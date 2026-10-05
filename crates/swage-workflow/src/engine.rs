@@ -5,7 +5,7 @@ use serde_json::Value;
 use rquickjs::{
     AsyncContext, AsyncRuntime, CatchResultExt, CaughtError, Context, Function, Promise, Runtime,
     context::intrinsic::{Eval, Json, MapSet, Promise as PromiseIntrinsic, RegExp, RegExpCompiler},
-    prelude::Async,
+    prelude::{Async, Coerced},
 };
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -1648,26 +1648,32 @@ impl WorkflowEngine {
                     .await
                     .catch(&ctx)
                     .map_err(|error| {
-                        // rquickjs's exception display hard-codes "Error", losing
-                        // the unknown-option name assigned before worker dispatch.
-                        if let CaughtError::Exception(exception) = &error
-                            && exception
-                                .as_object()
-                                .get::<_, String>("name")
-                                .is_ok_and(|name| name == "UnknownAgentOptionError")
-                        {
-                            let mut message = String::from("UnknownAgentOptionError:");
-                            if let Some(detail) = exception.message() {
-                                message.push(' ');
-                                message.push_str(&detail);
-                            }
-                            if let Some(stack) = exception.stack() {
-                                message.push('\n');
-                                message.push_str(&stack);
-                            }
-                            return message;
+                        // rquickjs's exception display hard-codes "Error" rather
+                        // than recording the thrown value's own classification.
+                        let exception = match &error {
+                            CaughtError::Exception(exception) => Some(exception.as_object()),
+                            CaughtError::Value(value) => value.as_object(),
+                            CaughtError::Error(_) => return error.to_string(),
+                        };
+                        let Some(exception) = exception else {
+                            return format!("Error: {error}");
+                        };
+                        let name = exception
+                            .get::<_, Option<Coerced<String>>>("name")
+                            .ok()
+                            .flatten()
+                            .map(|name| name.0)
+                            .unwrap_or_else(|| "Error".into());
+                        let mut message = format!("{name}:");
+                        if let Ok(Some(detail)) = exception.get::<_, Option<Coerced<String>>>("message") {
+                            message.push(' ');
+                            message.push_str(&detail.0);
                         }
-                        error.to_string()
+                        if let Ok(Some(stack)) = exception.get::<_, Option<Coerced<String>>>("stack") {
+                            message.push('\n');
+                            message.push_str(&stack.0);
+                        }
+                        message
                     })
             });
         tokio::pin!(execution);
@@ -2868,11 +2874,40 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn uncaught_unknown_agent_option_keeps_its_name_before_dispatch() {
-        for source in [
-            r#"await agent("inspect the unit", { bogusOption: true });"#,
-            r#"await parallel([() => agent("inspect the unit", { bogusOption: true })]);"#,
-            r#"await pipeline(["unit"], () => agent("inspect the unit", { bogusOption: true }));"#,
+    async fn uncaught_author_error_keeps_its_name_before_dispatch() {
+        for (source, expected) in [
+            (
+                r#"await agent("inspect the unit", { bogusOption: true });"#,
+                "UnknownAgentOptionError: unknown agent() option 'bogusOption'",
+            ),
+            (
+                r#"await parallel([() => agent("inspect the unit", { bogusOption: true })]);"#,
+                "UnknownAgentOptionError: unknown agent() option 'bogusOption'",
+            ),
+            (
+                r#"await pipeline(["unit"], () => agent("inspect the unit", { bogusOption: true }));"#,
+                "UnknownAgentOptionError: unknown agent() option 'bogusOption'",
+            ),
+            (
+                r#"await agent("inspect the unit", { agent: "" });"#,
+                "AgentRequiredError: opts.agent is required",
+            ),
+            (
+                r#"await agent("inspect the unit", { tools: "file_read" });"#,
+                "InvalidAgentOptionError: opts.tools must be an array of names",
+            ),
+            (
+                r#"await agent(42);"#,
+                "InvalidAgentPromptError: agent prompt must be a string",
+            ),
+            (
+                r#"Math.random();"#,
+                "NondeterministicCallError: Math.random is not available in workflow scripts",
+            ),
+            (
+                r#"const error = new Error("unnamed failure"); error.name = undefined; throw error;"#,
+                "Error: unnamed failure",
+            ),
         ] {
             let host = Arc::new(SurfaceHost::new());
             let error = WorkflowEngine::new(EngineLimits::default())
@@ -2884,12 +2919,12 @@ mod tests {
                     ScriptCapabilities::default(),
                 )
                 .await
-                .expect_err("unknown option must fail the run");
+                .expect_err("author error must fail the run");
 
             let message = error.to_string();
             assert!(
-                message.contains("UnknownAgentOptionError: unknown agent() option 'bogusOption'"),
-                "the recorded failure must name the author error and option: {message}"
+                message.contains(expected),
+                "the recorded failure must retain {expected}: {message}"
             );
             assert!(host.agent_requests.lock().unwrap().is_empty());
         }
