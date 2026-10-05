@@ -2,7 +2,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 
+import { compile } from "svelte/compiler";
+
 import OperatorDashboard from "../components/OperatorDashboard.svelte";
+import operatorDashboardSource from "../components/OperatorDashboard.svelte?raw";
 import * as operatorApi from "../api/operator";
 import type { OperatorOverview } from "../types";
 import { makeSchedule } from "./fixtures/schedules";
@@ -115,6 +118,7 @@ describe("OperatorDashboard", () => {
       component = undefined;
     }
 
+    document.head.querySelectorAll("style").forEach((style) => style.remove());
     while (document.body.firstChild) {
       document.body.removeChild(document.body.firstChild);
     }
@@ -263,6 +267,45 @@ describe("OperatorDashboard", () => {
     expect(document.body.textContent).toContain(
       "nothing new since the last digest",
     );
+  });
+
+  it("explains an empty devices card and how to pair a device", async () => {
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOverview({ devices: [] }));
+
+    component = mount(OperatorDashboard, { target: document.body });
+    await settleUi();
+
+    const devicesPanel = Array.from(document.querySelectorAll("article.panel")).find(
+      (panel) => panel.querySelector(".panel-kicker")?.textContent?.trim() === "Devices",
+    );
+    expect(devicesPanel).toBeDefined();
+    const emptyCopy = devicesPanel!.querySelector(".empty-copy")?.textContent ?? "";
+    expect(emptyCopy).toContain("No devices are attached.");
+    expect(emptyCopy).toContain("one-time pairing code");
+    expect(emptyCopy).toContain("swage device connect");
+    const command = devicesPanel!.querySelector(".empty-copy code") as HTMLElement | null;
+    expect(command?.textContent).toBe("swage device connect");
+    // jsdom loads no component CSS, so apply the component's compiled styles
+    // under the scope class the mounted paragraph carries.
+    const scope = Array.from(command!.parentElement!.classList).find((name) => name.startsWith("svelte-"));
+    expect(scope).toBeDefined();
+    const { css } = compile(operatorDashboardSource, { filename: "OperatorDashboard.svelte" });
+    const style = document.createElement("style");
+    style.textContent = (css?.code ?? "").replace(/svelte-[a-z0-9]+/g, scope!);
+    document.head.appendChild(style);
+    expect(getComputedStyle(command!.parentElement!).textTransform).toBe("uppercase");
+    expect(getComputedStyle(command!).textTransform).toBe("none");
+    expect(emptyCopy).toContain("Registration and pairing");
+  });
+
+  it("lists attached devices without the empty-state explanation", async () => {
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOverview());
+
+    component = mount(OperatorDashboard, { target: document.body });
+    await settleUi();
+
+    expect(document.body.textContent).toContain("Build device");
+    expect(document.body.textContent).not.toContain("No devices are attached.");
   });
 
   it("shows empty successful schedule runs as a visible non-outcome", async () => {

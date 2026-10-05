@@ -403,6 +403,13 @@
           <span class="panel-count">{overview.devices.length}</span>
         </div>
         <div class="ledger">
+          {#if overview.devices.length === 0}
+            <p class="empty-copy">
+              No devices are attached. To attach one, have the device redeem a one-time pairing code
+              from this gateway, then run <code>swage device connect</code> on it;
+              the Registration and pairing section of the documentation walks through both steps.
+            </p>
+          {/if}
           {#each overview.devices as device (device.device_id)}
             <div class="ledger-row">
               <div>
@@ -699,6 +706,11 @@
     letter-spacing: 0.12em;
     text-transform: uppercase;
     color: var(--ink-soft);
+  }
+
+  .empty-copy code {
+    text-transform: none;
+    letter-spacing: normal;
   }
 
   .primary-line {
