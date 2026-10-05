@@ -1258,8 +1258,8 @@ impl Agent {
             incomplete_reason: incomplete_reason.clone(),
             incomplete_account,
             turn_id: turn.id,
-            input_tokens: total_input_tokens,
-            output_tokens: total_output_tokens,
+            input_tokens: usage_reported.then_some(total_input_tokens),
+            output_tokens: usage_reported.then_some(total_output_tokens),
             tool_calls_count: total_tool_calls,
             structured_output: structured_output.clone(),
         });

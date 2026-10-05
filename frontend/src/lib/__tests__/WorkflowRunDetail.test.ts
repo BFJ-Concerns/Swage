@@ -153,7 +153,7 @@ describe("WorkflowRunDetail", () => {
     );
 
     const usage = document.querySelector(".usage")!.textContent!;
-    expect(usage).toContain("Not recorded");
+    expect(usage).toContain("Not reported");
     expect(usage).toContain("the provider reported no usage");
     expect(usage).not.toContain("0");
   });
@@ -162,6 +162,7 @@ describe("WorkflowRunDetail", () => {
     await render(
       runWith({
         ...baseCall,
+        termination: { termination: "unsettled" },
         usage: {
           availability: "unavailable",
           reason: "call_did_not_settle",
@@ -170,9 +171,37 @@ describe("WorkflowRunDetail", () => {
     );
 
     const usage = document.querySelector(".usage")!.textContent!;
-    expect(usage).toContain("Not recorded");
+    expect(usage).toContain("Not reported");
     expect(usage).toContain("the call never settled");
     expect(usage).not.toContain("the provider reported no usage");
+  });
+
+  it.each([
+    [{ termination: "outstanding" }, "the worker is still in progress"],
+    [
+      { termination: "failed", message: "AgentCallTimeoutError" },
+      "the worker failed before usage was reported",
+    ],
+    [
+      { termination: "cut_short", cause: "run_cancelled" },
+      "the worker was cut short before usage was reported",
+    ],
+    [
+      { termination: "settled" },
+      "the worker finished without reporting usage",
+    ],
+  ])("describes unavailable spend for %j", async (termination, wording) => {
+    await render(
+      runWith({
+        ...baseCall,
+        usage: { availability: "unavailable", reason: "call_did_not_settle" },
+        termination,
+      } as unknown as WorkflowAgentCallDetail),
+    );
+    const usage = document.querySelector(".usage")!.textContent!;
+    expect(usage).toContain(wording);
+    expect(usage).not.toContain("never settled");
+    expect(usage).not.toContain("0 in");
   });
 
   it("names a cut-short worker as the run's end, not the worker's failure", async () => {
