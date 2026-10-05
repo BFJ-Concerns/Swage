@@ -585,6 +585,45 @@ describe("SettingsPage", () => {
     expect(document.body.textContent).toContain("Commands");
   });
 
+  it("describes live schedule activation without a restart", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", topicId: null },
+    });
+    await flushUi();
+
+    const subtitle = document.querySelector(".head .sub")?.textContent;
+    expect(subtitle).toContain("Schedules become active when created, without a gateway restart.");
+    expect(subtitle).not.toContain("at startup");
+  });
+
+  it("places the autosave indication with settings rather than schedule creation", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", topicId: null },
+    });
+    await flushUi();
+
+    expect(document.querySelector(".settings-pane > .head .autosave-state")).toBeNull();
+    expect(document.querySelector(".schedule-automation")?.textContent).not.toContain("Autosave");
+    const settings = document.querySelector('[aria-label="Automation settings"]');
+    expect(settings?.textContent).toContain("Autosave");
+    expect(settings?.querySelector('[aria-label="Archive sessions after days"]')).not.toBeNull();
+    expect(settings?.querySelector(".schedule-automation")).toBeNull();
+  });
+
+  it("explains that Create schedule saves and activates the schedule", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", topicId: null },
+    });
+    await flushUi();
+
+    expect(document.querySelector(".create-card")?.textContent).toContain(
+      "Create schedule saves the schedule and activates it at once.",
+    );
+  });
+
   it("creates a fresh schedule in the selected topic", async () => {
     vi.mocked(workflowApi.createSchedule).mockResolvedValue(createdSchedule("selected-topic"));
     component = mount(SettingsPage, {

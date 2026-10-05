@@ -53,6 +53,22 @@ pub(crate) fn message_view(
     })
 }
 
+/// Project a recorded row with the same turn account the conversation loads.
+/// Live announcements include its failure explanation and any owned tool calls.
+pub(crate) async fn recorded_message_view(
+    storage: &dyn Storage,
+    message: swage_storage::model::Message,
+) -> Result<MessageView, GatewayError> {
+    let Some(turn_id) = message.turn_id else {
+        return message_view(message, None, Vec::new());
+    };
+    let turns = storage.get_turn(turn_id).await?.into_iter().collect();
+    let messages = storage.list_messages_by_thread(message.thread_id).await?;
+    TurnAccounts::load(storage, turns, &messages)
+        .await?
+        .view(message)
+}
+
 /// The per-turn account a conversation view attaches to one message: the
 /// turn's state, its tool calls and its failure explanation, keyed by turn.
 #[derive(Default)]
@@ -127,6 +143,7 @@ pub(crate) fn turn_state_to_wire(state: &TurnState) -> WireTurnState {
         TurnState::Pending => WireTurnState::Pending,
         TurnState::Processing => WireTurnState::Processing,
         TurnState::Completed => WireTurnState::Completed,
+        TurnState::Refused => WireTurnState::Refused,
         TurnState::Incomplete => WireTurnState::Incomplete,
         TurnState::Failed => WireTurnState::Failed,
         TurnState::Interrupted => WireTurnState::Interrupted,

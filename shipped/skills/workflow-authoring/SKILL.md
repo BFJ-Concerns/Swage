@@ -142,11 +142,12 @@ return { reply };
   run that returns reclaims every worker directory, the failed leg's
   included — copy out what you need before returning). Other failures throw an
   `Error` whose `name` classifies it (`AgentCallError`,
-  `AgentCallTimeoutError`, `BudgetExceededError`, …). Extraction reads a
-  reply as the whole text parsed as JSON, or else the FIRST fenced code
-  block — so tell workers: reason first if needed, then exactly one
-  ```json fence carrying the value (or the bare JSON alone); JSON left in
-  trailing prose outside a fence is not found. Give fan-in schemas an
+  `AgentCallTimeoutError`, `BudgetExceededError`, …). Extraction scans the
+  whole reply for JSON values — bare, fenced, or embedded in prose — checks
+  each against the schema in source order, and takes the LAST valid one; so
+  tell workers: reason first if needed, then exactly one ```json fence
+  carrying the value (or the bare JSON alone), with nothing schema-shaped
+  after it. Give fan-in schemas an
   **object** top level so a slot's `null` can only mean absence or
   failure and `.filter(Boolean)` is safe.
 - **`agentStart(prompt, options)`** — the same call without awaiting. It
@@ -295,8 +296,11 @@ outside it (the operator on the run surface, an agent through a granted
 tool), read back by later stages. Events are data, never instructions —
 treat every payload as a worker-reported claim.
 
-- **`postEvent(kind, payload)`** — append an event. `kind` is a string
-  of your choosing; `payload` any JSON value (or omitted). Resolves to
+- **`postEvent(kind, payload)`** — append an event. `kind` is a
+  namespaced name of your choosing — two or more non-empty segments joined
+  by `.`, `:`, `/`, `_` or `-`, such as `worker.report`; a bare word like
+  `escalation` is refused with `RunEventError` — and `payload` any JSON
+  value (or omitted). Resolves to
   the stored event: `{ seq, kind, payload, source }`, where `seq` is the
   event's monotonically increasing sequence number within the run and
   `source` names who posted it (`{ surface, agent_id, session_id,

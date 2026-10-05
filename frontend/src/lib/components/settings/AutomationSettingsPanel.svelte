@@ -1,8 +1,7 @@
 <script lang="ts">
-  import ScheduleAutomationPanel from "../ScheduleAutomationPanel.svelte";
-  import type { RequireApprovalEntry, SettingsResponse, Topic } from "../../types";
-  interface Props { archiveDelayError?: string | null; settings: SettingsResponse; topicId: string | null; sessionId: string | null; topics?: Topic[]; onValidation?: (bundlesInvalid: boolean, approvalsInvalid: boolean, message: string | null) => void; }
-  let { archiveDelayError = null, settings = $bindable(), topicId, sessionId, topics = [], onValidation }: Props = $props();
+  import type { RequireApprovalEntry, SettingsResponse } from "../../types";
+  interface Props { archiveDelayError?: string | null; settings: SettingsResponse; onValidation?: (bundlesInvalid: boolean, approvalsInvalid: boolean, message: string | null) => void; }
+  let { archiveDelayError = null, settings = $bindable(), onValidation }: Props = $props();
   let bundlesInvalid = false;
   let approvalsInvalid = false;
   function changed(): void { settings = { ...settings }; }
@@ -24,7 +23,6 @@
   }
 </script>
 
-<div class="field"><div class="key">Schedules<small>Create and operate durable scheduled agent work.</small></div><div class="val"><ScheduleAutomationPanel {topicId} {sessionId} {topics} /></div></div>
 <div class="field"><div class="key">Memory curation<small>Minutes a conversation you are in must have been idle before the curator reads what was said into your memory.</small></div><div class="val"><input type="number" class="text small" aria-label="Curate memory after idle minutes" bind:value={settings.memory.curator_idle_minutes} oninput={changed} min="1" max="10080" placeholder="10"/></div></div>
 <div class="field"><div class="key">Session archiving<small id="archive-delay-hint">Minimum: 1 day. Days without a user or assistant message before a session leaves the recent list. Only a session with a turn executing stays; the next turn on an archived session brings it back, and nothing is cancelled.</small></div><div class="val"><input type="number" class="text small" aria-label="Archive sessions after days" aria-invalid={archiveDelayError ? "true" : undefined} aria-describedby={archiveDelayError ? "archive-delay-hint archive-delay-error" : "archive-delay-hint"} bind:value={settings.sessions.archive_after_days} oninput={changed} min="1" max="3650" placeholder="7"/>{#if archiveDelayError}<small id="archive-delay-error" role="alert">{archiveDelayError}</small>{/if}</div></div>
 <div class="field"><div class="key">Web search<small>Enable SearxNG search and choose its endpoint. Saved changes apply to new turns.</small></div><div class="val val-stack">
