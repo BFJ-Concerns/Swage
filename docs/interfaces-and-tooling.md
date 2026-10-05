@@ -67,7 +67,9 @@ page it changed, shown in the same view so you can see exactly what was
 updated.
 
 The curator's background notices link directly to the page they name:
-clicking a notice opens the Memory tab with that page selected.
+clicking a notice opens the Memory tab with that page selected. The link
+carries both the scope (general or the topic's id) and the page reference,
+since a reference alone does not identify a page across scopes.
 
 Memory is the only way the operator reads and edits pages from Settings; there
 is no direct page-editing interface — every change runs through the curator.
@@ -444,8 +446,9 @@ A turn passes through several states as it runs. The two worth knowing
 about at the end are:
 
 - **Incomplete** — the reply was cut short by the output token limit. The
-  partial text the model produced is kept, and the conversation shows an
-  incomplete marker with the cause.
+  partial text the model produced is kept on the assistant message, and a
+  separate platform message records the cause — what the conversation shows
+  as the incomplete marker after a reload.
 - **Failed** — an error ended the turn. A failed turn keeps its explanation
   and any tool calls it made, visible in the conversation after a reload.
   The web UI offers **Retry** on a failed turn.
@@ -461,9 +464,10 @@ rows, both live and after reload.
 ### Status
 
 `swage gateway status` reports the running gateway's state — PID, address,
-uptime, and health — or prints "Gateway is not running" and exits
-successfully when no gateway is found. Stale metadata (a PID that is no
-longer alive) is cleaned up automatically.
+uptime, and health. When no runtime metadata file exists and no running
+gateway can be recovered at the configured address, it prints "Gateway is not
+running" and exits successfully (exit 0). When stale metadata points to a
+dead PID, it removes the stale file and exits with an error (non-zero).
 
 ### Start recovery
 
