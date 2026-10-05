@@ -81,7 +81,11 @@ pub fn location_approval_error(
     requested: &str,
     access: &str,
 ) -> ToolError {
-    let path = approval_root_for_request(ctx, requested).unwrap_or_else(|| requested.to_string());
+    // List and search address directories even when filesystem metadata cannot
+    // identify their not-yet-created targets.
+    let directory_target = matches!(tool_name, "file_list" | "file_search");
+    let path = approval_root_for_request(ctx, requested, directory_target)
+        .unwrap_or_else(|| requested.to_string());
     ToolError::RequiresLocationApproval {
         name: tool_name.to_string(),
         path,
@@ -570,7 +574,11 @@ fn sanitise_path_segment(value: &str) -> String {
     }
 }
 
-fn approval_root_for_request(ctx: &dyn ToolContext, requested: &str) -> Option<String> {
+fn approval_root_for_request(
+    ctx: &dyn ToolContext,
+    requested: &str,
+    directory_target: bool,
+) -> Option<String> {
     let raw = if Path::new(requested).is_absolute() {
         PathBuf::from(requested)
     } else {
@@ -579,7 +587,7 @@ fn approval_root_for_request(ctx: &dyn ToolContext, requested: &str) -> Option<S
     let normalised = normalise_path(&raw);
     // Missing parents are part of the requested location, not a reason to
     // grant access to a broader existing ancestor.
-    let root = if normalised.is_dir() {
+    let root = if normalised.is_dir() || (directory_target && !normalised.exists()) {
         normalised.as_path()
     } else {
         normalised.parent()?
