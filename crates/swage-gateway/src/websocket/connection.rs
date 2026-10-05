@@ -350,24 +350,28 @@ mod tests {
                 .unwrap();
             // The old relay is detached; let it deliver before starting the forwarder.
             tokio::task::yield_now().await;
+            let (sink, mut output) = futures::channel::mpsc::unbounded::<Message>();
+            let forwarding = tokio::spawn(forward_events(sink, session_id, receiver, broadcast));
+            let mut events = Vec::new();
+            for _ in 0..6 {
+                let message =
+                    tokio::time::timeout(std::time::Duration::from_secs(10), output.next())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let Message::Text(text) = message else {
+                    panic!("expected a server event");
+                };
+                events.push(serde_json::from_str::<serde_json::Value>(&text).unwrap());
+            }
+            // Stop only after observing the full sequence; shutdown must not hide a
+            // broadcast the old two-input forwarder delivered late.
             sender
                 .send(ServerEvent::Shutdown {
                     reason: "test finished".into(),
                 })
                 .unwrap();
-            let (sink, output) = futures::channel::mpsc::unbounded::<Message>();
-            forward_events(sink, session_id, receiver, broadcast).await;
-            let events: Vec<_> = output
-                .filter_map(|message| async move {
-                    match message {
-                        Message::Text(text) => {
-                            Some(serde_json::from_str::<serde_json::Value>(&text).unwrap())
-                        }
-                        _ => None,
-                    }
-                })
-                .collect()
-                .await;
+            forwarding.await.unwrap();
             let kinds: Vec<_> = events
                 .iter()
                 .map(|event| event["type"].as_str().unwrap())
@@ -380,8 +384,7 @@ mod tests {
                     "message_appended",
                     "queue_drained",
                     "token",
-                    "turn_complete",
-                    "shutdown"
+                    "turn_complete"
                 ],
                 "the socket must preserve the producer's session event order"
             );
