@@ -691,8 +691,8 @@ async fn run_turn_inner(
         incomplete_reason: None,
         incomplete_account: None,
         turn_id: request.turn_id,
-        input_tokens,
-        output_tokens,
+        input_tokens: usage_complete.then_some(input_tokens),
+        output_tokens: usage_complete.then_some(output_tokens),
         tool_calls_count: tool_count,
         structured_output: structured_output.clone(),
     });

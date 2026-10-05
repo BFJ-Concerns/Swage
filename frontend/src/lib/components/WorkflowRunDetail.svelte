@@ -30,13 +30,28 @@
 
   // Absence and zero are different facts, and the wording keeps them apart:
   // a call nobody reported usage for is not a call that spent nothing.
-  function usageLabel(usage: WorkflowCallUsage): string {
+  function usageLabel(
+    usage: WorkflowCallUsage,
+    termination: WorkflowWorkerTermination,
+  ): string {
     if (usage.availability === "known") {
       return `${usage.input_tokens} in / ${usage.output_tokens} out`;
     }
-    return usage.reason === "provider_reported_no_usage"
-      ? "Not recorded — the provider reported no usage"
-      : "Not recorded — the call never settled";
+    if (usage.reason === "provider_reported_no_usage") {
+      return "Not reported — the provider reported no usage";
+    }
+    switch (termination.termination) {
+      case "outstanding":
+        return "Not reported — the worker is still in progress";
+      case "failed":
+        return "Not reported — the worker failed before usage was reported";
+      case "cut_short":
+        return "Not reported — the worker was cut short before usage was reported";
+      case "settled":
+        return "Not reported — the worker finished without reporting usage";
+      case "unsettled":
+        return "Not reported — the call never settled";
+    }
   }
 
   function terminationLabel(termination: WorkflowWorkerTermination): string {
@@ -145,7 +160,7 @@
 
           <dl>
             <dt>Spend</dt>
-            <dd class="usage">{usageLabel(call.usage)}</dd>
+            <dd class="usage">{usageLabel(call.usage, call.termination)}</dd>
             <dt>Stopped</dt>
             <dd class="termination">{terminationLabel(call.termination)}</dd>
           </dl>
