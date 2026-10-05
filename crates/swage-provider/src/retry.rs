@@ -131,6 +131,29 @@ impl RetryProvider {
     }
 }
 
+/// Classify only the envelopes written by `ProviderError`'s Display impl.
+/// Streaming adapters expose rendered errors here, so only the leading status
+/// token is authoritative. Provider body text must never supply a status or
+/// override the envelope.
+fn is_permanent_stream_error(message: &str) -> bool {
+    if message.starts_with("authentication failed for provider ") {
+        return true;
+    }
+    let Some(rest) = message.strip_prefix("HTTP error ") else {
+        return false;
+    };
+    let Some((status, _body)) = rest.split_once(": ") else {
+        return false;
+    };
+    if status.len() != 3 || !status.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    let Ok(status) = status.parse::<u16>() else {
+        return false;
+    };
+    (400..500).contains(&status) && !matches!(status, 408 | 409 | 429)
+}
+
 // ---------------------------------------------------------------------------
 // LlmProvider implementation
 // ---------------------------------------------------------------------------
@@ -315,7 +338,9 @@ impl LlmProvider for RetryProvider {
                     return;
                 };
 
-                if attempt >= config.max_retries {
+                if attempt >= config.max_retries
+                    || (!is_anomaly && is_permanent_stream_error(&message))
+                {
                     if let Some(retry_attempt) = active_retry.take()
                         && tx
                             .send(StreamChunk::ProviderRetrySettled {
@@ -466,6 +491,235 @@ mod tests {
             max_retries: 3,
             initial_backoff: Duration::ZERO,
             max_backoff: Duration::ZERO,
+        }
+    }
+
+    struct ErrorEndpoint {
+        base_url: String,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for ErrorEndpoint {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    impl ErrorEndpoint {
+        async fn start(statuses: Vec<u16>, body: &'static str) -> Self {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let received_calls = Arc::clone(&calls);
+            let task = tokio::spawn(async move {
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    let mut buffer = [0; 4096];
+                    loop {
+                        let read = socket.read(&mut buffer).await.unwrap();
+                        assert_ne!(read, 0, "request must finish before the client disconnects");
+                        request.extend_from_slice(&buffer[..read]);
+                        if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                        {
+                            let headers = std::str::from_utf8(&request[..end]).unwrap();
+                            let content_length = headers
+                                .lines()
+                                .filter_map(|line| line.split_once(':'))
+                                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                                .map_or(0, |(_, value)| value.trim().parse::<usize>().unwrap());
+                            if request.len() >= end + 4 + content_length {
+                                break;
+                            }
+                        }
+                    }
+                    let call = received_calls.fetch_add(1, Ordering::SeqCst);
+                    let status = statuses[call.min(statuses.len() - 1)];
+                    let response = format!(
+                        "HTTP/1.1 {status} Rejected\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                    socket.shutdown().await.unwrap();
+                }
+            });
+            Self {
+                base_url,
+                calls,
+                task,
+            }
+        }
+    }
+
+    fn http_provider(adapter: &str, base_url: &str) -> Box<dyn LlmProvider> {
+        let config = crate::ProviderConfig::new("test-key", "unserved-model", base_url);
+        match adapter {
+            "openai" => Box::new(crate::openai::OpenAiProvider::from_config(config)),
+            "responses" => Box::new(crate::responses::ResponsesProvider::from_config(config)),
+            "anthropic" => Box::new(crate::anthropic::AnthropicProvider::from_config(config)),
+            "google" => Box::new(crate::google::GoogleProvider::from_config(config)),
+            _ => panic!("unknown test adapter: {adapter}"),
+        }
+    }
+
+    async fn http_error_chunks(adapter: &str, endpoint: &ErrorEndpoint) -> Vec<StreamChunk> {
+        let retry =
+            RetryProvider::new_erased(http_provider(adapter, &endpoint.base_url), zero_backoff());
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            retry.stream(completion_req()).collect(),
+        )
+        .await
+        .expect("the local HTTP rejection must terminate the stream")
+    }
+
+    async fn assert_permanent_http_rejections(adapter: &str) {
+        let body = r#"{"error":{"code":"model_not_found","type":"not_found_error","message":"Unknown model; HTTP error 503: do not retry"}}"#;
+        for status in (400..500).filter(|status| !matches!(status, 401 | 408 | 409 | 429)) {
+            let endpoint = ErrorEndpoint::start(vec![status], body).await;
+            let chunks = http_error_chunks(adapter, &endpoint).await;
+            assert_eq!(
+                endpoint.calls.load(Ordering::SeqCst),
+                1,
+                "{adapter}: HTTP {status} must make exactly one request: {chunks:?}"
+            );
+            assert_eq!(
+                chunks,
+                vec![StreamChunk::Error {
+                    message: format!("HTTP error {status}: {body}"),
+                }],
+                "{adapter}: permanent rejection must preserve the error without retry events"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_permanent_http_rejections_openai() {
+        assert_permanent_http_rejections("openai").await;
+    }
+
+    #[tokio::test]
+    async fn stream_permanent_http_rejections_responses() {
+        assert_permanent_http_rejections("responses").await;
+    }
+
+    #[tokio::test]
+    async fn stream_permanent_http_rejections_anthropic() {
+        assert_permanent_http_rejections("anthropic").await;
+    }
+
+    #[tokio::test]
+    async fn stream_permanent_http_rejections_google() {
+        assert_permanent_http_rejections("google").await;
+    }
+
+    #[tokio::test]
+    async fn stream_authentication_rejection_is_permanent() {
+        let body = r#"{"error":{"message":"HTTP error 503: try again"}}"#;
+        for adapter in ["openai", "responses", "anthropic", "google"] {
+            let endpoint = ErrorEndpoint::start(vec![401], body).await;
+            let chunks = http_error_chunks(adapter, &endpoint).await;
+            assert_eq!(
+                endpoint.calls.load(Ordering::SeqCst),
+                1,
+                "{adapter}: authentication failure must stop after one request: {chunks:?}"
+            );
+            assert_eq!(
+                chunks,
+                vec![StreamChunk::Error {
+                    message: format!("authentication failed for provider {body}"),
+                }]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_unrecognised_errors_keep_retrying() {
+        for message in [
+            "connection reset by peer",
+            "body mentions HTTP error 400: unknown model",
+            "HTTP error 4000: malformed status",
+            "HTTP error 400 : malformed separator",
+            "HTTP error xyz: malformed status",
+        ] {
+            let provider = SequencedStreamProvider {
+                call_count: Arc::new(Mutex::new(0)),
+                attempts: Mutex::new(vec![
+                    vec![StreamChunk::Error {
+                        message: message.into()
+                    }];
+                    4
+                ]),
+            };
+            let calls = Arc::clone(&provider.call_count);
+            let retry = RetryProvider::new(provider, zero_backoff());
+            let chunks: Vec<_> = retry.stream(completion_req()).collect().await;
+            assert_eq!(
+                *calls.lock().unwrap(),
+                4,
+                "unrecognised error must retain retries: {message}: {chunks:?}"
+            );
+            assert_eq!(
+                chunks
+                    .iter()
+                    .filter(|chunk| matches!(chunk, StreamChunk::ProviderRetryStarted { .. }))
+                    .count(),
+                3
+            );
+            assert!(
+                matches!(chunks.last(), Some(StreamChunk::Error { message: error }) if error == message)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_transient_http_rejections_keep_retrying() {
+        // A permanent-looking code and embedded status must not override the HTTP status.
+        let body =
+            r#"{"error":{"code":"model_not_found","message":"HTTP error 400: unknown model"}}"#;
+        for adapter in ["openai", "responses", "anthropic", "google"] {
+            for status in [408, 409, 429, 500, 501, 502, 503, 504, 529, 599] {
+                let endpoint = ErrorEndpoint::start(vec![status], body).await;
+                let chunks = http_error_chunks(adapter, &endpoint).await;
+                assert_eq!(
+                    endpoint.calls.load(Ordering::SeqCst),
+                    4,
+                    "{adapter}: HTTP {status} must retain all three retries: {chunks:?}"
+                );
+                assert_eq!(
+                    chunks
+                        .iter()
+                        .filter(|chunk| matches!(chunk, StreamChunk::ProviderRetryStarted { .. }))
+                        .count(),
+                    3
+                );
+                assert!(matches!(chunks.last(), Some(StreamChunk::Error { .. })));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_permanent_http_error_settles_prior_retry() {
+        let body = r#"{"error":{"code":"model_not_found"}}"#;
+        for adapter in ["openai", "responses", "anthropic", "google"] {
+            let endpoint = ErrorEndpoint::start(vec![503, 400], body).await;
+            let chunks = http_error_chunks(adapter, &endpoint).await;
+            assert_eq!(
+                endpoint.calls.load(Ordering::SeqCst),
+                2,
+                "{adapter}: the permanent second rejection must stop further requests: {chunks:?}"
+            );
+            assert!(
+                matches!(chunks.as_slice(), [
+                StreamChunk::ProviderRetryStarted { attempt: 1, .. },
+                StreamChunk::ProviderRetrySettled { attempt: 1, success: false, .. },
+                StreamChunk::Error { message },
+            ] if message == &format!("HTTP error 400: {body}")),
+                "{adapter}: settle the active retry before forwarding its terminal error: {chunks:?}"
+            );
         }
     }
 
