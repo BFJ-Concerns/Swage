@@ -66,6 +66,13 @@ pub enum IpcMessage {
         error: Option<String>,
     },
 
+    /// Host abandons an in-flight tool invocation — its turn was cancelled.
+    ///
+    /// The agent drops the running execution, which stops any processes it
+    /// started, and answers with a `ToolCallResult` carrying an error. A
+    /// cancel naming a call that already finished is ignored.
+    ToolCallCancel { request_id: String },
+
     // --- LLM proxying (agent → host → agent) --------------------------------
     /// Agent requests an LLM completion through the host (credentials stay
     /// in the host process; the agent never sees API keys).
@@ -254,6 +261,23 @@ mod tests {
                 assert_eq!(parameters, json!({"text": "hello"}));
             }
             other => panic!("expected ToolCallRequest, got {other:?}"),
+        }
+    }
+
+    // --- ToolCallCancel roundtrip ---
+
+    #[test]
+    fn tool_call_cancel_roundtrip() {
+        let msg = IpcMessage::ToolCallCancel {
+            request_id: "req-1".into(),
+        };
+        let serialised = serde_json::to_value(&msg).unwrap();
+        assert_eq!(serialised["kind"], "tool_call_cancel");
+        assert_eq!(serialised["request_id"], "req-1");
+
+        match serde_json::from_value(serialised).unwrap() {
+            IpcMessage::ToolCallCancel { request_id } => assert_eq!(request_id, "req-1"),
+            other => panic!("expected ToolCallCancel, got {other:?}"),
         }
     }
 

@@ -203,9 +203,20 @@ pub(super) async fn launch_turn_runtime(
             Ok(agent) => agent,
             Err(error) => {
                 tracing::error!(%error, "failed to build agent for turn");
+                let message = error.to_string();
+                if let Some(reason) = super::projection::record_failure_explanation(
+                    state,
+                    session_id,
+                    prepared_turn_id,
+                    &message,
+                )
+                .await
+                {
+                    tracing::error!(%reason, turn_id = %prepared_turn_id, "turn record integrity lost");
+                }
                 let _ = ws_tx.send(ServerEvent::Error {
                     code: "agent_construction_error".to_string(),
-                    message: error.to_string(),
+                    message,
                 });
                 if let Err(update_error) = state
                     .storage

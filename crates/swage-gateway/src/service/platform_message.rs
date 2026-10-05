@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
-use super::conversation::message_view;
+use super::conversation::recorded_message_view;
 
 /// What the platform is putting into the conversation.
 #[derive(Debug, Clone)]
@@ -71,17 +71,7 @@ pub(crate) async fn append_platform_message(
         })
         .await?;
 
-    // The view reports the turn's state as the record holds it right now; a
-    // notice with no turn reports none.
-    let turn_state = match message.turn_id {
-        Some(turn_id) => state
-            .storage
-            .get_turn(turn_id)
-            .await?
-            .map(|turn| super::conversation::turn_state_to_wire(&turn.state)),
-        None => None,
-    };
-    let view = message_view(recorded, turn_state, Vec::new())?;
+    let view = recorded_message_view(state.storage.as_ref(), recorded).await?;
     announce_appended_message(state, message.session_id, view.clone());
     Ok(view)
 }

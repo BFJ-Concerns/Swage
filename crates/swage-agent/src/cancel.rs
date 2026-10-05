@@ -382,6 +382,14 @@ mod tests {
             unimplemented!()
         }
 
+        async fn record_turn_failure_message(
+            &self,
+            _id: Uuid,
+            _message: &str,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+
         async fn record_turn_isolation(
             &self,
             _id: Uuid,

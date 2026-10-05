@@ -447,3 +447,27 @@ describe("truncation notice", () => {
     expect(notice).toBeNull();
   });
 });
+
+
+describe("operation outcome indicators", () => {
+  for (const isLive of [true, false]) {
+    it(`shows failure and never success for an error record (${isLive ? "live" : "history"})`, () => {
+      component = mount(ToolCallDisplay, {
+        target: document.body,
+        props: { toolCall: makeErrorCall(), isLive },
+      });
+      const root = document.querySelector(".tool-call");
+      expect(root?.querySelector(".error-icon")?.textContent).toBe("✗");
+      expect(root?.querySelector(".success")).toBeNull();
+    });
+    it(`shows success and never failure for a successful record (${isLive ? "live" : "history"})`, () => {
+      component = mount(ToolCallDisplay, {
+        target: document.body,
+        props: { toolCall: makeCompletedCall(), isLive },
+      });
+      const root = document.querySelector(".tool-call");
+      expect(root?.querySelector(".success")?.textContent).toBe("✓");
+      expect(root?.querySelector(".error-icon")).toBeNull();
+    });
+  }
+});

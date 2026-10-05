@@ -43,40 +43,37 @@ The CLI finds the running gateway through a metadata file in
 `$XDG_RUNTIME_DIR/swage/` (falling back to the data root's `run/`
 directory), so run `stop` with the same environment you started with.
 
-## The first turn may ask about sandboxing
+## Sandbox configuration
 
-Local tool calls that are eligible for sandboxed execution run inside a
-[bubblewrap](https://github.com/containers/bubblewrap) sandbox by default —
-install the `bubblewrap` package to get isolation. Tools that require live
-gateway state or host facilities execute directly in the gateway process,
-and sessions targeting a non-local device use that device's execution path;
-those calls do not receive the gateway's bubblewrap and Landlock isolation.
+Per-turn sandboxing is off by default. Local gateway turns run without
+bubblewrap isolation and record a degraded execution boundary with the reason
+`sandbox_disabled_by_configuration`. Installs with a declared boundary, such
+as a container image, retain that boundary in their turn records.
 
-If sandbox setup fails (most commonly `bwrap` is not installed), what happens
-next depends on whether anyone is there to answer. A turn you started from a
-connected client pauses with an approval: *"Sandbox setup failed. Approve
-running this turn without sandbox isolation?"* Approving runs that turn
-unsandboxed and records the degradation in the audit trail; rejecting fails
-the turn. A scheduled or delegated turn has nobody to ask, so it fails
-outright.
-
-To settle the question in configuration instead, opt in to unsandboxed
-execution explicitly:
+To enable sandboxing for a topic, add this to its `config.toml` and install
+[bubblewrap](https://github.com/containers/bubblewrap):
 
 ```toml
 [sandbox]
-allow_degraded_execution = true
+enabled = true
 ```
 
-Running without isolation always needs that opt-in, whether you chose it or
-sandbox setup failed. So turning sandboxing off takes both keys —
-`enabled = false` on its own makes every turn fail:
+Sandbox-eligible local tool calls then run inside the sandbox. Tools that
+require live gateway state or host facilities execute directly in the
+gateway process, and sessions targeting a non-local device use that device's
+execution path; those calls do not receive the gateway's bubblewrap and
+Landlock isolation.
 
-```toml
-[sandbox]
-enabled = false
-allow_degraded_execution = true
-```
+If enabled sandbox setup fails, what happens next depends on whether anyone
+is there to answer. A turn you started from a connected client pauses with
+an approval: *"Sandbox setup failed. Approve running this turn without sandbox
+isolation?"* Approving runs that turn unsandboxed and records the degradation
+in the audit trail; rejecting fails the turn. A scheduled or delegated turn
+has nobody to ask, so it fails outright.
+
+Setting `sandbox.allow_degraded_execution = true` permits unsandboxed
+execution after a sandbox setup failure without that approval. It is not
+needed when sandboxing is disabled by configuration.
 
 [docs/agents-and-permissions.md](docs/agents-and-permissions.md) covers what
 the sandbox confines and how tool approvals work.

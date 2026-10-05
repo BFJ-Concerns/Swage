@@ -26,6 +26,36 @@
     return JSON.stringify(state, null, 2);
   }
 
+  type ChangedField = { label: string; prior: string; next: string };
+
+  function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+
+  function labelSegment(key: string): string {
+    const words = key.replace(/_/g, " ");
+    return words.charAt(0).toUpperCase() + words.slice(1);
+  }
+
+  function formatValue(value: unknown): string {
+    if (value === undefined) return "unset";
+    return typeof value === "string" ? value : JSON.stringify(value);
+  }
+
+  // The settings that differ between two recorded states, descending into
+  // nested objects so a nested change is named by its own path. Arrays and
+  // scalars compare whole; a redacted credential compares as its recorded
+  // marker, so it never reads as changed unless the record says it did.
+  function changedFields(prior: unknown, next: unknown, path: string[] = []): ChangedField[] {
+    if (isRecord(prior) && isRecord(next)) {
+      const keys = [...new Set([...Object.keys(prior), ...Object.keys(next)])].sort();
+      return keys.flatMap((key) => changedFields(prior[key], next[key], [...path, key]));
+    }
+    if (path.length > 0 && JSON.stringify(prior) === JSON.stringify(next)) return [];
+    if (path.length === 0) return changedFields(isRecord(prior) ? prior : {}, isRecord(next) ? next : {}, path);
+    return [{ label: path.map(labelSegment).join(" › "), prior: formatValue(prior), next: formatValue(next) }];
+  }
+
   function auditFilter(before?: AuditEventCursor) {
     return {
       sessionId: auditSessionId.trim() || undefined,
@@ -135,6 +165,7 @@
       {:else}
         <div class="entries">
           {#each history.configuration_changes as event (event.id)}
+            {@const changes = changedFields(event.prior_state, event.new_state)}
             <article class="history-entry configuration-entry">
               <div class="entry-heading">
                 <strong>{event.resource_kind} · {event.resource_id}</strong>
@@ -145,10 +176,25 @@
                 <div><dt>Source</dt><dd>{event.source}</dd></div>
                 <div><dt>Session</dt><dd class="mono">{event.session_id ?? "none"}</dd></div>
               </dl>
-              <div class="state-grid">
-                <section><h4>Prior state</h4><pre>{formatState(event.prior_state)}</pre></section>
-                <section><h4>New state</h4><pre>{formatState(event.new_state)}</pre></section>
-              </div>
+              {#if changes.length === 0}
+                <p class="empty-copy">No field differs between the recorded states.</p>
+              {:else}
+                <table class="changed-fields">
+                  <thead><tr><th scope="col">Setting</th><th scope="col">Prior</th><th scope="col">New</th></tr></thead>
+                  <tbody>
+                    {#each changes as change (change.label)}
+                      <tr><th scope="row">{change.label}</th><td>{change.prior}</td><td>{change.next}</td></tr>
+                    {/each}
+                  </tbody>
+                </table>
+              {/if}
+              <details>
+                <summary>Whole prior and new state</summary>
+                <div class="state-grid">
+                  <section><h4>Prior state</h4><pre>{formatState(event.prior_state)}</pre></section>
+                  <section><h4>New state</h4><pre>{formatState(event.new_state)}</pre></section>
+                </div>
+              </details>
             </article>
           {/each}
         </div>
@@ -218,6 +264,9 @@
   dl div { display: flex; gap: 6px; } dt { text-transform: uppercase; } dd { margin: 0; }
   .state-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
   pre { overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--paper-deep); padding: 10px; font: 11px/1.45 var(--font-mono); margin: 6px 0 0; }
+  .changed-fields { border-collapse: collapse; width: 100%; font: 12px var(--font-mono); }
+  .changed-fields th, .changed-fields td { border-bottom: 1px solid var(--paper-deep); padding: 4px 8px 4px 0; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+  .changed-fields thead th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
   .history-alert { color: var(--accent); padding-top: 12px; }
   .audit-filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 10px; }
   .audit-filters label { display: flex; flex-direction: column; gap: 4px; font: 600 11px var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; }
