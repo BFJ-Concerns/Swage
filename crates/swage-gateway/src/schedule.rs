@@ -1960,7 +1960,7 @@ fn build_gate_prompt(schedule: &Schedule, gate: &GateConfig, digest: &GateStateD
          model would be wasted work.\n\n## Scheduled task\n\n{}\n",
         schedule.message
     );
-    if let Some(criteria) = &gate.criteria {
+    if let Some(criteria) = declared_criteria(gate) {
         prompt.push_str(&format!("\n## When the task should run\n\n{criteria}\n"));
         // Instruction text: the stance a gate takes on criteria it was given
         // no state for. Drafting-tier wording, never a build unit's.
@@ -2111,11 +2111,7 @@ async fn map_schedule(
 /// the operator learns at declaration — not from a run of wrong verdicts —
 /// that the gate decides those criteria blind.
 pub(crate) fn gate_declaration_warnings(gate: &GateConfig) -> Vec<wire::GateWarning> {
-    let criteria_declared = gate
-        .criteria
-        .as_deref()
-        .is_some_and(|criteria| !criteria.trim().is_empty());
-    if criteria_declared && gate.observations.is_empty() {
+    if declared_criteria(gate).is_some() && gate.observations.is_empty() {
         vec![wire::GateWarning::UnobservedCriteria {
             message: "This gate declares no files to observe, so its criteria are decided \
                       against the schedule's own record alone. A criterion about a file or \
@@ -2127,6 +2123,16 @@ pub(crate) fn gate_declaration_warnings(gate: &GateConfig) -> Vec<wire::GateWarn
     } else {
         Vec::new()
     }
+}
+
+/// The gate's criteria as declared — `None` when absent or blank, so the
+/// declaration flag and the prompt's framing decide on one predicate (the
+/// HTTP path stores criteria untrimmed; the tool and the form trim).
+fn declared_criteria(gate: &GateConfig) -> Option<&str> {
+    gate.criteria
+        .as_deref()
+        .map(str::trim)
+        .filter(|criteria| !criteria.is_empty())
 }
 
 fn map_run(run: ScheduleRun) -> wire::ScheduleRun {
@@ -2450,7 +2456,7 @@ mod tests {
         };
         assert!(gate_declaration_warnings(&blank_criteria).is_empty());
 
-        let schedule = Schedule {
+        let schedule_with = |gate: GateConfig| Schedule {
             id: Uuid::nil(),
             message: "Work the inbox.".into(),
             status: ScheduleStatus::Active,
@@ -2462,13 +2468,26 @@ mod tests {
             },
             creator: ScheduleCreator::User,
             delivery_routing: serde_json::Value::Null,
-            gate: Some(blind.clone()),
+            gate: Some(gate),
             next_run_at: None,
             last_run_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
+        let schedule = schedule_with(blind.clone());
         let digest = GateStateDigest::default();
+        // Blank criteria are no criteria on both halves: no flag, and no
+        // criteria heading or undecidable paragraph in the prompt.
+        let blank_prompt = build_gate_prompt(
+            &schedule_with(blank_criteria.clone()),
+            &blank_criteria,
+            &digest,
+        );
+        assert!(
+            !blank_prompt.contains("## When the task should run"),
+            "{blank_prompt}"
+        );
+        assert!(!blank_prompt.contains("declares no files to observe"));
         let framed = build_gate_prompt(&schedule, &blind, &digest);
         assert!(framed.contains("declares no files to observe"), "{framed}");
         assert!(framed.contains("which state was not observed"));
