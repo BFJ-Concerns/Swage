@@ -2175,6 +2175,7 @@ pub(crate) struct MockStorage {
     approval_read_barrier: std::sync::Mutex<Option<(Arc<tokio::sync::Barrier>, usize)>>,
     pause_approved_writes: AtomicBool,
     approved_write_release: Notify,
+    approved_write_started: Notify,
     interrupted_turn_writes: AtomicUsize,
     pause_structured_output_writes: AtomicBool,
     structured_output_write_started: Notify,
@@ -2678,6 +2679,7 @@ impl MockStorage {
             approval_read_barrier: std::sync::Mutex::new(None),
             pause_approved_writes: AtomicBool::new(false),
             approved_write_release: Notify::new(),
+            approved_write_started: Notify::new(),
             interrupted_turn_writes: AtomicUsize::new(0),
             pause_structured_output_writes: AtomicBool::new(false),
             structured_output_write_started: Notify::new(),
@@ -5091,6 +5093,7 @@ impl ApprovalStore for MockStorage {
         reason: Option<&str>,
     ) -> Result<bool, StorageError> {
         if state == ApprovalState::Approved && self.pause_approved_writes.load(Ordering::SeqCst) {
+            self.approved_write_started.notify_one();
             self.approved_write_release.notified().await;
         }
         let mut db = self.db.lock().await;
@@ -19773,8 +19776,8 @@ async fn chat_completions_stream_at_a_responses_endpoint_fails_the_turn_naming_p
     );
 }
 
-/// Both routes read Pending before either can claim the waiter. The agent is
-/// held at its pending-only storage update until both decision requests return.
+/// Both routes read Pending before either can claim the waiter. The winning
+/// settlement is held until the claim has been made, then released for delivery.
 async fn concurrent_approval_decisions(websocket: [bool; 2]) {
     use crate::error::{Json, Path};
     use axum::{extract::State, response::IntoResponse};
@@ -19890,12 +19893,16 @@ async fn concurrent_approval_decisions(websocket: [bool; 2]) {
             }
         }));
     }
+    // Both requests read Pending at the barrier. Release the winning storage
+    // write before awaiting its response: confirmation now follows settlement.
+    storage.approved_write_started.notified().await;
+    storage.pause_approved_writes.store(false, Ordering::SeqCst);
+    storage.approved_write_release.notify_one();
     let mut statuses = Vec::new();
     for task in decisions {
         statuses.push(task.await.unwrap());
     }
     *storage.approval_read_barrier.lock().unwrap() = None;
-    storage.approved_write_release.notify_one();
     turn_task.await.unwrap().expect("approved turn completes");
     statuses.sort_unstable();
     let approval = storage.get_approval(approval_id).await.unwrap().unwrap();
@@ -19955,4 +19962,281 @@ async fn approval_scope_concurrent_rest_and_websocket_decisions_release_one_oper
     )
     .await
     .expect("decision race must finish");
+}
+
+/// The same barrier holds either the gateway's settlement or the agent's
+/// settlement, depending on the delivery ordering. The timeout writer wins
+/// while the receiver is still live; no wall-clock scheduling is involved.
+async fn approval_scope_deadline_race(
+    websocket: bool,
+    scope: swage_agent::approval::ApprovalDecisionScope,
+) {
+    use crate::error::{Json, Path};
+    use axum::{extract::State, response::IntoResponse};
+    use swage_agent::approval::ApprovalDecisionValue;
+
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) = make_state_with_provider_and_root(
+        Arc::new(MockProvider::new(vec![])),
+        storage.clone(),
+        Some(root.path().to_path_buf()),
+    )
+    .await;
+    let thread = storage.list_by_session(session_id).await.unwrap()[0].clone();
+    let turn = storage
+        .create_turn(NewTurn {
+            thread_id: thread.id,
+            agent_id: "gateway".into(),
+            state: TurnState::AwaitingApproval,
+            user_input: None,
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+    let path = root.path().join("outside").to_string_lossy().into_owned();
+    let approval = storage
+        .create_approval(NewApprovalRequest {
+            turn_id: turn.id,
+            agent_id: "gateway".into(),
+            kind: swage_storage::ApprovalKind::Location,
+            tool_name: Some("file_write".into()),
+            tool_arguments: None,
+            hook_name: None,
+            prompt: "Allow writing?".into(),
+            context: Some(serde_json::json!({"path": path, "access": "write"})),
+            timeout_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            timeout_policy: swage_core::ApprovalTimeoutPolicy::Reject,
+        })
+        .await
+        .unwrap();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    state
+        .approval_channels
+        .lock()
+        .unwrap()
+        .insert(approval.id, sender.into());
+    storage.pause_approved_writes.store(true, Ordering::SeqCst);
+    let agent_storage = storage.clone();
+    let agent = tokio::spawn(async move {
+        if receiver.await.is_ok() {
+            agent_storage
+                .update_approval_state(approval.id, ApprovalState::Approved, None)
+                .await
+                .unwrap();
+        }
+    });
+    let decision_state = state.clone();
+    let decision = tokio::spawn(async move {
+        if websocket {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            crate::websocket::dispatch_client_message(
+                &serde_json::json!({"type":"approval_decision", "approval_id":approval.id, "decision":"approved", "scope":scope}).to_string(),
+                &decision_state, session_id, tx, Arc::new(Mutex::new(SubscriptionState::new(true))),
+            ).await;
+            match rx.recv().await.unwrap() {
+                ServerEvent::ApprovalConfirmed { .. } => 200,
+                ServerEvent::ApprovalDecisionError { error, .. } if error == "already_decided" => {
+                    409
+                }
+                other => panic!("unexpected response: {other:?}"),
+            }
+        } else {
+            match crate::handlers::decide_approval(
+                State(decision_state),
+                Path(approval.id),
+                Json(crate::handlers::ApprovalDecisionRequest {
+                    decision: ApprovalDecisionValue::Approved,
+                    scope,
+                    reason: None,
+                }),
+            )
+            .await
+            {
+                Ok(response) => response.into_response().status().as_u16(),
+                Err(error) => error.into_response().status().as_u16(),
+            }
+        }
+    });
+    storage.approved_write_started.notified().await;
+    assert!(
+        storage
+            .update_approval_state(
+                approval.id,
+                ApprovalState::Expired,
+                Some("approval timed out")
+            )
+            .await
+            .unwrap()
+    );
+    storage.pause_approved_writes.store(false, Ordering::SeqCst);
+    storage.approved_write_release.notify_one();
+    let status = decision.await.unwrap();
+    agent.await.unwrap();
+    let row = storage.get_approval(approval.id).await.unwrap().unwrap();
+    let grants = state.session_approval_grants.lock().unwrap().len();
+    // Check the actual topic's persisted grants as well as the runtime cache.
+    let session = storage.get_session(session_id).await.unwrap().unwrap();
+    let persisted = storage
+        .list_workspace_attachments_by_topic(session.topic_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        (row.state, grants, persisted.len(), status),
+        (ApprovalState::Expired, 0, 0, 409),
+        "expiry must win without installing a file grant or confirming the decision"
+    );
+}
+
+#[tokio::test]
+async fn approval_scope_deadline_race_refuses_rest_session_grant() {
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        approval_scope_deadline_race(false, swage_agent::approval::ApprovalDecisionScope::Session),
+    )
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn approval_scope_deadline_race_refuses_websocket_session_grant() {
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        approval_scope_deadline_race(true, swage_agent::approval::ApprovalDecisionScope::Session),
+    )
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn approval_scope_deadline_race_refuses_rest_permanent_file_grant() {
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        approval_scope_deadline_race(
+            false,
+            swage_agent::approval::ApprovalDecisionScope::Permanent,
+        ),
+    )
+    .await
+    .unwrap();
+}
+#[tokio::test]
+async fn approval_scope_deadline_race_refuses_websocket_global_file_grant() {
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        approval_scope_deadline_race(
+            true,
+            swage_agent::approval::ApprovalDecisionScope::PermanentGlobal,
+        ),
+    )
+    .await
+    .unwrap();
+}
+
+async fn expired_live_waiter(check_turn: bool) {
+    use crate::error::{Json, Path};
+    use axum::extract::State;
+    let storage = Arc::new(MockStorage::new());
+    let root = tempfile::tempdir().unwrap();
+    let (provider, _) = CapturingMultiRoundProvider::new(vec![vec![
+        StreamChunk::ToolUse {
+            call_id: "expired-live".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({"text":"must not run"}),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]]);
+    let (state, session_id) = make_state_with_provider_and_root(
+        Arc::new(provider),
+        storage.clone(),
+        Some(root.path().to_path_buf()),
+    )
+    .await;
+    let mut config = state.active_config();
+    config.hitl.timeout_policy = swage_core::ApprovalTimeoutPolicy::Reject;
+    config.tools.permissions.require_approval =
+        vec![swage_config::model::RequireApprovalEntry::Simple(
+            "echo".into(),
+        )];
+    state.replace_runtime(
+        config,
+        state.active_provider(),
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>
+        ]),
+    );
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let turn_state = state.clone();
+    let task = tokio::spawn(async move {
+        process_turn(
+            &turn_state,
+            session_id,
+            None,
+            TurnInput::from("Use echo"),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+    let (approval_id, turn_id) = loop {
+        if let ServerEvent::ApprovalRequired {
+            approval_id,
+            turn_id,
+            ..
+        } = rx.recv().await.unwrap()
+        {
+            break (approval_id, turn_id);
+        }
+    };
+    storage
+        .db
+        .lock()
+        .await
+        .approvals
+        .get_mut(&approval_id)
+        .unwrap()
+        .timeout_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+    let response = crate::handlers::decide_approval(
+        State(state),
+        Path(approval_id),
+        Json(crate::handlers::ApprovalDecisionRequest {
+            decision: swage_agent::approval::ApprovalDecisionValue::Approved,
+            scope: swage_agent::approval::ApprovalDecisionScope::Permanent,
+            reason: None,
+        }),
+    )
+    .await;
+    assert!(response.is_err());
+    let _ = task.await.unwrap();
+    if check_turn {
+        assert_eq!(
+            storage.get_turn(turn_id).await.unwrap().unwrap().state,
+            TurnState::Interrupted,
+            "expiring a live Reject-policy waiter must interrupt its turn"
+        );
+    } else {
+        let calls = storage.list_tool_calls_by_turn(turn_id).await.unwrap();
+        assert_eq!(
+            (
+                calls[0].status.as_deref(),
+                calls[0]
+                    .result
+                    .as_deref()
+                    .unwrap()
+                    .contains("approval timed out")
+            ),
+            (Some("expired"), true),
+            "expired gate must preserve expired tool feedback: {calls:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn approval_scope_expired_live_waiter_interrupts_turn() {
+    expired_live_waiter(true).await;
+}
+#[tokio::test]
+async fn approval_scope_expired_live_waiter_records_expired_feedback() {
+    expired_live_waiter(false).await;
 }

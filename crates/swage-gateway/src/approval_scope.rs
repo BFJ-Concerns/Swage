@@ -4,7 +4,7 @@ use swage_storage::model::{ApprovalRequest, NewWorkspaceAttachment, Topic};
 use crate::{error::ApiError, state::AppState};
 
 /// Validate and claim a waiting call in one map operation. A claimed slot
-/// remains present until the agent settles its row, so a competing decision
+/// remains present until the agent finishes its gate, so a competing decision
 /// cannot mistake an in-flight decision for an abandoned gate.
 pub(crate) async fn claim_approval_waiter(
     state: &AppState,
@@ -23,7 +23,7 @@ pub(crate) async fn claim_approval_waiter(
         .get_turn(approval.turn_id)
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
-    let has_waiter = {
+    let abandoned_waiter = {
         let mut channels = state
             .approval_channels
             .lock()
@@ -49,21 +49,60 @@ pub(crate) async fn claim_approval_waiter(
                 .and_then(|slot| slot.sender.take())
                 .expect("live waiter"));
         }
-        // Dropping an unclaimed sender wakes its gate through the timeout path.
-        channels.remove(&approval.id);
-        has_waiter
+        // Keep the sender alive until expiry and turn settlement finish.
+        channels.remove(&approval.id)
     };
-    expire_approval(state, approval, if has_waiter { None } else { turn }).await?;
+    expire_approval(state, approval, turn).await?;
+    drop(abandoned_waiter);
     Err(ApiError::conflict(
         "approval request expired; retry the operation".to_string(),
     ))
 }
 
-/// Failed delivery and genuinely abandoned gates may expire only a pending row.
+/// Storage settlement owns the decision. Delivery and retained scope follow
+/// only a successful pending-to-decided write, on both client routes.
+pub(crate) async fn decide_approval(
+    state: &AppState,
+    approval: &ApprovalRequest,
+    decision: swage_agent::ApprovalDecision,
+) -> Result<(), ApiError> {
+    use swage_storage::ApprovalState;
+
+    let sender = claim_approval_waiter(state, approval).await?;
+    let outcome = match decision.decision {
+        ApprovalDecisionValue::Approved => ApprovalState::Approved,
+        ApprovalDecisionValue::Rejected => ApprovalState::Rejected,
+    };
+    let settled = state
+        .storage
+        .update_approval_state(approval.id, outcome, decision.reason.as_deref())
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    if !settled {
+        let current = state
+            .storage
+            .get_approval(approval.id)
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .ok_or_else(|| ApiError::not_found("approval", approval.id))?;
+        return Err(ApiError::conflict(format!(
+            "approval request is {}; retry the operation",
+            current.state
+        )));
+    }
+    let value = decision.decision;
+    let scope = decision.scope;
+    sender.send(decision).map_err(|_| {
+        ApiError::conflict("approval request expired; retry the operation".to_string())
+    })?;
+    apply_approval_scope(state, approval, value, scope).await
+}
+
+/// Unactionable gates may expire only a pending row.
 pub(crate) async fn expire_approval(
     state: &AppState,
     approval: &ApprovalRequest,
-    abandoned_turn: Option<swage_storage::Turn>,
+    turn: Option<swage_storage::Turn>,
 ) -> Result<(), ApiError> {
     use swage_storage::{ApprovalState, TurnState};
     let expired = state
@@ -87,9 +126,18 @@ pub(crate) async fn expire_approval(
             current.state
         )));
     }
-    if let Some(turn) = abandoned_turn
+    if let Some(turn) = turn
         && turn.state == TurnState::AwaitingApproval
     {
+        state
+            .storage
+            .settle_started_tool_calls(
+                turn.id,
+                "Tool call expired: approval timed out; retry the operation",
+                "expired",
+            )
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))?;
         state
             .storage
             .update_turn_state(turn.id, TurnState::Interrupted)

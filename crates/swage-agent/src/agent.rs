@@ -242,6 +242,98 @@ mod approval_tests {
         );
     }
 
+    async fn gateway_settled_decision_resumes_gate(approved: bool) {
+        use crate::approval::{
+            ApprovalDecision, ApprovalDecisionScope, ApprovalDecisionValue, ApprovalGateOutcome,
+        };
+        use swage_storage::ApprovalState;
+        let registered = Arc::new(Mutex::new(None));
+        let slot = registered.clone();
+        let (agent, execution) = approval_fixture(Arc::new(move |id, sender| {
+            *slot.lock().unwrap() = Some((id, sender));
+            crate::approval::ApprovalChannelRegistration::default()
+        }))
+        .await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut scope = TurnApprovalScope::default();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let gate = agent.handle_approval_gate(
+            &execution,
+            ApprovalKind::Tool,
+            Some("shell".into()),
+            None,
+            None,
+            "Allow shell?".into(),
+            None,
+            std::time::Duration::from_secs(60),
+            swage_core::ApprovalTimeoutPolicy::Reject,
+            &tx,
+            &cancel,
+            &mut scope,
+        );
+        let settle_first = async {
+            rx.recv().await.unwrap();
+            let (id, sender) = registered.lock().unwrap().take().unwrap();
+            assert!(
+                agent
+                    .storage
+                    .update_approval_state(
+                        id,
+                        if approved {
+                            ApprovalState::Approved
+                        } else {
+                            ApprovalState::Rejected
+                        },
+                        None
+                    )
+                    .await
+                    .unwrap()
+            );
+            sender
+                .send(ApprovalDecision {
+                    decision: if approved {
+                        ApprovalDecisionValue::Approved
+                    } else {
+                        ApprovalDecisionValue::Rejected
+                    },
+                    scope: ApprovalDecisionScope::Session,
+                    reason: None,
+                })
+                .unwrap();
+        };
+        let (outcome, ()) = tokio::join!(gate, settle_first);
+        let matches_decision = if approved {
+            matches!(outcome, Ok(ApprovalGateOutcome::Approved { .. }))
+        } else {
+            matches!(outcome, Ok(ApprovalGateOutcome::Rejected { .. }))
+        };
+        assert_eq!(
+            (
+                matches_decision,
+                agent
+                    .storage
+                    .get_turn(execution.turn_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                scope.approves_remaining_gates
+            ),
+            (true, TurnState::Processing, approved),
+            "a gateway-settled matching decision must resume its waiting gate"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gateway_settled_approval_resumes_its_waiting_gate() {
+        gateway_settled_decision_resumes_gate(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gateway_settled_rejection_resumes_its_waiting_gate() {
+        gateway_settled_decision_resumes_gate(false).await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn immediate_rejection_after_approval_notification_keeps_its_sender() {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2581,10 +2673,25 @@ impl Agent {
     ) -> Result<bool, AgentError> {
         if !self
             .storage
-            .update_approval_state(approval_id, state, reason)
+            .update_approval_state(approval_id, state.clone(), reason)
             .await?
         {
-            return Ok(false);
+            // The gateway settles human decisions before delivering them.
+            // A timeout or conflicting decision must never resume the gate.
+            let matches_decision = state != swage_storage::ApprovalState::Expired
+                && self
+                    .storage
+                    .get_approval(approval_id)
+                    .await?
+                    .is_some_and(|approval| approval.state == state);
+            let awaiting = self
+                .storage
+                .get_turn(turn_id)
+                .await?
+                .is_some_and(|turn| turn.state == TurnState::AwaitingApproval);
+            if !matches_decision || !awaiting {
+                return Ok(false);
+            }
         }
         self.storage
             .update_turn_state(turn_id, TurnState::Processing)
