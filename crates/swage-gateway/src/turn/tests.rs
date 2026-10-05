@@ -14825,6 +14825,113 @@ fn process_turn_logs_token_usage_at_completion() {
     );
 }
 
+#[test]
+fn completion_without_usage_reports_absence_in_logs_and_subscribed_event() {
+    use std::sync::{Arc as StdArc, Mutex as StdMutex};
+    use tracing_subscriber::{Registry, layer::SubscriberExt};
+
+    struct Recorder(StdArc<StdMutex<Vec<HashMap<String, String>>>>);
+    struct Fields(HashMap<String, String>);
+    impl tracing::field::Visit for Fields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.insert(field.name().into(), format!("{value:?}"));
+        }
+    }
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Recorder {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut fields = Fields(HashMap::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+    }
+    let recorded = StdArc::new(StdMutex::new(Vec::new()));
+    let subscriber = Registry::default().with(Recorder(recorded.clone()));
+    tracing::subscriber::with_default(subscriber, || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let (state, session_id) = make_state_with_session(vec![
+                    StreamChunk::Delta {
+                        content: "ok".into(),
+                    },
+                    StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ])
+                .await;
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                tracing::callsite::rebuild_interest_cache();
+                process_turn(
+                    &state,
+                    session_id,
+                    None,
+                    "test".to_string(),
+                    tx,
+                    Arc::new(Mutex::new(SubscriptionState::new(true))),
+                    None,
+                )
+                .await
+                .unwrap();
+                let mut completed = None;
+                while let Ok(event) = rx.try_recv() {
+                    if let ServerEvent::TurnComplete {
+                        input_tokens,
+                        output_tokens,
+                        cost_microcents,
+                        ..
+                    } = event
+                    {
+                        completed = Some((input_tokens, output_tokens, cost_microcents));
+                    }
+                }
+                assert_eq!(
+                    completed,
+                    Some((None, None, None)),
+                    "completion must not invent zero usage"
+                );
+            });
+    });
+    let events = recorded.lock().unwrap();
+    let completion = events
+        .iter()
+        .find(|fields| {
+            fields
+                .get("message")
+                .is_some_and(|message| message.contains("turn_complete"))
+        })
+        .expect("completion must be logged");
+    assert_eq!(completion.get("input_tokens"), None);
+    assert_eq!(completion.get("output_tokens"), None);
+    assert_eq!(
+        completion
+            .get("input_unavailable_reason")
+            .map(String::as_str),
+        Some("\"provider reported no input count\"")
+    );
+    assert_eq!(
+        completion
+            .get("output_unavailable_reason")
+            .map(String::as_str),
+        Some("\"provider reported no output count\"")
+    );
+    assert_eq!(
+        completion.get("cost_microcents").map(String::as_str),
+        Some("None")
+    );
+    assert_eq!(
+        completion
+            .get("cost_unavailable_reason")
+            .map(String::as_str),
+        Some("\"provider reported no cost and token usage is incomplete\"")
+    );
+}
+
 // -----------------------------------------------------------------------
 // Context assembly tests
 // -----------------------------------------------------------------------
