@@ -122,7 +122,7 @@ fn spawn_person_turn(
     });
 }
 
-pub(super) async fn dispatch_client_message(
+pub(crate) async fn dispatch_client_message(
     text: &str,
     state: &AppState,
     session_id: Uuid,
@@ -424,28 +424,30 @@ pub(super) async fn dispatch_client_message(
                 }
             };
 
-            if let Err(error) =
-                crate::approval_scope::ensure_approval_actionable(state, &approval).await
+            let sender = match crate::approval_scope::claim_approval_waiter(state, &approval).await
             {
-                let current_state = match state.storage.get_approval(approval_uuid).await {
-                    Ok(approval) => approval.map(|approval| approval.state.to_string()),
-                    Err(storage_error) => {
-                        tracing::error!(%approval_uuid, %storage_error, "failed to read approval outcome");
-                        let _ = tx.send(ServerEvent::Error {
-                            code: error_codes::INTERNAL_ERROR.to_string(),
-                            message: "Failed to look up approval request.".to_string(),
-                        });
-                        return;
-                    }
-                };
-                let _ = tx.send(ServerEvent::ApprovalDecisionError {
-                    approval_id: approval_uuid,
-                    error: "already_decided".to_string(),
-                    message: error.message().to_string(),
-                    current_state,
-                });
-                return;
-            }
+                Ok(sender) => sender,
+                Err(error) => {
+                    let current_state = match state.storage.get_approval(approval_uuid).await {
+                        Ok(approval) => approval.map(|approval| approval.state.to_string()),
+                        Err(storage_error) => {
+                            tracing::error!(%approval_uuid, %storage_error, "failed to read approval outcome");
+                            let _ = tx.send(ServerEvent::Error {
+                                code: error_codes::INTERNAL_ERROR.to_string(),
+                                message: "Failed to look up approval request.".to_string(),
+                            });
+                            return;
+                        }
+                    };
+                    let _ = tx.send(ServerEvent::ApprovalDecisionError {
+                        approval_id: approval_uuid,
+                        error: "already_decided".to_string(),
+                        message: error.message().to_string(),
+                        current_state,
+                    });
+                    return;
+                }
+            };
 
             let Ok(decision_value) = ApprovalDecisionValue::from_str(&decision) else {
                 tracing::error!(%session_id, %approval_uuid, decision = %decision, "invalid approval decision after validation");
@@ -455,31 +457,22 @@ pub(super) async fn dispatch_client_message(
                 });
                 return;
             };
-            // Taking the channel claims this decision; the waiting agent records
-            // its outcome. A failed delivery must never confirm an approval.
-            let sender = state
-                .approval_channels
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&approval_uuid);
-            let delivered = sender.is_some_and(|sender| {
-                sender
-                    .send(swage_agent::ApprovalDecision {
-                        decision: decision_value,
-                        scope,
-                        reason: reason.clone(),
-                    })
-                    .is_ok()
-            });
-            if !delivered {
-                let error =
-                    match crate::approval_scope::ensure_approval_actionable(state, &approval).await
-                    {
-                        Err(error) => error,
-                        Ok(()) => crate::error::ApiError::conflict(
+            if sender
+                .send(swage_agent::ApprovalDecision {
+                    decision: decision_value,
+                    scope,
+                    reason: reason.clone(),
+                })
+                .is_err()
+            {
+                let error = crate::approval_scope::expire_approval(state, &approval, None)
+                    .await
+                    .err()
+                    .unwrap_or_else(|| {
+                        crate::error::ApiError::conflict(
                             "approval request expired; retry the operation".to_string(),
-                        ),
-                    };
+                        )
+                    });
                 if error.code() != swage_protocol::client::error::ErrorCode::Conflict {
                     tracing::error!(%approval_uuid, %error, "failed to expire abandoned approval");
                     let _ = tx.send(ServerEvent::Error {

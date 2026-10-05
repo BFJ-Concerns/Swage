@@ -47,6 +47,29 @@ fn declared_execution_boundary_from_env() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// A gate's sender and its claim, retained until the gate settles.
+pub struct ApprovalWaiter {
+    pub(crate) sender: Option<oneshot::Sender<ApprovalDecision>>,
+}
+
+impl From<oneshot::Sender<ApprovalDecision>> for ApprovalWaiter {
+    fn from(sender: oneshot::Sender<ApprovalDecision>) -> Self {
+        Self {
+            sender: Some(sender),
+        }
+    }
+}
+
+#[cfg(test)]
+impl ApprovalWaiter {
+    pub(crate) fn send(self, decision: ApprovalDecision) -> Result<(), ApprovalDecision> {
+        match self.sender {
+            Some(sender) => sender.send(decision),
+            None => Err(decision),
+        }
+    }
+}
+
 /// Shared application state available to all route handlers via axum's `State` extractor.
 ///
 /// All fields are wrapped in `Arc` so that cloning the state is cheap.
@@ -115,14 +138,10 @@ pub struct AppState {
     /// signals reach that cleanup without signalling the HTTP shutdown token.
     pub(crate) turn_shutdown_started: Arc<AtomicBool>,
 
-    /// Routes approval decisions from WebSocket handlers to waiting agent tasks.
-    ///
-    /// When an agent suspends on a tool awaiting human approval it inserts a
-    /// `oneshot::Sender<ApprovalDecision>` keyed by `approval_id`. The WebSocket
-    /// and REST handlers remove the sender and fire it when the client submits a
-    /// decision. A plain std mutex is sufficient here — the critical section is a
-    /// single HashMap operation with no async work under the lock.
-    pub approval_channels: Arc<Mutex<HashMap<Uuid, oneshot::Sender<ApprovalDecision>>>>,
+    /// Waiting gates retain their slot while a decision is being recorded.
+    /// The sender is claimed under the map lock; an empty slot means another
+    /// request owns the decision, rather than that the gate was abandoned.
+    pub approval_channels: Arc<Mutex<HashMap<Uuid, ApprovalWaiter>>>,
     /// Runtime-only approval grants created by "allow for this session".
     ///
     /// These are intentionally process-local: they affect newly built turn
@@ -778,7 +797,7 @@ mod tests {
             .approval_channels
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(approval_id, tx);
+            .insert(approval_id, tx.into());
         let sender = state
             .approval_channels
             .lock()

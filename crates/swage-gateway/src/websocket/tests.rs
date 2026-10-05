@@ -1246,7 +1246,7 @@ async fn approval_decision_after_expiry_drops_the_waiting_channel() {
         .approval_channels
         .lock()
         .unwrap()
-        .insert(approval.id, oneshot_tx);
+        .insert(approval.id, oneshot_tx.into());
 
     let (tx, _rx) = mpsc::unbounded_channel();
     let sub = Arc::new(Mutex::new(crate::subscription::SubscriptionState::new(

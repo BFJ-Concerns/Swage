@@ -2172,6 +2172,10 @@ pub(crate) struct MockStorage {
     fail_provider_round_writes: AtomicBool,
     fail_workflow_attempt_writes: AtomicBool,
     last_snapshot_list_limit: AtomicUsize,
+    approval_read_barrier: std::sync::Mutex<Option<(Arc<tokio::sync::Barrier>, usize)>>,
+    pause_approved_writes: AtomicBool,
+    approved_write_release: Notify,
+    interrupted_turn_writes: AtomicUsize,
     pause_structured_output_writes: AtomicBool,
     structured_output_write_started: Notify,
     structured_output_write_release: Notify,
@@ -2671,6 +2675,10 @@ impl MockStorage {
             fail_provider_round_writes: AtomicBool::new(false),
             fail_workflow_attempt_writes: AtomicBool::new(false),
             last_snapshot_list_limit: AtomicUsize::new(0),
+            approval_read_barrier: std::sync::Mutex::new(None),
+            pause_approved_writes: AtomicBool::new(false),
+            approved_write_release: Notify::new(),
+            interrupted_turn_writes: AtomicUsize::new(0),
             pause_structured_output_writes: AtomicBool::new(false),
             structured_output_write_started: Notify::new(),
             structured_output_write_release: Notify::new(),
@@ -4570,6 +4578,9 @@ impl TurnStore for MockStorage {
     }
 
     async fn update_turn_state(&self, id: Uuid, state: TurnState) -> Result<(), StorageError> {
+        if state == TurnState::Interrupted {
+            self.interrupted_turn_writes.fetch_add(1, Ordering::SeqCst);
+        }
         let call = self.turn_state_write_calls.fetch_add(1, Ordering::SeqCst) + 1;
         if self.fail_turn_state_writes.load(Ordering::SeqCst)
             || self.fail_turn_state_write_at.load(Ordering::SeqCst) == call
@@ -5018,7 +5029,21 @@ impl ApprovalStore for MockStorage {
     }
 
     async fn get_approval(&self, id: Uuid) -> Result<Option<ApprovalRequest>, StorageError> {
-        Ok(self.db.lock().await.approvals.get(&id).cloned())
+        let approval = self.db.lock().await.approvals.get(&id).cloned();
+        let barrier = {
+            let mut hook = self.approval_read_barrier.lock().unwrap();
+            hook.as_mut().and_then(|(barrier, remaining)| {
+                if *remaining == 0 {
+                    return None;
+                }
+                *remaining -= 1;
+                Some(Arc::clone(barrier))
+            })
+        };
+        if let Some(barrier) = barrier {
+            barrier.wait().await;
+        }
+        Ok(approval)
     }
 
     async fn list_pending_by_agent(
@@ -5065,6 +5090,9 @@ impl ApprovalStore for MockStorage {
         state: ApprovalState,
         reason: Option<&str>,
     ) -> Result<bool, StorageError> {
+        if state == ApprovalState::Approved && self.pause_approved_writes.load(Ordering::SeqCst) {
+            self.approved_write_release.notified().await;
+        }
         let mut db = self.db.lock().await;
         match db.approvals.get_mut(&id) {
             None => Ok(false),
@@ -19743,4 +19771,188 @@ async fn chat_completions_stream_at_a_responses_endpoint_fails_the_turn_naming_p
             .any(|error| error.contains("returned no") && error.contains("model output")),
         "the failure is the no-model-output anomaly: {errors:?}"
     );
+}
+
+/// Both routes read Pending before either can claim the waiter. The agent is
+/// held at its pending-only storage update until both decision requests return.
+async fn concurrent_approval_decisions(websocket: [bool; 2]) {
+    use crate::error::{Json, Path};
+    use axum::{extract::State, response::IntoResponse};
+    use swage_agent::approval::{ApprovalDecisionScope, ApprovalDecisionValue};
+
+    let storage = Arc::new(MockStorage::new());
+    storage.pause_approved_writes.store(true, Ordering::SeqCst);
+    let (provider, _) = CapturingMultiRoundProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "race-call".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({"text": "approved operation"}),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "Done".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]);
+    let root = tempfile::tempdir().unwrap();
+    let (state, session_id) = make_state_with_provider_and_root(
+        Arc::new(provider),
+        storage.clone(),
+        Some(root.path().to_path_buf()),
+    )
+    .await;
+    let mut config = state.active_config();
+    config.tools.permissions.require_approval =
+        vec![swage_config::model::RequireApprovalEntry::Simple(
+            "echo".into(),
+        )];
+    state.replace_runtime(
+        config,
+        state.active_provider(),
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>
+        ]),
+    );
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let task_state = state.clone();
+    let turn_task = tokio::spawn(async move {
+        process_turn(
+            &task_state,
+            session_id,
+            None,
+            TurnInput::from("Use echo"),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+    let (approval_id, turn_id) = loop {
+        if let ServerEvent::ApprovalRequired {
+            approval_id,
+            turn_id,
+            ..
+        } = rx.recv().await.unwrap()
+        {
+            break (approval_id, turn_id);
+        }
+    };
+    *storage.approval_read_barrier.lock().unwrap() =
+        Some((Arc::new(tokio::sync::Barrier::new(2)), 2));
+    let mut decisions = Vec::new();
+    for via_websocket in websocket {
+        let state = state.clone();
+        decisions.push(tokio::spawn(async move {
+            if via_websocket {
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                crate::websocket::dispatch_client_message(
+                    &serde_json::json!({"type": "approval_decision", "approval_id": approval_id,
+                        "decision": "approved"})
+                    .to_string(),
+                    &state,
+                    session_id,
+                    tx,
+                    Arc::new(Mutex::new(SubscriptionState::new(true))),
+                )
+                .await;
+                match rx.recv().await.unwrap() {
+                    ServerEvent::ApprovalConfirmed { .. } => 200,
+                    ServerEvent::ApprovalDecisionError { error, .. }
+                        if error == "already_decided" =>
+                    {
+                        409
+                    }
+                    other => panic!("unexpected decision response: {other:?}"),
+                }
+            } else {
+                match crate::handlers::decide_approval(
+                    State(state),
+                    Path(approval_id),
+                    Json(crate::handlers::ApprovalDecisionRequest {
+                        decision: ApprovalDecisionValue::Approved,
+                        scope: ApprovalDecisionScope::Once,
+                        reason: None,
+                    }),
+                )
+                .await
+                {
+                    Ok(response) => response.into_response().status().as_u16(),
+                    Err(error) => error.into_response().status().as_u16(),
+                }
+            }
+        }));
+    }
+    let mut statuses = Vec::new();
+    for task in decisions {
+        statuses.push(task.await.unwrap());
+    }
+    *storage.approval_read_barrier.lock().unwrap() = None;
+    storage.approved_write_release.notify_one();
+    turn_task.await.unwrap().expect("approved turn completes");
+    statuses.sort_unstable();
+    let approval = storage.get_approval(approval_id).await.unwrap().unwrap();
+    let turn = storage.get_turn(turn_id).await.unwrap().unwrap();
+    let calls = storage.list_tool_calls_by_turn(turn_id).await.unwrap();
+    assert_eq!(
+        (
+            statuses,
+            approval.state,
+            turn.state,
+            storage.interrupted_turn_writes.load(Ordering::SeqCst),
+            calls
+                .iter()
+                .filter(|call| call.status.as_deref() == Some("success")
+                    && call
+                        .result
+                        .as_deref()
+                        .is_some_and(|result| result.contains("approved operation")))
+                .count()
+        ),
+        (
+            vec![200, 409],
+            ApprovalState::Approved,
+            TurnState::Completed,
+            0,
+            1
+        ),
+        "one decision must release exactly one real operation without expiring or interrupting it",
+    );
+}
+
+#[tokio::test]
+async fn approval_scope_concurrent_rest_decisions_release_one_operation() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        concurrent_approval_decisions([false, false]),
+    )
+    .await
+    .expect("decision race must finish");
+}
+
+#[tokio::test]
+async fn approval_scope_concurrent_websocket_decisions_release_one_operation() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        concurrent_approval_decisions([true, true]),
+    )
+    .await
+    .expect("decision race must finish");
+}
+
+#[tokio::test]
+async fn approval_scope_concurrent_rest_and_websocket_decisions_release_one_operation() {
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        concurrent_approval_decisions([false, true]),
+    )
+    .await
+    .expect("decision race must finish");
 }

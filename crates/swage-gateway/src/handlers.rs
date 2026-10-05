@@ -1998,53 +1998,25 @@ pub async fn decide_approval(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
         .ok_or_else(|| ApiError::not_found("approval", approval_id))?;
-    crate::approval_scope::ensure_approval_actionable(&state, &approval).await?;
-
-    // Try to fire the oneshot channel for this approval.
-    let sender = state
-        .approval_channels
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&approval_id);
-
-    match sender {
-        Some(tx) => {
-            let decision = ApprovalDecision {
-                decision: req.decision,
-                scope: req.scope,
-                reason: req.reason.clone(),
-            };
-
-            if tx.send(decision).is_ok() {
-                crate::approval_scope::apply_approval_scope(
-                    &state,
-                    &approval,
-                    req.decision,
-                    req.scope,
-                )
-                .await?;
-                // Agent received the decision via the live channel.
-                Ok((
-                    StatusCode::OK,
-                    Json(serde_json::json!({
-                        "approval_id": approval_id,
-                        "decision": outcome.as_str(),
-                    })),
-                ))
-            } else {
-                crate::approval_scope::ensure_approval_actionable(&state, &approval).await?;
-                Err(ApiError::conflict(
-                    "approval request expired; retry the operation".to_string(),
-                ))
-            }
-        }
-        None => {
-            crate::approval_scope::ensure_approval_actionable(&state, &approval).await?;
-            Err(ApiError::conflict(
-                "approval request expired; retry the operation".to_string(),
-            ))
-        }
+    let sender = crate::approval_scope::claim_approval_waiter(&state, &approval).await?;
+    let decision = ApprovalDecision {
+        decision: req.decision,
+        scope: req.scope,
+        reason: req.reason.clone(),
+    };
+    if sender.send(decision).is_err() {
+        crate::approval_scope::expire_approval(&state, &approval, None).await?;
+        return Err(ApiError::conflict(
+            "approval request expired; retry the operation".to_string(),
+        ));
     }
+    crate::approval_scope::apply_approval_scope(&state, &approval, req.decision, req.scope).await?;
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "approval_id": approval_id, "decision": outcome.as_str(),
+        })),
+    ))
 }
 
 /// Turn listing response for a conversation.

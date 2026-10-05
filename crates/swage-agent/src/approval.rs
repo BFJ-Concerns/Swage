@@ -16,10 +16,35 @@ pub use swage_protocol::client::approval::{
 ///
 /// The agent calls this with an `approval_id` and the sender half of a
 /// oneshot channel. The gateway stores the sender in its shared map and
-/// fires it when the WebSocket client sends a decision. The agent holds
-/// the receiver and awaits the decision (racing against a timeout).
-pub type ApprovalChannelRegistrar =
-    Arc<dyn Fn(Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>) + Send + Sync>;
+/// fires it when a client sends a decision. The agent keeps the returned
+/// registration until its outcome is recorded, including timeout and cancellation.
+pub type ApprovalChannelRegistrar = Arc<
+    dyn Fn(Uuid, tokio::sync::oneshot::Sender<ApprovalDecision>) -> ApprovalChannelRegistration
+        + Send
+        + Sync,
+>;
+
+/// Removes a gate's registration when its wait and storage settlement end.
+#[derive(Default)]
+pub struct ApprovalChannelRegistration {
+    unregister: Option<Box<dyn FnOnce() + Send + Sync>>,
+}
+
+impl ApprovalChannelRegistration {
+    pub fn new(unregister: impl FnOnce() + Send + Sync + 'static) -> Self {
+        Self {
+            unregister: Some(Box::new(unregister)),
+        }
+    }
+}
+
+impl Drop for ApprovalChannelRegistration {
+    fn drop(&mut self) {
+        if let Some(unregister) = self.unregister.take() {
+            unregister();
+        }
+    }
+}
 
 /// Internal result from `dispatch_pre_tool_use` — distinguishes between
 /// "proceed with execution" and "approval required from hook".
@@ -177,9 +202,8 @@ mod tests {
     #[test]
     fn approval_channel_registrar_is_callable() {
         // Verify the type alias compiles and a closure satisfies it.
-        let registrar: ApprovalChannelRegistrar = Arc::new(|_id, _tx| {
-            // In production, this inserts into the gateway's approval_channels map.
-        });
+        let registrar: ApprovalChannelRegistrar =
+            Arc::new(|_id, _tx| ApprovalChannelRegistration::default());
         let (tx, _rx) = tokio::sync::oneshot::channel::<ApprovalDecision>();
         registrar(Uuid::new_v4(), tx);
     }

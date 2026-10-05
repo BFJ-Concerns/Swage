@@ -15,7 +15,7 @@ use crate::state::AppState;
 #[cfg(test)]
 use axum::http::StatusCode;
 pub(crate) use dispatch::discover_available_for_session;
-use dispatch::dispatch_client_message;
+pub(crate) use dispatch::dispatch_client_message;
 #[cfg(test)]
 use tokio::sync::{Mutex, mpsc};
 #[cfg(test)]
