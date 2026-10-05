@@ -614,11 +614,13 @@ add(byName.prompts);
 add(byName.history);
 ```
 
-Failure is fail-open: a script error (missing file, syntax error, runtime
-error) falls back to the built-in default assembly. A script that runs
-without error but produces no output is not a failure — the baseline floor
-restores every element the default assembly would have carried, producing a
-complete composition with warnings naming each restored element.
+A script that errors (missing file, syntax error, runtime error) falls back
+to the built-in default assembly. A script that runs without error but
+leaves out baseline elements has them restored by the baseline floor, with
+warnings — except elements the script declares as omitted via `omit()`,
+which stay out. If the final composition ends up genuinely empty (every
+baseline element was declared omitted and the script added nothing else),
+the assembly also falls back to the default.
 
 The other shipped locations (`context.working_norms`, `task.prompt`,
 `prompts.memory_curator`) have their alternatives defined in the gateway
