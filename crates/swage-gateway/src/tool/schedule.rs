@@ -280,7 +280,8 @@ impl Tool for ScheduleTool {
                 "agent_id": {
                     "type": "string",
                     "description": "For session=fresh: the id of the agent each new run executes \
-                                    as."
+                                    as. Fixed when the schedule is created; to change it, create \
+                                    a new schedule with that agent."
                 },
                 "continuation_session_id": {
                     "type": "string",
@@ -461,7 +462,12 @@ impl ScheduleTool {
         let gate = build_gate_update(params)?;
         let routing = build_routing(params)?;
 
+        let agent_id = params
+            .get("agent_id")
+            .map(|_| required_str(SCHEDULE_TOOL, params, "agent_id").map(str::to_owned))
+            .transpose()?;
         let request = wire::UpdateScheduleRequest {
+            agent_id,
             message,
             spec,
             routing,

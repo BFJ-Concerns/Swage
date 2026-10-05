@@ -267,6 +267,11 @@ pub struct CreateScheduleRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct UpdateScheduleRequest {
+    /// Recognised so an attempted agent change receives an actionable refusal.
+    /// The agent is fixed when the schedule is created.
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub agent_id: Option<String>,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub message: Option<String>,
