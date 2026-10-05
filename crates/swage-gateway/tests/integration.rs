@@ -25,10 +25,10 @@ mod hosted_docs_integration;
 mod integration;
 #[path = "integration/inter_agent_messaging_integration.rs"]
 mod inter_agent_messaging_integration;
-#[path = "integration/message_origin_integration.rs"]
-mod message_origin_integration;
 #[path = "integration/material_management_integration.rs"]
 mod material_management_integration;
+#[path = "integration/message_origin_integration.rs"]
+mod message_origin_integration;
 #[path = "integration/onboarding_recovery_integration.rs"]
 mod onboarding_recovery_integration;
 #[path = "integration/operator_audit_usage_integration.rs"]

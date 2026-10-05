@@ -233,8 +233,20 @@ describe("turn context inspector trigger", () => {
       duration: { secs: 0, nanos: 1 },
     }));
     const store = makeConversationStore([
-      makeAssistantMessage("First recorded response", undefined, undefined, "completed", "turn-42"),
-      makeAssistantMessage("Second recorded response", undefined, undefined, "completed", "turn-43"),
+      makeAssistantMessage(
+        "First recorded response",
+        undefined,
+        undefined,
+        "completed",
+        "turn-42",
+      ),
+      makeAssistantMessage(
+        "Second recorded response",
+        undefined,
+        undefined,
+        "completed",
+        "turn-43",
+      ),
     ]);
 
     component = mount(MessageDisplay, {
@@ -242,34 +254,57 @@ describe("turn context inspector trigger", () => {
       props: { store, streamingStore: makeStreamingStore() },
     });
 
-    const contextLinks = document.querySelectorAll<HTMLButtonElement>("button.context-link");
+    const contextLinks = document.querySelectorAll<HTMLButtonElement>(
+      "button.context-link",
+    );
     contextLinks[0].click();
 
-    await vi.waitFor(() => expect(fetchTurnContext).toHaveBeenCalledWith("turn-42"));
-    expect(document.body.textContent?.replace(/\s+/g, " ")).toContain("request total: 12 tokens");
-    expect(document.querySelector(".summary")?.closest(".message-display")).toBeNull();
+    await vi.waitFor(() =>
+      expect(fetchTurnContext).toHaveBeenCalledWith("turn-42"),
+    );
+    expect(document.body.textContent?.replace(/\s+/g, " ")).toContain(
+      "request total: 12 tokens",
+    );
+    expect(
+      document.querySelector(".summary")?.closest(".message-display"),
+    ).toBeNull();
     expect(document.querySelector(".summary")?.closest(".message")).toBeNull();
 
     contextLinks[1].click();
 
-    await vi.waitFor(() => expect(fetchTurnContext).toHaveBeenCalledWith("turn-43"));
+    await vi.waitFor(() =>
+      expect(fetchTurnContext).toHaveBeenCalledWith("turn-43"),
+    );
     expect(document.querySelectorAll(".context-inspector")).toHaveLength(1);
-    expect(document.body.textContent?.replace(/\s+/g, " ")).toContain("request total: 24 tokens");
+    expect(document.body.textContent?.replace(/\s+/g, " ")).toContain(
+      "request total: 24 tokens",
+    );
 
-    (document.querySelector('button[aria-label="Close"]') as HTMLButtonElement).click();
-    await vi.waitFor(() => expect(document.querySelector(".context-inspector")).toBeNull());
+    (
+      document.querySelector('button[aria-label="Close"]') as HTMLButtonElement
+    ).click();
+    await vi.waitFor(() =>
+      expect(document.querySelector(".context-inspector")).toBeNull(),
+    );
   });
 });
 
 describe("assistant Markdown time blanks", () => {
-  it.each(["__:__", "___:___", "____:____"])("preserves the time blank %s", (content) => {
-    component = mount(MessageDisplay, {
-      target: document.body,
-      props: { store: makeConversationStore([makeAssistantMessage(content)]) },
-    });
+  it.each(["__:__", "___:___", "____:____"])(
+    "preserves the time blank %s",
+    (content) => {
+      component = mount(MessageDisplay, {
+        target: document.body,
+        props: {
+          store: makeConversationStore([makeAssistantMessage(content)]),
+        },
+      });
 
-    expect(document.querySelector(".assistant-content")?.textContent?.trim()).toBe(content);
-  });
+      expect(
+        document.querySelector(".assistant-content")?.textContent?.trim(),
+      ).toBe(content);
+    },
+  );
 
   it("preserves Arrived and Left time blanks in a settled template", () => {
     const content = "Arrived at __:__.\nLeft at __:__.";
@@ -278,7 +313,9 @@ describe("assistant Markdown time blanks", () => {
       props: { store: makeConversationStore([makeAssistantMessage(content)]) },
     });
 
-    expect(document.querySelector(".assistant-content")?.textContent?.trim()).toBe(content);
+    expect(
+      document.querySelector(".assistant-content")?.textContent?.trim(),
+    ).toBe(content);
   });
 
   it("preserves Arrived and Left time blanks in a streaming template", () => {
@@ -287,11 +324,18 @@ describe("assistant Markdown time blanks", () => {
       target: document.body,
       props: {
         store: makeConversationStore([]),
-        streamingStore: { ...makeStreamingStore([], true), streamedContent: content },
+        streamingStore: {
+          ...makeStreamingStore([], true),
+          streamedContent: content,
+        },
       },
     });
 
-    expect(document.querySelector(".streaming .assistant-content p")?.textContent?.trim()).toBe(content);
+    expect(
+      document
+        .querySelector(".streaming .assistant-content p")
+        ?.textContent?.trim(),
+    ).toBe(content);
   });
 
   it("control: preserves underscores separated by spaces", () => {
@@ -300,16 +344,22 @@ describe("assistant Markdown time blanks", () => {
       props: { store: makeConversationStore([makeAssistantMessage("a __ b")]) },
     });
 
-    expect(document.querySelector(".assistant-content")?.textContent?.trim()).toBe("a __ b");
+    expect(
+      document.querySelector(".assistant-content")?.textContent?.trim(),
+    ).toBe("a __ b");
   });
 
   it("control: renders ordinary underscore bold emphasis", () => {
     component = mount(MessageDisplay, {
       target: document.body,
-      props: { store: makeConversationStore([makeAssistantMessage("__bold__")]) },
+      props: {
+        store: makeConversationStore([makeAssistantMessage("__bold__")]),
+      },
     });
 
-    expect(document.querySelector(".assistant-content strong")?.textContent).toBe("bold");
+    expect(
+      document.querySelector(".assistant-content strong")?.textContent,
+    ).toBe("bold");
   });
 });
 
@@ -344,9 +394,19 @@ describe("settled partial responses", () => {
     const store = makeConversationStore([]);
     const streamingStore = createStreamingStore({ conversationStore: store });
     streamingStore.startTurn("Compare");
-    streamingStore.handleServerEvent({ type: "token", content: "The answer ends at a" });
-    streamingStore.handleServerEvent(JSON.parse('{"type":"turn_complete","turn_id":"limited-turn","incomplete_reason":"length"}'));
-    component = mount(MessageDisplay, { target: document.body, props: { store, streamingStore } });
+    streamingStore.handleServerEvent({
+      type: "token",
+      content: "The answer ends at a",
+    });
+    streamingStore.handleServerEvent(
+      JSON.parse(
+        '{"type":"turn_complete","turn_id":"limited-turn","incomplete_reason":"length"}',
+      ),
+    );
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore },
+    });
     expect(document.body.textContent).toContain("The answer ends at a");
     expect(document.body.textContent).toContain("Response incomplete");
     expect(document.body.textContent).not.toContain("Response interrupted");
@@ -354,7 +414,12 @@ describe("settled partial responses", () => {
 
   it("distinguishes interrupted and failed responses for the user", () => {
     const store = makeConversationStore([
-      makeAssistantMessage("Stopped partial", undefined, undefined, "interrupted"),
+      makeAssistantMessage(
+        "Stopped partial",
+        undefined,
+        undefined,
+        "interrupted",
+      ),
       makeAssistantMessage("Failed partial", undefined, undefined, "failed"),
     ]);
 
@@ -365,7 +430,9 @@ describe("settled partial responses", () => {
 
     expect(document.body.textContent).toContain("Response interrupted");
     expect(document.body.textContent).toContain("Response failed");
-    expect(document.body.textContent?.match(/Response interrupted/g)).toHaveLength(1);
+    expect(
+      document.body.textContent?.match(/Response interrupted/g),
+    ).toHaveLength(1);
   });
 });
 
@@ -388,8 +455,17 @@ describe("turns that ended without a reply, as loaded", () => {
     const store = makeConversationStore([
       makeRequest({
         tool_calls: [
-          makeToolCall({ call_id: "write", tool: "file_write", status: "success" }),
-          makeToolCall({ call_id: "shell", tool: "shell", status: "interrupted", result: null }),
+          makeToolCall({
+            call_id: "write",
+            tool: "file_write",
+            status: "success",
+          }),
+          makeToolCall({
+            call_id: "shell",
+            tool: "shell",
+            status: "interrupted",
+            result: null,
+          }),
         ],
       }),
     ]);
@@ -434,7 +510,13 @@ describe("turns that ended without a reply, as loaded", () => {
   it("keeps the explanation and Retry for a failed turn under its partial reply", () => {
     const startTurn = vi.fn();
     const partial = {
-      ...makeAssistantMessage("Partial answer", undefined, undefined, "failed", "turn-1"),
+      ...makeAssistantMessage(
+        "Partial answer",
+        undefined,
+        undefined,
+        "failed",
+        "turn-1",
+      ),
       failure_message: "stream reset by provider",
     };
     const store = makeConversationStore([
@@ -447,9 +529,9 @@ describe("turns that ended without a reply, as loaded", () => {
       props: { store, streamingStore: { ...makeStreamingStore(), startTurn } },
     });
 
-    expect(document.body.querySelector('[role="alert"]')?.textContent).toContain(
-      "stream reset by provider",
-    );
+    expect(
+      document.body.querySelector('[role="alert"]')?.textContent,
+    ).toContain("stream reset by provider");
     const retries = [...document.body.querySelectorAll("button")].filter(
       (button) => button.textContent === "Retry",
     );
@@ -465,7 +547,14 @@ describe("turns that ended without a reply, as loaded", () => {
         content: "Run sleep 30",
         timestamp: "2026-03-20T10:00:59Z",
         turn_state: "interrupted",
-        tool_calls: [makeToolCall({ call_id: "sleep", tool: "shell", status: "interrupted", result: null })],
+        tool_calls: [
+          makeToolCall({
+            call_id: "sleep",
+            tool: "shell",
+            status: "interrupted",
+            result: null,
+          }),
+        ],
       },
     ]);
 
@@ -550,7 +639,11 @@ describe("historical tool calls from committed messages", () => {
   it("renders persisted rejected approvals as failed beside successful calls", () => {
     const store = makeConversationStore([
       makeAssistantMessage("The request was denied and the turn continued.", [
-        makeToolCall({ call_id: "successful", tool: "read_file", status: "success" }),
+        makeToolCall({
+          call_id: "successful",
+          tool: "read_file",
+          status: "success",
+        }),
         makeToolCall({
           call_id: "rejected",
           tool: "write_file",
@@ -621,7 +714,8 @@ describe("historical tool calls from committed messages", () => {
     expect(toolCalls).not.toBeNull();
     expect(response).not.toBeNull();
     expect(
-      toolCalls!.compareDocumentPosition(response!) & Node.DOCUMENT_POSITION_FOLLOWING,
+      toolCalls!.compareDocumentPosition(response!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 
@@ -641,9 +735,7 @@ describe("historical tool calls from committed messages", () => {
   });
 
   it("renders assistant content as plain text when markdown rendering is disabled", () => {
-    const store = makeConversationStore([
-      makeAssistantMessage("**not bold**"),
-    ]);
+    const store = makeConversationStore([makeAssistantMessage("**not bold**")]);
     const streaming = makeStreamingStore();
 
     component = mount(MessageDisplay, {
@@ -739,9 +831,7 @@ describe("historical tool calls from committed messages", () => {
 
   it("historical tool calls do not show the pulse/in-progress indicator", () => {
     const store = makeConversationStore([
-      makeAssistantMessage("Done", [
-        makeToolCall({ status: "success" }),
-      ]),
+      makeAssistantMessage("Done", [makeToolCall({ status: "success" })]),
     ]);
     const streaming = makeStreamingStore();
 
@@ -765,7 +855,11 @@ describe("live tool calls from streaming store", () => {
     const store = makeConversationStore([]);
     const streaming = makeStreamingStore(
       [
-        makeToolCall({ call_id: "successful", tool: "read_file", status: "success" }),
+        makeToolCall({
+          call_id: "successful",
+          tool: "read_file",
+          status: "success",
+        }),
         makeToolCall({
           call_id: "rejected",
           tool: "write_file",
@@ -806,14 +900,23 @@ describe("live tool calls from streaming store", () => {
     const response = document.querySelector(".message.streaming");
     expect(toolCalls).not.toBeNull();
     expect(response).not.toBeNull();
-    expect(toolCalls!.compareDocumentPosition(response!) & Node.DOCUMENT_POSITION_FOLLOWING)
-      .not.toBe(0);
+    expect(
+      toolCalls!.compareDocumentPosition(response!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
   });
 
   it("renders a .tool-call element for each active tool call", () => {
     const store = makeConversationStore([]);
     const streaming = makeStreamingStore(
-      [makeToolCall({ call_id: "live-1", result: null, status: null, duration_ms: null })],
+      [
+        makeToolCall({
+          call_id: "live-1",
+          result: null,
+          status: null,
+          duration_ms: null,
+        }),
+      ],
       true,
     );
 
@@ -829,7 +932,14 @@ describe("live tool calls from streaming store", () => {
   it("shows the pulse indicator for in-progress live tool calls (no result)", () => {
     const store = makeConversationStore([]);
     const streaming = makeStreamingStore(
-      [makeToolCall({ call_id: "live-1", result: null, status: null, duration_ms: null })],
+      [
+        makeToolCall({
+          call_id: "live-1",
+          result: null,
+          status: null,
+          duration_ms: null,
+        }),
+      ],
       true,
     );
 
@@ -877,7 +987,9 @@ describe("live tool calls from streaming store", () => {
     });
 
     expect(document.body.textContent).toContain("WAIT 4s");
-    expect(document.body.textContent).toContain("retry 2 of 3 · provider · anthropic");
+    expect(document.body.textContent).toContain(
+      "retry 2 of 3 · provider · anthropic",
+    );
     expect(document.body.textContent).not.toContain("SHELL");
   });
 });
@@ -951,13 +1063,17 @@ describe("branching from a message", () => {
     );
     expect(labels).toEqual(["Schedule", "You"]);
 
-    const briefElement = document.querySelector('[aria-label="Schedule message"]');
+    const briefElement = document.querySelector(
+      '[aria-label="Schedule message"]',
+    );
     expect(briefElement).not.toBeNull();
     // Not the person's words: it sits on the assistant's side, and renders
     // as the platform wrote it (markdown), not as typed plain text.
     expect(briefElement!.classList.contains("user")).toBe(false);
     expect(briefElement!.querySelector("strong")?.textContent).toBe("inbox");
-    expect(document.querySelector('[aria-label="Your message"]')).not.toBeNull();
+    expect(
+      document.querySelector('[aria-label="Your message"]'),
+    ).not.toBeNull();
   });
 
   it("shows messages held for the next turn after the recorded ones, labelled as queued", () => {
@@ -978,10 +1094,14 @@ describe("branching from a message", () => {
 
     const held = document.querySelector('[aria-label="Queued message"]');
     expect(held).not.toBeNull();
-    expect(held!.querySelector(".role-label")?.textContent?.trim()).toBe("You · queued");
+    expect(held!.querySelector(".role-label")?.textContent?.trim()).toBe(
+      "You · queued",
+    );
     expect(held!.textContent).toContain("and one more thing");
     // Not a recorded message: nothing to branch from.
-    expect(held!.querySelector('button[aria-label="Branch from this message"]')).toBeNull();
+    expect(
+      held!.querySelector('button[aria-label="Branch from this message"]'),
+    ).toBeNull();
   });
 
   it("offers no branch action when the store cannot branch", () => {
@@ -994,7 +1114,9 @@ describe("branching from a message", () => {
       },
     });
 
-    expect(document.querySelector('button[aria-label="Branch from this message"]')).toBeNull();
+    expect(
+      document.querySelector('button[aria-label="Branch from this message"]'),
+    ).toBeNull();
   });
 });
 
@@ -1088,7 +1210,10 @@ describe("assistant message width", () => {
 });
 
 describe("authorship of platform-written messages", () => {
-  function makeUserRoleMessage(origin: MessageView["origin"], content: string): MessageView {
+  function makeUserRoleMessage(
+    origin: MessageView["origin"],
+    content: string,
+  ): MessageView {
     _msgSeq += 1;
     return {
       id: `m-${_msgSeq}`,
@@ -1102,9 +1227,18 @@ describe("authorship of platform-written messages", () => {
 
   it("labels delegation and schedule messages by origin and only the typed prompt as You", () => {
     const store = makeConversationStore([
-      makeUserRoleMessage("delegation", "Delegated Task\n\nSummarise the report"),
-      makeUserRoleMessage("delegation", "Delegated agent researcher completed: done"),
-      makeUserRoleMessage("schedule", "Check the queue.\n\nPrevious run outcome: ok"),
+      makeUserRoleMessage(
+        "delegation",
+        "Delegated Task\n\nSummarise the report",
+      ),
+      makeUserRoleMessage(
+        "delegation",
+        "Delegated agent researcher completed: done",
+      ),
+      makeUserRoleMessage(
+        "schedule",
+        "Check the queue.\n\nPrevious run outcome: ok",
+      ),
       makeUserRoleMessage("user", "What did the researcher find?"),
     ]);
 
@@ -1113,11 +1247,13 @@ describe("authorship of platform-written messages", () => {
       props: { store, streamingStore: makeStreamingStore() },
     });
 
-    const labels = [...document.body.querySelectorAll(".message > .role-label")].map((label) =>
-      label.textContent?.trim(),
-    );
+    const labels = [
+      ...document.body.querySelectorAll(".message > .role-label"),
+    ].map((label) => label.textContent?.trim());
     expect(labels).toEqual(["Delegation", "Delegation", "Schedule", "You"]);
-    expect(document.body.querySelectorAll('[aria-label="Your message"]')).toHaveLength(1);
+    expect(
+      document.body.querySelectorAll('[aria-label="Your message"]'),
+    ).toHaveLength(1);
     expect(document.body.querySelectorAll(".message.platform")).toHaveLength(3);
   });
 });
