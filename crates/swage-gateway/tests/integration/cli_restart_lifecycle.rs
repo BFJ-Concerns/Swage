@@ -10,14 +10,16 @@ use std::{
         fd::{AsRawFd, FromRawFd},
         unix::ffi::OsStrExt,
     },
+    panic::AssertUnwindSafe,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::Output,
 };
 
+use futures::FutureExt;
 use serde_json::Value;
 
 use swage_client::{http::GatewayClient, runtime::RuntimeMetadata};
-use tokio::io::unix::AsyncFd;
+use tokio::{io::unix::AsyncFd, process::Command};
 
 use super::support::journey;
 
@@ -72,6 +74,7 @@ impl GatewayProbe {
 
     fn command(&self) -> Command {
         let mut command = Command::new(&self.binary);
+        command.kill_on_drop(true);
         command.env("HOME", self.home.path());
         if self.explicit_root {
             command.env("SWAGE_HOME", self.root.path());
@@ -86,10 +89,11 @@ impl GatewayProbe {
         command
     }
 
-    fn run(&self, arguments: &[&str]) -> Output {
+    async fn run(&self, arguments: &[&str]) -> Output {
         self.command()
             .args(arguments)
             .output()
+            .await
             .expect("failed to invoke the Swage CLI")
     }
 
@@ -193,12 +197,37 @@ impl GatewayProbe {
     }
 
     async fn start(&self) {
-        self.assert_ready_after_start(self.run(&["gateway", "start", "--port", "0"]), None, 0)
-            .await;
+        self.assert_ready_after_start(
+            self.run(&["gateway", "start", "--port", "0"]).await,
+            None,
+            0,
+        )
+        .await;
     }
 
-    fn stop(&self) {
-        let _ = self.run(&["gateway", "stop", "--force"]);
+    async fn stop(&self) {
+        let output = self.run(&["gateway", "stop", "--force"]).await;
+        assert!(
+            output.status.success()
+                || (!self.metadata_path().exists()
+                    && String::from_utf8_lossy(&output.stderr).contains("no metadata file found")),
+            "fixture cleanup failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    async fn journey(self, body: impl AsyncFnOnce(&Self)) {
+        // Keep the disposable roots alive through asynchronous cleanup even
+        // when the journey panics or its hang guard expires.
+        let result = AssertUnwindSafe(journey(body(&self))).catch_unwind().await;
+        let cleanup = AssertUnwindSafe(journey(self.stop())).catch_unwind().await;
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+        if let Err(panic) = cleanup {
+            std::panic::resume_unwind(panic);
+        }
     }
 }
 
@@ -214,85 +243,163 @@ impl Drop for GatewayProbe {
             fs::read_to_string(self.metadata_path()),
             fs::read_to_string(data_root.join("gateway.log")).unwrap_or_default()
         );
-        self.stop();
+        // No subprocess or wait may block Drop after a timeout. The metadata
+        // belongs to this disposable fixture; terminate a surviving daemon if
+        // its asynchronous cleanup could not finish.
+        if let Ok(metadata) = RuntimeMetadata::load_from(&self.metadata_path()) {
+            let expected_home = format!("HOME={}", self.home.path().display());
+            let environment =
+                fs::read(format!("/proc/{}/environ", metadata.pid)).unwrap_or_default();
+            if environment
+                .split(|byte| *byte == 0)
+                .any(|entry| entry == expected_home.as_bytes())
+            {
+                // SAFETY: signal only a process belonging to this disposable HOME.
+                unsafe { libc::kill(metadata.pid as i32, libc::SIGKILL) };
+            }
+        }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clean_stop_status_reports_not_running_without_an_error() {
+    GatewayProbe::new()
+        .journey(async |probe| {
+            probe.start().await;
+            probe.assert_success(probe.run(&["gateway", "stop"]).await);
+            assert!(!probe.metadata_path().exists());
+
+            let output = probe.run(&["gateway", "status"]).await;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && !stdout.contains("Error:") && !stderr.contains("Error:"),
+                "stopped status must succeed without an error\nstdout: {stdout}\nstderr: {stderr}"
+            );
+            assert!(
+                stdout.contains("not running") || stderr.contains("not running"),
+                "stopped status must report not running\nstdout: {stdout}\nstderr: {stderr}"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_after_sigkill_recovers_without_a_status_call() {
+    GatewayProbe::new().journey(async |probe| {
+        let mut child = probe.command()
+            .args(["gateway", "start", "--foreground", "--port", "0"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn foreground gateway");
+        let first_pid = tokio::select! {
+            pid = probe.wait_for_ready_process(None, 0) => pid,
+            status = child.wait() => panic!("foreground gateway exited before readiness: {status:?}"),
+        };
+        assert_eq!(Some(first_pid), child.id());
+        child.start_kill().expect("SIGKILL foreground gateway");
+        // Do not poll child.wait(): start must recover while the terminated
+        // process is still an unreaped zombie and its metadata remains intact.
+        loop {
+            let status = fs::read_to_string(format!("/proc/{first_pid}/status"))
+                .expect("unreaped foreground process still has a proc entry");
+            if status.lines().any(|line| line.starts_with("State:") && line.contains('Z')) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(probe.pid(), first_pid);
+        let metadata = RuntimeMetadata::load_from(&probe.metadata_path()).expect("killed gateway metadata");
+        assert!(
+            GatewayClient::new(&metadata.address).health().await.is_err(),
+            "killed gateway must no longer serve health"
+        );
+        let output = probe.run(&["gateway", "start", "--port", "0"]).await;
+        probe.assert_ready_after_start(output, Some(first_pid), 0).await;
+        assert_ne!(probe.pid(), first_pid, "start must publish a replacement PID");
+        child.wait().await.expect("reap killed foreground gateway");
+    }).await;
 }
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gateway_start_regenerates_fresh_and_damaged_shipped_skill_projection() {
-    journey(async {
-        use std::os::unix::fs::PermissionsExt;
+    GatewayProbe::new()
+        .journey(async |probe| {
+            use std::os::unix::fs::PermissionsExt;
+            let projected = probe
+                .root
+                .path()
+                .join("generated/shipped-skills/commission/scripts/create-annexe.sh");
+            let projection_root = probe.root.path().join("generated/shipped-skills");
+            let expected =
+                include_str!("../../../../shipped/skills/commission/scripts/create-annexe.sh");
 
-        let probe = GatewayProbe::new();
-        let projected = probe
-            .root
-            .path()
-            .join("generated/shipped-skills/commission/scripts/create-annexe.sh");
-        let projection_root = probe.root.path().join("generated/shipped-skills");
-        let expected =
-            include_str!("../../../../shipped/skills/commission/scripts/create-annexe.sh");
+            probe.start().await;
+            assert_eq!(
+                fs::read(&projected).expect("gateway startup projected shipped skill"),
+                expected.as_bytes(),
+                "the gateway startup consumer must project bundled skill bytes into a fresh root"
+            );
+            probe.stop().await;
 
-        probe.start().await;
-        assert_eq!(
-            fs::read(&projected).expect("gateway startup projected shipped skill"),
-            expected.as_bytes(),
-            "the gateway startup consumer must project bundled skill bytes into a fresh root"
-        );
-        probe.stop();
+            fs::write(&projected, "damaged projection").expect("damage projected skill");
+            fs::set_permissions(&projected, fs::Permissions::from_mode(0o600))
+                .expect("remove projected script execute mode");
+            let stray = projection_root.join("stray.txt");
+            fs::write(&stray, "stray").expect("write stray projection file");
 
-        fs::write(&projected, "damaged projection").expect("damage projected skill");
-        fs::set_permissions(&projected, fs::Permissions::from_mode(0o600))
-            .expect("remove projected script execute mode");
-        let stray = projection_root.join("stray.txt");
-        fs::write(&stray, "stray").expect("write stray projection file");
-
-        probe.start().await;
-        assert_eq!(
-            fs::read(&projected).expect("gateway startup restored shipped skill"),
-            expected.as_bytes(),
-            "a later gateway startup must replace damaged projected bytes"
-        );
-        assert!(
-            !stray.exists(),
-            "a later gateway startup must replace the complete shipped-skill projection"
-        );
-        assert_eq!(
-            fs::metadata(&projected)
-                .expect("gateway startup restored projected script metadata")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o755,
-            "a later gateway startup must restore executable projected scripts"
-        );
-    })
-    .await;
+            probe.start().await;
+            assert_eq!(
+                fs::read(&projected).expect("gateway startup restored shipped skill"),
+                expected.as_bytes(),
+                "a later gateway startup must replace damaged projected bytes"
+            );
+            assert!(
+                !stray.exists(),
+                "a later gateway startup must replace the complete shipped-skill projection"
+            );
+            assert_eq!(
+                fs::metadata(&projected)
+                    .expect("gateway startup restored projected script metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755,
+                "a later gateway startup must restore executable projected scripts"
+            );
+        })
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_recovers_xdg_metadata_without_swage_home() {
-    journey(async {
-        assert_restart_recovers_without_swage_home(GatewayProbe::without_explicit_root()).await;
-    })
-    .await;
+    GatewayProbe::without_explicit_root()
+        .journey(async |probe| {
+            assert_restart_recovers_without_swage_home(probe).await;
+        })
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_recovers_default_root_metadata_without_overrides() {
-    journey(async {
-        assert_restart_recovers_without_swage_home(GatewayProbe::with_default_root()).await;
-    })
-    .await;
+    GatewayProbe::with_default_root()
+        .journey(async |probe| {
+            assert_restart_recovers_without_swage_home(probe).await;
+        })
+        .await;
 }
 
-async fn assert_restart_recovers_without_swage_home(probe: GatewayProbe) {
+async fn assert_restart_recovers_without_swage_home(probe: &GatewayProbe) {
     probe.start().await;
     let first_pid = probe.pid();
     fs::remove_file(probe.metadata_path()).expect("failed to remove live runtime metadata");
 
     let port = probe.port.get().to_string();
-    let output = probe.run(&["gateway", "restart", "--force", "--port", &port]);
+    let output = probe
+        .run(&["gateway", "restart", "--force", "--port", &port])
+        .await;
     probe
         .assert_ready_after_start(output, Some(first_pid), probe.port.get())
         .await;
@@ -331,72 +438,75 @@ fn process_environment(pid: u32) -> Vec<u8> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_preserves_running_environment_and_still_starts_when_nothing_is_running() {
-    journey(async {
-        let probe = GatewayProbe::new();
-        probe.start().await;
-        let first_pid = probe.pid();
+    GatewayProbe::new()
+        .journey(async |probe| {
+            probe.start().await;
+            let first_pid = probe.pid();
 
-        let invoking_runtime = tempfile::TempDir::new().expect("failed to create invoking runtime");
-        let invoking_home = tempfile::TempDir::new().expect("failed to create invoking home");
-        let invoking_metadata = invoking_runtime.path().join("swage/metadata.json");
-        fs::create_dir_all(invoking_metadata.parent().unwrap())
-            .expect("failed to create invoking metadata directory");
-        // Keep the live metadata discoverable while giving the restart process a
-        // conflicting runtime directory whose inherited value would fail below.
-        fs::hard_link(probe.metadata_path(), &invoking_metadata)
-            .expect("failed to expose runtime metadata to the restart command");
+            let invoking_runtime =
+                tempfile::TempDir::new().expect("failed to create invoking runtime");
+            let invoking_home = tempfile::TempDir::new().expect("failed to create invoking home");
+            let invoking_metadata = invoking_runtime.path().join("swage/metadata.json");
+            fs::create_dir_all(invoking_metadata.parent().unwrap())
+                .expect("failed to create invoking metadata directory");
+            // Keep the live metadata discoverable while giving the restart process a
+            // conflicting runtime directory whose inherited value would fail below.
+            fs::hard_link(probe.metadata_path(), &invoking_metadata)
+                .expect("failed to expose runtime metadata to the restart command");
 
-        let live_log = probe.root.path().join("gateway.log");
-        fs::remove_file(&live_log).expect("failed to remove the initial gateway log");
+            let live_log = probe.root.path().join("gateway.log");
+            fs::remove_file(&live_log).expect("failed to remove the initial gateway log");
 
-        let port = "0";
-        let mut restart = probe.command();
-        let output = restart
-            .env_remove("SWAGE_HOME")
-            .env("HOME", invoking_home.path())
-            .env("XDG_RUNTIME_DIR", invoking_runtime.path())
-            .args(["gateway", "restart", "--force", "--port", port])
-            .output()
-            .expect("failed to invoke gateway restart");
-        probe
-            .assert_ready_after_start(output, Some(first_pid), 0)
-            .await;
+            let port = "0";
+            let mut restart = probe.command();
+            let output = restart
+                .env_remove("SWAGE_HOME")
+                .env("HOME", invoking_home.path())
+                .env("XDG_RUNTIME_DIR", invoking_runtime.path())
+                .args(["gateway", "restart", "--force", "--port", port])
+                .output()
+                .await
+                .expect("failed to invoke gateway restart");
+            probe
+                .assert_ready_after_start(output, Some(first_pid), 0)
+                .await;
 
-        let second_pid = probe.pid();
-        assert_ne!(first_pid, second_pid);
-        let environment = process_environment(second_pid);
-        for (name, value) in [
-            ("SWAGE_HOME", probe.root.path()),
-            ("HOME", probe.home.path()),
-            ("XDG_RUNTIME_DIR", probe.runtime.path()),
-        ] {
-            let expected = format!("{name}={}", value.display());
-            assert!(
-                environment
-                    .split(|byte| *byte == 0)
-                    .any(|entry| entry == expected.as_bytes()),
-                "replacement gateway did not receive recovered {name}"
-            );
-        }
-        assert!(live_log.exists());
-        assert!(!invoking_metadata.exists());
-        assert!(!invoking_home.path().join(".swage/gateway.log").exists());
-        assert!(!invoking_home.path().join(".swage/swage.db").exists());
+            let second_pid = probe.pid();
+            assert_ne!(first_pid, second_pid);
+            let environment = process_environment(second_pid);
+            for (name, value) in [
+                ("SWAGE_HOME", probe.root.path()),
+                ("HOME", probe.home.path()),
+                ("XDG_RUNTIME_DIR", probe.runtime.path()),
+            ] {
+                let expected = format!("{name}={}", value.display());
+                assert!(
+                    environment
+                        .split(|byte| *byte == 0)
+                        .any(|entry| entry == expected.as_bytes()),
+                    "replacement gateway did not receive recovered {name}"
+                );
+            }
+            assert!(live_log.exists());
+            assert!(!invoking_metadata.exists());
+            assert!(!invoking_home.path().join(".swage/gateway.log").exists());
+            assert!(!invoking_home.path().join(".swage/swage.db").exists());
 
-        probe.stop();
-        assert!(!probe.metadata_path().exists());
+            probe.stop().await;
+            assert!(!probe.metadata_path().exists());
 
-        let output = probe.run(&["gateway", "restart", "--force", "--port", port]);
-        probe.assert_ready_after_start(output, None, 0).await;
-        assert!(probe.metadata_path().exists());
-    })
-    .await;
+            let output = probe
+                .run(&["gateway", "restart", "--force", "--port", port])
+                .await;
+            probe.assert_ready_after_start(output, None, 0).await;
+            assert!(probe.metadata_path().exists());
+        })
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn foreground_restart_preserves_running_environment() {
-    journey(async {
-        let probe = GatewayProbe::new();
+    GatewayProbe::new().journey(async |probe| {
         probe.start().await;
         let first_pid = probe.pid();
 
@@ -409,7 +519,7 @@ async fn foreground_restart_preserves_running_environment() {
             .expect("failed to expose runtime metadata to the restart command");
 
         let port = "0";
-        let mut restart = tokio::process::Command::from(probe.command())
+        let mut restart = probe.command()
             .kill_on_drop(true)
             .env_remove("SWAGE_HOME")
             .env("HOME", invoking_home.path())
@@ -445,7 +555,7 @@ async fn foreground_restart_preserves_running_environment() {
         }
         assert!(!invoking_metadata.exists());
 
-        let stop_output = probe.run(&["gateway", "stop", "--force"]);
+        let stop_output = probe.run(&["gateway", "stop", "--force"]).await;
         probe.assert_success(stop_output);
         let status = restart
             .wait()
