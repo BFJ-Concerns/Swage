@@ -72,6 +72,12 @@
   let lastSavedSearch: SettingsResponse["tool_runtime"]["search"] = null;
   let hasInvalidBundlesJson = $state(false);
   let hasInvalidApprovalJson = $state(false);
+  let lastSavedArchiveDelay = $state(7);
+  const archiveDelayError = $derived(
+    settings && (nullableNumber(settings.sessions.archive_after_days) == null || settings.sessions.archive_after_days < 1)
+      ? "Archive delay must be at least 1 day."
+      : null,
+  );
   let status = $state("");
   let error = $state<string | null>(null);
   const HOT_AUTOSAVE_TABS: ReadonlySet<SettingsTabId> = new Set([
@@ -84,6 +90,7 @@
   onMount(async () => {
     try {
       settings = await fetchSettings();
+      lastSavedArchiveDelay = settings.sessions.archive_after_days;
       lastSavedSearch = settings.tool_runtime.search ? { ...settings.tool_runtime.search } : null;
       savedProviderIds = new Set(Object.keys(settings.providers));
       lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
@@ -149,6 +156,11 @@
     if (!settings) return false;
     error = null;
     status = "";
+    if (archiveDelayError) {
+      error = "Fix the archive delay in Automation before saving. It must be at least 1 day.";
+      return false;
+    }
+    const archiveDelayChanged = settings.sessions.archive_after_days !== lastSavedArchiveDelay;
     const holdSearchDraft = searchIsIncomplete(settings.tool_runtime.search);
     if (hasInvalidBundlesJson || hasInvalidApprovalJson) {
       error = "Fix the invalid automation JSON before saving.";
@@ -164,7 +176,7 @@
       preset.temperature = nullableNumber(preset.temperature);
     }
     settings.hitl.timeout = nullableNumber(settings.hitl.timeout) ?? 0;
-    settings.sessions.archive_after_days = Math.min(3650, Math.max(1, nullableNumber(settings.sessions.archive_after_days) ?? 7));
+    settings.sessions.archive_after_days = Math.min(3650, settings.sessions.archive_after_days);
     settings.memory.curator_idle_minutes = Math.min(10080, Math.max(1, nullableNumber(settings.memory.curator_idle_minutes) ?? 10));
     settings.context.timeout = nullableNumber(settings.context.timeout) ?? 0;
     settings.context.budget = nullableNumber(settings.context.budget);
@@ -174,6 +186,7 @@
       const saved = await saveSettings({ ...settings, tool_runtime: toolRuntimeForSave(settings.tool_runtime) });
       const searchDraft = settings.tool_runtime.search;
       settings = saved;
+      lastSavedArchiveDelay = saved.sessions.archive_after_days;
       lastSavedSearch = saved.tool_runtime.search ? { ...saved.tool_runtime.search } : null;
       savedProviderIds = new Set(Object.keys(settings.providers));
       // The server never echoes raw credentials; clear the input so the
@@ -182,9 +195,9 @@
       lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
       if (holdSearchDraft) settings.tool_runtime.search = searchDraft;
       await onSettingsSaved?.();
-      status =
-        options.message ??
-        "Saved. New turns will use the updated runtime.";
+      status = archiveDelayChanged
+        ? `Archive delay saved as ${saved.sessions.archive_after_days} ${saved.sessions.archive_after_days === 1 ? "day" : "days"}.`
+        : options.message ?? "Saved. New turns will use the updated runtime.";
       return true;
     } catch (err) {
       error = err instanceof Error ? err.message : "Failed to save settings.";
@@ -336,7 +349,7 @@
       </div>
     {/if}
 
-    {#if status}
+    {#if status && !archiveDelayError}
       <div class="notice">
         <span>{status}</span>
       </div>
@@ -444,7 +457,7 @@
       </div>
     {/if}
 
-    {#if status}
+    {#if status && !archiveDelayError}
       <div class="notice">
         <span>{status}</span>
         {#if settings.can_restart}
@@ -480,6 +493,7 @@
         </div>
         <AutomationSettingsPanel
           bind:settings
+          {archiveDelayError}
           onValidation={(bundlesInvalid, approvalsInvalid, message) => {
             hasInvalidBundlesJson = bundlesInvalid;
             hasInvalidApprovalJson = approvalsInvalid;

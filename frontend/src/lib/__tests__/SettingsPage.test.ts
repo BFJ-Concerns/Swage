@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
+import { fromStore, writable } from "svelte/store";
 
 import SettingsPage from "../components/SettingsPage.svelte";
 import type { Schedule } from "../protocol/Schedule";
@@ -666,6 +667,146 @@ describe("SettingsPage", () => {
 
     const [payload] = vi.mocked(settingsApi.saveSettings).mock.calls[0];
     expect(payload.sessions).toEqual({ archive_after_days: 14 });
+  });
+
+  it("explains the archive delay minimum before editing", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", topicId: null },
+    });
+    await flushUi();
+
+    const delay = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Archive sessions after days"]',
+    )!;
+    const hint = document.getElementById(delay.getAttribute("aria-describedby") ?? "");
+    expect(hint?.textContent ?? "").toContain("Minimum: 1 day");
+  });
+
+  it.each([0, -1])("refuses archive delay %s without changing the saved value", async (days) => {
+    // Only the save API can change this persisted snapshot; mounting or
+    // reloading reads it without replacing it with the working draft.
+    let persisted = structuredClone(emptySettings());
+    const save = vi.mocked(settingsApi.saveSettings).getMockImplementation()!;
+    vi.mocked(settingsApi.fetchSettings).mockImplementation(async () => structuredClone(persisted));
+    vi.mocked(settingsApi.saveSettings).mockImplementation(async (payload) => {
+      persisted = structuredClone(await save(payload));
+      return structuredClone(persisted);
+    });
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", topicId: null },
+    });
+    await flushUi();
+
+    const delay = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Archive sessions after days"]',
+    )!;
+    delay.value = String(days);
+    delay.dispatchEvent(new Event("input", { bubbles: true }));
+    // No blur: input alone triggers the real autosave timer.
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    await flushUi();
+
+    expect(settingsApi.saveSettings).not.toHaveBeenCalled();
+    expect(delay.value).toBe(String(days));
+    expect(delay.getAttribute("aria-invalid")).toBe("true");
+    expect(delay.closest(".field")?.querySelector('[role="alert"]')?.textContent)
+      .toContain("Archive delay must be at least 1 day");
+    expect(document.body.textContent).not.toContain("Saved automatically");
+    expect(persisted.sessions.archive_after_days).toBe(7);
+
+    await unmount(component);
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", topicId: null },
+    });
+    await flushUi();
+    expect(document.querySelector<HTMLInputElement>(
+      'input[aria-label="Archive sessions after days"]',
+    )?.value).toBe("7");
+  });
+
+  it("announces the saved archive delay after correcting a refused draft", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", topicId: null },
+    });
+    await flushUi();
+
+    const delay = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Archive sessions after days"]',
+    )!;
+    delay.value = "0";
+    delay.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    await flushUi();
+    vi.mocked(settingsApi.saveSettings).mockClear();
+
+    delay.value = "14";
+    delay.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    await flushUi();
+
+    expect(settingsApi.saveSettings).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls[0][0].sessions)
+      .toEqual({ archive_after_days: 14 });
+    expect(delay.closest(".field")?.querySelector('[role="alert"]')).toBeNull();
+    expect(document.body.textContent).toContain("Archive delay saved as 14 days.");
+
+    vi.mocked(settingsApi.saveSettings).mockClear();
+    delay.value = "1";
+    delay.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    await flushUi();
+    expect(document.body.textContent).toContain("Archive delay saved as 1 day.");
+  });
+
+  it("explains why voice autosave is blocked by an invalid archive draft", async () => {
+    const tab = writable<"automation" | "voice">("automation");
+    const currentTab = fromStore(tab);
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { get tab() { return currentTab.current; }, topicId: null },
+    });
+    await flushUi();
+
+    const delay = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Archive sessions after days"]',
+    )!;
+    delay.value = "0";
+    delay.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    await flushUi();
+
+    tab.set("voice");
+    await flushUi();
+    expect(document.querySelector('input[aria-label="Archive sessions after days"]')).toBeNull();
+    const transcription = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Transcription model"]',
+    )!;
+    transcription.value = "whisper-1";
+    transcription.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    await flushUi();
+
+    expect(settingsApi.saveSettings).not.toHaveBeenCalled();
+    expect(transcription.value).toBe("whisper-1");
+    expect(document.querySelector('[role="alert"]')?.textContent ?? "")
+      .toContain("Fix the archive delay in Automation before saving.");
+
+    tab.set("automation");
+    await flushUi();
+    const correction = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Archive sessions after days"]',
+    )!;
+    correction.value = "14";
+    correction.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    await flushUi();
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls[0][0].voice)
+      .toEqual({ transcription_model: "whisper-1" });
+    expect(document.querySelector('[role="alert"]')).toBeNull();
   });
 
   it("saves the voice model routes from the voice tab", async () => {
