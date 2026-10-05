@@ -373,9 +373,9 @@ A device can join through direct registration or pairing.
 identity, the gateway secret its credential resolves against, and the
 workspace it operates in.
 
-**Pairing** walks through seven steps. The first two happen on the gateway
-host; the last two on the device machine; the middle pair are API calls from
-wherever is convenient.
+**Pairing** walks through seven steps. Steps 1 and 2 happen on the gateway
+host; steps 3 and 5 are API calls from wherever is convenient; steps 4, 6
+and 7 happen on the device machine.
 
 1. **Create the token file on the gateway host.** Write a plain-text file
    holding only the shared token value (a trailing newline is fine — the
