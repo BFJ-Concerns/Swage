@@ -260,7 +260,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn messages_arriving_mid_turn_queue_in_order_and_run_as_the_next_turn() {
-        let (state, session_id) = make_state_with_session(reply("Both answered.")).await;
+        let root = tempfile::tempdir().unwrap();
+        let (state, session_id) = crate::turn::tests::make_state_with_storage_and_root(
+            reply("Both answered."),
+            Arc::new(crate::turn::tests::MockStorage::new()),
+            Some(root.path().to_path_buf()),
+        )
+        .await;
         let thread = resolve_thread_for_session(state.storage.as_ref(), session_id, None)
             .await
             .unwrap();
@@ -428,7 +434,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_consecutive_drain_waits_for_the_previous_turns_session_delivery() {
-        let (state, session_id) = make_state_with_session(Vec::new()).await;
+        let root = tempfile::tempdir().unwrap();
+        let (state, session_id) = crate::turn::tests::make_state_with_storage_and_root(
+            Vec::new(),
+            Arc::new(crate::turn::tests::MockStorage::new()),
+            Some(root.path().to_path_buf()),
+        )
+        .await;
         let thread = resolve_thread_for_session(state.storage.as_ref(), session_id, None)
             .await
             .unwrap();
@@ -518,7 +530,12 @@ mod tests {
             settled.is_ok(),
             "the first turn must actually settle while delivery is blocked"
         );
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(200), &mut first).await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), &mut first)
+                .await
+                .is_err(),
+            "the drained turn must wait for its completion to enter the session before handing off"
+        );
         assert_eq!(
             state
                 .storage
