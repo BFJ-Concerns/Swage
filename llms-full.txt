@@ -57,6 +57,7 @@ creation request:
   "tool_permissions": {
     "allow": ["knowledge_search", "knowledge_orient", "docs_read", "file_read", "file_list", "file_search", "url_fetch", "web_search"],
     "deny": [],
+    "bundles": {},
     "require_approval": []
   }
 }
@@ -64,13 +65,15 @@ creation request:
 
 `description` is required. `topic_id` scopes the definition to one topic;
 omit it for a global definition. `tool_permissions` is a JSON object with
-`allow`, `deny`, and `require_approval` arrays — it intersects with the
-config cascade's grants, so it can only narrow what the config allows.
-Fields not shown above (`model_id`, `skills`, `output_schema`,
-`output_max_retries`) are optional.
+`allow`, `deny`, `bundles`, and `require_approval`. `bundles` maps bundle
+names to tool-name arrays — it must be present (use `{}` when no custom
+bundles are needed). The overlay intersects with the config cascade's
+grants, so it can only narrow what the config allows. Fields not shown
+above (`model_id`, `skills`, `output_schema`, `output_max_retries`) are
+optional.
 
-**Conversationally.** An agent whose definition grants the configuration
-tools can create and edit definitions through those tools during a session.
+Conversational authoring of agent definitions is not yet available. The
+API routes above are the supported surface.
 
 ## Effort
 
@@ -585,9 +588,9 @@ Each location has its own `enabled` flag and an optional `forced_variant`
 pin:
 
 ```toml
-[experimentation.locations."context.assembly"]
+[experimentation.locations."context.working_norms"]
 enabled = true
-forced_variant = "working_norms"
+forced_variant = "family-fallback"
 ```
 
 - `enabled` — defaults to `true`. Setting it to `false` disables variant
@@ -602,14 +605,44 @@ Location ids are application-defined strings. The shipped locations are
 `context.assembly`, `context.working_norms`, `task.prompt`, and
 `prompts.memory_curator`.
 
+### Alternatives
+
+What can be forced or drawn at a location depends on the alternatives
+registered there. On this tree, alternatives are defined in code — each
+location's choice point names its registered variants — except for
+`context.assembly`, where the operator authors alternatives as JavaScript
+files.
+
+A context assembly alternative is a `<name>.js` file placed in an
+`assemblies/` directory under the config hierarchy (global, topic, or
+agent). List it in `[context] alternatives` so the selection loop includes
+it:
+
+```toml
+[context]
+assembly = "default"
+alternatives = ["my-variant"]
+```
+
+The other shipped locations (`context.working_norms`, `task.prompt`,
+`prompts.memory_curator`) have their alternatives defined in the gateway
+source and cannot be extended through configuration. For
+`context.working_norms` the registered variants are `authored-v1` (the
+default) and `family-fallback`.
+
 ### How the effect shows in operator history
 
 Every variant decision — drawn, forced, disabled, or default-only — is
 recorded in the audit trail. The operator history pane
 (`GET /api/operator/history`) lists each selection with the location, the
-variant that served, the reason (`drawn`, `forced`, `disabled`,
-`default_only`, `record_unavailable`), and the session and turn that
-produced it.
+variant that served, the reason (`drawn`, `forced`, `disabled`, or
+`default_only`), and the session and turn that produced it.
+
+When selection recording fails (for example because the audit store is
+temporarily unavailable), the turn falls back to the default variant
+without writing a record. The absence of a record for a turn is how a
+later reader identifies that recording failed — there is no
+`record_unavailable` entry in history.
 
 ### Configuration cascade
 
@@ -1223,13 +1256,33 @@ workspace it operates in.
 
 **Pairing** is a two-step alternative:
 
-1. **Prepare the shared-token secret.** Create a file-backed secret for the
-   device's credential (see
-   [Provider credentials — Registering a file-backed secret](#registering-a-file-backed-secret)
-   for the pattern). The file holds the token value; the secret reference
-   is what registration and connection resolve against.
+1. **Create the token file on the gateway host.** Write a plain-text file
+   holding only the shared token value (the file is trimmed on read, so a
+   trailing newline is fine):
 
-2. **Issue a pairing code.** `POST /api/onboarding/devices/pairing-codes`:
+   ```bash
+   # On the gateway host
+   head -c 32 /dev/urandom | base64 > /var/lib/swage/device-tokens/workshop.token
+   ```
+
+2. **Register the token file as a secret.** `POST /api/secrets`:
+
+   ```json
+   {
+     "name": "workshop-token",
+     "material_kind": "shared_token",
+     "owner_kind": "operator",
+     "backend_kind": "file",
+     "scope_kind": "device",
+     "scope_id": "workshop",
+     "external_reference": "/var/lib/swage/device-tokens/workshop.token"
+   }
+   ```
+
+   No `metadata` or `json_pointer` — the entire file is the token. The
+   response carries the `secret_id`.
+
+3. **Issue a pairing code.** `POST /api/onboarding/devices/pairing-codes`:
 
    ```json
    {
@@ -1240,11 +1293,11 @@ workspace it operates in.
    `expires_in_seconds` is optional (default 600 — ten minutes). The
    response carries the `pairing_code` and `expires_at`.
 
-3. **Redeem the code.** `POST /api/onboarding/devices/redeem`:
+4. **Redeem the code.** `POST /api/onboarding/devices/redeem`:
 
    ```json
    {
-     "pairing_code": "<code from step 2>",
+     "pairing_code": "<code from step 3>",
      "device_id": "workshop",
      "shared_token_secret_ref": "secret://file/<secret-id>",
      "workspace_root": "/home/user/projects"
@@ -1254,18 +1307,28 @@ workspace it operates in.
    This registers and trusts the device in one step. `label` (optional) and
    `kind` (defaults to `"attached_device"`) can also be included.
 
-4. **Connect.** Run the device:
+5. **Create the same token file on the device machine.** Copy or recreate
+   the file so the device holds the same value the gateway resolves:
+
+   ```bash
+   # On the device machine — same content as the gateway's file
+   cat > /home/user/.swage/workshop.token
+   ```
+
+6. **Connect.** Run the device:
 
    ```bash
    swage device connect \
      --gateway http://gateway.local:3000 \
      --device-id workshop \
-     --shared-token-file /path/to/token-file \
+     --shared-token-file /home/user/.swage/workshop.token \
      --workspace /home/user/projects
    ```
 
-   The process dials the gateway, presents the token, advertises the
-   workspace's tools, and serves operations until interrupted.
+   `--shared-token-file` points at the device's local copy. The process
+   reads it, dials the gateway, presents the token for comparison against
+   the registered secret, advertises the workspace's tools, and serves
+   operations until interrupted.
 
 In both paths the `kind` field defaults to `"attached_device"` and names the
 device type. A `kind` of `"local"` is refused: a local device has no remote
