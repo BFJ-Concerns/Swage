@@ -398,3 +398,56 @@ describe("OperatorDashboard approvals layout", () => {
     expect(approvals.textContent).toContain("Allow shell command");
   });
 });
+
+describe("OperatorDashboard session summaries", () => {
+  let component: MountedComponent | undefined;
+  let stylesheet: HTMLStyleElement | undefined;
+
+  beforeEach(() => vi.clearAllMocks());
+  afterEach(() => {
+    if (component) unmount(component);
+    component = undefined;
+    stylesheet?.remove();
+    stylesheet = undefined;
+    document.body.replaceChildren();
+  });
+
+  it.each([
+    ["**Amber Cabinet** - **Size:** `120 × 60 cm`", "Amber Cabinet - Size: 120 × 60 cm"],
+    ["## Ingredients\n\n| Name | ID |\n| --- | --- |\n| Lentils | 42 |", "Ingredients Name ID Lentils 42"],
+    ["[Open child](swage://session/child-id)", "Open child"],
+  ])("renders the session's latest message as plain text: %s", async (source, expected) => {
+    const overview = makeOverview();
+    overview.sessions[0].message_preview = source;
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValueOnce(overview);
+    component = mount(OperatorDashboard, { target: document.body });
+    await settleUi();
+    expect(document.querySelector(".ledger-row .secondary-line")?.textContent?.trim().replace(/\s+/g, " ")).toBe(`default · ${expected}`);
+  });
+
+  it("applies a three-line clamp to a long session summary", async () => {
+    // Vitest does not install Svelte's external CSS. Install the component's
+    // compiled stylesheet so assertions read styles applied to its real DOM.
+    const componentPath = "../components/OperatorDashboard.svelte";
+    const compiled = compile(operatorDashboardSource, {
+      filename: decodeURIComponent(new URL(componentPath, import.meta.url).pathname),
+      generate: "client",
+    });
+    stylesheet = document.createElement("style");
+    stylesheet.textContent = compiled.css?.code ?? "";
+    document.head.append(stylesheet);
+    const overview = makeOverview();
+    overview.sessions[0].message_preview = Array.from({ length: 300 }, (_, i) => `Line ${i}: **${"Amber".repeat(50)}**`).join("\n");
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValueOnce(overview);
+    component = mount(OperatorDashboard, { target: document.body });
+    await settleUi();
+
+    const summary = document.querySelector(".ledger-row .secondary-line")!;
+    const style = getComputedStyle(summary);
+    expect(style.getPropertyValue("-webkit-line-clamp")).toBe("3");
+    expect(style.display).toBe("-webkit-box");
+    expect(style.getPropertyValue("-webkit-box-orient")).toBe("vertical");
+    expect(style.overflow).toBe("hidden");
+    expect(style.getPropertyValue("overflow-wrap")).toBe("anywhere");
+  });
+});

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { messagePreview } from "../message-preview";
   import { onMount } from "svelte";
   import {
     approvePendingAction,
@@ -189,7 +190,7 @@
         <div class="ledger">
           {#each overview.sessions as session (session.id)}
             <div class="ledger-row">
-              <div>
+              <div class="session-summary">
                 <div class="primary-line">
                   <span class="mono">{session.id}</span>
                   {#if session.has_active_connection}
@@ -202,9 +203,9 @@
                     <StatusBadge register="wants-a-human" label="interrupted" />
                   {/if}
                 </div>
-                <div class="secondary-line">
+                <div class="secondary-line session-preview">
                   {session.topic_name} ·
-                  {session.message_preview ?? "No messages yet"}
+                  {messagePreview(session.message_preview ?? "No messages yet")}
                 </div>
               </div>
               <span class="timestamp">{new Date(session.last_activity).toLocaleString()}</span>
@@ -685,6 +686,18 @@
 
   .ledger-row:last-child {
     border-bottom: none;
+  }
+
+  .session-summary {
+    min-width: 0;
+  }
+
+  .session-preview {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
+    overflow-wrap: anywhere;
   }
 
   .control-card {

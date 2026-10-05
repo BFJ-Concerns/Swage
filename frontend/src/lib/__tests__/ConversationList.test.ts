@@ -320,3 +320,29 @@ describe("ConversationList", () => {
     expect(store.selectConversation).toHaveBeenCalledWith("conv-click-test");
   });
 });
+
+describe("ConversationList session previews", () => {
+  let component: MountedComponent | undefined;
+
+  afterEach(() => {
+    if (component) unmount(component);
+    component = undefined;
+    document.body.replaceChildren();
+  });
+
+  it("renders the sidebar message as plain text", () => {
+    component = mount(ConversationList, {
+      target: document.body,
+      props: { store: makeStore([makeConversationSummary({ message_preview: "**Amber Cabinet** - **Size:** `120 × 60 cm`" })]) },
+    });
+    expect(document.querySelector(".preview")?.textContent?.trim()).toBe("Amber Cabinet - Size: 120 × 60 cm");
+  });
+
+  it("names the delete control by the plain link label", () => {
+    component = mount(ConversationList, {
+      target: document.body,
+      props: { store: makeStore([makeConversationSummary({ message_preview: "[Open child](swage://session/child-id)" })]) },
+    });
+    expect(document.querySelector(".delete-btn")?.getAttribute("aria-label")).toBe("Delete conversation: Open child");
+  });
+});

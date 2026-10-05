@@ -20,6 +20,7 @@
   import type { EffectiveAgentDefinitionResponse } from "../protocol/EffectiveAgentDefinitionResponse";
   import type { ConversationBranch } from "../types";
   import { relativeTime } from "../utils/relative-time";
+  import { messagePreview } from "../message-preview";
 
   interface Props {
     conversationStore: ConversationStore;
@@ -62,7 +63,7 @@
   const sessions = $derived.by(() => {
     const listed = conversationStore.conversations.map((conversation) => ({
       id: conversation.id,
-      label: conversation.message_preview ?? "New conversation",
+      label: messagePreview(conversation.message_preview ?? "New conversation"),
     }));
     const active = activeConversation;
     if (active && !listed.some((session) => session.id === active.id)) {
