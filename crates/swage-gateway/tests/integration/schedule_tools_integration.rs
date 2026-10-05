@@ -382,6 +382,74 @@ async fn agent_can_create_schedules_with_each_delivery_route() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn agent_change_is_refused_without_mutating_the_schedule_tool() {
+    let state = test_state();
+    let topic = state.topic_store.general_scope().await.unwrap();
+    let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
+    let ctx = host_context(&state, "researcher", tool_session(&state, topic.id).await);
+    let created = dispatcher
+        .dispatch(
+            "schedule",
+            json!({
+                "action": "create", "message": "original task",
+                "timing": "every", "every": "every 1 hours",
+                "session": "fresh", "topic_id": topic.id, "agent_id": "gateway",
+            }),
+            &ctx,
+            "researcher",
+        )
+        .await
+        .unwrap();
+    let schedule_id = created.result["schedule"]["id"].as_str().unwrap();
+    let updated = dispatcher
+        .dispatch(
+            "schedule",
+            json!({
+                "action": "update", "schedule_id": schedule_id, "message": "ordinary edit",
+                "timing": "every", "every": "every 2 hours",
+            }),
+            &ctx,
+            "researcher",
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.result["schedule"]["message"], "ordinary edit");
+    assert_eq!(updated.result["schedule"]["spec"]["every"], "every 2 hours");
+    let before = state
+        .storage
+        .get_schedule(schedule_id.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let result = dispatcher
+        .dispatch(
+            "schedule",
+            json!({
+                "action": "update", "schedule_id": schedule_id, "agent_id": "researcher",
+                "message": "must not be applied", "timing": "every", "every": "every 3 hours",
+            }),
+            &ctx,
+            "researcher",
+        )
+        .await;
+    let wording = "A schedule's agent is fixed when the schedule is created. To change it, create a new schedule with that agent.";
+    assert!(
+        matches!(&result, Err(swage_core::ToolError::InvalidParameters { message, .. }) if message == wording),
+        "agent change must return an actionable refusal, got {result:?}"
+    );
+    let after = state
+        .storage
+        .get_schedule(schedule_id.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.session_policy, before.session_policy);
+    assert_eq!(after.message, before.message);
+    assert_eq!(after.expression, before.expression);
+    assert_eq!(after.updated_at, before.updated_at);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn agent_can_update_schedules_to_each_delivery_route() {
     let state = test_state();
     let topic = state.topic_store.general_scope().await.unwrap();
