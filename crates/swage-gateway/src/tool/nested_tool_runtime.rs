@@ -389,6 +389,197 @@ mod tests {
         }
     }
 
+    async fn nested_attachment_regression(scenario: &str) {
+        use swage_storage::{NewWorkspaceAttachment, WorkspaceAttachmentStore};
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let child = root.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let turn_id = create_turn(storage.as_ref()).await;
+        let turn = storage.get_turn(turn_id).await.unwrap().unwrap();
+        let thread = ThreadStore::get(storage.as_ref(), turn.thread_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let session = storage
+            .get_session(thread.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let writable = scenario != "child";
+        storage
+            .create_workspace_attachment(NewWorkspaceAttachment {
+                topic_id: session.topic_id,
+                label: "parent workspace".into(),
+                path: root.path().to_string_lossy().into_owned(),
+                permissions: if writable {
+                    vec!["read".into(), "write".into()]
+                } else {
+                    vec!["read".into()]
+                },
+                is_trusted: true,
+            })
+            .await
+            .unwrap();
+        let target_root = if scenario == "child" {
+            child.as_path()
+        } else if scenario == "trimmed" {
+            other.path()
+        } else {
+            root.path()
+        };
+        if scenario != "lookup" {
+            let attachment = storage
+                .create_workspace_attachment(NewWorkspaceAttachment {
+                    topic_id: session.topic_id,
+                    label: "target workspace".into(),
+                    path: target_root.to_string_lossy().into_owned(),
+                    permissions: if scenario == "child" {
+                        vec!["read".into(), "write".into()]
+                    } else {
+                        vec!["read".into()]
+                    },
+                    is_trusted: true,
+                })
+                .await
+                .unwrap();
+            if scenario == "child" {
+                storage
+                    .set_session_active_workspace(session.id, Some(attachment.id))
+                    .await
+                    .unwrap();
+            }
+        } else {
+            storage.with_conn(|conn| conn.execute_batch("ALTER TABLE workspace_attachments RENAME TO unavailable_workspace_attachments")).await.unwrap();
+        }
+        let target = target_root.join("existing.txt");
+        std::fs::write(&target, "original").unwrap();
+        let mut context = parent_context(turn_id);
+        context.session_id = session.id.to_string();
+        context.working_directory = if scenario == "child" {
+            child.clone()
+        } else {
+            root.path().to_path_buf()
+        };
+        context.allowed_paths = vec![root.path().to_path_buf(), other.path().to_path_buf()];
+        let dispatcher = Arc::new(crate::tool::ToolDispatcher::allow_all(
+            crate::startup::workspace_tools(&swage_config::ResolvedConfig::default()),
+        ));
+        let (ws_tx, mut ws_rx) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = NestedToolRuntime::new(
+            dispatcher,
+            ws_tx,
+            storage,
+            turn_id,
+            "python_parent".into(),
+            serialise_tool_context(&context),
+        );
+        let path = if scenario == "trimmed" {
+            format!("  {}  ", target.display())
+        } else {
+            "existing.txt".into()
+        };
+        let edit = runtime.dispatch_tool("file_edit", json!({"changes": [
+            {"path": path, "edits": [{"type": "replace", "old_text": "original", "new_text": "edited"}]}
+        ]})).await;
+        if scenario == "child" {
+            assert!(edit.is_ok(), "active writable child edit failed: {edit:?}");
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "edited");
+        } else {
+            assert_eq!(
+                std::fs::read_to_string(&target).unwrap(),
+                "original",
+                "nested edit mutated a refused target"
+            );
+            let error = edit.expect_err("nested edit must refuse");
+            assert!(
+                error.message.contains(if scenario == "lookup" {
+                    "Cannot check workspace write access"
+                } else {
+                    "read-only access"
+                }),
+                "{error:?}"
+            );
+            if scenario == "lookup" {
+                assert!(
+                    error
+                        .message
+                        .contains("no such table: workspace_attachments"),
+                    "{error:?}"
+                );
+            }
+        }
+        let write = runtime
+            .dispatch_tool(
+                "file_write",
+                json!({"path": "nested/probe.txt", "content": "written"}),
+            )
+            .await;
+        if scenario == "child" {
+            assert!(
+                write.is_ok(),
+                "active writable child write failed: {write:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(child.join("nested/probe.txt")).unwrap(),
+                "written"
+            );
+        } else if scenario == "lookup" {
+            assert!(!root.path().join("nested").exists());
+            let error = write.expect_err("nested write must refuse attachment lookup failure");
+            assert!(
+                error
+                    .message
+                    .contains("Cannot check workspace write access"),
+                "{error:?}"
+            );
+            assert!(
+                error
+                    .message
+                    .contains("no such table: workspace_attachments"),
+                "{error:?}"
+            );
+        } else {
+            assert!(
+                write.is_ok(),
+                "writable working directory control failed: {write:?}"
+            );
+        }
+        let statuses: Vec<_> = std::iter::from_fn(|| ws_rx.try_recv().ok())
+            .filter_map(|event| {
+                if let ServerEvent::ToolEnd { status, .. } = event {
+                    Some(status)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            statuses,
+            match scenario {
+                "child" => vec!["success", "success"],
+                "lookup" => vec!["error", "error"],
+                _ => vec!["error", "success"],
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn nested_file_edit_refuses_trimmed_read_only_path() {
+        nested_attachment_regression("trimmed").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn nested_file_mutations_allow_active_writable_child() {
+        nested_attachment_regression("child").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn nested_file_mutations_refuse_attachment_lookup_failure() {
+        nested_attachment_regression("lookup").await;
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn nested_model_result_redacts_credentials_before_replay() {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());

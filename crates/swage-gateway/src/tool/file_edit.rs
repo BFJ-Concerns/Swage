@@ -213,6 +213,19 @@ struct AppliedEdit {
     replacements: usize,
 }
 
+/// Parse the target identically for execution and gateway attachment preflight.
+pub(super) fn parse_change_path<'a>(
+    change: &'a Value,
+    tool_name: &str,
+) -> Result<&'a str, ToolError> {
+    change
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| invalid(tool_name, "change.path must be a non-empty string"))
+}
+
 fn parse_changes(
     params: &Value,
     ctx: &dyn ToolContext,
@@ -228,13 +241,7 @@ fn parse_changes(
 
     for change in changes {
         validate_object_keys(change, &["path", "edits"], tool_name)?;
-        let requested_path = change
-            .get("path")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-            .ok_or_else(|| invalid(tool_name, "change.path must be a non-empty string"))?
-            .to_string();
+        let requested_path = parse_change_path(change, tool_name)?.to_owned();
         let resolved = resolve_context_path(ctx, &requested_path)
             .map_err(|_| location_approval_error(tool_name, ctx, &requested_path, "write"))?;
         if !seen_paths.insert(resolved.path.clone()) {
