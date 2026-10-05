@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 /**
  * The recent-sessions list: order, grouping beneath a source, the topic
- * filter as a membership change, and the archived view.
+ * filter as a membership change, the archived view, and the disclosure
+ * that collapses a group's automated sessions.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { flushSync, mount, unmount } from "svelte";
+import { flushSync, mount, tick, unmount } from "svelte";
 
 import RecentSessions from "../components/RecentSessions.svelte";
 import * as sessionsApi from "../api/sessions";
@@ -64,6 +65,7 @@ describe("RecentSessions", () => {
 
   beforeEach(() => {
     vi.mocked(sessionsApi.listRecentSessions).mockReset();
+    localStorage.clear();
   });
 
   afterEach(() => {
@@ -156,7 +158,7 @@ describe("RecentSessions", () => {
     expect(onSelectSession).toHaveBeenCalledWith("old");
   });
 
-  it("names a schedule by its instruction and does not open it as a session", async () => {
+  it("names a schedule by its instruction and toggles its runs rather than opening it as a session", async () => {
     const run = makeSession({ id: "run-session", origin: { kind: "schedule_run", schedule_id: "sched-1" }, message_preview: "Inbox summarised" });
     vi.mocked(sessionsApi.listRecentSessions).mockResolvedValueOnce([
       { source: { kind: "schedule", id: "sched-1", message: "Summarise the inbox" }, last_activity: run.last_activity, automated: [run] },
@@ -168,7 +170,137 @@ describe("RecentSessions", () => {
 
     const source = document.querySelector(".row.source") as HTMLButtonElement;
     expect(source.textContent).toContain("Summarise the inbox");
-    expect(source.disabled).toBe(true);
+    expect(document.querySelector('[aria-label="Automated sessions"]')).toBeNull();
+    flushSync(() => source.click());
+    expect(onSelectSession).not.toHaveBeenCalled();
     expect(document.querySelector('[aria-label="Automated sessions"]')?.textContent).toContain("scheduled run");
+  });
+});
+
+const BRIEF =
+  "Check the nightly build at /home/ops/builds/nightly/artefacts/reports/summary and post the result to the team\nThen tidy up.";
+
+function scheduleEntry(latest: Partial<RecentSession> = {}): RecentSessionsEntry {
+  const automated = Array.from({ length: 11 }, (_, index) =>
+    makeSession({
+      id: `run-${index}`,
+      origin: { kind: "schedule_run", schedule_id: "sched-1" },
+      message_preview: `Run ${index}`,
+      ...(index === 0 ? latest : {}),
+    }),
+  );
+  return {
+    source: { kind: "schedule", id: "sched-1", message: BRIEF },
+    last_activity: "2026-10-05T09:00:00Z",
+    automated,
+  };
+}
+
+async function render(entries: RecentSessionsEntry[]): Promise<MountedComponent> {
+  vi.mocked(sessionsApi.listRecentSessions).mockResolvedValue(entries);
+  const component = mount(RecentSessions, { target: document.body, props: {} });
+  await tick();
+  await Promise.resolve();
+  flushSync();
+  return component;
+}
+
+// The disclosure line with its whitespace collapsed, read whole so a wrong
+// count or state cannot pass as a substring.
+function summaryText(): string {
+  return (document.querySelector(".group-summary")?.textContent ?? "").replace(/\s+/g, " ").trim();
+}
+
+function childRows(): number {
+  return document.querySelectorAll(".automated li").length;
+}
+
+function scheduleHeading(): HTMLButtonElement {
+  const heading = document.querySelector<HTMLButtonElement>(".row.source.schedule");
+  expect(heading).not.toBeNull();
+  return heading!;
+}
+
+describe("RecentSessions schedule groups", () => {
+  let component: MountedComponent | undefined;
+
+  beforeEach(() => {
+    vi.mocked(sessionsApi.listRecentSessions).mockReset();
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    if (component) unmount(component);
+    component = undefined;
+    document.body.replaceChildren();
+  });
+
+  it("starts collapsed with a count and the latest run's state, and toggles its runs from the heading", async () => {
+    component = await render([scheduleEntry({ has_running_turn: true })]);
+
+    expect(childRows()).toBe(0);
+    expect(summaryText()).toBe("▸ 11 runs · Running");
+
+    const heading = scheduleHeading();
+    expect(heading.disabled).toBe(false);
+    heading.click();
+    flushSync();
+    expect(childRows()).toBe(11);
+    expect(heading.getAttribute("aria-expanded")).toBe("true");
+
+    heading.click();
+    flushSync();
+    expect(childRows()).toBe(0);
+  });
+
+  it("labels the group by the brief's first line cut at a word boundary, keeping the full brief as its title", async () => {
+    component = await render([scheduleEntry()]);
+
+    const heading = scheduleHeading();
+    const label = heading.querySelector(".preview")?.textContent ?? "";
+    expect(label).toBe("Check the nightly build at…");
+    expect(heading.title).toBe(BRIEF);
+  });
+
+  it("reports a run with neither flag as ended, not completed", async () => {
+    component = await render([scheduleEntry({ has_interrupted_turn: true })]);
+    expect(summaryText()).toBe("▸ 11 runs · Interrupted");
+    unmount(component);
+    document.body.replaceChildren();
+
+    component = await render([scheduleEntry()]);
+    expect(summaryText()).toMatch(/^▸ 11 runs · Last run ended \S.*$/);
+    expect(summaryText()).not.toMatch(/complete|finished/i);
+  });
+
+  it("remembers each group's choice across visits", async () => {
+    const conversation: RecentSessionsEntry = {
+      source: { kind: "conversation", session: makeSession({ id: "conv-1" }) },
+      last_activity: "2026-10-05T08:00:00Z",
+      automated: [makeSession({ id: "run-100", origin: { kind: "schedule_run", schedule_id: "sched-1" } })],
+    };
+    component = await render([conversation]);
+    expect(childRows()).toBe(1);
+    document.querySelector<HTMLButtonElement>(".group-summary")?.click();
+    flushSync();
+    expect(childRows()).toBe(0);
+    unmount(component);
+    document.body.replaceChildren();
+
+    component = await render([conversation]);
+    expect(childRows()).toBe(0);
+    unmount(component);
+    document.body.replaceChildren();
+
+    component = await render([scheduleEntry()]);
+    expect(childRows()).toBe(0);
+    scheduleHeading().click();
+    flushSync();
+    expect(childRows()).toBe(11);
+    unmount(component);
+    document.body.replaceChildren();
+
+    component = await render([scheduleEntry()]);
+    expect(childRows()).toBe(11);
   });
 });
