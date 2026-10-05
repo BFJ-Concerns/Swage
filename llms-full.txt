@@ -1292,7 +1292,9 @@ A device can join in two ways: direct registration or pairing.
 identity, the gateway secret its credential resolves against, and the
 workspace it operates in.
 
-**Pairing** is a two-step alternative:
+**Pairing** is a seven-step alternative. Steps 1 and 2 happen on the
+gateway host; steps 3 and 5 are API calls from wherever is convenient;
+steps 4, 6 and 7 happen on the device machine.
 
 1. **Create the token file on the gateway host.** Write a plain-text file
    holding only the shared token value (the file is trimmed on read, so a
