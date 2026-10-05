@@ -294,7 +294,7 @@ pub(crate) fn writable_test_context(
 ///
 /// Works with both existing and not-yet-existing paths — the normalisation
 /// step resolves `..` components without requiring the path to be on disk.
-/// If the path does exist, a final `canonicalize` catches any symlink escapes.
+/// Symlink targets are checked even when their final path does not exist yet.
 pub fn validate_path(workspace_root: &Path, requested: &str) -> Result<PathBuf, String> {
     // Absolute paths are only accepted if they fall inside the workspace root.
     let raw = if Path::new(requested).is_absolute() {
@@ -593,26 +593,44 @@ fn approval_root_for_request(ctx: &dyn ToolContext, requested: &str) -> Option<S
     .map(|path| path.to_string_lossy().into_owned())
 }
 
+/// Follows every symlink before appending missing path components, including
+/// links whose targets do not exist yet. Relative link targets start at the
+/// link's parent, and a traversal bound refuses cycles.
 fn resolve_existing_prefix(path: &Path, requested: &str) -> Result<PathBuf, String> {
-    if path.exists() {
-        return path.canonicalize().map_err(|e| e.to_string());
-    }
-
-    let mut existing = path;
-    let mut missing_components = Vec::new();
-    while !existing.exists() {
-        let file_name = existing
-            .file_name()
-            .ok_or_else(|| format!("Path is outside the workspace: {requested}"))?;
-        missing_components.push(file_name.to_os_string());
-        existing = existing
-            .parent()
-            .ok_or_else(|| format!("Path is outside the workspace: {requested}"))?;
-    }
-
-    let mut resolved = existing.canonicalize().map_err(|e| e.to_string())?;
-    for component in missing_components.iter().rev() {
-        resolved.push(component);
+    let mut pending: std::collections::VecDeque<_> = path
+        .components()
+        .map(|component| component.as_os_str().to_os_string())
+        .collect();
+    let mut resolved = PathBuf::new();
+    let mut followed_links = 0;
+    while let Some(component) = pending.pop_front() {
+        match Path::new(&component).components().next() {
+            Some(Component::CurDir) => continue,
+            Some(Component::ParentDir) => {
+                resolved.pop();
+                continue;
+            }
+            _ => resolved.push(&component),
+        }
+        match std::fs::symlink_metadata(&resolved) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                followed_links += 1;
+                if followed_links > 40 {
+                    return Err(format!("Too many symlinks in path: {requested}"));
+                }
+                let target = std::fs::read_link(&resolved).map_err(|error| error.to_string())?;
+                resolved.pop();
+                if target.is_absolute() {
+                    resolved.clear();
+                }
+                for component in target.components().rev() {
+                    pending.push_front(component.as_os_str().to_os_string());
+                }
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Cannot resolve path {requested}: {error}")),
+        }
     }
     Ok(resolved)
 }
@@ -676,6 +694,27 @@ mod tests {
             String::from_utf8(status.stdout).unwrap(),
             "",
             "tool output must not dirty the workspace repository"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_new_path_resolves_dangling_symlink_parent() {
+        let dir = tmp_workspace();
+        std::os::unix::fs::symlink("missing-directory", dir.path().join("link")).unwrap();
+        let resolved = validate_new_path(dir.path(), "link/probe.txt").unwrap();
+        assert_eq!(resolved, dir.path().join("missing-directory/probe.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_new_path_rejects_dangling_symlink_cycle() {
+        let dir = tmp_workspace();
+        std::os::unix::fs::symlink("second-link", dir.path().join("link")).unwrap();
+        std::os::unix::fs::symlink("link", dir.path().join("second-link")).unwrap();
+        assert!(
+            validate_new_path(dir.path(), "link").is_err(),
+            "symlink cycle must refuse resolution"
         );
     }
 

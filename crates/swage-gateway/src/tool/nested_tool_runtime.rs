@@ -389,6 +389,103 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    async fn nested_dangling_symlink_write(chain: bool, writable: bool) {
+        use std::os::unix::fs::symlink;
+        use swage_storage::{NewWorkspaceAttachment, WorkspaceAttachmentStore};
+        let root = tempfile::tempdir().unwrap();
+        let target_root = root.path().join("target");
+        std::fs::create_dir(&target_root).unwrap();
+        let target = target_root.join("probe.txt");
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let turn_id = create_turn(storage.as_ref()).await;
+        let turn = storage.get_turn(turn_id).await.unwrap().unwrap();
+        let thread = ThreadStore::get(storage.as_ref(), turn.thread_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let session = storage
+            .get_session(thread.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        for (path, can_write) in [(root.path(), true), (target_root.as_path(), writable)] {
+            storage
+                .create_workspace_attachment(NewWorkspaceAttachment {
+                    topic_id: session.topic_id,
+                    label: "symlink workspace".into(),
+                    path: path.to_string_lossy().into_owned(),
+                    permissions: if can_write {
+                        vec!["read".into(), "write".into()]
+                    } else {
+                        vec!["read".into()]
+                    },
+                    is_trusted: true,
+                })
+                .await
+                .unwrap();
+        }
+        if chain {
+            symlink(&target, root.path().join("second-link")).unwrap();
+            symlink("second-link", root.path().join("link")).unwrap();
+        } else {
+            symlink("target/probe.txt", root.path().join("link")).unwrap();
+        }
+        let mut context = parent_context(turn_id);
+        context.session_id = session.id.to_string();
+        context.working_directory = root.path().to_path_buf();
+        context.allowed_paths = vec![root.path().to_path_buf()];
+        let dispatcher = Arc::new(crate::tool::ToolDispatcher::allow_all(
+            crate::startup::workspace_tools(&swage_config::ResolvedConfig::default()),
+        ));
+        let (ws_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let runtime = NestedToolRuntime::new(
+            dispatcher,
+            ws_tx,
+            storage,
+            turn_id,
+            "python_parent".into(),
+            serialise_tool_context(&context),
+        );
+        let result = runtime
+            .dispatch_tool("file_write", json!({"path": "link", "content": "written"}))
+            .await;
+        if writable {
+            assert!(
+                result.is_ok()
+                    && std::fs::read_to_string(&target).is_ok_and(|text| text == "written"),
+                "nested writable dangling symlink must create its target: {result:?}"
+            );
+        } else {
+            assert!(
+                result
+                    .as_ref()
+                    .is_err_and(|error| error.message.contains("read-only access"))
+                    && !target.exists(),
+                "nested dangling symlink must refuse read-only target without creating it: {result:?}; target exists: {}",
+                target.exists()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn nested_file_write_refuses_dangling_symlink() {
+        nested_dangling_symlink_write(false, false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn nested_file_write_refuses_dangling_symlink_chain() {
+        nested_dangling_symlink_write(true, false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn nested_file_write_allows_writable_dangling_symlink() {
+        nested_dangling_symlink_write(false, true).await;
+    }
+
     async fn nested_attachment_regression(scenario: &str) {
         use swage_storage::{NewWorkspaceAttachment, WorkspaceAttachmentStore};
         let root = tempfile::tempdir().unwrap();
