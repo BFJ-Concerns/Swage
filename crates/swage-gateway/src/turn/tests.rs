@@ -8027,7 +8027,18 @@ pub(crate) async fn make_state_with_capturing_tools(
 pub(crate) async fn make_state_with_approval_gated_echo(
     rounds: Vec<Vec<StreamChunk>>,
 ) -> (AppState, Uuid) {
-    let (state, session_id, _) = make_state_with_capturing_tools(rounds).await;
+    let (state, session_id, _) = make_state_with_capturing_approval_gated_echo(rounds).await;
+    (state, session_id)
+}
+
+async fn make_state_with_capturing_approval_gated_echo(
+    rounds: Vec<Vec<StreamChunk>>,
+) -> (
+    AppState,
+    Uuid,
+    Arc<std::sync::Mutex<Vec<CompletionRequest>>>,
+) {
+    let (state, session_id, captured) = make_state_with_capturing_tools(rounds).await;
     let mut runtime_config = state.active_config();
     runtime_config.tools.permissions.require_approval =
         vec![swage_config::model::RequireApprovalEntry::Simple(
@@ -8040,7 +8051,7 @@ pub(crate) async fn make_state_with_approval_gated_echo(
             Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>
         ]),
     );
-    (state, session_id)
+    (state, session_id, captured)
 }
 
 // -----------------------------------------------------------------------
@@ -9708,7 +9719,7 @@ async fn attended_turn_prompts_and_records_rejected_granted_tool_call() {
             },
         ],
     ];
-    let (state, session_id) = make_state_with_approval_gated_echo(rounds).await;
+    let (state, session_id, captured) = make_state_with_capturing_approval_gated_echo(rounds).await;
     let (tx, mut rx) = mpsc::unbounded_channel();
     let task_state = state.clone();
     let task = tokio::spawn(async move {
@@ -9762,12 +9773,37 @@ async fn attended_turn_prompts_and_records_rejected_granted_tool_call() {
         .unwrap();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].status.as_deref(), Some("rejected"));
-    assert!(
-        calls[0]
-            .result
-            .as_deref()
-            .is_some_and(|result| result.contains("operator declined")),
-        "the recorded call should expose the rejection to the model"
+    let requests = captured.lock().unwrap();
+    let model_feedback = requests
+        .last()
+        .into_iter()
+        .flat_map(|request| &request.messages)
+        .filter_map(|message| message.tool_replay())
+        .flatten()
+        .filter_map(|part| match part {
+            ToolReplayPart::ToolResult {
+                call_id,
+                content,
+                is_error,
+            } if call_id == "attended-rejection" => Some((content.as_str(), *is_error)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let expected_feedback =
+        "The user denied this tool call. It did not run, and no approval is pending.";
+    let stored_model_result = calls[0]
+        .model_result
+        .as_deref()
+        .and_then(|result| serde_json::from_str::<serde_json::Value>(result).ok());
+    assert_eq!(
+        (
+            stored_model_result
+                .as_ref()
+                .and_then(|result| result["preview"].as_str()),
+            model_feedback,
+        ),
+        (Some(expected_feedback), vec![(expected_feedback, true)]),
+        "the stored model result and the next provider request must expose the final user denial"
     );
 }
 
