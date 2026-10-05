@@ -219,9 +219,12 @@ workspace roots appear as `Topic`.
 ## Search configuration
 
 `[tools.search]` configures `web_search`. SearxNG is the only supported backend.
-The fields are `provider_type` (must be `"searxng"`) and `base_url` (the
-SearxNG instance URL). Unsupported provider types are refused when configuration
-loads and when settings are saved.
+The only fields are `provider_type` (must be `"searxng"`) and `base_url` (the
+SearxNG instance URL). Unsupported provider types and unrecognised keys are
+refused when configuration loads and when settings are saved.
+
+The web search provider can be edited in the web UI under **Settings**; saved
+changes apply to new turns.
 
 ## Tool permission model
 
