@@ -23,24 +23,23 @@ use clap::Parser;
 // Top-level entry point
 // ---------------------------------------------------------------------------
 
-/// Top-level CLI entry point for the combined `swage` binary.
+// When no subcommand is given (`command` is `None`), callers should print help
+// and exit. The hidden `--server-mode` flag is set by the `gateway start`
+// handler when it re-spawns the binary as a background daemon.
+/// Swage AI assistant platform.
 ///
-/// When no subcommand is given (`command` is `None`), callers should print help
-/// and exit. The hidden `--server-mode` flag is set by the `gateway start`
-/// handler when it re-spawns the binary as a background daemon — it is not
-/// intended for direct user invocation.
+/// Run prompts, chat in your terminal, and manage the gateway or connected devices.
 #[derive(Debug, Parser)]
 #[command(name = "swage", version, about = "Swage AI assistant platform")]
 pub struct Cli {
-    /// The top-level subcommand to run. None causes callers to show help.
+    // None causes callers to show help.
+    /// The command to run.
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// Internal flag: run as gateway server rather than CLI dispatch.
-    ///
-    /// Set by `swage gateway start` when it re-executes the current binary as
-    /// a background daemon. Hidden from help to keep the user-facing interface
-    /// clean.
+    // Internal flag: run as gateway server rather than CLI dispatch.
+    // Set by `swage gateway start` when it re-executes the current binary as
+    // a background daemon. Not intended for direct user invocation.
     #[arg(long, hide = true)]
     pub server_mode: bool,
 
@@ -423,6 +422,37 @@ mod tests {
                 Cli::try_parse_from(args).is_err(),
                 "old command parsed: {args:?}"
             );
+        }
+    }
+
+    #[test]
+    fn top_level_help_describes_user_commands_without_internal_notes() {
+        use clap::CommandFactory;
+
+        let mut command = Cli::command();
+        for help in [
+            command.render_help().to_string(),
+            command.render_long_help().to_string(),
+        ] {
+            for internal_note in [
+                "Top-level CLI entry point",
+                "callers",
+                "`command` is `None`",
+                "server-mode",
+                "background daemon",
+            ] {
+                assert!(
+                    !help.contains(internal_note),
+                    "help exposes developer commentary {internal_note:?}:\n{help}"
+                );
+            }
+            assert!(help.contains("Swage AI assistant platform"));
+            for user_command in ["run", "gateway", "chat", "device", "generate-completion"] {
+                assert!(
+                    help.contains(user_command),
+                    "help omits user command {user_command:?}:\n{help}"
+                );
+            }
         }
     }
 
