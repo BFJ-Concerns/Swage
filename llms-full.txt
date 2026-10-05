@@ -508,8 +508,14 @@ and location approvals explicitly use a global location key.
 | `hitl.timeout` | `300` seconds (5 minutes) |
 | `hitl.timeout_policy` | `Reject` |
 
-Per-tool overrides are possible through a `require_approval` entry's
-`WithOptions` variant, which can set a custom `timeout` and
+Per-tool overrides use an object entry in `require_approval` instead of a
+plain string:
+
+```toml
+require_approval = ["write_file", { tool = "execute_command", timeout = 600 }]
+```
+
+The object form accepts `tool` (required), `timeout` (seconds), and
 `timeout_policy` for individual tools.
 
 **Timeout policies:**
@@ -625,7 +631,7 @@ alternatives = ["my-variant"]
 ```
 
 The script runs in a caged QuickJS runtime (no IO, no network, no timers)
-with three globals:
+with four globals:
 
 - `elements` — the turn's context elements, read-only:
   `[{ name, priority, source, tokenCount, messages }]` where `messages` is
@@ -648,8 +654,11 @@ add(byName.prompts);
 add(byName.history);
 ```
 
-Failure is fail-open: any script problem (missing file, syntax error,
-runtime error, empty output) falls back to the built-in default assembly.
+Failure is fail-open: a script error (missing file, syntax error, runtime
+error) falls back to the built-in default assembly. A script that runs
+without error but produces no output is not a failure — the baseline floor
+restores every element the default assembly would have carried, producing a
+complete composition with warnings naming each restored element.
 
 The other shipped locations (`context.working_norms`, `task.prompt`,
 `prompts.memory_curator`) have their alternatives defined in the gateway
@@ -1289,8 +1298,8 @@ workspace it operates in.
 
    ```bash
    # On the gateway host
-   mkdir -p /var/lib/swage/device-tokens
-   head -c 32 /dev/urandom | base64 > /var/lib/swage/device-tokens/workshop.token
+   mkdir -p "$HOME/.swage/device-tokens"
+   head -c 32 /dev/urandom | base64 > "$HOME/.swage/device-tokens/workshop.token"
    ```
 
 2. **Register the token file as a secret.** `POST /api/secrets`:
@@ -1303,9 +1312,13 @@ workspace it operates in.
      "backend_kind": "file",
      "scope_kind": "device",
      "scope_id": "workshop",
-     "external_reference": "/var/lib/swage/device-tokens/workshop.token"
+     "external_reference": "<gateway-user-home>/.swage/device-tokens/workshop.token"
    }
    ```
+
+   Replace `<gateway-user-home>` with the absolute path to the gateway
+   user's home directory. The file backend reads any path the gateway
+   process can access.
 
    No `metadata` or `json_pointer` — the entire file is the token. The
    response carries a `reference` field (e.g. `secret://file/<id>`) used
@@ -1343,16 +1356,16 @@ workspace it operates in.
 
    ```bash
    # On the device machine
-   mkdir -p /home/user/.swage
+   mkdir -p "$HOME/.swage"
    # Paste the token value from the gateway's workshop.token and press Ctrl-D:
-   cat > /home/user/.swage/workshop.token
+   cat > "$HOME/.swage/workshop.token"
    ```
 
    Alternatively, transfer the file directly:
 
    ```bash
-   scp gateway.local:/var/lib/swage/device-tokens/workshop.token \
-     /home/user/.swage/workshop.token
+   scp gateway.local:.swage/device-tokens/workshop.token \
+     "$HOME/.swage/workshop.token"
    ```
 
    The device file must hold exactly the same value as the gateway's file —
@@ -1364,8 +1377,8 @@ workspace it operates in.
    swage device connect \
      --gateway http://gateway.local:3000 \
      --device-id workshop \
-     --shared-token-file /home/user/.swage/workshop.token \
-     --workspace /home/user/projects
+     --shared-token-file "$HOME/.swage/workshop.token" \
+     --workspace "$HOME/projects"
    ```
 
    `--shared-token-file` points at the device's local copy. The process
