@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { untrack } from "svelte";
+  import { providerBaseUrlError } from "./provider-endpoint";
   import type { DiscoveredModel, ModelSettings, ProviderSettings } from "../../types";
   import type { ProviderSignInState } from "../../protocol/ProviderSignInState";
   import CodexProviderAuthentication from "./CodexProviderAuthentication.svelte";
@@ -18,6 +20,27 @@
   let { id, index, provider, displayName, models, defaultModel, saved, signInState, deviceCode, selected, query, discoveredModels, addedModelIds, isPersisting, onremoveprovider, onmanualadd, onremovemodel, ondefault, onselect, onquery, onrefresh, ondiscoveradd, onbegin, oncheck, oncopy, onend }: Props = $props();
   let collapsed = $state(false);
   let manualModelId = $state("");
+  let baseUrlDraft = $state("");
+  let lastBaseUrl: string | undefined;
+  const baseUrlError = $derived(baseUrlDraft.trim() ? providerBaseUrlError(baseUrlDraft) : null);
+
+  $effect(() => {
+    const value = provider.base_url ?? "";
+    untrack(() => {
+      if (value !== lastBaseUrl) {
+        baseUrlDraft = value;
+        lastBaseUrl = value;
+      }
+    });
+  });
+
+  function editBaseUrl(event: Event): void {
+    baseUrlDraft = (event.currentTarget as HTMLInputElement).value;
+    const value = baseUrlDraft.trim();
+    if (value && providerBaseUrlError(value)) return;
+    lastBaseUrl = value;
+    provider.base_url = value || null;
+  }
   const codexUsable = $derived(provider.protocol !== "codex" || signInState?.status === "signed_in");
 </script>
 
@@ -33,7 +56,7 @@
   {#if !collapsed}
     <div class="provider-body">
       {#if provider.protocol !== "codex"}
-        <div class="field"><div class="key">Base URL<small>Override the provider's canonical endpoint when needed.</small></div><div class="val"><input type="text" class="text" bind:value={provider.base_url} placeholder="Provider default" autocomplete="off" /></div></div>
+        <div class="field"><div class="key">Base URL<small>Override the provider's canonical endpoint when needed.</small></div><div class="val"><input type="text" class="text" aria-label={`Base URL for ${displayName}`} aria-invalid={!!baseUrlError} aria-describedby={baseUrlError ? `provider-${id}-base-url-error` : undefined} value={baseUrlDraft} oninput={editBaseUrl} placeholder="Provider default" autocomplete="off" />{#if baseUrlError}<p id={`provider-${id}-base-url-error`} class="field-error" role="alert">{baseUrlError}</p>{/if}</div></div>
         <div class="field"><div class="key">API key<small>Paste a new value to store or rotate this provider's credential.</small></div><div class="val key-val"><input type="password" class="text" bind:value={provider.api_key} placeholder={provider.has_credential ? "Stored credential" : "Paste to store"} autocomplete="off" /><span class="credential-status" class:set={provider.has_credential}>{provider.has_credential ? "Stored" : "Empty"}</span></div></div>
       {:else}
         <CodexProviderAuthentication providerId={id} {saved} state={signInState} {deviceCode} {onbegin} {oncheck} {oncopy} {onend} />
@@ -69,6 +92,7 @@
   .key { font-family: var(--font-mono); font-weight: 500; font-size: 11px; line-height: 1.5; letter-spacing: 0.18em; text-transform: uppercase; }
   .key small { display: block; margin-top: 4px; font-family: var(--font-body); font-weight: 400; font-size: 11px; line-height: 1.4; letter-spacing: 0; text-transform: none; color: var(--ink-soft); }
   .val { display: flex; gap: 10px; flex-wrap: wrap; }
+  .field-error { margin: 0; font-family: var(--font-mono); font-size: var(--font-label-sm); color: var(--error); }
   .key-val { align-items: center; }
   .text { width: 100%; max-width: 480px; padding: 9px 11px; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); font-family: var(--font-body); font-size: 13px; line-height: 1.4; }
   .text:focus { outline: none; background: color-mix(in srgb, var(--accent) 6%, transparent); }

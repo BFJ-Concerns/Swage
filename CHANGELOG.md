@@ -54,6 +54,8 @@ All notable changes to Swage are documented in this file.
 - Turn usage logs and subscribed completion events distinguish unreported token counts from zero and explain unavailable cost. Workflow Spend says when usage was not reported and distinguishes workers still running, failed, cut short, finished and unsettled.
 - `swage --help` describes the product and its commands without internal caller instructions or daemon details.
 - The front page's **New session** control sits at the top, above the recent sessions, and stays in place as the list grows; keyboard focus reaches it before the list.
+- Editing a provider’s base URL validates it as adding one does, with an inline error for invalid endpoints.
+
 - File search, read and edit recognise a binary file from its first 8 KiB and read no further, and file search reads text line by line. A search reaching multi-gigabyte model weights no longer holds each file whole in memory, which had grown the gateway past 20 GB.
 - Underscores in fill-in blanks, such as `__:__`, render literally in assistant messages while ordinary underscore emphasis still renders as emphasis.
 - PEM private keys are redacted whole, including their body and footer; truncated keys are redacted through the end of the input, and overlapping secret matches leave no plaintext tail.

@@ -211,6 +211,74 @@ describe("SettingsPage", () => {
     vi.clearAllMocks();
   });
 
+  it("refuses invalid provider URL drafts before autosave and accepts corrections or clearing", async () => {
+    const originalUrl = "https://api.example.org/v1";
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue({
+      ...emptySettings(),
+      providers: { openai: {
+        protocol: "openai", base_url: originalUrl, api_key_secret_ref: null,
+        api_key_env: null, has_credential: false,
+      } },
+      default_provider: "openai",
+    });
+    component = mount(SettingsPage, { target: document.body, props: { tab: "providers" } });
+    await flushUi();
+    const input = document.querySelector<HTMLInputElement>('input[placeholder="Provider default"]')!;
+    const edit = async (value: string) => {
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      await flushUi();
+    };
+    await edit("not-a-url");
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    expect(document.body.textContent).toContain("Base URL must start with http:// or https://");
+    expect(settingsApi.saveSettings).not.toHaveBeenCalled();
+    expect(document.querySelector('.meta-endpoint')?.textContent).toBe(originalUrl);
+    input.dispatchEvent(new Event("blur"));
+    await flushUi();
+    expect(settingsApi.saveSettings).not.toHaveBeenCalled();
+
+    await edit(" HTTP://localhost:8317/v1 ");
+    await waitForSaveCall();
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].providers.openai.base_url).toBe("HTTP://localhost:8317/v1");
+    expect(document.body.textContent).not.toContain("Base URL must start with http:// or https://");
+    vi.mocked(settingsApi.saveSettings).mockClear();
+    await edit("https://replacement.example.org/v1");
+    await waitForSaveCall();
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].providers.openai.base_url).toBe("https://replacement.example.org/v1");
+    vi.mocked(settingsApi.saveSettings).mockClear();
+    await edit("   ");
+    await waitForSaveCall();
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].providers.openai.base_url).toBeNull();
+    expect(document.body.textContent).not.toContain("Base URL must start with http:// or https://");
+
+    vi.mocked(settingsApi.saveSettings).mockClear();
+    await edit("https://pending.example.org/v1");
+    await edit("ftp://invalid.example.org");
+    await waitForSaveCall();
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].providers.openai.base_url).toBe("https://pending.example.org/v1");
+    expect(input.value).toBe("ftp://invalid.example.org");
+    expect(document.body.textContent).toContain("Base URL must start with http:// or https://");
+
+    buttonContaining("Add provider").click();
+    await flushUi();
+    buttonContaining("OpenAI compatible").click();
+    await flushUi();
+    const connectInput = document.querySelector<HTMLInputElement>('#compatible-base-url')!;
+    connectInput.value = "not-a-url";
+    connectInput.dispatchEvent(new Event("input", { bubbles: true }));
+    buttonContaining("Connect").click();
+    await flushUi();
+    expect(document.querySelector('#compatible-base-url-error')?.textContent).toBe("Base URL must start with http:// or https://");
+    expect(document.querySelectorAll('.provider-section')).toHaveLength(1);
+    vi.mocked(settingsApi.saveSettings).mockClear();
+    connectInput.value = " HTTPS://proxy.example.org/v1 ";
+    connectInput.dispatchEvent(new Event("input", { bubbles: true }));
+    buttonContaining("Connect").click();
+    await waitForSaveCall();
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].providers["openai-compatible"].base_url).toBe("HTTPS://proxy.example.org/v1");
+  }, 10_000);
+
   it("waits for the required search fields before autosaving", async () => {
     component = mount(SettingsPage, {
       target: document.body,
