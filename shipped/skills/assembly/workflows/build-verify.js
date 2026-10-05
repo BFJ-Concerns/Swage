@@ -475,7 +475,7 @@ const landingSchema = {
 
 const landPrompt =
   mergePolicy === "direct-merge"
-    ? `Land the finished unit. First read ${annexeConfigPath} for push_policy. From ${worktree}, merge the unit branch into the repository's main branch. A conflicted merge is yours to resolve: keep both sides' behaviour (the brief's known sibling overlaps say where the sides meet), then run the project's full gate — the whole-tree suite — on the resolved tree; the resolution stands only when it is green. Report as blocked ({landed:false, blocked_on:"conflict", detail: what contradicts what}) only a genuine semantic contradiction — the same knob given different semantics, intent the sides cannot both keep — or a resolution whose gate stays red; abort the merge before reporting. Push main only if push_policy is "push-on-land"; under "hold-for-user" the merge stays local and detail says so. A merge that reports the branch already contained in main ("Already up to date") is an already-integrated unit, not a blocked landing: run the full gate on main as usual and, when it is green, reply {landed:true, already_integrated:true, merge_commit: the main commit that contains the branch head, detail: "already integrated"}. Reply with {landed, detail, merge_commit} — landed true only if the merge commit exists on main (verify with git log), or if main already contains the branch head and the gate is green. landed:false always carries blocked_on naming what blocked the landing. Reply with the JSON last.`
+    ? `Land the finished unit. First read ${annexeConfigPath} for push_policy. From ${worktree}, merge the unit branch into the repository's main branch. A conflicted merge is yours to resolve: keep both sides' behaviour (the brief's known sibling overlaps say where the sides meet), then run the project's full gate — the whole-tree suite — on the resolved tree; the resolution stands only when it is green. Report as blocked ({landed:false, blocked_on:"conflict", detail: what contradicts what}) only a genuine semantic contradiction — the same knob given different semantics, intent the sides cannot both keep — or a resolution whose gate stays red; abort the merge before reporting. Push main only if push_policy is "push-on-land"; under "hold-for-user" the merge stays local and detail says so. A merge that reports the branch already contained in main ("Already up to date") is an already-integrated unit, not a blocked landing: nothing changed, so there is nothing to abort — run the full gate on main as usual and reply {landed:true, already_integrated:true, merge_commit: the main commit that contains the branch head, detail: "already integrated; gate green" or "already integrated; gate red: <what failed>"} — a red gate on a main this unit did not change is lane state for the orchestrator, never a blocked landing. Reply with {landed, detail, merge_commit} — landed true only if the merge commit exists on main (verify with git log) or main already contains the branch head. landed:false always carries blocked_on naming what blocked the landing. Reply with the JSON last.`
     : `Publish the finished unit as a blocked PR. First read ${annexeConfigPath} for push_policy: under "hold-for-user", do NOT push — reply {landed:false, blocked_on:"push_policy hold-for-user", detail:...} and stop. Otherwise: write ${unitDir}/pr.md whole from ${unitDir}/report.md (What changed / Why / What must be true / Known gaps), push the branch (git push -u origin <branch>), open the PR via the forge API — POST /api/v1/repos/<owner>/<repo>/pulls, title "WIP: <unit title>", body from pr.md, head the branch, base ${integrationBranch} (the unit's integration lane — the structural branch for lane units, whose promotion PR carries them to main later; the parent branch for a stacked unit whose work builds on a sibling's unmerged branch; or main itself for a Lane: main unit); tokens under ~/.config/forgejo/ (instances.toml maps the origin host to url and token). Never push refs/for/* (AGit is forbidden — no tracked branch, no multiline body); on auth failure reply {landed:false, blocked_on:"forge auth", detail:...}. Confirm by API read that the PR exists with a non-empty body; landed is true only on that confirmation. Before pushing, check whether ${integrationBranch} already contains the branch head (git fetch, then git merge-base --is-ancestor <branch> origin/${integrationBranch}): if it does, there is nothing to publish — reply {landed:true, already_integrated:true, detail: the containing commit} with no PR opened and no pr_number. landed:false always carries blocked_on naming what blocked the landing. Reply with {landed, detail, pr_number, pr_url} — the JSON last.`;
 
 // The landing continues the builder while its session is warm — it knows
@@ -492,6 +492,24 @@ if (builderIdle.stale === false) {
   dispatching("land", "re-briefed", `the landing is mechanical and ${unitDir}/report.md carries what it needs; ${builderIdle.stale === true ? "the builder's session is cold" : "the route declares no staleness threshold, so warmth is unknown"} (${builderIdle.phrase})`);
   landing = await agent(landPrompt, { schema: landingSchema, cwd: worktree, label: "land", timeoutMs: 1800000 });
 }
+// A landing turn that exhausts the landing schema returns null: the worker
+// replied, but nothing it said validated. One fresh worker is re-briefed
+// (report.md carries what a landing needs); a second exhaustion is a
+// blocked landing whose blocked_on names the cause, so the envelope keeps
+// the shape the lead reads and the journal says where the replies are.
+if (landing === null) {
+  log("[land] the landing worker replied, but nothing it said validated against the landing schema; its turns are in the run record under label land. Re-briefing one fresh worker.");
+  dispatching("land:retry", "re-briefed", "the previous landing worker exhausted the landing schema; a fresh worker reads report.md and lands from it");
+  landing = await agent(landPrompt, { schema: landingSchema, cwd: worktree, label: "land:retry", timeoutMs: 1800000 });
+  if (landing === null) {
+    log("[land] the replacement landing worker also exhausted the landing schema; the landing is blocked.");
+    landing = {
+      landed: false,
+      blocked_on: "landing reply never validated against the landing schema",
+      detail: "two landing workers replied without a schema-valid landing report; their turns are in the run record under labels land and land:retry — read them before re-dispatching",
+    };
+  }
+}
 // Closed on the success path so the journal records intent; the early
 // returns above are run-ending, and a run ending by any path closes every
 // worker it still holds.
@@ -502,6 +520,18 @@ await close(verifier);
 // obligation's evidence from this returned envelope (references/ledger.md),
 // and files issues_findings — sub-severe findings accepted by default at the
 // land — to the annexe issue log.
+// A reply that claims a no-op and a publication at once is no verdict: the
+// envelope keeps the shape the lead reads, with blocked_on naming the
+// contradiction, rather than classifying on one half of it.
+if (landing && landing.landed && landing.already_integrated === true
+    && (landing.pr_number !== undefined || (landing.pr_url && landing.pr_url.trim()))) {
+  log(`[land] the landing reply contradicts itself: already_integrated with a PR (${landing.pr_number ?? landing.pr_url}); not read as a landing.`);
+  landing = {
+    landed: false,
+    blocked_on: "landing reply contradicts itself: already_integrated together with a PR",
+    detail: `the worker replied ${JSON.stringify(landing)}; read its turns in the run record before re-dispatching`,
+  };
+}
 // Three landing outcomes, derived from the returned envelope: "landed" (a
 // merge commit or a confirmed PR), "already-integrated" (the lane already
 // held the branch head; landed stays true so the lead reads it as done), and

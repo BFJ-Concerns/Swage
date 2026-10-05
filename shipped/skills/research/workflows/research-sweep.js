@@ -151,6 +151,10 @@ const gathered = await pipeline(
       {
         tools: researcherTools,
         label: `Gather ${source.url}`,
+        // Identified, so a slot that settled by schema exhaustion
+        // ({ output: null, failure }) reads differently from a worker that
+        // never replied (the slot collapses to null) in the accounting below.
+        identity: true,
         schema: {
           type: "object",
           required: ["url", "recorded", "observation_id", "note"],
@@ -169,28 +173,42 @@ const gathered = await pipeline(
 
 // Source accounting is derived from the knowledge base, never from a
 // gatherer's account of its own attempt: a source is gathered when an
-// observation for it exists under this run's capture scopes, found by the
-// observation id the gatherer reported first and by the plan URL second (a
-// page recorded under a redirected or normalised URL is still gathered). A
-// source is failed only when no observation exists, and its reason is the
-// gatherer's own note or the fact that the worker never replied.
+// observation for it exists under this run's capture scopes. The plan URL
+// is matched first — one observation can carry several captured origins
+// when two sources have the same body, so an id alone does not name a
+// source — and the gatherer's reported observation id second, only through
+// a captured origin no other planned source owns (a page recorded under a
+// redirected or normalised URL is still gathered; a gatherer naming another
+// source's id is not). A source is failed only when no observation exists,
+// and its reason is the gatherer's own note, its off-schema reply, or the
+// fact that the worker never replied.
 const captured = await capturedSources();
+const planUrls = new Set(plan.sources.map((source) => source.url));
 const capturedByUrl = new Map(captured.sources.map((source) => [source.url, source]));
-const capturedById = new Map(captured.sources.map((source) => [source.observation_id, source]));
+const unplannedById = new Map(
+  captured.sources
+    .filter((source) => !planUrls.has(source.url))
+    .map((source) => [source.observation_id, source]),
+);
 const accounted = plan.sources.map((source, index) => {
-  const outcome = gathered[index];
-  const byId = outcome && outcome.observation_id ? capturedById.get(outcome.observation_id) : undefined;
-  return { source, outcome, landed: byId ?? capturedByUrl.get(source.url) ?? null };
+  const slot = gathered[index];
+  const outcome = slot && slot.output ? slot.output : null;
+  const failure = slot && slot.failure ? slot.failure.message : null;
+  const byUrl = capturedByUrl.get(source.url);
+  const byId = outcome && outcome.observation_id ? unplannedById.get(outcome.observation_id) : undefined;
+  return { source, outcome, failure, landed: byUrl ?? byId ?? null };
 });
 const landed = accounted
   .filter((entry) => entry.landed)
   .map((entry) => ({ url: entry.landed.url, observation_id: entry.landed.observation_id }));
 const failed = accounted
   .filter((entry) => !entry.landed)
-  .map(({ source, outcome }) => ({
+  .map(({ source, outcome, failure }) => ({
     url: source.url,
     reason: outcome === null
-      ? "the gather worker failed before replying"
+      ? (failure
+          ? `the gather worker replied, but nothing it said validated against the gather schema: ${failure}`
+          : "the gather worker failed before replying")
       : outcome.recorded
         ? `the gatherer reported recording ${outcome.observation_id}, but the knowledge base holds no observation for this source: ${outcome.note}`
         : outcome.note,

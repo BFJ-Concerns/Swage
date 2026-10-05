@@ -515,9 +515,14 @@ mod tests {
             .text_content();
 
         assert!(text.contains("Write for a teammate returning to the work"));
-        assert!(!text.contains("Native harness divergences"));
 
         let divergences = native_harness_divergences(" CLAUDE-FABLE-5 ").unwrap();
+        for divergence in divergences {
+            assert!(
+                !text.contains(divergence.material),
+                "the divergence register is audit evidence, never model instructions"
+            );
+        }
         assert_eq!(divergences.len(), 2);
         assert_eq!(
             divergences[0].category,
@@ -536,7 +541,8 @@ mod tests {
             .text_content();
 
         assert!(text.contains("issue those tool calls together"));
-        assert!(!text.contains("Native harness divergences"));
+        assert!(native_harness_divergences("claude-future-6").is_none());
+        assert!(!text.contains(STANDARD_DIVERGENCES[0].material));
         assert!(!text.contains("Write for a teammate returning to the work"));
     }
 
@@ -678,7 +684,9 @@ mod tests {
                 .text_content();
 
         assert!(text.contains("fully resolved before ending your turn"));
-        assert!(!text.contains("Native harness divergences"));
+        for divergence in native_harness_divergences("gpt-5.6-sol").unwrap() {
+            assert!(!text.contains(divergence.material));
+        }
         assert!(!text.contains("coordinate independent tasks"));
     }
 }
