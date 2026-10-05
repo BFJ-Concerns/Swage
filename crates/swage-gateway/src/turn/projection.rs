@@ -433,21 +433,11 @@ pub(super) async fn project_agent_events(
                 structured_output,
                 ..
             } => {
-                // The durable record may already carry a reported cost. Never
-                // replace it with an estimate or infer a cost from absent counts.
-                let recorded_cost = match state.storage.get_turn(turn_id).await {
-                    Ok(Some(turn)) => turn.cost_microcents,
-                    Ok(None) => None,
-                    Err(error) => {
-                        tracing::warn!(%error, %turn_id, "failed to read recorded turn cost");
-                        None
-                    }
-                };
-                let cost_microcents = recorded_cost.or_else(|| {
+                // Estimate cost only when both token counts were reported.
+                let cost_microcents =
                     input_tokens.zip(output_tokens).and_then(|(input, output)| {
                         pricing_config.compute_cost(model_name, input, output)
-                    })
-                });
+                    });
                 let input_unavailable_reason = input_tokens
                     .is_none()
                     .then_some("provider reported no input count");
