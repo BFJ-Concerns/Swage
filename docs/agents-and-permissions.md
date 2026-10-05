@@ -477,8 +477,14 @@ feedback, and the turn continues. The alternative policy, **Interrupt**, marks
 the entire turn as interrupted — no further tool calls or completions are
 issued.
 
-Per-tool overrides are possible through the `WithOptions` variant of a
-`require_approval` entry, which can set a custom `timeout` and
+Per-tool overrides use an object entry in `require_approval` instead of a
+plain string:
+
+```toml
+require_approval = ["write_file", { tool = "execute_command", timeout = 600 }]
+```
+
+The object form accepts `tool` (required), `timeout` (seconds), and
 `timeout_policy` for individual tools.
 
 ## Context configuration
@@ -585,7 +591,7 @@ alternatives = ["my-variant"]
 
 The assembly script runs in a caged QuickJS runtime (no IO, no network, no
 timers) and composes the turn's context from the elements the gateway built.
-The script receives three globals:
+The script receives four globals:
 
 - `elements` — the turn's context elements, read-only:
   `[{ name, priority, source, tokenCount, messages }]` where `messages` is
@@ -608,8 +614,11 @@ add(byName.prompts);
 add(byName.history);
 ```
 
-Failure is fail-open: any script problem (missing file, syntax error,
-runtime error, empty output) falls back to the built-in default assembly.
+Failure is fail-open: a script error (missing file, syntax error, runtime
+error) falls back to the built-in default assembly. A script that runs
+without error but produces no output is not a failure — the baseline floor
+restores every element the default assembly would have carried, producing a
+complete composition with warnings naming each restored element.
 
 The other shipped locations (`context.working_norms`, `task.prompt`,
 `prompts.memory_curator`) have their alternatives defined in the gateway

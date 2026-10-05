@@ -446,8 +446,8 @@ workspace it operates in.
 
    ```bash
    # On the gateway host
-   mkdir -p /var/lib/swage/device-tokens
-   head -c 32 /dev/urandom | base64 > /var/lib/swage/device-tokens/workshop.token
+   mkdir -p "$HOME/.swage/device-tokens"
+   head -c 32 /dev/urandom | base64 > "$HOME/.swage/device-tokens/workshop.token"
    ```
 
 2. **Register the token file as a secret.** `POST /api/secrets`:
@@ -460,9 +460,13 @@ workspace it operates in.
      "backend_kind": "file",
      "scope_kind": "device",
      "scope_id": "workshop",
-     "external_reference": "/var/lib/swage/device-tokens/workshop.token"
+     "external_reference": "<gateway-user-home>/.swage/device-tokens/workshop.token"
    }
    ```
+
+   Replace `<gateway-user-home>` with the absolute path to the gateway
+   user's home directory. The file backend reads any path the gateway
+   process can access.
 
    No `metadata` or `json_pointer` — the entire file is the token. The
    response carries a `reference` field (e.g. `secret://file/<id>`) used
@@ -500,16 +504,16 @@ workspace it operates in.
 
    ```bash
    # On the device machine
-   mkdir -p /home/user/.swage
+   mkdir -p "$HOME/.swage"
    # Paste the token value from the gateway's workshop.token and press Ctrl-D:
-   cat > /home/user/.swage/workshop.token
+   cat > "$HOME/.swage/workshop.token"
    ```
 
    Alternatively, transfer the file directly:
 
    ```bash
-   scp gateway.local:/var/lib/swage/device-tokens/workshop.token \
-     /home/user/.swage/workshop.token
+   scp gateway.local:.swage/device-tokens/workshop.token \
+     "$HOME/.swage/workshop.token"
    ```
 
    The device file must hold exactly the same value as the gateway's file —
@@ -521,8 +525,8 @@ workspace it operates in.
    swage device connect \
      --gateway http://gateway.local:3000 \
      --device-id workshop \
-     --shared-token-file /home/user/.swage/workshop.token \
-     --workspace /home/user/projects
+     --shared-token-file "$HOME/.swage/workshop.token" \
+     --workspace "$HOME/projects"
    ```
 
    `--shared-token-file` points at the device's local copy. The process
