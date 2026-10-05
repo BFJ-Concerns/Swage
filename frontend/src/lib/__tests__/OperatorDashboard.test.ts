@@ -278,6 +278,7 @@ describe("OperatorDashboard", () => {
     const emptyCopy = devicesPanel!.querySelector(".empty-copy")?.textContent ?? "";
     expect(emptyCopy).toContain("No devices are attached.");
     expect(emptyCopy).toContain("one-time pairing code");
+    expect(emptyCopy).toContain("swage device connect");
     expect(emptyCopy).toContain("Registration and pairing");
   });
 
