@@ -1,174 +1,129 @@
 // @vitest-environment jsdom
-/**
- * The recent-sessions list: order, grouping beneath a source, the topic
- * filter as a membership change, and the archived view.
- */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { flushSync, mount, unmount } from "svelte";
+import { flushSync, mount, tick, unmount } from "svelte";
 
-import RecentSessions from "../components/RecentSessions.svelte";
-import * as sessionsApi from "../api/sessions";
 import type { RecentSession } from "../protocol/RecentSession";
 import type { RecentSessionsEntry } from "../protocol/RecentSessionsEntry";
 
+const listRecentSessions = vi.fn<() => Promise<RecentSessionsEntry[]>>();
+
 vi.mock("../api/sessions", () => ({
-  listRecentSessions: vi.fn(),
+  listRecentSessions: () => listRecentSessions(),
 }));
+
+import RecentSessions from "../components/RecentSessions.svelte";
 
 type MountedComponent = ReturnType<typeof mount>;
 
-function makeSession(overrides: Partial<RecentSession> = {}): RecentSession {
+const BRIEF =
+  "Check the nightly build at /home/ops/builds/nightly/artefacts/reports/summary and post the result to the team\nThen tidy up.";
+
+function run(index: number, flags: Partial<RecentSession> = {}): RecentSession {
   return {
-    id: "conv-1",
+    id: `run-${index}`,
     topic_name: "General",
-    agent_id: "gateway",
-    origin: { kind: "direct" },
-    created_at: "2026-09-15T08:00:00Z",
-    last_activity: "2026-09-15T08:00:00Z",
-    message_preview: "Plan the release",
+    agent_id: "default",
+    origin: { kind: "schedule_run", schedule_id: "sched-1" } as RecentSession["origin"],
+    created_at: "2026-10-05T09:00:00Z",
+    last_activity: "2026-10-05T09:00:00Z",
+    message_preview: `Run ${index}`,
     has_interrupted_turn: false,
     has_running_turn: false,
-    ...overrides,
+    ...flags,
   };
 }
 
-function conversationEntry(
-  session: RecentSession,
-  automated: RecentSession[] = [],
-): RecentSessionsEntry {
+function scheduleEntry(latest: Partial<RecentSession> = {}): RecentSessionsEntry {
+  const automated = Array.from({ length: 11 }, (_, index) => run(index, index === 0 ? latest : {}));
   return {
-    source: { kind: "conversation", session },
-    last_activity: automated[0]?.last_activity ?? session.last_activity,
+    source: { kind: "schedule", id: "sched-1", message: BRIEF },
+    last_activity: "2026-10-05T09:00:00Z",
     automated,
   };
 }
 
-async function settle(): Promise<void> {
-  for (let i = 0; i < 6; i += 1) {
-    await Promise.resolve();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  }
+async function render(entries: RecentSessionsEntry[]): Promise<MountedComponent> {
+  listRecentSessions.mockResolvedValue(entries);
+  const component = mount(RecentSessions, { target: document.body, props: {} });
+  await tick();
+  await Promise.resolve();
   flushSync();
+  return component;
 }
 
-function buttonNamed(text: string): HTMLButtonElement {
-  const button = Array.from(document.querySelectorAll("button")).find(
-    (candidate) => candidate.textContent?.trim() === text,
-  );
-  if (!button) throw new Error(`Button not found: ${text}\n${document.body.textContent ?? ""}`);
-  return button as HTMLButtonElement;
+function childRows(): number {
+  return document.querySelectorAll(".automated li").length;
 }
 
-describe("RecentSessions", () => {
+function scheduleHeading(): HTMLButtonElement {
+  const heading = document.querySelector<HTMLButtonElement>(".row.source.schedule");
+  expect(heading).not.toBeNull();
+  return heading!;
+}
+
+describe("RecentSessions schedule groups", () => {
   let component: MountedComponent | undefined;
 
   beforeEach(() => {
-    vi.mocked(sessionsApi.listRecentSessions).mockReset();
+    localStorage.clear();
   });
 
   afterEach(() => {
-    if (component) {
-      unmount(component);
-      component = undefined;
-    }
+    if (component) unmount(component);
+    component = undefined;
     document.body.replaceChildren();
   });
 
-  it("lists every scope's sessions in the order the gateway gave, automated ones nested beneath their source", async () => {
-    const worker = makeSession({
-      id: "worker-1",
-      topic_name: "Research",
-      topic_id: "topic-research",
-      agent_id: "builder",
-      origin: { kind: "workflow_worker", run_id: "run-1" },
-      message_preview: null,
-      last_activity: "2026-09-15T09:00:00Z",
-    });
-    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValueOnce([
-      conversationEntry(
-        makeSession({ id: "conv-dispatcher", topic_name: "Research", topic_id: "topic-research", message_preview: "Ship it" }),
-        [worker],
-      ),
-      conversationEntry(makeSession({ id: "conv-general", message_preview: "Quiet chat" })),
-    ]);
-    const onSelectSession = vi.fn();
+  it("starts collapsed with a count and the latest run's state, and toggles its runs from the heading", async () => {
+    component = await render([scheduleEntry({ has_running_turn: true })]);
 
-    component = mount(RecentSessions, {
-      target: document.body,
-      props: { topics: [{ id: "topic-research", name: "Research", description: "", slug: "research", created_at: "" }], onSelectSession },
-    });
-    await settle();
+    expect(childRows()).toBe(0);
+    const summary = document.querySelector(".group-summary");
+    expect(summary?.textContent).toContain("11 runs");
+    expect(summary?.textContent).toContain("Running");
 
-    expect(sessionsApi.listRecentSessions).toHaveBeenCalledWith(null, false);
-    const previews = Array.from(document.querySelectorAll(".row.source .preview")).map((el) => el.textContent?.trim());
-    expect(previews).toEqual(["Ship it", "Quiet chat"]);
-    const nested = document.querySelector('[aria-label="Automated sessions"]');
-    expect(nested?.textContent).toContain("workflow worker");
-    expect(nested?.textContent).toContain("builder");
+    const heading = scheduleHeading();
+    expect(heading.disabled).toBe(false);
+    heading.click();
+    flushSync();
+    expect(childRows()).toBe(11);
+    expect(heading.getAttribute("aria-expanded")).toBe("true");
 
-    flushSync(() => (nested?.querySelector("button") as HTMLButtonElement).click());
-    expect(onSelectSession).toHaveBeenCalledWith("worker-1");
+    heading.click();
+    flushSync();
+    expect(childRows()).toBe(0);
   });
 
-  it("narrows to a topic with the filter and returns to all sessions", async () => {
-    vi.mocked(sessionsApi.listRecentSessions)
-      .mockResolvedValueOnce([conversationEntry(makeSession({ id: "a" })), conversationEntry(makeSession({ id: "b", topic_id: "topic-ops", topic_name: "Ops" }))])
-      .mockResolvedValueOnce([conversationEntry(makeSession({ id: "b", topic_id: "topic-ops", topic_name: "Ops" }))])
-      .mockResolvedValueOnce([conversationEntry(makeSession({ id: "a" })), conversationEntry(makeSession({ id: "b", topic_id: "topic-ops", topic_name: "Ops" }))]);
+  it("labels the group by the brief's first line cut at a word boundary, keeping the full brief as its title", async () => {
+    component = await render([scheduleEntry()]);
 
-    component = mount(RecentSessions, {
-      target: document.body,
-      props: { topics: [{ id: "topic-ops", name: "Ops", description: "", slug: "ops", created_at: "" }] },
-    });
-    await settle();
-    expect(document.querySelectorAll(".entry")).toHaveLength(2);
-
-    flushSync(() => buttonNamed("Ops").click());
-    await settle();
-    expect(sessionsApi.listRecentSessions).toHaveBeenLastCalledWith("topic-ops", false);
-    expect(document.querySelectorAll(".entry")).toHaveLength(1);
-    expect(buttonNamed("Ops").getAttribute("aria-pressed")).toBe("true");
-
-    flushSync(() => buttonNamed("All sessions").click());
-    await settle();
-    expect(sessionsApi.listRecentSessions).toHaveBeenLastCalledWith(null, false);
-    expect(document.querySelectorAll(".entry")).toHaveLength(2);
+    const heading = scheduleHeading();
+    const label = heading.querySelector(".preview")?.textContent ?? "";
+    expect(label).toBe("Check the nightly build at…");
+    expect(heading.title).toBe(BRIEF);
   });
 
-  it("shows the archived sessions on request and lets one be resumed from there", async () => {
-    vi.mocked(sessionsApi.listRecentSessions)
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([
-        conversationEntry(makeSession({ id: "old", message_preview: "From last month", archived_at: "2026-09-01T00:00:00Z" })),
-      ]);
-    const onSelectSession = vi.fn();
+  it("reports a run with neither flag as ended, not completed", async () => {
+    component = await render([scheduleEntry({ has_interrupted_turn: true })]);
+    expect(document.querySelector(".group-summary")?.textContent).toContain("Interrupted");
+    unmount(component);
+    document.body.replaceChildren();
 
-    component = mount(RecentSessions, { target: document.body, props: { onSelectSession } });
-    await settle();
-    expect(document.body.textContent).toContain("No sessions yet.");
-
-    flushSync(() => buttonNamed("Archived").click());
-    await settle();
-    expect(sessionsApi.listRecentSessions).toHaveBeenLastCalledWith(null, true);
-    expect(document.querySelector(".entry.archived")).not.toBeNull();
-
-    flushSync(() => (document.querySelector(".row.source") as HTMLButtonElement).click());
-    expect(onSelectSession).toHaveBeenCalledWith("old");
+    component = await render([scheduleEntry()]);
+    const summary = document.querySelector(".group-summary")?.textContent ?? "";
+    expect(summary).toContain("Last run ended");
+    expect(summary).not.toMatch(/complete|finished/i);
   });
 
-  it("names a schedule by its instruction and does not open it as a session", async () => {
-    const run = makeSession({ id: "run-session", origin: { kind: "schedule_run", schedule_id: "sched-1" }, message_preview: "Inbox summarised" });
-    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValueOnce([
-      { source: { kind: "schedule", id: "sched-1", message: "Summarise the inbox" }, last_activity: run.last_activity, automated: [run] },
-    ]);
-    const onSelectSession = vi.fn();
+  it("remembers an expanded group across visits", async () => {
+    component = await render([scheduleEntry()]);
+    scheduleHeading().click();
+    flushSync();
+    expect(childRows()).toBe(11);
+    unmount(component);
+    document.body.replaceChildren();
 
-    component = mount(RecentSessions, { target: document.body, props: { onSelectSession } });
-    await settle();
-
-    const source = document.querySelector(".row.source") as HTMLButtonElement;
-    expect(source.textContent).toContain("Summarise the inbox");
-    expect(source.disabled).toBe(true);
-    expect(document.querySelector('[aria-label="Automated sessions"]')?.textContent).toContain("scheduled run");
+    component = await render([scheduleEntry()]);
+    expect(childRows()).toBe(11);
   });
 });

@@ -3,7 +3,10 @@
 
   Every scope's sessions, newest user-or-assistant message first, with
   automated sessions (schedule runs, workflow workers, delegated children)
-  nested beneath the conversation or schedule that caused them. "All sessions"
+  nested beneath the conversation or schedule that caused them. Each group
+  collapses behind a disclosure showing its count and latest run's state;
+  schedule groups start collapsed, and the choice is remembered per group.
+  "All sessions"
   is the default; the topic filter narrows membership and nothing else — it
   never opens a topic or touches a session's working context. The archived
   toggle lists what the inactivity sweep has hidden, so an old session is
@@ -16,6 +19,9 @@
   import type { RecentSession } from "../protocol/RecentSession";
   import type { RecentSessionsEntry } from "../protocol/RecentSessionsEntry";
   import type { Topic } from "../types";
+
+  const GROUP_EXPANDED_KEY = "swage:recent-session-groups";
+  const LABEL_LIMIT = 60;
 
   interface Props {
     topics?: Topic[];
@@ -32,6 +38,8 @@
   let entries = $state<RecentSessionsEntry[]>([]);
   let loadState = $state<"loading" | "loaded" | "error">("loading");
   let errorMessage = $state("");
+  // Per-group disclosure choices, keyed by entryKey; absent means the default.
+  let groupExpanded = $state<Record<string, boolean>>(readGroupExpanded());
   // A slow response for an earlier filter must not overwrite a later one.
   let loadGeneration = 0;
 
@@ -74,12 +82,64 @@
       : `${entry.source.kind}:${entry.source.id}`;
   }
 
+  function readGroupExpanded(): Record<string, boolean> {
+    try {
+      const stored: unknown = JSON.parse(localStorage.getItem(GROUP_EXPANDED_KEY) ?? "{}");
+      if (stored && typeof stored === "object" && !Array.isArray(stored)) {
+        return Object.fromEntries(
+          Object.entries(stored).filter((pair): pair is [string, boolean] => typeof pair[1] === "boolean"),
+        );
+      }
+    } catch {
+      // Unreadable storage falls back to the defaults.
+    }
+    return {};
+  }
+
+  function isExpanded(entry: RecentSessionsEntry): boolean {
+    return groupExpanded[entryKey(entry)] ?? entry.source.kind !== "schedule";
+  }
+
+  function toggleGroup(entry: RecentSessionsEntry): void {
+    groupExpanded = { ...groupExpanded, [entryKey(entry)]: !isExpanded(entry) };
+    try {
+      localStorage.setItem(GROUP_EXPANDED_KEY, JSON.stringify(groupExpanded));
+    } catch {
+      // The choice still holds for this visit when storage is unavailable.
+    }
+  }
+
+  function groupCount(entry: RecentSessionsEntry): string {
+    const count = entry.automated.length;
+    const noun = entry.source.kind === "schedule" ? "run" : "automated session";
+    return `${count} ${noun}${count === 1 ? "" : "s"}`;
+  }
+
+  // Only what the session flags establish: a run with neither flag may have
+  // succeeded or failed, so it is reported as ended, never as completed.
+  function latestOutcome(entry: RecentSessionsEntry): string {
+    const latest = entry.automated[0];
+    if (latest.has_running_turn) return "Running";
+    if (latest.has_interrupted_turn) return "Interrupted";
+    return `Last run ended ${relativeTime(latest.last_activity)}`;
+  }
+
+  // A schedule's brief can run to paragraphs and paths; the heading takes its
+  // first line, cut at a word boundary.
+  function conciseLabel(text: string): string {
+    const firstLine = text.trim().split("\n", 1)[0].trim();
+    if (firstLine.length <= LABEL_LIMIT) return firstLine;
+    const cut = firstLine.slice(0, LABEL_LIMIT);
+    const boundary = cut.lastIndexOf(" ");
+    return `${(boundary > 0 ? cut.slice(0, boundary) : cut).trimEnd()}…`;
+  }
+
   function sourceLabel(entry: RecentSessionsEntry): string {
     switch (entry.source.kind) {
       case "conversation":
         return entry.source.session.message_preview ?? "New conversation";
       case "schedule":
-        return entry.source.message;
+        return conciseLabel(entry.source.message);
       case "workflow_run":
         return entry.source.label ?? "Workflow run";
     }
@@ -154,8 +214,10 @@
             type="button"
             class="row source"
             class:schedule={entry.source.kind === "schedule"}
-            disabled={entry.source.kind === "schedule"}
-            onclick={() => openSource(entry)}
+            title={entry.source.kind === "schedule" ? entry.source.message : undefined}
+            aria-expanded={entry.source.kind === "schedule" ? isExpanded(entry) : undefined}
+            disabled={entry.source.kind === "schedule" && entry.automated.length === 0}
+            onclick={() => (entry.source.kind === "schedule" ? toggleGroup(entry) : openSource(entry))}
           >
             <span class="preview">{sourceLabel(entry)}</span>
             <span class="meta">
@@ -173,6 +235,18 @@
           </button>
 
           {#if entry.automated.length > 0}
+            <button
+              type="button"
+              class="group-summary"
+              aria-expanded={isExpanded(entry)}
+              onclick={() => toggleGroup(entry)}
+            >
+              <span class="disclosure" aria-hidden="true">{isExpanded(entry) ? "▾" : "▸"}</span>
+              {groupCount(entry)} · {latestOutcome(entry)}
+            </button>
+          {/if}
+
+          {#if entry.automated.length > 0 && isExpanded(entry)}
             <ul class="automated" aria-label="Automated sessions">
               {#each entry.automated as automated (automated.id)}
                 <li>
@@ -297,6 +371,21 @@
 
   .row:disabled {
     cursor: default;
+  }
+
+  .group-summary {
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+    padding: 0 0 6px 22px;
+    background: none;
+    border: none;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    color: var(--ink-soft);
+    cursor: pointer;
   }
 
   .row.nested {
