@@ -304,3 +304,54 @@ describe("OperatorDashboard", () => {
     expect(document.body.textContent).toContain("No assistant text produced.");
   });
 });
+
+describe("OperatorDashboard approvals layout", () => {
+  let component: MountedComponent | undefined;
+
+  afterEach(() => {
+    if (component) {
+      unmount(component);
+      component = undefined;
+    }
+
+    while (document.body.firstChild) {
+      document.body.removeChild(document.body.firstChild);
+    }
+  });
+
+  function panelByKicker(kicker: string): HTMLElement {
+    const panel = [...document.querySelectorAll<HTMLElement>(".ops-grid > .panel")].find(
+      (candidate) => candidate.querySelector(".panel-kicker")?.textContent === kicker,
+    );
+    expect(panel).toBeDefined();
+    return panel as HTMLElement;
+  }
+
+  async function mountWith(overview: OperatorOverview): Promise<void> {
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(overview);
+    component = mount(OperatorDashboard, { target: document.body });
+    await settleUi();
+  }
+
+  it("collapses an empty Approvals panel and gives Schedules the full grid width", async () => {
+    await mountWith(makeOverview({ approvals: [] }));
+
+    const approvals = panelByKicker("Approvals");
+    const schedules = panelByKicker("Schedules");
+    expect(approvals.classList.contains("panel-compact")).toBe(true);
+    expect(approvals.classList.contains("panel-wide")).toBe(true);
+    expect(schedules.classList.contains("panel-wide")).toBe(true);
+    expect(approvals.textContent).toContain("Nothing is waiting for operator approval.");
+  });
+
+  it("restores the side-by-side Approvals panel while a decision is pending", async () => {
+    await mountWith(makeOverview());
+
+    const approvals = panelByKicker("Approvals");
+    const schedules = panelByKicker("Schedules");
+    expect(approvals.classList.contains("panel-compact")).toBe(false);
+    expect(approvals.classList.contains("panel-wide")).toBe(false);
+    expect(schedules.classList.contains("panel-wide")).toBe(false);
+    expect(approvals.textContent).toContain("Allow shell command");
+  });
+});
