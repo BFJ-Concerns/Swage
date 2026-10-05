@@ -173,17 +173,29 @@
   {/if}
   {#if activeConversation}<ConnectionIndicator store={connectionStore} {onRetry} />{/if}
   <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} />
-  {#if activeBranchAbandoned}
-    <p class="thread-notice" role="status">This branch is abandoned — it takes no further messages. Switch to the main thread or another branch to continue.</p>
-  {:else if activeStream?.pendingApproval ?? streamingStore.pendingApproval}
-    <ApprovalCard approval={activeStream?.pendingApproval ?? streamingStore.pendingApproval!} />
-  {:else}
-    <MessageInput store={streamingStore} {modelOptions} {modelCatalogueReady} selectedModelId={activeConversation?.selected_model_id ?? defaultModelId} sessionId={activeConversation?.id ?? null} {agentDefinitions} canSelectAgent={!activeConversation} bind:selectedAgentId {onNavigate} />
-  {/if}
+  <!-- Pinned to the foot of the channel's scroll, so a turn waiting on the
+       user's decision shows its approval card in view however long the
+       history above it is. -->
+  <div class="composer-slot">
+    {#if activeBranchAbandoned}
+      <p class="thread-notice" role="status">This branch is abandoned — it takes no further messages. Switch to the main thread or another branch to continue.</p>
+    {:else if activeStream?.pendingApproval ?? streamingStore.pendingApproval}
+      <ApprovalCard approval={activeStream?.pendingApproval ?? streamingStore.pendingApproval!} />
+    {:else}
+      <MessageInput store={streamingStore} {modelOptions} {modelCatalogueReady} selectedModelId={activeConversation?.selected_model_id ?? defaultModelId} sessionId={activeConversation?.id ?? null} {agentDefinitions} canSelectAgent={!activeConversation} bind:selectedAgentId {onNavigate} />
+    {/if}
+  </div>
 </section>
 
 <style>
   section { min-width: 0; overflow: auto; }
+
+  .composer-slot {
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
+    background: var(--paper);
+  }
 
   /* One mono line above the history: which session is in the channel, and the
      way to start another. Matches the conversation list's control register.
