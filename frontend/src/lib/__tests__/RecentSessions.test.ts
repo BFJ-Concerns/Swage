@@ -105,7 +105,7 @@ describe("RecentSessions schedule groups", () => {
 
   it("reports a run with neither flag as ended, not completed", async () => {
     component = await render([scheduleEntry({ has_interrupted_turn: true })]);
-    expect(document.querySelector(".group-summary")?.textContent).toContain("Interrupted");
+    expect(document.querySelector(".group-summary")?.textContent ?? "").toContain("Interrupted");
     unmount(component);
     document.body.replaceChildren();
 
@@ -115,8 +115,27 @@ describe("RecentSessions schedule groups", () => {
     expect(summary).not.toMatch(/complete|finished/i);
   });
 
-  it("remembers an expanded group across visits", async () => {
+  it("remembers each group's choice across visits", async () => {
+    const conversation: RecentSessionsEntry = {
+      source: { kind: "conversation", session: { ...run(99), id: "conv-1", origin: { kind: "direct" } as RecentSession["origin"] } },
+      last_activity: "2026-10-05T08:00:00Z",
+      automated: [run(100)],
+    };
+    component = await render([conversation]);
+    expect(childRows()).toBe(1);
+    document.querySelector<HTMLButtonElement>(".group-summary")?.click();
+    flushSync();
+    expect(childRows()).toBe(0);
+    unmount(component);
+    document.body.replaceChildren();
+
+    component = await render([conversation]);
+    expect(childRows()).toBe(0);
+    unmount(component);
+    document.body.replaceChildren();
+
     component = await render([scheduleEntry()]);
+    expect(childRows()).toBe(0);
     scheduleHeading().click();
     flushSync();
     expect(childRows()).toBe(11);
