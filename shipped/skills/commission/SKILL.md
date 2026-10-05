@@ -808,11 +808,15 @@ platform).
 The platform keeps every turn of this conversation in its local record,
 and the `session_transcript` tool returns it: every user and assistant
 message of this session, verbatim and in order, across resumes and
-compactions, paged by offset like the other read tools. Before dispatching
-the audit, read the whole transcript through that tool and write it
-unchanged to files under `<scratch>` — one JSON line per message as the
-tool returned it, split into files only where the tool's paging splits it
-— and pass those file paths as the workflow's transcript arguments.
+compactions. Call it with no arguments for this session from the start
+(`offset: 0`); it returns `messages` — each `{ seq, role, text,
+created_at }` — and, when more remain, `truncated: true` with a
+`follow_up` naming this tool and the next `offset`, the way `docs_read`
+pages a long document; call it again with that offset until no
+`follow_up` is returned. Before dispatching the audit, read the whole
+transcript that way and write it unchanged to files under `<scratch>` —
+one JSON line per message as the tool returned it, one file per page —
+and pass those file paths as the workflow's transcript arguments.
 
 Never reconstruct the transcript: a file assembled from remembered or
 selected user messages with the assistant's turns summarised is not the

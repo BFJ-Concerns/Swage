@@ -270,7 +270,7 @@ dispatching("verify", "re-briefed", "cross-family verification is independent by
 const verifyTurn = async (label, prompt) => {
   let result = await send(verifier, prompt, { schema: findingsSchema, label });
   if (result !== null) return result;
-  log(`[verify] ${label}: no reply from the verifier validated against the findings schema; its turns are in the run record under label ${label}. Re-briefing one fresh reader of the same envelope.`);
+  log(`[verify] ${label}: the verifier replied, but nothing it said validated against the findings schema; its turns are in the run record under label ${label}. Re-briefing one fresh reader of the same envelope.`);
   await close(verifier);
   verifier = await session(verifierEnvelope);
   dispatching(label, "re-briefed", "the previous reader exhausted the findings schema; a fresh reader of the same envelope replaces it, because a held worker cannot be re-shaped and a second attempt by the reader that drifted repeats the drift");

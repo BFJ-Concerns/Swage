@@ -1966,8 +1966,9 @@ fn build_gate_prompt(schedule: &Schedule, gate: &GateConfig, digest: &GateStateD
         // no state for. Drafting-tier wording, never a build unit's.
         if gate.observations.is_empty() {
             prompt.push_str(
-                "\nThis gate declares nothing to observe beyond the schedule's own record, so \
-                 the state below is that record alone. A criterion that depends on a file or \
+                "\nThis gate declares no files to observe, so the state below is the schedule's \
+                 own record — its recent runs, the session's latest message, the topic's open \
+                 workflow runs — and nothing from the workspace. A criterion that depends on a file or \
                  other workspace state cannot be decided here: do not infer it from the task \
                  text in either direction. For such a criterion answer \"skip\" and say in \
                  your reasoning which state was not observed — this outranks the run-when-in-\
@@ -2469,10 +2470,10 @@ mod tests {
         };
         let digest = GateStateDigest::default();
         let framed = build_gate_prompt(&schedule, &blind, &digest);
-        assert!(framed.contains("declares nothing to observe"), "{framed}");
+        assert!(framed.contains("declares no files to observe"), "{framed}");
         assert!(framed.contains("which state was not observed"));
         let seeing = build_gate_prompt(&schedule, &observed, &digest);
-        assert!(!seeing.contains("declares nothing to observe"));
+        assert!(!seeing.contains("declares no files to observe"));
     }
 
     /// A gate that declares files reads them under the session's trusted

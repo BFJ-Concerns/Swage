@@ -270,8 +270,10 @@ const findings = await agent(
     `shortest sufficient exact quote returned by search. Put the claim in ` +
     `findings only after knowledge_cite accepts the quote, and return with ` +
     `the claim its citation_id, the quote exactly as accepted, the ` +
-    `observation_id it was cited from, and the source string the search ` +
-    `hit carried (the origin URL or path). If citation validation refuses ` +
+    `observation_id it was cited from, and the hit's source (its origin ` +
+    `URL or path; null when the hit carries none - never invent one). ` +
+    `knowledge_cite takes the hit's observation_id, its version field, and ` +
+    `the exact quote. If citation validation refuses ` +
     `the quote, the claim does not go in findings - it goes in ` +
     `"withheld", with the reason it could not be supported (nothing in the ` +
     `corpus, evidence conflicts, the evidence is too thin). Never drop an ` +
@@ -298,7 +300,7 @@ const findings = await agent(
               citation_id: { type: "string" },
               quote: { type: "string" },
               observation_id: { type: "string" },
-              source: { type: "string" },
+              source: { type: ["string", "null"] },
             },
           },
         },
