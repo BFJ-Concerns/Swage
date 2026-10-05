@@ -507,8 +507,14 @@ and location approvals explicitly use a global location key.
 | `hitl.timeout` | `300` seconds (5 minutes) |
 | `hitl.timeout_policy` | `Reject` |
 
-Per-tool overrides are possible through a `require_approval` entry's
-`WithOptions` variant, which can set a custom `timeout` and
+Per-tool overrides use an object entry in `require_approval` instead of a
+plain string:
+
+```toml
+require_approval = ["write_file", { tool = "execute_command", timeout = 600 }]
+```
+
+The object form accepts `tool` (required), `timeout` (seconds), and
 `timeout_policy` for individual tools.
 
 **Timeout policies:**
@@ -624,7 +630,7 @@ alternatives = ["my-variant"]
 ```
 
 The script runs in a caged QuickJS runtime (no IO, no network, no timers)
-with three globals:
+with four globals:
 
 - `elements` — the turn's context elements, read-only:
   `[{ name, priority, source, tokenCount, messages }]` where `messages` is
@@ -647,8 +653,11 @@ add(byName.prompts);
 add(byName.history);
 ```
 
-Failure is fail-open: any script problem (missing file, syntax error,
-runtime error, empty output) falls back to the built-in default assembly.
+Failure is fail-open: a script error (missing file, syntax error, runtime
+error) falls back to the built-in default assembly. A script that runs
+without error but produces no output is not a failure — the baseline floor
+restores every element the default assembly would have carried, producing a
+complete composition with warnings naming each restored element.
 
 The other shipped locations (`context.working_norms`, `task.prompt`,
 `prompts.memory_curator`) have their alternatives defined in the gateway
