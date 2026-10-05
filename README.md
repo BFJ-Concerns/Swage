@@ -71,6 +71,10 @@ isolation?"* Approving runs that turn unsandboxed and records the degradation
 in the audit trail; rejecting fails the turn. A scheduled or delegated turn
 has nobody to ask, so it fails outright.
 
+The failure reason names the cause. A missing `bwrap` is one cause, not the
+only one: when the sandbox exits during setup, the reason quotes its own
+error output, such as a failure to connect to the gateway's IPC socket.
+
 Setting `sandbox.allow_degraded_execution = true` permits unsandboxed
 execution after a sandbox setup failure without that approval. It is not
 needed when sandboxing is disabled by configuration.
