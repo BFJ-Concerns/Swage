@@ -159,7 +159,7 @@ async fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
 /// zombies. Zombie processes have terminated and are awaiting parent `wait()`;
 /// they no longer serve requests and should be treated as dead. If the proc
 /// entry is absent the process is fully gone.
-fn is_pid_dead(pid: u32) -> bool {
+pub(super) fn is_pid_dead(pid: u32) -> bool {
     #[cfg(target_os = "linux")]
     {
         let status_path = format!("/proc/{pid}/status");

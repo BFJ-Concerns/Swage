@@ -20,8 +20,11 @@
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
-use crate::support::{LiveTestGateway, WsStream, journey, live_http_json, ws_collect_through};
+use crate::support::{
+    LiveTestGateway, WsStream, journey, live_http_json, ws_collect_through, ws_collect_until,
+};
 
 use async_trait::async_trait;
 use axum::http::StatusCode;
@@ -46,6 +49,9 @@ use swage_storage::{SqliteStorage, store::TopicStore};
 
 struct MockProvider {
     rounds: std::sync::Mutex<Vec<Vec<StreamChunk>>>,
+    detached_comparison: bool,
+    parent_started: std::sync::atomic::AtomicBool,
+    child_release: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl MockProvider {
@@ -54,6 +60,9 @@ impl MockProvider {
     fn new(rounds: Vec<Vec<StreamChunk>>) -> Self {
         Self {
             rounds: std::sync::Mutex::new(rounds),
+            detached_comparison: false,
+            child_release: None,
+            parent_started: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -80,8 +89,58 @@ impl LlmProvider for MockProvider {
 
     fn stream(
         &self,
-        _request: CompletionRequest,
+        request: CompletionRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        if self.detached_comparison {
+            let is_child = request
+                .messages
+                .iter()
+                .any(|m| m.text_content() == "Delegated Task\n\nCompare");
+            let chunks = if is_child {
+                vec![
+                    StreamChunk::Delta {
+                        content: "The detached child ends at a".into(),
+                    },
+                    StreamChunk::Done {
+                        finish_reason: Some(FinishReason::Length),
+                    },
+                ]
+            } else if !self
+                .parent_started
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                vec![
+                    StreamChunk::ToolUse {
+                        call_id: "detached-child".into(),
+                        name: "delegate".into(),
+                        arguments: json!({"target_agent":"researcher", "task":"Compare", "completion_mode":"detach"}),
+                    },
+                    StreamChunk::Done {
+                        finish_reason: Some(FinishReason::ToolUse),
+                    },
+                ]
+            } else {
+                vec![
+                    StreamChunk::Delta {
+                        content: "Parent continued".into(),
+                    },
+                    StreamChunk::Done {
+                        finish_reason: Some(FinishReason::Stop),
+                    },
+                ]
+            };
+            if is_child && let Some(release) = &self.child_release {
+                let release = release.clone();
+                return Box::pin(
+                    futures::stream::once(async move {
+                        let _permit = release.acquire().await.unwrap();
+                        chunks
+                    })
+                    .flat_map(futures::stream::iter),
+                );
+            }
+            return Box::pin(futures::stream::iter(chunks));
+        }
         let mut rounds = self.rounds.lock().unwrap();
         let chunks = if rounds.is_empty() {
             vec![StreamChunk::Done {
@@ -762,4 +821,374 @@ async fn workspace_gate_allows_file_read_with_trusted_read_attachment() {
         );
     })
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_limit_marks_an_ordinary_reply_incomplete_live_and_on_reload() {
+    for (finish, schema) in [
+        (FinishReason::Length, None),
+        (FinishReason::Length, Some(json!({"type": "object"}))),
+        (FinishReason::Stop, None),
+    ] {
+        let limited = finish == FinishReason::Length;
+        let provider = MockProvider::new(vec![vec![
+            StreamChunk::Delta {
+                content: "The comparison ends at a".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(finish),
+            },
+        ]]);
+        let mut config = ResolvedConfig::default();
+        config.output.schema = schema;
+        let (gateway, _) = start_test_server_with_config(
+            provider,
+            config,
+            swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        )
+        .await;
+        let (_, created) = http(&gateway, "POST", "/api/conversations").await;
+        let id = created["id"].as_str().unwrap();
+        let (mut sink, mut stream) = connect_ws(gateway.address, id).await;
+        ws_send(
+            &mut sink,
+            json!({"type":"send_message", "content":"Compare"}),
+        )
+        .await;
+        let mut events =
+            ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(10)).await;
+        let terminal = events
+            .iter()
+            .find(|e| e["type"] == "turn_complete")
+            .unwrap();
+        assert_eq!(
+            terminal["incomplete_reason"].as_str(),
+            limited.then_some("length"),
+            "live completion must carry the output-limit cause"
+        );
+        // Recorded messages arrive on the broadcast channel, independently
+        // of the turn stream; completion is not a broadcast-drained barrier.
+        if limited && !events.iter().any(|e| e["type"] == "message_appended") {
+            events.extend(
+                ws_collect_until(&mut stream, "message_appended", Duration::from_secs(10)).await,
+            );
+        }
+        let (_, detail) = http(&gateway, "GET", &format!("/api/conversations/{id}")).await;
+        let messages = detail["messages"].as_array().unwrap();
+        let reply = messages.iter().find(|m| m["role"] == "assistant").unwrap();
+        assert_eq!(reply["content"], "The comparison ends at a");
+        assert_eq!(
+            reply["turn_state"],
+            if limited { "incomplete" } else { "completed" }
+        );
+        let accounts: Vec<_> = messages
+            .iter()
+            .filter(|m| m["origin"] == "platform")
+            .collect();
+        assert_eq!(accounts.len(), usize::from(limited));
+        if limited {
+            assert!(
+                accounts[0]["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("output token limit reached (length)")
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e["type"] == "message_appended"
+                        && e["message"]["id"] == accounts[0]["id"]),
+                "the durable account must reach the open view"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_limit_marks_a_delegated_reply_and_parent_event_incomplete() {
+    use swage_storage::store::{
+        AgentDefinitionStore, MessageStore, ThreadStore, ToolCallStore, TurnStore,
+    };
+    let provider = MockProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "child-call".into(),
+                name: "delegate".into(),
+                arguments: json!({"target_agent":"researcher", "task":"Compare"}),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::ToolUse),
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "The child ends at a".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Length),
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "Parent received partial work".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ],
+    ]);
+    let (gateway, storage) = start_test_server_with_config(
+        provider,
+        ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(
+            swage_tool::delegate::DelegateTool,
+        )
+            as Arc<dyn swage_gateway::tool::Tool>]),
+    )
+    .await;
+    storage
+        .upsert_agent_definition(swage_storage::NewAgentDefinition {
+            id: "researcher".into(),
+            topic_id: None,
+            display_name: "Researcher".into(),
+            description: String::new(),
+            instructions: String::new(),
+            model_id: None,
+            tool_permissions: None,
+            skills: vec![],
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .unwrap();
+    let (_, created) = http(&gateway, "POST", "/api/conversations").await;
+    let id = created["id"].as_str().unwrap();
+    let (mut sink, mut stream) = connect_ws(gateway.address, id).await;
+    ws_send(
+        &mut sink,
+        json!({"type":"send_message", "content":"Delegate comparison"}),
+    )
+    .await;
+    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(10)).await;
+    let event = events
+        .iter()
+        .find(|e| e["type"] == "delegation_completed")
+        .unwrap_or_else(|| panic!("missing child completion: {events:?}"));
+    assert_eq!(
+        event["incomplete_reason"], "length",
+        "the parent event must identify the child's incomplete answer"
+    );
+    assert_eq!(event["success"], false);
+    let threads = storage
+        .list_by_session(uuid::Uuid::parse_str(id).unwrap())
+        .await
+        .unwrap();
+    let parent_turn = storage
+        .list_turns_by_thread(threads[0].id)
+        .await
+        .unwrap()
+        .remove(0);
+    let calls = storage
+        .list_tool_calls_by_turn(parent_turn.id)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_str(calls[0].result.as_deref().unwrap()).unwrap();
+    assert_eq!(payload["incomplete_reason"], "length");
+    let child_thread = uuid::Uuid::parse_str(payload["child_thread_id"].as_str().unwrap()).unwrap();
+    let turns = storage.list_turns_by_thread(child_thread).await.unwrap();
+    assert_eq!(turns[0].state.to_string(), "incomplete");
+    assert!(turns[0].completed_at.is_some());
+    storage
+        .update_turn_state(turns[0].id, swage_storage::TurnState::Processing)
+        .await
+        .unwrap();
+    assert_eq!(
+        storage
+            .get_turn(turns[0].id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state
+            .to_string(),
+        "incomplete",
+        "an incomplete turn must remain terminal"
+    );
+    assert_eq!(
+        turns[0].assistant_response.as_deref(),
+        Some("The child ends at a")
+    );
+    let child_messages = storage.list_messages_by_thread(child_thread).await.unwrap();
+    assert!(
+        child_messages
+            .iter()
+            .any(|m| m.origin == swage_storage::MessageOrigin::Platform
+                && m.content.contains("output token limit reached (length)")),
+        "child's record must retain its cause"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn output_limit_marks_the_detached_child_and_parent_notice_incomplete() {
+    use swage_storage::store::{AgentDefinitionStore, AgentMessageStore, ToolCallStore, TurnStore};
+    let mut provider = MockProvider::new(vec![]);
+    provider.detached_comparison = true;
+    let child_release = Arc::new(tokio::sync::Semaphore::new(0));
+    provider.child_release = Some(child_release.clone());
+    let (gateway, storage) = start_test_server_with_config(
+        provider,
+        ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(
+            swage_tool::delegate::DelegateTool,
+        )
+            as Arc<dyn swage_gateway::tool::Tool>]),
+    )
+    .await;
+    storage
+        .upsert_agent_definition(swage_storage::NewAgentDefinition {
+            id: "researcher".into(),
+            topic_id: None,
+            display_name: "Researcher".into(),
+            description: String::new(),
+            instructions: String::new(),
+            model_id: None,
+            tool_permissions: None,
+            skills: vec![],
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .unwrap();
+    let (_, created) = http(&gateway, "POST", "/api/conversations").await;
+    let id = created["id"].as_str().unwrap();
+    let (mut sink, mut stream) = connect_ws(gateway.address, id).await;
+    ws_send(
+        &mut sink,
+        json!({"type":"send_message", "content":"Delegate comparison"}),
+    )
+    .await;
+    let _ = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(10)).await;
+    let (_, parent) = http(&gateway, "GET", &format!("/api/conversations/{id}")).await;
+    let parent_thread = uuid::Uuid::parse_str(parent["root_thread_id"].as_str().unwrap()).unwrap();
+    let parent_turns = storage.list_turns_by_thread(parent_thread).await.unwrap();
+    let calls = storage
+        .list_tool_calls_by_turn(parent_turns[0].id)
+        .await
+        .unwrap();
+    let detached: Value = serde_json::from_str(calls[0].result.as_deref().unwrap()).unwrap();
+    let open_child_id = detached["child_session_id"].as_str().unwrap();
+    let (mut child_sink, mut child_stream) = connect_ws(gateway.address, open_child_id).await;
+    // The upgrade can return before the server installs its broadcast
+    // listener. A refused frame's response proves the receive loop is ready
+    // without starting a child turn or supplying its completion state.
+    ws_send(&mut child_sink, json!({"type": "connection_ready_probe"})).await;
+    let _ = ws_collect_until(&mut child_stream, "error", Duration::from_secs(10)).await;
+    child_release.add_permits(1);
+    let mut child_events = Vec::new();
+    // The child view is connected before its provider can finish. The
+    // deadline only bounds observation; missing delivery fails our assertion.
+    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(event) = crate::support::ws_recv_lenient(&mut child_stream).await {
+            let is_account =
+                event["type"] == "message_appended" && event["message"]["origin"] == "platform";
+            child_events.push(event);
+            if is_account {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(
+        child_events.iter().any(|e| e["type"] == "message_appended"
+            && e["message"]["origin"] == "assistant"
+            && e["message"]["turn_state"] == "incomplete"
+            && e["message"]["content"] == "The detached child ends at a"),
+        "the open child must receive its incomplete reply: {child_events:?}"
+    );
+    assert!(
+        child_events.iter().any(|e| e["type"] == "message_appended"
+            && e["message"]["origin"] == "platform"
+            && e["message"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("output token limit reached (length)")),
+        "the open child must receive its cause: {child_events:?}"
+    );
+    let results = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let results = storage.list_pending_for_agent("gateway").await.unwrap();
+            if results
+                .iter()
+                .any(|r| r.kind == swage_core::MessageKind::Result)
+            {
+                break results;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached result must settle");
+    let result = results
+        .iter()
+        .find(|r| r.kind == swage_core::MessageKind::Result)
+        .unwrap();
+    assert_eq!(result.payload["incomplete_reason"], "length");
+    let child_id = result.payload["child_session_id"].as_str().unwrap();
+    let (_, child) = http(&gateway, "GET", &format!("/api/conversations/{child_id}")).await;
+    assert!(
+        child["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["origin"] == "platform"
+                && m["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("output token limit reached (length)")),
+        "child's conversation must expose the limit cause: {child:?}"
+    );
+    let child_reply = child["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .unwrap();
+    assert_eq!(child_reply["turn_state"], "incomplete");
+    assert_eq!(child_reply["content"], "The detached child ends at a");
+    ws_send(
+        &mut sink,
+        json!({"type":"send_message", "content":"Continue"}),
+    )
+    .await;
+    let mut events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(10)).await;
+    if !events.iter().any(|e| e["type"] == "message_appended") {
+        events.extend(
+            ws_collect_until(&mut stream, "message_appended", Duration::from_secs(10)).await,
+        );
+    }
+    let (_, detail) = http(&gateway, "GET", &format!("/api/conversations/{id}")).await;
+    let notice = detail["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["origin"] == "delegation")
+        .expect("parent must retain child's notice");
+    assert!(
+        notice["content"]
+            .as_str()
+            .unwrap()
+            .contains("incomplete (length)"),
+        "parent must label incomplete work: {notice:?}"
+    );
+    assert!(
+        notice["content"]
+            .as_str()
+            .unwrap()
+            .contains("The detached child ends at a")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| e["type"] == "message_appended" && e["message"]["id"] == notice["id"]),
+        "parent's notice must reach its open view"
+    );
 }

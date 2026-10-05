@@ -669,6 +669,7 @@ impl Agent {
         let mut total_tool_calls: u32 = 0;
         let mut tool_position: i32 = 0;
         let mut round = 0usize;
+        let mut incomplete_reason;
 
         'outer: loop {
             // Check cancellation eagerly before starting each round. This
@@ -705,13 +706,14 @@ impl Agent {
                     round,
                 )
                 .await?;
+            incomplete_reason = round_outcome.incomplete_reason;
             let round_text = round_outcome.text;
             let round_tool_calls = round_outcome.tool_calls;
             let round_reasoning = round_outcome.reasoning;
             accumulated.push_str(&round_text);
 
-            // No tool calls → LLM produced a final text response for this round.
-            if round_tool_calls.is_empty() {
+            // An output limit settles partial work; otherwise no tool calls means a final response.
+            if incomplete_reason.is_some() || round_tool_calls.is_empty() {
                 break 'outer;
             }
 
@@ -878,6 +880,22 @@ impl Agent {
                         .unwrap_or_else(|_| Value::String(result_content.clone()));
                     let result_metadata = extract_tool_result_metadata(&result_value);
 
+                    // These tools can return a structured result successfully even
+                    // when the operation failed. Keep that result and the model's
+                    // feedback intact, but record the operation's outcome.
+                    let status = if status == "success"
+                        && match call.name.as_str() {
+                            "shell" => result_value["exit_code"]
+                                .as_i64()
+                                .is_some_and(|code| code != 0),
+                            "workflow_run" => result_value["state"] == "failed",
+                            _ => false,
+                        } {
+                        "error".to_string()
+                    } else {
+                        status
+                    };
+
                     // PostToolUse hook — informational, fire-and-forget.
                     self.dispatch_post_tool_use(&call.name, &call.arguments, &result_value)
                         .await;
@@ -1015,7 +1033,9 @@ impl Agent {
         // When an output schema is configured, extract JSON from the accumulated
         // response, validate it, and retry the LLM call if validation fails. Each
         // retry streams tokens independently. Without a schema, this block is skipped.
-        let structured_output = if let Some(ref schema_value) = self.config.output_schema {
+        let structured_output = if incomplete_reason.is_some() {
+            None
+        } else if let Some(ref schema_value) = self.config.output_schema {
             // Compile once — AgentConfig::validate() already proved this succeeds.
             let validator = swage_core::json_schema_validator(schema_value)
                 .expect("schema was validated at config time");
@@ -1144,7 +1164,11 @@ impl Agent {
                         round + attempt as usize,
                     )
                     .await?;
+                incomplete_reason = retry_outcome.incomplete_reason;
                 accumulated = retry_outcome.text;
+                if incomplete_reason.is_some() {
+                    break None;
+                }
             }
         } else {
             // No output schema configured — skip validation entirely.
@@ -1180,7 +1204,29 @@ impl Agent {
             })
             .await?;
 
-        // 11. Update turn: response text, token counts, state → Completed.
+        // Persist the cause beside the partial response, including delegated
+        // turns whose events never pass through the gateway projection loop.
+        let incomplete_account = if let Some(reason) = &incomplete_reason {
+            Some(Box::new(
+                self.storage
+                    .append_message(swage_storage::model::AppendMessage {
+                        thread_id,
+                        turn_id: Some(turn.id),
+                        role: Role::User,
+                        origin: swage_storage::MessageOrigin::Platform,
+                        content: format!(
+                            "Response incomplete: output token limit reached ({reason})."
+                        ),
+                        attachments: Vec::new(),
+                        agent_id: self.config.agent_id.clone(),
+                    })
+                    .await?,
+            ))
+        } else {
+            None
+        };
+
+        // 11. Store response, usage and the terminal state.
         self.storage.update_response(turn.id, &safe_content).await?;
         if usage_reported {
             self.storage
@@ -1192,7 +1238,14 @@ impl Agent {
                 .await?;
         }
         self.storage
-            .update_turn_state(turn.id, TurnState::Completed)
+            .update_turn_state(
+                turn.id,
+                if incomplete_reason.is_some() {
+                    TurnState::Incomplete
+                } else {
+                    TurnState::Completed
+                },
+            )
             .await?;
 
         // 12. Thread → Idle.
@@ -1202,6 +1255,8 @@ impl Agent {
 
         // 13. Emit TurnCompleted — final event, signals the turn is done.
         let _ = event_tx.send(AgentEvent::TurnCompleted {
+            incomplete_reason: incomplete_reason.clone(),
+            incomplete_account,
             turn_id: turn.id,
             input_tokens: total_input_tokens,
             output_tokens: total_output_tokens,
@@ -1211,6 +1266,7 @@ impl Agent {
 
         // 14. Return outbound message.
         Ok(OutboundMessage {
+            incomplete_reason,
             response: safe_content,
             turn_id: turn.id,
             input_tokens: total_input_tokens,
@@ -1247,6 +1303,7 @@ impl Agent {
         let mut text = String::new();
         let mut tool_calls = Vec::new();
         let mut reasoning = Vec::new();
+        let mut incomplete_reason = None;
 
         loop {
             tokio::select! {
@@ -1268,7 +1325,13 @@ impl Agent {
                 }
                 chunk = stream.next() => {
                     match chunk {
-                        None | Some(StreamChunk::Done { .. }) => break,
+                        None => break,
+                        Some(StreamChunk::Done { finish_reason }) => {
+                            if finish_reason == Some(swage_core::FinishReason::Length) {
+                                incomplete_reason = Some("length".to_owned());
+                            }
+                            break;
+                        }
                         Some(StreamChunk::Delta { content }) => {
                             text.push_str(&content);
                             let _ = event_tx.send(AgentEvent::Token { content });
@@ -1364,6 +1427,7 @@ impl Agent {
         });
 
         Ok(StreamRoundOutcome {
+            incomplete_reason,
             text,
             tool_calls,
             reasoning,
@@ -1372,6 +1436,7 @@ impl Agent {
 }
 
 struct StreamRoundOutcome {
+    incomplete_reason: Option<String>,
     text: String,
     tool_calls: Vec<ToolCall>,
     reasoning: Vec<ToolReplayReasoning>,
@@ -2101,9 +2166,14 @@ impl Agent {
 
                 match delegation_result {
                     Ok(crate::delegation::DelegationOutcome::Completed(result)) => {
+                        let incomplete_reason = result
+                            .get("incomplete_reason")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned);
                         let _ = event_tx.send(AgentEvent::DelegationCompleted {
+                            incomplete_reason: incomplete_reason.clone(),
                             target_agent_id: target_agent_id.clone(),
-                            success: true,
+                            success: incomplete_reason.is_none(),
                         });
                         let result_str = serde_json::to_string(&result).unwrap_or_default();
                         Ok((result_str, false, "success".to_string()))
@@ -2118,6 +2188,7 @@ impl Agent {
                     }
                     Err(e) => {
                         let _ = event_tx.send(AgentEvent::DelegationCompleted {
+                            incomplete_reason: None,
                             target_agent_id: target_agent_id.clone(),
                             success: false,
                         });

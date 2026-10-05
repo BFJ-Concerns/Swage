@@ -68,6 +68,7 @@
   let isPersisting = $state(false);
   let hasLoadedSettings = $state(false);
   let lastPersistedSettingsFingerprint = "";
+  let lastSavedSearch: SettingsResponse["tool_runtime"]["search"] = null;
   let hasInvalidBundlesJson = $state(false);
   let hasInvalidApprovalJson = $state(false);
   let status = $state("");
@@ -82,6 +83,7 @@
   onMount(async () => {
     try {
       settings = await fetchSettings();
+      lastSavedSearch = settings.tool_runtime.search ? { ...settings.tool_runtime.search } : null;
       savedProviderIds = new Set(Object.keys(settings.providers));
       lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
       hasLoadedSettings = true;
@@ -112,6 +114,14 @@
     settings.default_provider = replacement ? settings.models[replacement].provider_id : "";
   }
 
+  function searchIsIncomplete(search: SettingsResponse["tool_runtime"]["search"]): boolean {
+    return search != null && (!search.provider_type.trim() || !search.base_url.trim());
+  }
+
+  function toolRuntimeForSave(runtime: SettingsResponse["tool_runtime"]): SettingsResponse["tool_runtime"] {
+    return { ...runtime, search: searchIsIncomplete(runtime.search) ? lastSavedSearch : runtime.search };
+  }
+
   function settingsFingerprint(): string | null {
     if (!settings) return null;
     return JSON.stringify({
@@ -120,7 +130,7 @@
       models: settings.models,
       default_model: settings.default_model,
       generation_presets: settings.generation_presets,
-      tool_runtime: settings.tool_runtime,
+      tool_runtime: toolRuntimeForSave(settings.tool_runtime),
       tool_permissions: settings.tool_permissions,
       hitl: settings.hitl,
       sandbox: settings.sandbox,
@@ -138,6 +148,7 @@
     if (!settings) return false;
     error = null;
     status = "";
+    const holdSearchDraft = searchIsIncomplete(settings.tool_runtime.search);
     if (hasInvalidBundlesJson || hasInvalidApprovalJson) {
       error = "Fix the invalid automation JSON before saving.";
       return false;
@@ -159,12 +170,16 @@
     try {
       isPersisting = true;
       normaliseDefaultModel();
-      settings = await saveSettings(settings);
+      const saved = await saveSettings({ ...settings, tool_runtime: toolRuntimeForSave(settings.tool_runtime) });
+      const searchDraft = settings.tool_runtime.search;
+      settings = saved;
+      lastSavedSearch = saved.tool_runtime.search ? { ...saved.tool_runtime.search } : null;
       savedProviderIds = new Set(Object.keys(settings.providers));
       // The server never echoes raw credentials; clear the input so the
       // password field returns to the "Stored credential" placeholder.
       for (const provider of Object.values(settings.providers)) provider.api_key = "";
       lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
+      if (holdSearchDraft) settings.tool_runtime.search = searchDraft;
       await onSettingsSaved?.();
       status =
         options.message ??

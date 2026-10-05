@@ -17,8 +17,10 @@ use swage_client::{
 /// Run the `swage gateway status` command.
 ///
 /// Exit semantics:
-/// - `Ok(())` (exit 0): gateway is running and health check passed
-/// - `Err(_)` (exit non-zero): not running, stale, or unresponsive
+/// - `Ok(())` (exit 0): gateway is healthy, or no running gateway was found
+///   when runtime metadata is absent
+/// - `Err(_)` (exit non-zero): stale metadata, an unresponsive process, or a
+///   metadata/configuration read failure
 pub async fn run() -> Result<(), ClientError> {
     let installed = super::install::load_install_config()?;
     let meta = match RuntimeMetadata::load() {
@@ -33,9 +35,7 @@ pub async fn run() -> Result<(), ClientError> {
                 Some(metadata) => metadata,
                 None => {
                     eprintln!("Gateway is not running");
-                    return Err(ClientError::GatewayNotRunning {
-                        reason: "no metadata file found".to_string(),
-                    });
+                    return Ok(());
                 }
             }
         }

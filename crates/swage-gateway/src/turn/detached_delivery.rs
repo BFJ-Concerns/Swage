@@ -63,7 +63,14 @@ pub(super) async fn deliver_detached_results(
 pub(super) fn render_delegation_result(result: &swage_storage::model::AgentMessage) -> String {
     let sender = &result.sender_agent_id;
     let mut text = match result.payload.get("response").and_then(|v| v.as_str()) {
-        Some(response) => format!("Delegated agent {sender} completed:\n{response}"),
+        Some(response) => match result
+            .payload
+            .get("incomplete_reason")
+            .and_then(|v| v.as_str())
+        {
+            Some(reason) => format!("Delegated agent {sender} incomplete ({reason}):\n{response}"),
+            None => format!("Delegated agent {sender} completed:\n{response}"),
+        },
         None => match result.payload.get("error").and_then(|v| v.as_str()) {
             Some(error) => format!("Delegated agent {sender} failed: {error}"),
             None => format!(
