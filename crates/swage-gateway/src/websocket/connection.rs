@@ -300,21 +300,25 @@ mod tests {
     use super::*;
     use crate::thread_selection::resolve_thread_for_session;
     use crate::turn::TurnInput;
-    use crate::turn::tests::make_state_with_session;
     use swage_core::{FinishReason, StreamChunk};
 
     #[tokio::test]
     async fn ready_queue_and_turn_events_reach_the_socket_in_emission_order() {
         // Repeat with both inputs ready: an unbiased merge must not get lucky.
         for _ in 0..64 {
-            let (state, session_id) = make_state_with_session(vec![
-                StreamChunk::Delta {
-                    content: "next reply".into(),
-                },
-                StreamChunk::Done {
-                    finish_reason: Some(FinishReason::Stop),
-                },
-            ])
+            let root = tempfile::tempdir().unwrap();
+            let (state, session_id) = crate::turn::tests::make_state_with_storage_and_root(
+                vec![
+                    StreamChunk::Delta {
+                        content: "next reply".into(),
+                    },
+                    StreamChunk::Done {
+                        finish_reason: Some(FinishReason::Stop),
+                    },
+                ],
+                Arc::new(crate::turn::tests::MockStorage::new()),
+                Some(root.path().to_path_buf()),
+            )
             .await;
             let thread = resolve_thread_for_session(state.storage.as_ref(), session_id, None)
                 .await

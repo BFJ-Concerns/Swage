@@ -6130,7 +6130,7 @@ pub(crate) async fn make_state_with_storage(
     make_state_with_storage_and_root(provider_chunks, storage, None).await
 }
 
-async fn make_state_with_storage_and_root(
+pub(crate) async fn make_state_with_storage_and_root(
     provider_chunks: Vec<StreamChunk>,
     storage: Arc<MockStorage>,
     config_root: Option<std::path::PathBuf>,
