@@ -96,7 +96,8 @@ async fn stored_origin(
     prefix: &str,
 ) -> swage_storage::MessageOrigin {
     let thread = storage.list_by_session(session_id).await.unwrap()[0].clone();
-    let rows: Vec<_> = storage.list_messages_by_thread(thread.id)
+    let rows: Vec<_> = storage
+        .list_messages_by_thread(thread.id)
         .await
         .unwrap()
         .into_iter()
@@ -162,18 +163,28 @@ async fn a_delegated_brief_is_recorded_and_projected_as_the_delegations() {
 
     let child = storage.list_sessions_by_agent_id("agent-b").await.unwrap()[0].clone();
     let messages = conversation_messages(&client, address, child.id).await;
-    let brief = projected(&messages, "Delegated Task\n\nSummarise the quarterly report");
-    assert_eq!(brief["role"], "user", "the brief still reaches the model as its task");
+    let brief = projected(
+        &messages,
+        "Delegated Task\n\nSummarise the quarterly report",
+    );
+    assert_eq!(
+        brief["role"], "user",
+        "the brief still reaches the model as its task"
+    );
     assert_eq!(brief["origin"], "delegation");
     assert_eq!(
-        stored_origin(&storage, child.id, "Delegated Task\n\nSummarise the quarterly report").await,
+        stored_origin(
+            &storage,
+            child.id,
+            "Delegated Task\n\nSummarise the quarterly report"
+        )
+        .await,
         swage_storage::MessageOrigin::Delegation
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_delegated_completion_notice_is_the_delegations_and_only_typed_prompts_are_the_persons()
-{
+async fn a_delegated_completion_notice_is_the_delegations_and_only_typed_prompts_are_the_persons() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let state = live_state(&storage, vec![text_round("noted")]);
     let router = swage_agent::MessageRouter::new(storage.clone() as Arc<dyn Storage>, None);
@@ -239,7 +250,12 @@ async fn a_delegated_completion_notice_is_the_delegations_and_only_typed_prompts
     let notice = projected(&messages, "Delegated agent researcher completed:");
     assert_eq!(notice["origin"], "delegation");
     assert_eq!(
-        stored_origin(&storage, session_id, "Delegated agent researcher completed:").await,
+        stored_origin(
+            &storage,
+            session_id,
+            "Delegated agent researcher completed:"
+        )
+        .await,
         swage_storage::MessageOrigin::Delegation
     );
     // One prompt typed, so exactly one message is the person's.
@@ -247,7 +263,11 @@ async fn a_delegated_completion_notice_is_the_delegations_and_only_typed_prompts
         .iter()
         .filter(|message| message["origin"] == "user")
         .collect();
-    assert_eq!(persons.len(), 1, "only the typed prompt is the person's: {messages:?}");
+    assert_eq!(
+        persons.len(),
+        1,
+        "only the typed prompt is the person's: {messages:?}"
+    );
     assert_eq!(persons[0]["content"], "What did the researcher find?");
 }
 
@@ -290,7 +310,10 @@ async fn a_fresh_schedule_runs_prompt_is_recorded_and_projected_as_the_schedules
             .contains("first run of this schedule"),
         "the prompt carries its generated previous-run section: {prompt}"
     );
-    assert_eq!(prompt["role"], "user", "the prompt still reaches the model as its task");
+    assert_eq!(
+        prompt["role"], "user",
+        "the prompt still reaches the model as its task"
+    );
     assert_eq!(prompt["origin"], "schedule");
     assert_eq!(
         stored_origin(&storage, session_id, "Check the queue.").await,
