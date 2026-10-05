@@ -17,7 +17,8 @@ use super::{
     ChatMessage, GatewayDelegationHandler, GatewayError, SandboxGuard, ServerEvent, ToolDispatcher,
     TurnRequest, TurnState, Uuid, WorkflowAgentCallResolution, build_approval_registrar,
     build_permission_config, mpsc, record_agent_call_attempt_before_execution,
-    record_effort_snapshot, resolve_model_catalogue_entry, shutdown_sandbox_guard,
+    record_effort_snapshot, record_terminal_state_and_release, resolve_model_catalogue_entry,
+    shutdown_sandbox_guard,
 };
 use swage_agent::OutboundMessage;
 
@@ -218,23 +219,18 @@ pub(super) async fn launch_turn_runtime(
                     code: "agent_construction_error".to_string(),
                     message,
                 });
-                if let Err(update_error) = state
-                    .storage
-                    .update_turn_state(prepared_turn_id, TurnState::Failed)
-                    .await
-                {
-                    tracing::warn!(
-                        turn_id = %prepared_turn_id,
-                        error = %update_error,
-                        "failed to mark turn failed after agent construction error"
-                    );
-                }
                 shutdown_sandbox_guard(
                     sandbox_guard,
                     "failed to shut down turn sandbox after agent construction error",
                 )
                 .await;
-                state.active_turns.lock().await.remove(&session_id);
+                record_terminal_state_and_release(
+                    state,
+                    session_id,
+                    prepared_turn_id,
+                    TurnState::Failed,
+                )
+                .await?;
                 return Err(GatewayError::WebSocketError(format!(
                     "agent construction failed: {error}"
                 )));

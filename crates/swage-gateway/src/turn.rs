@@ -880,8 +880,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
         tracing::warn!(error = %error, "failed to shut down turn sandbox");
     }
 
-    // Cleanup: remove the cancellation token regardless of outcome.
-    release_active_turn(state, session_id).await;
+    release_active_turn(state, session_id, prepared_turn_id).await?;
 
     // A turn that ended on its own hands the session to whatever queued
     // behind it; a stopped turn leaves the queue standing (C60).
