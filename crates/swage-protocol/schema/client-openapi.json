@@ -2001,6 +2001,28 @@
         ],
         "type": "string"
       },
+      "GateWarning": {
+        "description": "A flag raised when a gate is declared: something about the declaration\nthe operator should know before the first fire. Derived from the gate as\nstored, never persisted, so every surface that shows the schedule shows\nthe same flags.",
+        "oneOf": [
+          {
+            "description": "Criteria were declared but nothing is observed, so a criterion about\na file or other workspace state can never be decided against that\nstate: the gate skips such a criterion and names what it did not\nobserve, rather than guessing at every fire.",
+            "properties": {
+              "kind": {
+                "const": "unobserved_criteria",
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "message"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "GenerationPresetConfig": {
         "additionalProperties": false,
         "properties": {
@@ -3762,6 +3784,13 @@
                 "type": "null"
               }
             ]
+          },
+          "gate_warnings": {
+            "description": "Declaration-time flags on the gate, derived from it as stored; empty\nwhen there is no gate or nothing to flag.",
+            "items": {
+              "$ref": "#/components/schemas/GateWarning"
+            },
+            "type": "array"
           },
           "id": {
             "format": "uuid",

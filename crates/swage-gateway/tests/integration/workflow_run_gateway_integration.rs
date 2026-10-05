@@ -165,7 +165,7 @@ impl LlmProvider for ResearchSweepProvider {
             )
         } else if prompt.contains("Deliver research findings.") {
             text_output(format!(
-                r#"{{"findings":[{{"claim":"The landed source supports the purpose.","citation_id":"{landed_id}"}}],"withheld":[{{"claim":"The comparison is conclusive.","reason":"The comparison source was unreachable."}}]}}"#
+                r#"{{"findings":[{{"claim":"The landed source supports the purpose.","citation_id":"{landed_id}","quote":"The landed source supports the purpose.","observation_id":"{landed_id}","source":"https://example.test/landed"}}],"withheld":[{{"claim":"The comparison is conclusive.","reason":"The comparison source was unreachable."}}]}}"#
             ))
         } else {
             panic!("unexpected research-sweep stage: {prompt}");
