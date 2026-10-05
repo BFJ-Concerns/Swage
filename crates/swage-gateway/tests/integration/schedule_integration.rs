@@ -2485,3 +2485,72 @@ async fn gate_update_tristate_round_trips_over_the_wire() {
     assert_eq!(set["gate"]["model"], GATE_MODEL);
     assert_eq!(set["gate"]["criteria"], "revised");
 }
+
+#[tokio::test]
+async fn agent_change_is_refused_without_mutating_the_schedule_api() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(
+        &dir.path().join("agent-change.db"),
+        MockProvider::new(vec![]),
+    );
+    let router = build_router(state.clone());
+    let (status, created) = request_json(
+        &router,
+        "POST",
+        "/api/schedules",
+        Some(json!({
+            "message": "original task", "spec": {"kind": "interval", "every": "every 1 hours"},
+            "session": {"policy": "fresh", "agent_id": "gateway"},
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let schedule_id = created["id"].as_str().unwrap();
+    let uri = format!("/api/schedules/{schedule_id}");
+    let (status, updated) = request_json(
+        &router,
+        "PUT",
+        &uri,
+        Some(json!({
+            "message": "ordinary edit", "spec": {"kind": "interval", "every": "every 2 hours"},
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["message"], "ordinary edit");
+    assert_eq!(updated["spec"]["every"], "every 2 hours");
+    let before = state
+        .storage
+        .get_schedule(schedule_id.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let (status, body) = request_json(
+        &router,
+        "PUT",
+        &uri,
+        Some(json!({
+            "agent_id": "researcher", "message": "must not be applied",
+            "spec": {"kind": "interval", "every": "every 3 hours"},
+        })),
+    )
+    .await;
+    let wording = "A schedule's agent is fixed when the schedule is created. To change it, create a new schedule with that agent.";
+    assert!(
+        body["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(wording)),
+        "agent change must return an actionable refusal, got {status}: {body}"
+    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let after = state
+        .storage
+        .get_schedule(schedule_id.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.session_policy, before.session_policy);
+    assert_eq!(after.message, before.message);
+    assert_eq!(after.expression, before.expression);
+    assert_eq!(after.updated_at, before.updated_at);
+}
