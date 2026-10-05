@@ -58,6 +58,7 @@ A complete creation request:
   "tool_permissions": {
     "allow": ["knowledge_search", "knowledge_orient", "docs_read", "file_read", "file_list", "file_search", "url_fetch", "web_search"],
     "deny": [],
+    "bundles": {},
     "require_approval": []
   }
 }
@@ -65,13 +66,15 @@ A complete creation request:
 
 `description` is required. `topic_id` scopes the definition to one topic;
 omit it for a global definition. The `tool_permissions` object carries
-`allow`, `deny`, and `require_approval` arrays — it intersects with the
-config cascade's grants, so it can only narrow what the config allows, never
-widen it. Optional fields not shown above include `model_id`, `skills`,
+`allow`, `deny`, `bundles`, and `require_approval`. `bundles` maps bundle
+names to tool-name arrays — it must be present (use `{}` when no custom
+bundles are needed). The overlay intersects with the config cascade's
+grants, so it can only narrow what the config allows, never widen it.
+Optional fields not shown above include `model_id`, `skills`,
 `output_schema`, and `output_max_retries`.
 
-**Conversationally.** An agent whose definition grants the configuration
-tools can create and edit definitions during a session, using those tools.
+Conversational authoring of agent definitions is not yet available. The
+API routes above are the supported surface.
 
 ## Effort
 
@@ -551,9 +554,9 @@ Each experiment location — identified by a stable string such as
 controlled:
 
 ```toml
-[experimentation.locations."context.assembly"]
+[experimentation.locations."context.working_norms"]
 enabled = true
-forced_variant = "working_norms"
+forced_variant = "family-fallback"
 ```
 
 - **`enabled`** — defaults to `true`. Set to `false` to disable variant
@@ -566,12 +569,36 @@ forced_variant = "working_norms"
 The shipped locations are `context.assembly`, `context.working_norms`,
 `task.prompt`, and `prompts.memory_curator`.
 
+### Alternatives
+
+What can be forced or drawn at a location depends on the alternatives
+registered there. For `context.assembly`, alternatives are operator-authored:
+each is a `<name>.js` file placed in an `assemblies/` directory under the
+config hierarchy (global, topic, or agent). List a new assembly in `[context]
+alternatives` so the selection loop includes it:
+
+```toml
+[context]
+assembly = "default"
+alternatives = ["my-variant"]
+```
+
+The other shipped locations have their alternatives defined in the gateway
+source. For `context.working_norms`, the registered variants are
+`authored-v1` (the default) and `family-fallback`. These cannot be extended
+through configuration.
+
 ### Operator history
 
 Every variant decision — whether drawn randomly, forced, or recorded as
 disabled — appears in the operator history pane. Each entry names the
 location, the variant that served, the reason (such as `drawn`, `forced`, or
 `disabled`), and the session and turn that produced it.
+
+When the selection cannot be recorded (for example because the audit store
+is temporarily unavailable), the turn falls back to the default variant
+without writing a record. The gap in the history is how a later reader
+identifies that recording failed.
 
 ### Cascading
 
