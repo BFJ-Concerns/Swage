@@ -432,24 +432,64 @@ back over the same socket. `swage device connect` runs a machine as a device.
 
 ### Registration and pairing
 
-A device can join in two ways:
+A device can join in two ways: direct registration or pairing.
 
-- **Direct registration** — `POST /api/devices/register`
-  (`RegisterDeviceRequest` in `swage-protocol::device`). The caller supplies
-  the device identity, the gateway secret its credential resolves against,
-  and the workspace it operates in.
-- **Pairing** — the gateway issues a one-time pairing code
-  (`POST /api/onboarding/devices/pairing-codes`, with an optional
-  `expires_in_seconds`; default 600 s), and the device redeems it
-  (`POST /api/onboarding/devices/redeem` with the code and its registration
-  fields) to register and trust itself in one step.
+**Direct registration** — `POST /api/devices/register` with the device
+identity, the gateway secret its credential resolves against, and the
+workspace it operates in.
+
+**Pairing** is a two-step alternative:
+
+1. **Prepare the shared-token secret.** Create a file-backed secret for the
+   device's credential (see
+   [Provider credentials — Registering a file-backed secret](#registering-a-file-backed-secret)
+   for the pattern). The file holds the token value; the secret reference
+   is what registration and connection resolve against.
+
+2. **Issue a pairing code.** `POST /api/onboarding/devices/pairing-codes`:
+
+   ```json
+   {
+     "expires_in_seconds": 600
+   }
+   ```
+
+   `expires_in_seconds` is optional (default 600 — ten minutes). The
+   response carries the `pairing_code` and `expires_at`.
+
+3. **Redeem the code.** `POST /api/onboarding/devices/redeem`:
+
+   ```json
+   {
+     "pairing_code": "<code from step 2>",
+     "device_id": "workshop",
+     "shared_token_secret_ref": "secret://file/<secret-id>",
+     "workspace_root": "/home/user/projects"
+   }
+   ```
+
+   This registers and trusts the device in one step. `label` (optional) and
+   `kind` (defaults to `"attached_device"`) can also be included.
+
+4. **Connect.** Run the device:
+
+   ```bash
+   swage device connect \
+     --gateway http://gateway.local:3000 \
+     --device-id workshop \
+     --shared-token-file /path/to/token-file \
+     --workspace /home/user/projects
+   ```
+
+   The process dials the gateway, presents the token, advertises the
+   workspace's tools, and serves operations until interrupted.
 
 In both paths the `kind` field defaults to `"attached_device"` and names the
-device type. A `kind` of `"local"` is refused with a `ValidationError`: a
-local device has no remote producer to register. The same refusal applies to
-recovery imports, so the remote-device registry never holds a local entry.
-What a device can run is not registered — the device advertises its
-capabilities each time it connects.
+device type. A `kind` of `"local"` is refused: a local device has no remote
+producer to register. The same constraint applies to recovery imports, so the
+remote-device registry never holds a local entry. What a device can run is
+not registered — the device advertises its capabilities each time it
+connects.
 
 ### The connection
 
@@ -472,8 +512,7 @@ After the welcome the connection carries two frame types in each direction:
 | Device → gateway | `Cancelled` | Operation `correlation_id` was stopped |
 | Device → gateway | `Heartbeat` | Sent every `heartbeat_interval_secs` (default 10 s) |
 
-All frames are tagged by `kind` (snake_case) and defined in
-`swage-protocol::device` (`DeviceFrame`, `GatewayFrame`).
+All frames are tagged by `kind` (snake_case).
 
 ### Cancellation
 
@@ -653,15 +692,16 @@ Stages 7–8 run regardless; their results are combined.
 | 8 | Projection freshness (`git diff --exit-code` on generated files) | No |
 
 The Rust test runner is selected by the `SWAGE_TEST_RUNNER` environment
-variable. When set to `nextest`, Rust tests run under `cargo nextest run`
-with a `ci` profile (which retries flaky tests), followed by a separate
-`cargo test --workspace --doc` stage for doctests (nextest cannot run
-doctests). When set to `cargo` or unset, Rust tests run under
-`cargo test --workspace --no-fail-fast`.
+variable. The Justfile defaults it to `nextest`, so `just verify` runs
+nextest unless overridden. When set to `nextest` (the default), Rust tests
+run under `cargo nextest run` with a `ci` profile (which retries flaky
+tests), followed by a separate `cargo test --workspace --doc` stage for
+doctests (nextest cannot run doctests). When set to `cargo`, Rust tests run
+under `cargo test --workspace --no-fail-fast`.
 
 When both tests and projections fail, both errors surface in one message.
-The test suite aggregates Rust, frontend, and desktop-smoke failures into a
-`Vec<String>` rather than aborting on the first.
+The test suite aggregates Rust, frontend, and desktop-smoke failures rather
+than aborting on the first.
 
 The verify body runs inside `run_with_final_sweep`, which runs
 `cargo sweep` after the gate (even on failure) and reports the artefact
