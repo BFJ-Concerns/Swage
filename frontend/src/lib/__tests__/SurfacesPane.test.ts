@@ -9,10 +9,8 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { mount, unmount, flushSync } from "svelte";
 import { fromStore, writable } from "svelte/store";
 import { compile } from "svelte/compiler";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import SurfacesPane from "../components/SurfacesPane.svelte";
+import surfacesPaneSource from "../components/SurfacesPane.svelte?raw";
 import type { SurfacesStore } from "../stores/surfaces";
 import type { SurfaceResponse } from "../protocol/SurfaceResponse";
 import type { SurfaceModuleView } from "../protocol/SurfaceModuleView";
@@ -239,11 +237,7 @@ describe("SurfacesPane module controls", () => {
     // none to an element no rule targets, leaving the cells unstyled).
     const scope = Array.from(content!.classList).find((name) => name.startsWith("svelte-")) ??
       "svelte-unstyled";
-    const source = readFileSync(
-      join(dirname(fileURLToPath(import.meta.url)), "../components/SurfacesPane.svelte"),
-      "utf8",
-    );
-    const { css } = compile(source, { filename: "SurfacesPane.svelte", css: "external", cssHash: () => scope });
+    const { css } = compile(surfacesPaneSource, { filename: "SurfacesPane.svelte", css: "external", cssHash: () => scope });
     const style = document.createElement("style");
     style.textContent = css?.code ?? "";
     document.head.append(style);
