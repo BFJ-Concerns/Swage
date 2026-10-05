@@ -89,6 +89,13 @@ pub(crate) fn build_bwrap_command_with_path(
     cmd.args(["--dev", "/dev"]);
     cmd.args(["--tmpfs", "/tmp"]);
 
+    // The host IPC socket may live under /tmp (a relocated or over-long
+    // runtime directory), where the tmpfs above hides it. Bind the socket
+    // file itself — never its directory — after the overlay so the agent can
+    // connect and sees nothing else of the host's socket root.
+    let socket = socket_path.as_os_str();
+    cmd.arg("--bind").arg(socket).arg(socket);
+
     // Working directory: read-write inside the sandbox.
     let wd = config.working_directory.as_os_str();
     cmd.arg("--bind").arg(wd).arg(wd);
@@ -580,5 +587,49 @@ mod tests {
         assert!(n >= 2, "must have at least 2 args");
         assert_eq!(args[n - 1], OsStr::new("--sandbox-mode"));
         assert_eq!(args[n - 2], OsStr::new("/usr/bin/swage-agent"));
+    }
+
+    #[test]
+    fn socket_under_tmp_is_bound_over_the_tmpfs_overlay() {
+        let config = basic_config();
+        let socket = Path::new("/tmp/swage-1000/swage-sandbox-0000.sock");
+        let cmd = build_bwrap_command_with_path(
+            Path::new("/usr/bin/bwrap"),
+            &config,
+            socket,
+            Path::new("/usr/bin/swage-agent"),
+        )
+        .unwrap();
+
+        let args = args_of(&cmd);
+        let tmpfs = args
+            .windows(2)
+            .position(|w| w == [OsStr::new("--tmpfs"), OsStr::new("/tmp")])
+            .expect("command overlays /tmp with tmpfs");
+        let bind_targets: Vec<(usize, &OsStr)> = args
+            .windows(3)
+            .enumerate()
+            .filter(|(_, w)| w[0] == OsStr::new("--bind") && w[1] == w[2])
+            .map(|(i, w)| (i, w[2]))
+            .collect();
+        let socket_bind = bind_targets
+            .iter()
+            .find(|(_, target)| *target == socket.as_os_str())
+            .unwrap_or_else(|| {
+                panic!("socket file must be bound into the sandbox; args: {args:?}")
+            });
+        assert!(
+            socket_bind.0 > tmpfs,
+            "socket bind must follow the /tmp tmpfs or the overlay hides it; args: {args:?}"
+        );
+        for ancestor in socket.ancestors().skip(1) {
+            assert!(
+                !bind_targets
+                    .iter()
+                    .any(|(_, target)| *target == ancestor.as_os_str()),
+                "only the socket itself may be exposed, not {}; args: {args:?}",
+                ancestor.display()
+            );
+        }
     }
 }

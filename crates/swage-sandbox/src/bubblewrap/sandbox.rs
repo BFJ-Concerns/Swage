@@ -36,6 +36,62 @@ use crate::socket::SocketManager;
 const CREDENTIAL_ENV_VARS: &[&str] = &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"];
 
 // ---------------------------------------------------------------------------
+// Sandbox stderr
+// ---------------------------------------------------------------------------
+
+/// How much of the sandbox's stderr a startup failure quotes.
+const STDERR_TAIL_BYTES: usize = 4096;
+
+/// How long a startup failure waits for the exited sandbox's stderr to close.
+const STDERR_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Drains the sandbox's stderr for its whole life — relaying each line to the
+/// host's log so the pipe never fills — and keeps a bounded tail for a
+/// startup failure to quote.
+struct StderrRelay {
+    tail: Arc<std::sync::Mutex<String>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl StderrRelay {
+    /// Waits briefly for the pipe to close, then returns the captured tail.
+    async fn finish(self) -> String {
+        let _ = tokio::time::timeout(STDERR_DRAIN_TIMEOUT, self.task).await;
+        let tail = self
+            .tail
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        tail.trim().to_string()
+    }
+}
+
+fn spawn_stderr_relay(stderr: tokio::process::ChildStderr) -> StderrRelay {
+    use tokio::io::AsyncBufReadExt;
+
+    let tail = Arc::new(std::sync::Mutex::new(String::new()));
+    let captured = Arc::clone(&tail);
+    let task = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            tracing::warn!(target: "swage_sandbox::agent", "{line}");
+            let mut tail = captured
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            tail.push_str(&line);
+            tail.push('\n');
+            if tail.len() > STDERR_TAIL_BYTES {
+                let mut cut = tail.len() - STDERR_TAIL_BYTES;
+                while !tail.is_char_boundary(cut) {
+                    cut += 1;
+                }
+                tail.drain(..cut);
+            }
+        }
+    });
+    StderrRelay { tail, task }
+}
+
+// ---------------------------------------------------------------------------
 // BubblewrapSandbox
 // ---------------------------------------------------------------------------
 
@@ -121,36 +177,63 @@ impl Sandbox for BubblewrapSandbox {
             cmd.env_remove(var);
         }
 
-        let process = ChildProcessManager::spawn(cmd)?;
-        tracing::debug!(pid = process.pid(), "bubblewrap sandbox agent spawned");
+        // Capture stderr so a sandbox that dies before connecting reports why.
+        cmd.stderr(std::process::Stdio::piped());
 
-        // Accept the agent's incoming connection.
-        let (stream, _addr) =
-            match tokio::time::timeout(self.config.tool_call_timeout, listener.accept()).await {
-                Ok(Ok(connection)) => connection,
-                Ok(Err(error)) => {
-                    cleanup_failed_startup_process(
-                        process,
-                        self.config.shutdown_grace_period,
-                        "failed to shut down bubblewrap sandbox after IPC accept error",
-                    )
-                    .await;
-                    return Err(SandboxError::SpawnFailed {
-                        message: format!("IPC accept failed: {error}"),
-                    });
-                }
-                Err(_) => {
-                    cleanup_failed_startup_process(
-                        process,
-                        self.config.shutdown_grace_period,
-                        "failed to shut down bubblewrap sandbox after IPC accept timeout",
-                    )
-                    .await;
-                    return Err(SandboxError::SpawnFailed {
-                        message: "timed out waiting for sandbox agent IPC connection".into(),
-                    });
-                }
-            };
+        let mut process = ChildProcessManager::spawn(cmd)?;
+        tracing::debug!(pid = process.pid(), "bubblewrap sandbox agent spawned");
+        let stderr = process.take_stderr().map(spawn_stderr_relay);
+
+        // Accept the agent's incoming connection, unless the sandbox exits
+        // first — waiting out the timeout then would only hide the cause.
+        let accepted = tokio::select! {
+            accepted = tokio::time::timeout(self.config.tool_call_timeout, listener.accept()) => accepted,
+            exit = process.wait_for_exit() => {
+                let status = match exit {
+                    Ok(status) => status.to_string(),
+                    Err(error) => error.to_string(),
+                };
+                let output = match stderr {
+                    Some(relay) => relay.finish().await,
+                    None => String::new(),
+                };
+                let cause = if output.is_empty() {
+                    "no error output".to_string()
+                } else {
+                    output
+                };
+                return Err(SandboxError::SpawnFailed {
+                    message: format!(
+                        "sandbox agent exited before connecting ({status}): {cause}"
+                    ),
+                });
+            }
+        };
+        let (stream, _addr) = match accepted {
+            Ok(Ok(connection)) => connection,
+            Ok(Err(error)) => {
+                cleanup_failed_startup_process(
+                    process,
+                    self.config.shutdown_grace_period,
+                    "failed to shut down bubblewrap sandbox after IPC accept error",
+                )
+                .await;
+                return Err(SandboxError::SpawnFailed {
+                    message: format!("IPC accept failed: {error}"),
+                });
+            }
+            Err(_) => {
+                cleanup_failed_startup_process(
+                    process,
+                    self.config.shutdown_grace_period,
+                    "failed to shut down bubblewrap sandbox after IPC accept timeout",
+                )
+                .await;
+                return Err(SandboxError::SpawnFailed {
+                    message: "timed out waiting for sandbox agent IPC connection".into(),
+                });
+            }
+        };
 
         let mut transport = IpcTransport::new(stream);
 
@@ -500,6 +583,54 @@ mod tests {
         assert!(
             !is_pid_running(pid),
             "timed-out bubblewrap startup should terminate and reap child process {pid}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_reports_the_exited_sandbox_stderr_without_waiting_out_the_timeout() {
+        let _env_guard = crate::SANDBOX_TEST_ENV_LOCK.lock().await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let script_path = temp_dir.path().join("bwrap");
+        fs::write(
+            &script_path,
+            "#!/bin/sh\necho 'Error: failed to connect to host socket at /x.sock: No such file or directory' >&2\nexit 1\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).unwrap();
+        let previous_path = std::env::var_os("PATH");
+        let test_path = match &previous_path {
+            Some(path) => {
+                let mut paths = vec![temp_dir.path().to_path_buf()];
+                paths.extend(std::env::split_paths(path));
+                std::env::join_paths(paths).unwrap()
+            }
+            None => temp_dir.path().as_os_str().to_owned(),
+        };
+        unsafe { std::env::set_var("PATH", test_path) };
+
+        let mut sandbox = BubblewrapSandbox::new(test_config(), no_op_llm_handler());
+        let started = std::time::Instant::now();
+        let result = sandbox.spawn_agent().await;
+        let elapsed = started.elapsed();
+
+        match previous_path {
+            Some(value) => unsafe { std::env::set_var("PATH", value) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+
+        let error = result.expect_err("a sandbox that exits before connecting must fail startup");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to connect to host socket at /x.sock"),
+            "startup error must quote the sandbox's own cause: {error}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "startup must fail when the sandbox exits, not after the {:?} timeout (took {elapsed:?})",
+            test_config().tool_call_timeout
         );
     }
 

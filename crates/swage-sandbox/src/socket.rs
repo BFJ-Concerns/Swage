@@ -4,13 +4,23 @@
 //! from previous crashes, and ensures cleanup on shutdown.
 
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use swage_core::SandboxError;
 use tokio::net::UnixListener;
 
-const FALLBACK_SOCKET_ROOT: &str = "/tmp";
+const FALLBACK_SOCKET_PARENT: &str = "/tmp";
+
+/// The short root used when `XDG_RUNTIME_DIR` is unset or too long: a
+/// per-user `swage-<uid>` directory under `/tmp`. Bubblewrap overlays `/tmp`
+/// with an empty tmpfs, so the sandbox sees a socket here only through the
+/// command builder's bind of the socket file itself.
+fn fallback_socket_root() -> PathBuf {
+    // Safety: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    Path::new(FALLBACK_SOCKET_PARENT).join(format!("swage-{uid}"))
+}
 
 fn socket_path_fits(root: &Path, prefix: &str) -> bool {
     let socket_address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
@@ -22,44 +32,63 @@ fn socket_path_fits(root: &Path, prefix: &str) -> bool {
 }
 
 fn socket_root(prefix: &str) -> Result<PathBuf, SandboxError> {
-    let fallback = PathBuf::from(FALLBACK_SOCKET_ROOT);
-    let Some(xdg_runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") else {
-        return socket_path_fits(&fallback, prefix).then_some(fallback).ok_or_else(|| {
-            SandboxError::SpawnFailed {
-                message: format!(
-                    "Unix socket path is too long under {FALLBACK_SOCKET_ROOT}; use a shorter socket prefix"
-                ),
-            }
-        });
+    let root = match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(xdg_runtime_dir) => PathBuf::from(xdg_runtime_dir).join("swage"),
+        None => fallback_socket_root(),
     };
-
-    let root = PathBuf::from(xdg_runtime_dir).join("swage");
-    if !socket_path_fits(&root, prefix) {
-        return socket_path_fits(&fallback, prefix).then_some(fallback).ok_or_else(|| {
-            SandboxError::SpawnFailed {
+    let root = if socket_path_fits(&root, prefix) {
+        root
+    } else {
+        let fallback = fallback_socket_root();
+        if !socket_path_fits(&fallback, prefix) {
+            return Err(SandboxError::SpawnFailed {
                 message: format!(
-                    "Unix socket paths are too long under both {} and {FALLBACK_SOCKET_ROOT}; set XDG_RUNTIME_DIR to a shorter path or use a shorter socket prefix",
-                    root.display()
+                    "Unix socket paths are too long under both {} and {}; set XDG_RUNTIME_DIR to a shorter path or use a shorter socket prefix",
+                    root.display(),
+                    fallback.display()
                 ),
-            }
-        });
-    }
-    std::fs::create_dir_all(&root).map_err(|error| SandboxError::SpawnFailed {
+            });
+        }
+        fallback
+    };
+    create_private_dir(&root)?;
+    Ok(root)
+}
+
+/// Creates `root` if needed and ensures it is a directory owned by this user
+/// with mode 0700. The fallback lives in world-writable `/tmp`, so a
+/// pre-existing directory owned by someone else is refused, not reused.
+fn create_private_dir(root: &Path) -> Result<(), SandboxError> {
+    std::fs::create_dir_all(root).map_err(|error| SandboxError::SpawnFailed {
         message: format!(
             "failed to create Unix socket directory at {}: {error}",
             root.display()
         ),
     })?;
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).map_err(|error| {
+    let metadata = std::fs::symlink_metadata(root).map_err(|error| SandboxError::SpawnFailed {
+        message: format!(
+            "failed to inspect Unix socket directory at {}: {error}",
+            root.display()
+        ),
+    })?;
+    // Safety: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    if !metadata.is_dir() || metadata.uid() != uid {
+        return Err(SandboxError::SpawnFailed {
+            message: format!(
+                "Unix socket directory at {} is not a directory owned by this user",
+                root.display()
+            ),
+        });
+    }
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).map_err(|error| {
         SandboxError::SpawnFailed {
             message: format!(
                 "failed to protect Unix socket directory at {}: {error}",
                 root.display()
             ),
         }
-    })?;
-
-    Ok(root)
+    })
 }
 
 /// Manages the lifecycle of a Unix domain socket file.
@@ -225,7 +254,7 @@ mod tests {
 
     #[test]
     fn create_is_independent_of_long_tmpdir() {
-        let root = tempfile::tempdir_in(FALLBACK_SOCKET_ROOT)
+        let root = tempfile::tempdir_in(FALLBACK_SOCKET_PARENT)
             .expect("short temporary test root should be created");
         let long_tmp = root.path().join("t".repeat(120));
         std::fs::create_dir(&long_tmp).expect("long TMPDIR should be created");
@@ -287,7 +316,7 @@ mod tests {
 
     #[test]
     fn overlong_xdg_runtime_dir_uses_short_fallback() {
-        let root = tempfile::tempdir_in(FALLBACK_SOCKET_ROOT).expect("temporary root");
+        let root = tempfile::tempdir_in(FALLBACK_SOCKET_PARENT).expect("temporary root");
         let long_xdg = root.path().join("x".repeat(120));
         let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
             .args([
@@ -315,7 +344,7 @@ mod tests {
         let (manager, _listener) = SocketManager::create(TEST_PREFIX).expect("fallback socket");
         assert_eq!(
             manager.path().parent(),
-            Some(Path::new(FALLBACK_SOCKET_ROOT))
+            Some(fallback_socket_root().as_path())
         );
         assert!(!configured.join("swage").exists());
     }
@@ -348,7 +377,7 @@ mod tests {
         let (manager, _listener) = SocketManager::create(TEST_PREFIX).expect("fallback socket");
         assert_eq!(
             manager.path().parent(),
-            Some(Path::new(FALLBACK_SOCKET_ROOT))
+            Some(fallback_socket_root().as_path())
         );
     }
 
