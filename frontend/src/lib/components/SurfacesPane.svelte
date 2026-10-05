@@ -529,6 +529,32 @@
     margin: 12px 0;
   }
 
+  /* Document tables read as distinct cells, as conversation markdown does. */
+  .module-content :global(table) {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 0.5em 0;
+    font-size: 0.875em;
+    border: 1px solid var(--ink);
+  }
+
+  .module-content :global(th),
+  .module-content :global(td) {
+    border: 1px solid var(--rule-soft);
+    padding: 6px 10px;
+    text-align: left;
+  }
+
+  .module-content :global(th) {
+    background: var(--ink);
+    color: var(--paper);
+    font-family: var(--font-mono);
+    font-weight: 500;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
   .module textarea {
     width: 100%;
     font-family: var(--font-mono);

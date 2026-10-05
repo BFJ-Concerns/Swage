@@ -302,3 +302,35 @@ test("renders the dark-theme status badge and controlled provider error", async 
   await expect(error).toContainText("Controlled provider failure");
   await expect(error).toHaveCSS("border-left-color", "rgb(248, 93, 120)");
 });
+
+test("separates the cells of a multi-column table in a surface document module", async ({ page }, testInfo) => {
+  await send(page, "plan the volunteer rota");
+  await page.getByRole("navigation", { name: "Surface" }).getByRole("button", { name: "Surfaces" }).click();
+  await page.getByPlaceholder("New surface title").fill("Planning");
+  await page.getByPlaceholder("New surface title").press("Enter");
+  await page.getByRole("button", { name: "Add module" }).click();
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  await page.locator("article.module textarea").fill(
+    "| Priya | Tom | Ellis |\n| --- | --- | --- |\n| 280 | Confirmed | Likely |",
+  );
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+
+  const table = page.locator("article.module .module-content table");
+  await expect(table).toBeVisible();
+  await table.screenshot({ path: testInfo.outputPath("module-table.png") });
+  for (const row of [table.locator("th"), table.locator("tbody td")]) {
+    const cells = await row.evaluateAll((elements) =>
+      elements.map((element) => {
+        const text = document.createRange();
+        text.selectNodeContents(element);
+        const glyphs = text.getBoundingClientRect();
+        return { left: glyphs.left, right: glyphs.right };
+      }),
+    );
+    expect(cells).toHaveLength(3);
+    for (let index = 1; index < cells.length; index += 1) {
+      // The gap between one cell's text and the next is visible space, not touching glyphs.
+      expect(cells[index].left - cells[index - 1].right).toBeGreaterThanOrEqual(8);
+    }
+  }
+});
