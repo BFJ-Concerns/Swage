@@ -45,7 +45,7 @@
           "permanent_global",
         );
       } else {
-        await rejectPendingAction(approval.approval_id, "approval card");
+        await rejectPendingAction(approval.approval_id, "denied by the user");
       }
     } catch (err) {
       error = err instanceof Error ? err.message : "Approval decision failed.";
