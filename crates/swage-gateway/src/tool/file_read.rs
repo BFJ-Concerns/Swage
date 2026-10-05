@@ -71,7 +71,7 @@ impl Tool for FileReadTool {
         let offset_bytes = optional_offset_bytes(&params, self.name())?;
 
         let resolved = resolve_context_path(ctx, &path_str)
-            .map_err(|_| location_approval_error(self.name(), ctx, &path_str, "read"))?;
+            .map_err(|_| location_approval_error(self.name(), ctx, &path_str, "read", false))?;
 
         let content = read_file_content(&resolved.path).await.map_err(|e| {
             let message = match e.kind() {

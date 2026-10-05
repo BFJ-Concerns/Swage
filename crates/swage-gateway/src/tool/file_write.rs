@@ -74,7 +74,7 @@ impl Tool for FileWriteTool {
             .to_string();
 
         let resolved = resolve_new_context_path(ctx, &path_str)
-            .map_err(|_| location_approval_error(self.name(), ctx, &path_str, "write"))?;
+            .map_err(|_| location_approval_error(self.name(), ctx, &path_str, "write", false))?;
 
         require_workspace_write_access(ctx, &resolved.path, self.name()).await?;
 
