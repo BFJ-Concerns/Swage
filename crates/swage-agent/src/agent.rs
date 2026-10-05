@@ -281,14 +281,15 @@ mod approval_tests {
         let crate::approval::ApprovalGateOutcome::Rejected { feedback } = outcome else {
             panic!("expected rejected approval, got {outcome:?}");
         };
-        assert_eq!(feedback, "Tool call rejected: denied by the user");
+        assert_eq!(feedback, crate::approval::user_denied_feedback());
+        assert!(feedback.contains("The user denied this tool call"));
         assert!(!feedback.contains("approval card"));
         let model_result = compact_tool_result_for_model_with_reference(
             &feedback,
             true,
             tool_result_reference(&execution.turn_id.to_string(), "call-1"),
         );
-        assert!(model_result.contains("Tool call rejected: denied by the user"));
+        assert!(model_result.contains("The user denied this tool call"));
         assert!(!model_result.contains("approval card"));
     }
 
