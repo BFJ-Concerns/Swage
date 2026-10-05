@@ -566,7 +566,7 @@ async fn streaming_turn_persists_completed_response_and_raw_input() {
             input_tokens,
             output_tokens,
             ..
-        } if *turn_id == outbound.turn_id && *input_tokens == 11 && *output_tokens == 7
+        } if *turn_id == outbound.turn_id && *input_tokens == Some(11) && *output_tokens == Some(7)
     )));
 }
 

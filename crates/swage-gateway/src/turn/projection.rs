@@ -433,14 +433,32 @@ pub(super) async fn project_agent_events(
                 structured_output,
                 ..
             } => {
-                // Derive cost from the pricing config when available.
+                // Estimate cost only when both token counts were reported.
                 let cost_microcents =
-                    pricing_config.compute_cost(model_name, input_tokens, output_tokens);
+                    input_tokens.zip(output_tokens).and_then(|(input, output)| {
+                        pricing_config.compute_cost(model_name, input, output)
+                    });
+                let input_unavailable_reason = input_tokens
+                    .is_none()
+                    .then_some("provider reported no input count");
+                let output_unavailable_reason = output_tokens
+                    .is_none()
+                    .then_some("provider reported no output count");
+                let cost_unavailable_reason = cost_microcents.is_none().then_some(
+                    if input_tokens.is_none() || output_tokens.is_none() {
+                        "provider reported no cost and token usage is incomplete"
+                    } else {
+                        "provider reported no cost and model pricing is unavailable"
+                    },
+                );
 
                 tracing::info!(
-                    input_tokens = input_tokens,
-                    output_tokens = output_tokens,
+                    input_tokens,
+                    output_tokens,
+                    input_unavailable_reason,
+                    output_unavailable_reason,
                     cost_microcents = ?cost_microcents,
+                    cost_unavailable_reason,
                     "turn_complete",
                 );
 
@@ -458,7 +476,7 @@ pub(super) async fn project_agent_events(
                     .await
                     .is_subscribed(crate::subscription::ObservabilityChannel::Context)
                 {
-                    (Some(input_tokens), Some(output_tokens), cost_microcents)
+                    (input_tokens, output_tokens, cost_microcents)
                 } else {
                     (None, None, None)
                 };

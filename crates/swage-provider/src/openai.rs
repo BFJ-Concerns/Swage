@@ -941,6 +941,54 @@ mod tests {
     use crate::test_support::{empty_completion_request, local_provider_config};
     use swage_core::{ChatMessage, Role, ToolCall};
 
+    #[tokio::test]
+    async fn captured_proxy_stream_preserves_usage_before_completion() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let capture = include_str!("../tests/fixtures/gpt-6.1-sol-usage.sse");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&mut socket);
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(length) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = length.trim().parse::<usize>().unwrap();
+                }
+            }
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).unwrap();
+            drop(reader);
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", capture.len(), capture).unwrap();
+        });
+        let provider = OpenAiProvider::from_config(ProviderConfig::new(
+            "test-key",
+            "gpt-6.1-sol",
+            format!("http://{address}/v1"),
+        ));
+        let chunks: Vec<_> = provider.stream(empty_completion_request()).collect().await;
+        server.join().unwrap();
+        let usage_position = chunks.iter().position(|chunk| matches!(
+            chunk, StreamChunk::Usage(usage) if usage.input_tokens == 9916 && usage.output_tokens == 6
+        )).expect("captured provider counts must reach the caller");
+        let done_position = chunks
+            .iter()
+            .position(|chunk| matches!(chunk, StreamChunk::Done { .. }))
+            .expect("captured response must complete");
+        assert!(
+            usage_position < done_position,
+            "usage must reach the caller before completion"
+        );
+    }
+
     // --- Message conversion ---
 
     #[test]

@@ -114,8 +114,10 @@ pub enum AgentEvent {
         turn_id: Uuid,
         incomplete_reason: Option<String>,
         incomplete_account: Option<Box<swage_storage::Message>>,
-        input_tokens: u32,
-        output_tokens: u32,
+        /// None when the provider reported no token usage for the turn.
+        input_tokens: Option<u32>,
+        /// None when the provider reported no token usage for the turn.
+        output_tokens: Option<u32>,
         tool_calls_count: u32,
         /// Parsed, validated JSON when the agent has an output schema and
         /// validation passes. None when no schema is configured or when
@@ -339,8 +341,8 @@ mod tests {
             incomplete_reason: None,
             incomplete_account: None,
             turn_id,
-            input_tokens: 100,
-            output_tokens: 200,
+            input_tokens: Some(100),
+            output_tokens: Some(200),
             tool_calls_count: 3,
             structured_output: None,
         };
@@ -354,8 +356,8 @@ mod tests {
         } = event
         {
             assert_eq!(id, turn_id);
-            assert_eq!(input_tokens, 100);
-            assert_eq!(output_tokens, 200);
+            assert_eq!(input_tokens, Some(100));
+            assert_eq!(output_tokens, Some(200));
             assert_eq!(tool_calls_count, 3);
             assert!(structured_output.is_none());
         } else {
@@ -411,8 +413,8 @@ mod tests {
             incomplete_reason: None,
             incomplete_account: None,
             turn_id,
-            input_tokens: 1,
-            output_tokens: 2,
+            input_tokens: Some(1),
+            output_tokens: Some(2),
             tool_calls_count: 0,
             structured_output: None,
         })
@@ -478,8 +480,8 @@ mod tests {
             incomplete_reason: None,
             incomplete_account: None,
             turn_id,
-            input_tokens: 10,
-            output_tokens: 20,
+            input_tokens: Some(10),
+            output_tokens: Some(20),
             tool_calls_count: 0,
             structured_output: Some(payload.clone()),
         })
