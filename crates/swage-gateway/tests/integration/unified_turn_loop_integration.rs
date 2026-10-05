@@ -22,16 +22,15 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::support::{WsStream, start_live_server, ws_collect_until};
+use crate::support::{
+    LiveTestGateway, WsStream, journey, live_http_json, ws_collect_through, ws_collect_until,
+};
 
 use async_trait::async_trait;
-use axum::Router;
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
+use axum::http::StatusCode;
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite;
-use tower::ServiceExt;
 
 use swage_config::ResolvedConfig;
 use swage_core::{
@@ -224,9 +223,9 @@ async fn start_test_server_with_config(
     provider: impl LlmProvider + 'static,
     config: ResolvedConfig,
     dispatcher: swage_gateway::tool::ToolDispatcher,
-) -> (Router, SocketAddr, Arc<SqliteStorage>) {
+) -> (LiveTestGateway, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let root = tempfile::tempdir().expect("isolated gateway configuration root");
+    let root = tempfile::tempdir().expect("isolated turn-loop root");
     let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -238,21 +237,13 @@ async fn start_test_server_with_config(
     );
     let router = build_router(state);
 
-    let (addr, server) = start_live_server(router.clone()).await;
-    // Keep the root until the server ends or this test's runtime drops the
-    // task; TempDir then removes it without leaking state between tests.
-    tokio::spawn(async move {
-        let _ = server.await;
-        drop(root);
-    });
-
-    (router, addr, storage)
+    (LiveTestGateway::start(router, root).await, storage)
 }
 
 /// Convenience: start server with default config.
 async fn start_test_server(
     provider: impl LlmProvider + 'static,
-) -> (Router, SocketAddr, Arc<SqliteStorage>) {
+) -> (LiveTestGateway, Arc<SqliteStorage>) {
     start_test_server_with_config(
         provider,
         ResolvedConfig::default(),
@@ -265,29 +256,21 @@ async fn start_test_server(
 async fn start_test_server_with_echo(
     provider: impl LlmProvider + 'static,
     config: ResolvedConfig,
-) -> (Router, SocketAddr, Arc<SqliteStorage>) {
+) -> (LiveTestGateway, Arc<SqliteStorage>) {
     let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
         Arc::new(EchoTool) as Arc<dyn swage_gateway::tool::Tool>
     ]);
     start_test_server_with_config(provider, config, dispatcher).await
 }
 
-async fn http(router: &Router, method: &str, uri: &str) -> (StatusCode, Value) {
-    let resp = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(method)
-                .uri(uri)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let status = resp.status();
-    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, body)
+async fn http(gateway: &LiveTestGateway, method: &str, uri: &str) -> (StatusCode, Value) {
+    live_http_json(
+        gateway.address,
+        method.parse().expect("HTTP method"),
+        uri,
+        None,
+    )
+    .await
 }
 
 type WsSink = futures::stream::SplitSink<
@@ -324,76 +307,79 @@ async fn ws_send(sink: &mut WsSink, payload: Value) {
 /// and constructs the ToolDispatcher with allow-all.
 /// After unification: the gateway builds a per-turn dispatcher from resolved
 /// config, and the deny list blocks the tool call.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn config_deny_list_blocks_tool_through_unified_turn_loop() {
-    // Configure: deny the echo tool via config
-    let mut config = ResolvedConfig::default();
-    config.tools.permissions.deny = vec!["echo".into()];
+    journey(async {
+        // Configure: deny the echo tool via config
+        let mut config = ResolvedConfig::default();
+        config.tools.permissions.deny = vec!["echo".into()];
 
-    // Provider returns a tool call for "echo", then a final text response.
-    let provider = MockProvider::new(vec![
-        vec![
-            StreamChunk::ToolUse {
-                call_id: "call_1".into(),
-                name: "echo".into(),
-                arguments: json!({"text": "hello"}),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ],
-        vec![
-            StreamChunk::Delta {
-                content: "Tool was denied".into(),
-            },
-            StreamChunk::Done {
-                finish_reason: Some(FinishReason::Stop),
-            },
-        ],
-    ]);
+        // Provider returns a tool call for "echo", then a final text response.
+        let provider = MockProvider::new(vec![
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "call_1".into(),
+                    name: "echo".into(),
+                    arguments: json!({"text": "hello"}),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "Tool was denied".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::Stop),
+                },
+            ],
+        ]);
 
-    let (router, addr, _storage) = start_test_server_with_echo(provider, config).await;
+        let (gateway, _storage) = start_test_server_with_echo(provider, config).await;
 
-    // Create conversation and connect WebSocket
-    let (_, body) = http(&router, "POST", "/api/conversations").await;
-    let conv_id = body["id"].as_str().unwrap();
-    let (mut sink, mut stream) = connect_ws(addr, conv_id).await;
+        // Create conversation and connect WebSocket
+        let (_, body) = http(&gateway, "POST", "/api/conversations").await;
+        let conv_id = body["id"].as_str().unwrap();
+        let (mut sink, mut stream) = connect_ws(gateway.address, conv_id).await;
 
-    // Subscribe to tool events so we can observe the denial
-    ws_send(
-        &mut sink,
-        json!({"type": "subscribe", "channels": ["tools"]}),
-    )
+        // Subscribe to tool events so we can observe the denial
+        ws_send(
+            &mut sink,
+            json!({"type": "subscribe", "channels": ["tools"]}),
+        )
+        .await;
+
+        // Send a message that triggers the echo tool
+        ws_send(
+            &mut sink,
+            json!({"type": "send_message", "content": "Use echo"}),
+        )
+        .await;
+
+        // Collect all events
+        let events = ws_collect_through(&mut stream, "turn_complete").await;
+
+        // After unification, the tool_end event should show the tool was denied
+        // because config.tools.permissions.deny = ["echo"].
+        let tool_end = events.iter().find(|e| e["type"] == "tool_end");
+        assert!(
+            tool_end.is_some(),
+            "expected a tool_end event; got events: {events:?}"
+        );
+        let tool_end = tool_end.unwrap();
+        assert_eq!(
+            tool_end["status"], "error",
+            "echo tool should be denied by config permissions; got status={}, events: {events:?}",
+            tool_end["status"]
+        );
+        let result_text = tool_end["result"].as_str().unwrap_or("");
+        assert!(
+            result_text.contains("denied") || result_text.contains("permission"),
+            "denial reason should mention permissions; got: {result_text}"
+        );
+    })
     .await;
-
-    // Send a message that triggers the echo tool
-    ws_send(
-        &mut sink,
-        json!({"type": "send_message", "content": "Use echo"}),
-    )
-    .await;
-
-    // Collect all events
-    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
-
-    // After unification, the tool_end event should show the tool was denied
-    // because config.tools.permissions.deny = ["echo"].
-    let tool_end = events.iter().find(|e| e["type"] == "tool_end");
-    assert!(
-        tool_end.is_some(),
-        "expected a tool_end event; got events: {events:?}"
-    );
-    let tool_end = tool_end.unwrap();
-    assert_eq!(
-        tool_end["status"], "error",
-        "echo tool should be denied by config permissions; got status={}, events: {events:?}",
-        tool_end["status"]
-    );
-    let result_text = tool_end["result"].as_str().unwrap_or("");
-    assert!(
-        result_text.contains("denied") || result_text.contains("permission"),
-        "denial reason should mention permissions; got: {result_text}"
-    );
 }
 
 /// Default config (no permissions section) allows non-gated tools.
@@ -406,63 +392,66 @@ async fn config_deny_list_blocks_tool_through_unified_turn_loop() {
 /// Before unification: PASSES (trivially — gateway already allows all).
 /// After unification: MUST STILL PASS — the resolved default policy flows
 /// through the unified path without breaking ordinary tool calls.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn default_permissions_allow_safe_tools_without_approval() {
-    // Default config — no permissions overrides
-    let config = ResolvedConfig::default();
+    journey(async {
+        // Default config — no permissions overrides
+        let config = ResolvedConfig::default();
 
-    // Provider emits a tool call, then a text response.
-    let provider = MockProvider::new(vec![
-        vec![
-            StreamChunk::ToolUse {
-                call_id: "call_1".into(),
-                name: "echo".into(),
-                arguments: json!({"text": "hello"}),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ],
-        vec![
-            StreamChunk::Delta {
-                content: "Echo said hello".into(),
-            },
-            StreamChunk::Done {
-                finish_reason: Some(FinishReason::Stop),
-            },
-        ],
-    ]);
+        // Provider emits a tool call, then a text response.
+        let provider = MockProvider::new(vec![
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "call_1".into(),
+                    name: "echo".into(),
+                    arguments: json!({"text": "hello"}),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "Echo said hello".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::Stop),
+                },
+            ],
+        ]);
 
-    let (router, addr, _storage) = start_test_server_with_echo(provider, config).await;
+        let (gateway, _storage) = start_test_server_with_echo(provider, config).await;
 
-    let (_, body) = http(&router, "POST", "/api/conversations").await;
-    let conv_id = body["id"].as_str().unwrap();
-    let (mut sink, mut stream) = connect_ws(addr, conv_id).await;
+        let (_, body) = http(&gateway, "POST", "/api/conversations").await;
+        let conv_id = body["id"].as_str().unwrap();
+        let (mut sink, mut stream) = connect_ws(gateway.address, conv_id).await;
 
-    ws_send(
-        &mut sink,
-        json!({"type": "subscribe", "channels": ["tools"]}),
-    )
+        ws_send(
+            &mut sink,
+            json!({"type": "subscribe", "channels": ["tools"]}),
+        )
+        .await;
+        ws_send(
+            &mut sink,
+            json!({"type": "send_message", "content": "Use echo"}),
+        )
+        .await;
+
+        let events = ws_collect_through(&mut stream, "turn_complete").await;
+
+        // The echo tool should succeed — default policy still permits ordinary tools.
+        let tool_end = events.iter().find(|e| e["type"] == "tool_end");
+        assert!(
+            tool_end.is_some(),
+            "expected a tool_end event; got events: {events:?}"
+        );
+        assert_eq!(
+            tool_end.unwrap()["status"],
+            "success",
+            "echo tool should succeed with default allow-all permissions; events: {events:?}"
+        );
+    })
     .await;
-    ws_send(
-        &mut sink,
-        json!({"type": "send_message", "content": "Use echo"}),
-    )
-    .await;
-
-    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
-
-    // The echo tool should succeed — default policy still permits ordinary tools.
-    let tool_end = events.iter().find(|e| e["type"] == "tool_end");
-    assert!(
-        tool_end.is_some(),
-        "expected a tool_end event; got events: {events:?}"
-    );
-    assert_eq!(
-        tool_end.unwrap()["status"],
-        "success",
-        "echo tool should succeed with default allow-all permissions; events: {events:?}"
-    );
 }
 
 /// Hooks fire for gateway-initiated turns after unification.
@@ -488,55 +477,58 @@ async fn default_permissions_allow_safe_tools_without_approval() {
 /// into the agent construction. If hooks are configured but the gateway still
 /// uses the old path, this test will fail because the turn_complete event
 /// will arrive without the agent's involvement.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hook_events_fire_for_gateway_initiated_turns() {
-    let provider = MockProvider::new(vec![vec![
-        StreamChunk::Delta {
-            content: "Response".into(),
-        },
-        StreamChunk::Usage(swage_core::TokenUsage {
-            input_tokens: 10,
-            output_tokens: 5,
-        }),
-        StreamChunk::Done {
-            finish_reason: Some(FinishReason::Stop),
-        },
-    ]]);
+    journey(async {
+        let provider = MockProvider::new(vec![vec![
+            StreamChunk::Delta {
+                content: "Response".into(),
+            },
+            StreamChunk::Usage(swage_core::TokenUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+            }),
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ]]);
 
-    let (router, addr, _storage) = start_test_server(provider).await;
+        let (gateway, _storage) = start_test_server(provider).await;
 
-    let (_, body) = http(&router, "POST", "/api/conversations").await;
-    let conv_id = body["id"].as_str().unwrap();
-    let (mut sink, mut stream) = connect_ws(addr, conv_id).await;
+        let (_, body) = http(&gateway, "POST", "/api/conversations").await;
+        let conv_id = body["id"].as_str().unwrap();
+        let (mut sink, mut stream) = connect_ws(gateway.address, conv_id).await;
 
-    ws_send(
-        &mut sink,
-        json!({"type": "send_message", "content": "Hello"}),
-    )
+        ws_send(
+            &mut sink,
+            json!({"type": "send_message", "content": "Hello"}),
+        )
+        .await;
+
+        let events = ws_collect_through(&mut stream, "turn_complete").await;
+
+        // Verify the turn completed.
+        let turn_complete = events.iter().find(|e| e["type"] == "turn_complete");
+        assert!(
+            turn_complete.is_some(),
+            "expected turn_complete; got events: {events:?}"
+        );
+
+        // After unification, the turn_complete event includes an `agent_processed`
+        // field (or equivalent marker) proving the turn went through the agent
+        // runtime rather than the gateway's direct path. The agent's execution
+        // loop always fires hooks — if this marker is present, hooks fired.
+        //
+        // This assertion will be refined once the event shape is finalised.
+        // For now, we verify the turn completes at all — and the permission
+        // denial test above provides the stronger cross-task proof.
+        let complete = turn_complete.unwrap();
+        assert!(
+            complete.get("turn_id").is_some(),
+            "turn_complete should include turn_id; got: {complete:?}"
+        );
+    })
     .await;
-
-    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
-
-    // Verify the turn completed.
-    let turn_complete = events.iter().find(|e| e["type"] == "turn_complete");
-    assert!(
-        turn_complete.is_some(),
-        "expected turn_complete; got events: {events:?}"
-    );
-
-    // After unification, the turn_complete event includes an `agent_processed`
-    // field (or equivalent marker) proving the turn went through the agent
-    // runtime rather than the gateway's direct path. The agent's execution
-    // loop always fires hooks — if this marker is present, hooks fired.
-    //
-    // This assertion will be refined once the event shape is finalised.
-    // For now, we verify the turn completes at all — and the permission
-    // denial test above provides the stronger cross-task proof.
-    let complete = turn_complete.unwrap();
-    assert!(
-        complete.get("turn_id").is_some(),
-        "turn_complete should include turn_id; got: {complete:?}"
-    );
 }
 
 /// Streaming tokens arrive identically through the agent delegation path.
@@ -548,56 +540,59 @@ async fn hook_events_fire_for_gateway_initiated_turns() {
 ///
 /// Before unification: PASSES (trivially — gateway streams directly from provider).
 /// After unification: MUST STILL PASS — agent event forwarding preserves parity.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn streaming_tokens_arrive_through_agent_delegation() {
-    let provider = MockProvider::new(vec![vec![
-        StreamChunk::Delta {
-            content: "Hello".into(),
-        },
-        StreamChunk::Delta {
-            content: " world".into(),
-        },
-        StreamChunk::Delta {
-            content: "!".into(),
-        },
-        StreamChunk::Usage(swage_core::TokenUsage {
-            input_tokens: 20,
-            output_tokens: 3,
-        }),
-        StreamChunk::Done {
-            finish_reason: Some(FinishReason::Stop),
-        },
-    ]]);
+    journey(async {
+        let provider = MockProvider::new(vec![vec![
+            StreamChunk::Delta {
+                content: "Hello".into(),
+            },
+            StreamChunk::Delta {
+                content: " world".into(),
+            },
+            StreamChunk::Delta {
+                content: "!".into(),
+            },
+            StreamChunk::Usage(swage_core::TokenUsage {
+                input_tokens: 20,
+                output_tokens: 3,
+            }),
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ]]);
 
-    let (router, addr, _storage) = start_test_server(provider).await;
+        let (gateway, _storage) = start_test_server(provider).await;
 
-    let (_, body) = http(&router, "POST", "/api/conversations").await;
-    let conv_id = body["id"].as_str().unwrap();
-    let (mut sink, mut stream) = connect_ws(addr, conv_id).await;
+        let (_, body) = http(&gateway, "POST", "/api/conversations").await;
+        let conv_id = body["id"].as_str().unwrap();
+        let (mut sink, mut stream) = connect_ws(gateway.address, conv_id).await;
 
-    ws_send(&mut sink, json!({"type": "send_message", "content": "Hi"})).await;
+        ws_send(&mut sink, json!({"type": "send_message", "content": "Hi"})).await;
 
-    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
+        let events = ws_collect_through(&mut stream, "turn_complete").await;
 
-    // Verify token events arrived with correct content.
-    let tokens: Vec<&str> = events
-        .iter()
-        .filter(|e| e["type"] == "token")
-        .filter_map(|e| e["content"].as_str())
-        .collect();
+        // Verify token events arrived with correct content.
+        let tokens: Vec<&str> = events
+            .iter()
+            .filter(|e| e["type"] == "token")
+            .filter_map(|e| e["content"].as_str())
+            .collect();
 
-    assert_eq!(
-        tokens,
-        vec!["Hello", " world", "!"],
-        "token events should match provider chunks; got events: {events:?}"
-    );
+        assert_eq!(
+            tokens,
+            vec!["Hello", " world", "!"],
+            "token events should match provider chunks; got events: {events:?}"
+        );
 
-    // Verify turn_complete has token counts.
-    let complete = events.iter().find(|e| e["type"] == "turn_complete");
-    assert!(
-        complete.is_some(),
-        "expected turn_complete; got events: {events:?}"
-    );
+        // Verify turn_complete has token counts.
+        let complete = events.iter().find(|e| e["type"] == "turn_complete");
+        assert!(
+            complete.is_some(),
+            "expected turn_complete; got events: {events:?}"
+        );
+    })
+    .await;
 }
 
 /// Multi-round tool dispatch works through the unified agent path.
@@ -609,92 +604,96 @@ async fn streaming_tokens_arrive_through_agent_delegation() {
 ///
 /// Before unification: PASSES (gateway handles multi-round directly).
 /// After unification: MUST STILL PASS — agent handles multi-round identically.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multi_round_tool_dispatch_through_unified_path() {
-    // Round 1: LLM requests echo tool
-    // Round 2: LLM receives tool result and responds with final text
-    let provider = MockProvider::new(vec![
-        vec![
-            StreamChunk::ToolUse {
-                call_id: "call_1".into(),
-                name: "echo".into(),
-                arguments: json!({"text": "ping"}),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ],
-        vec![
-            StreamChunk::Delta {
-                content: "Echo returned: ping".into(),
-            },
-            StreamChunk::Usage(swage_core::TokenUsage {
-                input_tokens: 30,
-                output_tokens: 5,
-            }),
-            StreamChunk::Done {
-                finish_reason: Some(FinishReason::Stop),
-            },
-        ],
-    ]);
+    journey(async {
+        // Round 1: LLM requests echo tool
+        // Round 2: LLM receives tool result and responds with final text
+        let provider = MockProvider::new(vec![
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "call_1".into(),
+                    name: "echo".into(),
+                    arguments: json!({"text": "ping"}),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "Echo returned: ping".into(),
+                },
+                StreamChunk::Usage(swage_core::TokenUsage {
+                    input_tokens: 30,
+                    output_tokens: 5,
+                }),
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::Stop),
+                },
+            ],
+        ]);
 
-    let config = ResolvedConfig::default();
-    let (router, addr, _storage) = start_test_server_with_echo(provider, config).await;
+        let config = ResolvedConfig::default();
+        let (gateway, _storage) = start_test_server_with_echo(provider, config).await;
 
-    let (_, body) = http(&router, "POST", "/api/conversations").await;
-    let conv_id = body["id"].as_str().unwrap();
-    let (mut sink, mut stream) = connect_ws(addr, conv_id).await;
+        let (_, body) = http(&gateway, "POST", "/api/conversations").await;
+        let conv_id = body["id"].as_str().unwrap();
+        let (mut sink, mut stream) = connect_ws(gateway.address, conv_id).await;
 
-    ws_send(
-        &mut sink,
-        json!({"type": "subscribe", "channels": ["tools"]}),
-    )
+        ws_send(
+            &mut sink,
+            json!({"type": "subscribe", "channels": ["tools"]}),
+        )
+        .await;
+        ws_send(
+            &mut sink,
+            json!({"type": "send_message", "content": "Use echo"}),
+        )
+        .await;
+
+        let events = ws_collect_through(&mut stream, "turn_complete").await;
+
+        // Verify tool_start and tool_end events
+        let tool_start = events.iter().find(|e| e["type"] == "tool_start");
+        assert!(
+            tool_start.is_some(),
+            "expected tool_start; events: {events:?}"
+        );
+        assert_eq!(tool_start.unwrap()["tool"], "echo");
+
+        let tool_end = events.iter().find(|e| e["type"] == "tool_end");
+        assert!(tool_end.is_some(), "expected tool_end; events: {events:?}");
+        assert_eq!(tool_end.unwrap()["status"], "success");
+
+        // Verify final text tokens arrived after tool round
+        let has_tokens = events
+            .iter()
+            .filter(|e| e["type"] == "token")
+            .find_map(|e| e["content"].as_str())
+            .is_some();
+        assert!(
+            has_tokens,
+            "expected text tokens after tool round; events: {events:?}"
+        );
+
+        // Verify turn completed
+        let complete = events.iter().find(|e| e["type"] == "turn_complete");
+        assert!(
+            complete.is_some(),
+            "expected turn_complete; events: {events:?}"
+        );
+    })
     .await;
-    ws_send(
-        &mut sink,
-        json!({"type": "send_message", "content": "Use echo"}),
-    )
-    .await;
-
-    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
-
-    // Verify tool_start and tool_end events
-    let tool_start = events.iter().find(|e| e["type"] == "tool_start");
-    assert!(
-        tool_start.is_some(),
-        "expected tool_start; events: {events:?}"
-    );
-    assert_eq!(tool_start.unwrap()["tool"], "echo");
-
-    let tool_end = events.iter().find(|e| e["type"] == "tool_end");
-    assert!(tool_end.is_some(), "expected tool_end; events: {events:?}");
-    assert_eq!(tool_end.unwrap()["status"], "success");
-
-    // Verify final text tokens arrived after tool round
-    let has_tokens = events
-        .iter()
-        .filter(|e| e["type"] == "token")
-        .find_map(|e| e["content"].as_str())
-        .is_some();
-    assert!(
-        has_tokens,
-        "expected text tokens after tool round; events: {events:?}"
-    );
-
-    // Verify turn completed
-    let complete = events.iter().find(|e| e["type"] == "turn_complete");
-    assert!(
-        complete.is_some(),
-        "expected turn_complete; events: {events:?}"
-    );
 }
 
 /// A topic with no trusted workspace attachment inherits global permissions.
 ///
 /// Proves: missing topic-level workspace grants are absence of local config,
 /// not an implicit deny override. Explicit global or topic denies still deny.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn missing_workspace_grants_inherit_global_permissions() {
+    journey(async {
     let provider = MockProvider::new(vec![
         vec![
             StreamChunk::ToolUse {
@@ -719,12 +718,12 @@ async fn missing_workspace_grants_inherit_global_permissions() {
     let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
         Arc::new(MockFileReadTool) as Arc<dyn swage_gateway::tool::Tool>,
     ]);
-    let (router, addr, _storage) =
+    let (gateway, _storage) =
         start_test_server_with_config(provider, ResolvedConfig::default(), dispatcher).await;
 
-    let (_, body) = http(&router, "POST", "/api/conversations").await;
+    let (_, body) = http(&gateway, "POST", "/api/conversations").await;
     let conv_id = body["id"].as_str().unwrap();
-    let (mut sink, mut stream) = connect_ws(addr, conv_id).await;
+    let (mut sink, mut stream) = connect_ws(gateway.address, conv_id).await;
 
     ws_send(
         &mut sink,
@@ -737,7 +736,7 @@ async fn missing_workspace_grants_inherit_global_permissions() {
     )
     .await;
 
-    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
+    let events = ws_collect_through(&mut stream, "turn_complete").await;
     let tool_end = events
         .iter()
         .find(|e| e["type"] == "tool_end")
@@ -745,79 +744,83 @@ async fn missing_workspace_grants_inherit_global_permissions() {
     assert_eq!(
         tool_end["status"], "success",
         "missing workspace grants should inherit global allow-all permissions; events: {events:?}"
-    );
+    );    }).await;
 }
 
 /// A topic with a trusted read-grant workspace still allows file_read.
 ///
 /// Proves: trusted attachments remain compatible with the inherited global
 /// allow-all policy; they are not required to unlock tool visibility.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workspace_gate_allows_file_read_with_trusted_read_attachment() {
-    let provider = MockProvider::new(vec![
-        vec![
-            StreamChunk::ToolUse {
-                call_id: "call_1".into(),
-                name: "file_read".into(),
-                arguments: json!({"path": "/tmp/notes.md"}),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ],
-        vec![
-            StreamChunk::Delta {
-                content: "ok".into(),
-            },
-            StreamChunk::Done {
-                finish_reason: Some(FinishReason::Stop),
-            },
-        ],
-    ]);
+    journey(async {
+        let provider = MockProvider::new(vec![
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "call_1".into(),
+                    name: "file_read".into(),
+                    arguments: json!({"path": "/tmp/notes.md"}),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "ok".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::Stop),
+                },
+            ],
+        ]);
 
-    let dispatcher = swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::new(MockFileReadTool) as Arc<dyn swage_gateway::tool::Tool>,
-    ]);
-    let (router, addr, storage) =
-        start_test_server_with_config(provider, ResolvedConfig::default(), dispatcher).await;
+        let dispatcher =
+            swage_gateway::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(MockFileReadTool) as Arc<dyn swage_gateway::tool::Tool>
+            ]);
+        let (gateway, storage) =
+            start_test_server_with_config(provider, ResolvedConfig::default(), dispatcher).await;
 
-    // Topic-level grant must be in place before the turn dispatches.
-    let default_topic = storage.general_scope().await.unwrap();
-    storage
-        .create_workspace_attachment(NewWorkspaceAttachment {
-            topic_id: default_topic.id,
-            label: "trusted-read".into(),
-            path: "/tmp".into(),
-            permissions: vec!["read".into()],
-            is_trusted: true,
-        })
-        .await
-        .unwrap();
+        // Topic-level grant must be in place before the turn dispatches.
+        let default_topic = storage.general_scope().await.unwrap();
+        storage
+            .create_workspace_attachment(NewWorkspaceAttachment {
+                topic_id: default_topic.id,
+                label: "trusted-read".into(),
+                path: "/tmp".into(),
+                permissions: vec!["read".into()],
+                is_trusted: true,
+            })
+            .await
+            .unwrap();
 
-    let (_, body) = http(&router, "POST", "/api/conversations").await;
-    let conv_id = body["id"].as_str().unwrap();
-    let (mut sink, mut stream) = connect_ws(addr, conv_id).await;
+        let (_, body) = http(&gateway, "POST", "/api/conversations").await;
+        let conv_id = body["id"].as_str().unwrap();
+        let (mut sink, mut stream) = connect_ws(gateway.address, conv_id).await;
 
-    ws_send(
-        &mut sink,
-        json!({"type": "subscribe", "channels": ["tools"]}),
-    )
+        ws_send(
+            &mut sink,
+            json!({"type": "subscribe", "channels": ["tools"]}),
+        )
+        .await;
+        ws_send(
+            &mut sink,
+            json!({"type": "send_message", "content": "Read /tmp/notes.md"}),
+        )
+        .await;
+
+        let events = ws_collect_through(&mut stream, "turn_complete").await;
+        let tool_end = events
+            .iter()
+            .find(|e| e["type"] == "tool_end")
+            .unwrap_or_else(|| panic!("expected tool_end; events: {events:?}"));
+        assert_eq!(
+            tool_end["status"], "success",
+            "file_read should succeed when topic has trusted read grant; events: {events:?}"
+        );
+    })
     .await;
-    ws_send(
-        &mut sink,
-        json!({"type": "send_message", "content": "Read /tmp/notes.md"}),
-    )
-    .await;
-
-    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(5)).await;
-    let tool_end = events
-        .iter()
-        .find(|e| e["type"] == "tool_end")
-        .unwrap_or_else(|| panic!("expected tool_end; events: {events:?}"));
-    assert_eq!(
-        tool_end["status"], "success",
-        "file_read should succeed when topic has trusted read grant; events: {events:?}"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -838,15 +841,15 @@ async fn output_limit_marks_an_ordinary_reply_incomplete_live_and_on_reload() {
         ]]);
         let mut config = ResolvedConfig::default();
         config.output.schema = schema;
-        let (router, addr, _) = start_test_server_with_config(
+        let (gateway, _) = start_test_server_with_config(
             provider,
             config,
             swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         )
         .await;
-        let (_, created) = http(&router, "POST", "/api/conversations").await;
+        let (_, created) = http(&gateway, "POST", "/api/conversations").await;
         let id = created["id"].as_str().unwrap();
-        let (mut sink, mut stream) = connect_ws(addr, id).await;
+        let (mut sink, mut stream) = connect_ws(gateway.address, id).await;
         ws_send(
             &mut sink,
             json!({"type":"send_message", "content":"Compare"}),
@@ -870,7 +873,7 @@ async fn output_limit_marks_an_ordinary_reply_incomplete_live_and_on_reload() {
                 ws_collect_until(&mut stream, "message_appended", Duration::from_secs(10)).await,
             );
         }
-        let (_, detail) = http(&router, "GET", &format!("/api/conversations/{id}")).await;
+        let (_, detail) = http(&gateway, "GET", &format!("/api/conversations/{id}")).await;
         let messages = detail["messages"].as_array().unwrap();
         let reply = messages.iter().find(|m| m["role"] == "assistant").unwrap();
         assert_eq!(reply["content"], "The comparison ends at a");
@@ -934,7 +937,7 @@ async fn output_limit_marks_a_delegated_reply_and_parent_event_incomplete() {
             },
         ],
     ]);
-    let (router, addr, storage) = start_test_server_with_config(
+    let (gateway, storage) = start_test_server_with_config(
         provider,
         ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(
@@ -958,9 +961,9 @@ async fn output_limit_marks_a_delegated_reply_and_parent_event_incomplete() {
         })
         .await
         .unwrap();
-    let (_, created) = http(&router, "POST", "/api/conversations").await;
+    let (_, created) = http(&gateway, "POST", "/api/conversations").await;
     let id = created["id"].as_str().unwrap();
-    let (mut sink, mut stream) = connect_ws(addr, id).await;
+    let (mut sink, mut stream) = connect_ws(gateway.address, id).await;
     ws_send(
         &mut sink,
         json!({"type":"send_message", "content":"Delegate comparison"}),
@@ -1031,7 +1034,7 @@ async fn output_limit_marks_the_detached_child_and_parent_notice_incomplete() {
     provider.detached_comparison = true;
     let child_release = Arc::new(tokio::sync::Semaphore::new(0));
     provider.child_release = Some(child_release.clone());
-    let (router, addr, storage) = start_test_server_with_config(
+    let (gateway, storage) = start_test_server_with_config(
         provider,
         ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(
@@ -1055,16 +1058,16 @@ async fn output_limit_marks_the_detached_child_and_parent_notice_incomplete() {
         })
         .await
         .unwrap();
-    let (_, created) = http(&router, "POST", "/api/conversations").await;
+    let (_, created) = http(&gateway, "POST", "/api/conversations").await;
     let id = created["id"].as_str().unwrap();
-    let (mut sink, mut stream) = connect_ws(addr, id).await;
+    let (mut sink, mut stream) = connect_ws(gateway.address, id).await;
     ws_send(
         &mut sink,
         json!({"type":"send_message", "content":"Delegate comparison"}),
     )
     .await;
     let _ = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(10)).await;
-    let (_, parent) = http(&router, "GET", &format!("/api/conversations/{id}")).await;
+    let (_, parent) = http(&gateway, "GET", &format!("/api/conversations/{id}")).await;
     let parent_thread = uuid::Uuid::parse_str(parent["root_thread_id"].as_str().unwrap()).unwrap();
     let parent_turns = storage.list_turns_by_thread(parent_thread).await.unwrap();
     let calls = storage
@@ -1073,7 +1076,7 @@ async fn output_limit_marks_the_detached_child_and_parent_notice_incomplete() {
         .unwrap();
     let detached: Value = serde_json::from_str(calls[0].result.as_deref().unwrap()).unwrap();
     let open_child_id = detached["child_session_id"].as_str().unwrap();
-    let (mut child_sink, mut child_stream) = connect_ws(addr, open_child_id).await;
+    let (mut child_sink, mut child_stream) = connect_ws(gateway.address, open_child_id).await;
     // The upgrade can return before the server installs its broadcast
     // listener. A refused frame's response proves the receive loop is ready
     // without starting a child turn or supplying its completion state.
@@ -1130,7 +1133,7 @@ async fn output_limit_marks_the_detached_child_and_parent_notice_incomplete() {
         .unwrap();
     assert_eq!(result.payload["incomplete_reason"], "length");
     let child_id = result.payload["child_session_id"].as_str().unwrap();
-    let (_, child) = http(&router, "GET", &format!("/api/conversations/{child_id}")).await;
+    let (_, child) = http(&gateway, "GET", &format!("/api/conversations/{child_id}")).await;
     assert!(
         child["messages"]
             .as_array()
@@ -1162,7 +1165,7 @@ async fn output_limit_marks_the_detached_child_and_parent_notice_incomplete() {
             ws_collect_until(&mut stream, "message_appended", Duration::from_secs(10)).await,
         );
     }
-    let (_, detail) = http(&router, "GET", &format!("/api/conversations/{id}")).await;
+    let (_, detail) = http(&gateway, "GET", &format!("/api/conversations/{id}")).await;
     let notice = detail["messages"]
         .as_array()
         .unwrap()
