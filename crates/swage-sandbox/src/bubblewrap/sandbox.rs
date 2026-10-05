@@ -65,6 +65,31 @@ impl StderrRelay {
     }
 }
 
+/// The startup error for a sandbox that exited before `stage` completed,
+/// naming its exit status and quoting the tail of its stderr.
+async fn exited_during_startup(
+    exit: Result<std::process::ExitStatus, SandboxError>,
+    stderr: Option<StderrRelay>,
+    stage: &str,
+) -> SandboxError {
+    let status = match exit {
+        Ok(status) => status.to_string(),
+        Err(error) => error.to_string(),
+    };
+    let output = match stderr {
+        Some(relay) => relay.finish().await,
+        None => String::new(),
+    };
+    let cause = if output.is_empty() {
+        "no error output".to_string()
+    } else {
+        output
+    };
+    SandboxError::SpawnFailed {
+        message: format!("sandbox agent exited before {stage} ({status}): {cause}"),
+    }
+}
+
 fn spawn_stderr_relay(stderr: tokio::process::ChildStderr) -> StderrRelay {
     use tokio::io::AsyncBufReadExt;
 
@@ -182,31 +207,14 @@ impl Sandbox for BubblewrapSandbox {
 
         let mut process = ChildProcessManager::spawn(cmd)?;
         tracing::debug!(pid = process.pid(), "bubblewrap sandbox agent spawned");
-        let stderr = process.take_stderr().map(spawn_stderr_relay);
+        let mut stderr = process.take_stderr().map(spawn_stderr_relay);
 
         // Accept the agent's incoming connection, unless the sandbox exits
         // first — waiting out the timeout then would only hide the cause.
         let accepted = tokio::select! {
             accepted = tokio::time::timeout(self.config.tool_call_timeout, listener.accept()) => accepted,
             exit = process.wait_for_exit() => {
-                let status = match exit {
-                    Ok(status) => status.to_string(),
-                    Err(error) => error.to_string(),
-                };
-                let output = match stderr {
-                    Some(relay) => relay.finish().await,
-                    None => String::new(),
-                };
-                let cause = if output.is_empty() {
-                    "no error output".to_string()
-                } else {
-                    output
-                };
-                return Err(SandboxError::SpawnFailed {
-                    message: format!(
-                        "sandbox agent exited before connecting ({status}): {cause}"
-                    ),
-                });
+                return Err(exited_during_startup(exit, stderr, "connecting").await);
             }
         };
         let (stream, _addr) = match accepted {
@@ -244,6 +252,15 @@ impl Sandbox for BubblewrapSandbox {
         {
             Ok(message) => message,
             Err(error) => {
+                // A handshake broken by the sandbox exiting reports why it
+                // exited, not the closed connection that followed.
+                if let Ok(exit) =
+                    tokio::time::timeout(STDERR_DRAIN_TIMEOUT, process.wait_for_exit()).await
+                {
+                    return Err(
+                        exited_during_startup(exit, stderr.take(), "reporting ready").await,
+                    );
+                }
                 cleanup_failed_startup_process(
                     process,
                     self.config.shutdown_grace_period,
@@ -586,16 +603,14 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn spawn_agent_reports_the_exited_sandbox_stderr_without_waiting_out_the_timeout() {
-        let _env_guard = crate::SANDBOX_TEST_ENV_LOCK.lock().await;
+    /// Runs `spawn_agent` with `script` installed as `bwrap` at the front of
+    /// `PATH`, returning the startup result and how long it took.
+    async fn spawn_with_fake_bwrap(
+        script: &str,
+    ) -> (Result<(), SandboxError>, std::time::Duration) {
         let temp_dir = tempfile::tempdir().unwrap();
         let script_path = temp_dir.path().join("bwrap");
-        fs::write(
-            &script_path,
-            "#!/bin/sh\necho 'Error: failed to connect to host socket at /x.sock: No such file or directory' >&2\nexit 1\n",
-        )
-        .unwrap();
+        fs::write(&script_path, script).unwrap();
         let mut permissions = fs::metadata(&script_path).unwrap().permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(&script_path, permissions).unwrap();
@@ -619,8 +634,11 @@ mod tests {
             Some(value) => unsafe { std::env::set_var("PATH", value) },
             None => unsafe { std::env::remove_var("PATH") },
         }
+        (result, elapsed)
+    }
 
-        let error = result.expect_err("a sandbox that exits before connecting must fail startup");
+    fn assert_startup_quotes_cause(result: Result<(), SandboxError>, elapsed: Duration) {
+        let error = result.expect_err("a sandbox that exits during startup must fail it");
         assert!(
             error
                 .to_string()
@@ -632,6 +650,37 @@ mod tests {
             "startup must fail when the sandbox exits, not after the {:?} timeout (took {elapsed:?})",
             test_config().tool_call_timeout
         );
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_reports_the_exited_sandbox_stderr_without_waiting_out_the_timeout() {
+        let _env_guard = crate::SANDBOX_TEST_ENV_LOCK.lock().await;
+        let (result, elapsed) = spawn_with_fake_bwrap(
+            "#!/bin/sh\necho 'Error: failed to connect to host socket at /x.sock: No such file or directory' >&2\nexit 1\n",
+        )
+        .await;
+        assert_startup_quotes_cause(result, elapsed);
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_reports_the_sandbox_stderr_when_it_exits_after_connecting() {
+        let _env_guard = crate::SANDBOX_TEST_ENV_LOCK.lock().await;
+        // Connects to the socket named in bwrap's --setenv arguments, then
+        // exits with a diagnostic before ever sending Ready.
+        let (result, elapsed) = spawn_with_fake_bwrap(
+            r#"#!/usr/bin/env python3
+import socket, sys, time
+args = sys.argv[1:]
+path = args[args.index("SWAGE_IPC_SOCKET") + 1]
+s = socket.socket(socket.AF_UNIX)
+s.connect(path)
+time.sleep(0.1)
+sys.stderr.write("Error: failed to connect to host socket at /x.sock: No such file or directory\n")
+sys.exit(1)
+"#,
+        )
+        .await;
+        assert_startup_quotes_cause(result, elapsed);
     }
 
     // -----------------------------------------------------------------------
