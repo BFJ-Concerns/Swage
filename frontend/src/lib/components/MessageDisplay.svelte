@@ -176,6 +176,12 @@
     providerRetry ? Math.max(1, Math.ceil(providerRetry.wait_ms / 1000)) : 0,
   );
   const shouldRenderMarkdown = $derived(displayPreferences.conversation_rendering === "markdown");
+  // A turn blocked on the user's decision is not generating: its approval
+  // card speaks for it, so no empty generating bubble stands in.
+  const awaitingApproval = $derived(
+    (stream?.pendingApproval ?? streamingStore?.pendingApproval ?? null) !== null,
+  );
+  const isGenerating = $derived(isStreaming && !awaitingApproval);
   // Live tool calls for the current in-progress turn.
   const activeToolCalls = $derived(stream?.activeToolCalls ?? streamingStore?.activeToolCalls ?? []);
 
@@ -405,7 +411,7 @@
     {/each}
 
     <!-- ---- Live streaming content: grows as tokens arrive ---- -->
-    {#if isStreaming || streamedContent}
+    {#if isGenerating || streamedContent}
       <div class="message assistant streaming" aria-label="Assistant message">
         <span class="role-label">Assistant</span>
         <div class="message-content assistant-content markdown-body">
@@ -417,7 +423,7 @@
             <div class="plain-body">{streamedContent}</div>
           {/if}
 
-          {#if isStreaming}
+          {#if isGenerating}
             <!-- Blinking cursor to signal active generation. Decoration only —
                  muted ink so it stops competing with status/error colour
                  (UI audit f-17). -->
