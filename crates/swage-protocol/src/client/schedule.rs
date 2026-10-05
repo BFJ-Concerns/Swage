@@ -104,6 +104,21 @@ pub enum GateObservation {
     File { path: String },
 }
 
+/// A flag raised when a gate is declared: something about the declaration
+/// the operator should know before the first fire. Derived from the gate as
+/// stored, never persisted, so every surface that shows the schedule shows
+/// the same flags.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
+pub enum GateWarning {
+    /// Criteria were declared but nothing is observed, so a criterion about
+    /// a file or other workspace state can never be decided against that
+    /// state: the gate skips such a criterion and names what it did not
+    /// observe, rather than guessing at every fire.
+    UnobservedCriteria { message: String },
+}
+
 /// How an update touches a schedule's gate.
 ///
 /// A gate is an optional field, and clearing an optional field over the
@@ -267,6 +282,11 @@ pub struct CreateScheduleRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct UpdateScheduleRequest {
+    /// Recognised so an attempted agent change receives an actionable refusal.
+    /// The agent is fixed when the schedule is created.
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub agent_id: Option<String>,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub message: Option<String>,
@@ -295,6 +315,11 @@ pub struct Schedule {
     pub creator: ScheduleCreator,
     pub routing: DeliveryRoutingRequest,
     pub gate: Option<GateConfig>,
+    /// Declaration-time flags on the gate, derived from it as stored; empty
+    /// when there is no gate or nothing to flag.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub gate_warnings: Vec<GateWarning>,
     pub next_run_at: Option<DateTime<Utc>>,
     pub last_run_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,

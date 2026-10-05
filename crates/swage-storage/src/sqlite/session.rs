@@ -75,8 +75,8 @@ fn row_to_session_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionA
 /// The activity columns appended to `SESSION_COLUMNS` for the recent list:
 /// the latest user-or-assistant message's time and text (creation time and
 /// no text for a session with none), and whether any turn was interrupted.
-/// Tool and system messages are excluded so the list reflects what a person
-/// or the agent last said, not bookkeeping.
+/// Tool, system and platform messages, and assistant rows containing only tool
+/// effects, are excluded so the list reflects what a person or the agent said.
 const SESSION_ACTIVITY_COLUMNS: &str = "
     COALESCE(latest.created_at, sessions.created_at) AS last_activity,
     latest.content AS latest_message,
@@ -96,6 +96,8 @@ const SESSION_ACTIVITY_JOIN: &str = "
         FROM messages
         JOIN threads ON threads.id = messages.thread_id
         WHERE messages.role IN ('user', 'assistant')
+          AND messages.origin != 'platform'
+          AND messages.content != ''
     ) AS latest ON latest.session_id = sessions.id AND latest.recency = 1";
 
 fn parse_uuid(s: &str) -> rusqlite::Result<Uuid> {

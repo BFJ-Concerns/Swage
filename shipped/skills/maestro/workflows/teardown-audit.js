@@ -98,7 +98,7 @@ You are sweep ${slice} of ${total}: order the changed paths alphabetically and f
 
 For each capability: what it was (one line, concrete), evidence (the file/symbol at ${baseCommit} that provided it), confidence it is genuinely gone rather than relocated.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — every JSON value in your reply is checked against the schema and the LAST valid one is read, so use exactly one fence and put nothing schema-shaped after it. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
 
 const sweepsOut = (
   await parallel(
@@ -210,7 +210,7 @@ Report:
 
 Then write the full report as markdown to ${reportPath}: a header naming the audit window (${baseCommit}..${headCommit}, both literal hashes) and date, then the four sections above with their content, then the summary.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`,
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — every JSON value in your reply is checked against the schema and the LAST valid one is read, so use exactly one fence and put nothing schema-shaped after it. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`,
   {
     ...ADJ_OPTS,
     schema: adjudicationSchema,

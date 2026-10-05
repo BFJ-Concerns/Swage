@@ -9,6 +9,9 @@ pub enum AgentError {
     #[error("LLM provider failed: {0}")]
     ProviderFailed(#[from] ProviderError),
 
+    #[error("The model refused this request")]
+    ProviderRefused,
+
     #[error("storage operation failed: {0}")]
     StorageFailed(#[from] StorageError),
 
@@ -71,7 +74,7 @@ impl AgentError {
             // Schema validation exhausted all retries — not transient.
             AgentError::OutputSchemaFailed { .. } => false,
             // Cancellation is not a transient failure — the caller chose to stop.
-            AgentError::Cancelled => false,
+            AgentError::Cancelled | AgentError::ProviderRefused => false,
         }
     }
 }

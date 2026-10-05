@@ -14,6 +14,7 @@ pub enum TurnState {
     Pending,
     Processing,
     Completed,
+    Refused,
     Incomplete,
     Failed,
     Interrupted,

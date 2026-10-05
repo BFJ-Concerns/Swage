@@ -39,13 +39,84 @@ pub(crate) enum PreToolUseOutcome {
 /// tool dispatch loop.
 #[derive(Debug)]
 pub(crate) enum ApprovalGateOutcome {
-    /// Human approved — proceed with tool execution.
-    Approved,
+    /// Human approved — proceed with tool execution. The scope is carried
+    /// so the tool result can tell the model how the call was approved.
+    Approved { scope: ApprovalDecisionScope },
     /// Human rejected (or timeout treated as rejection) — deliver this
     /// feedback string as the tool result.
     Rejected { feedback: String },
     /// Timeout with interrupt policy — the turn must be interrupted.
     Interrupted,
+}
+
+/// Model-facing tool result for a call the person denied. The decision is
+/// stated in fixed words; the UI's reason string describes which control was
+/// used, not anything the person said, so it never reaches the model.
+pub(crate) fn user_denied_feedback() -> String {
+    String::from("The user denied this tool call. It did not run, and no approval is pending.")
+}
+
+/// A dispatch's payload and approval feedback travel separately so only the
+/// model-facing content carries the feedback. Storage metadata and hooks use
+/// the payload unchanged.
+pub(crate) struct ToolDispatchResult {
+    pub content: String,
+    pub is_error: bool,
+    pub status: String,
+    pub approval_note: Option<String>,
+    pub execution_prevented: bool,
+}
+
+impl From<(String, bool, String)> for ToolDispatchResult {
+    fn from((content, is_error, status): (String, bool, String)) -> Self {
+        Self {
+            content,
+            is_error,
+            status,
+            approval_note: None,
+            execution_prevented: false,
+        }
+    }
+}
+
+impl ToolDispatchResult {
+    pub fn model_content(&self, content: &str) -> String {
+        match &self.approval_note {
+            Some(note) => format!("{note}\n{content}"),
+            None => content.to_owned(),
+        }
+    }
+}
+
+/// Record how the person approved the call without altering its payload.
+/// Success confirms execution; validation or access failures prevent it.
+/// Other errors do not establish whether execution began.
+pub(crate) fn with_user_approval_note(
+    mut result: ToolDispatchResult,
+    scope: ApprovalDecisionScope,
+) -> ToolDispatchResult {
+    let how = match scope {
+        ApprovalDecisionScope::Once => "once",
+        ApprovalDecisionScope::Session => "for this session",
+        ApprovalDecisionScope::Permanent | ApprovalDecisionScope::PermanentGlobal => "permanently",
+    };
+    if result.status == "rejected" {
+        // A later gate on the same call denied it; that denial is the outcome.
+        return result;
+    }
+    let outcome = if result.status == "success" {
+        "; it ran after approval"
+    } else if result.execution_prevented {
+        "; it did not run"
+    } else {
+        ""
+    };
+    let note = format!("[The user approved this tool call {how}{outcome}.]");
+    result.approval_note = Some(match result.approval_note {
+        Some(previous) => format!("{note}\n{previous}"),
+        None => note,
+    });
+    result
 }
 
 /// Default approval timeout when neither config nor hook specifies one.

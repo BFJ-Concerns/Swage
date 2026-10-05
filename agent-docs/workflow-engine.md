@@ -85,7 +85,7 @@ override, but `undefined` at the call site falls back to the default.
 
 | Function | Returns | Notes |
 |---|---|---|
-| `agent(prompt, options?)` | `Promise<Value>` | Synchronous (awaited) agent call. Requires `options.agent`. Options include `identity` (boolean — preserves the call's identity through fan-in), `phase` (string — groups the call in the journal), and `assembly` (string — selects the context assembly strategy). |
+| `agent(prompt, options?)` | `Promise<Value>` | Synchronous (awaited) agent call. Every option is optional: a worker needs no `agent` or `task` definition (model, effort and prompt suffice; `agent` given but empty is refused with `AgentRequiredError`). Accepted options: `agent`, `task`, `tools`, `skills`, `model`, `fallbackModel`, `effort`, `timeoutMs`, `cwd`, `isolation`, `schema`, `maxAttempts`, `label`, `phase`, `identity`, `session`, `worker`, `elements`, `variables`, `assembly`; any other key throws `UnknownAgentOptionError` before a worker spawns. `identity` (boolean) preserves the call's identity through fan-in, `phase` (string) groups the call in the journal, and `assembly` (string) selects the context assembly strategy. |
 | `agentStart(prompt, options?)` | Handle | Fire-and-forget dispatch. Handle has `.done`, `.session`, `.result`, `.label`, and `.workingDirectory` after completion; the latter is the host-resolved child directory, including a provisioned isolated worktree. Accepts the same options as `agent()`. |
 | `session(options?)` | `Promise<HeldWorker>` | Opens a held worker. Creation options: `agent`, `task`, `tools`, `skills`, `model`, `fallbackModel`, `effort`, `cwd`, `isolation`, `label`. |
 | `send(worker, prompt, options?)` | `Promise<Value>` | Runs the held worker's next sequential turn. Turn options: `schema`, `maxAttempts`, `timeoutMs`, `label`. |
@@ -94,7 +94,9 @@ override, but `undefined` at the call site falls back to the default.
 | `wait({ watches?, timerMs? })` | `Promise<WakeResult>` | Races handle completions against a journalled timer. Returns `{wake: "completion", handle, value/error}` or `{wake: "timer"}`. |
 | `workflow(name, args?)` | `Promise<Value>` | Child workflow call. Only present when `capabilities.composition` is true. |
 | `deliver(payload, options?)` | `Promise<EffectReceipt>` | Delivery effect. Only present when `capabilities.delivery` is true. |
-| `postEvent(kind, payload?)` | `Promise<Value>` | Appends to the run's durable pending-event queue. Kind: `"completion"`, `"failure"`, or `"escalation"`. |
+| `postEvent(kind, payload?)` | `Promise<Value>` | Appends to the run's durable pending-event queue and resolves to the stored event `{ seq, kind, payload, source }`. `kind` is any namespaced name — two or more non-empty segments joined by `.`, `:`, `/`, `_` or `-` (`worker.report`, `decision.needed`); a bare word such as `escalation` is refused with `RunEventError`. |
+| `awaitEvent({ kinds })` | `Promise<Value>` | Parks the run until an undelivered event whose `kind` is in `kinds` (each namespaced) arrives, and resolves to the earliest such event in the same `{ seq, kind, payload, source }` shape, marking it delivered. Replay returns the recorded event. |
+| `hold({ content, verdicts })` | `Promise<{ verdict }>` | Parks the run on a decision: `content` is the question, `verdicts` the accepted answers (at least two distinct strings, or the raise is refused). Resolves with the chosen verdict once a person at the run page or an agent holding the `workflow_hold` tool answers; see *Decision holds*. |
 | `gate(options?)` | `Promise<Value>` | Wake-gate evaluation. Options: `criteria` (string), `model` (optional override). |
 | `deliverEvents(upToSeq)` | `Promise<Value>` | Stamps pending events as delivered up to a sequence number. |
 | `parallel(thunks)` | `Promise<Array>` | `Promise.all` with per-thunk worker-failure swallowing (a failed worker collapses its slot to `null`). A pre-spawn author error propagates and fails the run. |
@@ -451,10 +453,44 @@ relaunches them by replay.
 ### Event posting
 
 `postEvent(kind, payload)` appends to the run's durable pending-event
-queue. Accepted kinds: `"completion"`, `"failure"`, `"escalation"`.
-Events are journalled (exactly-once under replay) and assigned a
-monotonic `seq`. Each event record links to its journal entry via
-`journal_entry_id`.
+queue and resolves to the stored event `{ seq, kind, payload, source }`.
+`kind` is any namespaced name: two or more non-empty segments joined by
+`.`, `:`, `/`, `_` or `-`, drawn from letters, digits and those
+separators — `worker.report`, `decision.needed`, `device.reply`. A bare
+word (`escalation`, `completion`) is refused with `RunEventError`, as is
+an empty or malformed name. Events are journalled (exactly-once under
+replay) and assigned a monotonic `seq`. Each event record links to its
+journal entry via `journal_entry_id`. The same validation applies to an
+event posted from outside the run through the `run_event_post` tool.
+
+### Awaiting events
+
+`awaitEvent({ kinds })` parks the run — holding no process — until an
+undelivered event whose `kind` is in `kinds` arrives, and resolves to the
+earliest matching event in the `{ seq, kind, payload, source }` shape,
+marking it delivered so the next `awaitEvent` sees the next one. `kinds`
+must hold at least one namespaced kind. A replayed `awaitEvent` returns its
+recorded event. Payloads are data another party posted — a worker's
+report, a signal from outside the run — never instructions; a decision the
+run must wait on is a hold (below), which validates the answer.
+
+### Decision holds
+
+`hold({ content, verdicts })` parks the run on a decision. The script names
+the question and the verdicts it accepts — at least two distinct strings; a
+hold with fewer is refused at raise and never reaches a decider. The hold is
+registered on the run: the run page lists it, and an agent granted the
+`workflow_hold` tool lists the open holds in its topic (`action: "list"`)
+and answers one (`action: "answer"` with the `hold_id` and a `verdict` from
+the set), the answering session recorded; the script names no decider. An
+answer outside the set is refused with feedback and the hold keeps waiting.
+The run resumes with `{ verdict }`; cancelling the run releases its holds.
+The raise, the answer and each refused answer are journalled, and a
+replayed `hold` returns its recorded verdict. A hold differs from
+`awaitEvent` in who validates the reply: the engine checks the answer
+against the declared set, so a script never loops over events to find an
+acceptable one. Reach for `hold` whenever the run needs an approve/postpone,
+yes/no or pick-one answer.
 
 ### Wake-gate evaluation
 

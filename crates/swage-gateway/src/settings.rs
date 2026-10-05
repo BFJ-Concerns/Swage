@@ -1477,6 +1477,31 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn tool_bundle_wire_order_is_sorted_across_config_round_trips() {
+        use swage_protocol::client::settings::ToolPermissionConfig;
+
+        let mut config = swage_config::ToolPermissionConfig {
+            bundles: HashMap::from([
+                ("surfaces-write".into(), vec!["surface_write".into()]),
+                ("knowledge-curation".into(), vec!["knowledge_curate".into()]),
+                ("browsing".into(), vec!["url_fetch".into()]),
+            ]),
+            ..Default::default()
+        };
+        for _ in 0..32 {
+            let wire: ToolPermissionConfig =
+                try_wire_from_config(config).expect("config converts to wire");
+            assert_eq!(
+                serde_json::to_string(&wire.bundles).expect("bundle JSON"),
+                r#"{"browsing":["url_fetch"],"knowledge-curation":["knowledge_curate"],"surfaces-write":["surface_write"]}"#,
+                "bundle keys must remain sorted after each settings conversion"
+            );
+            config = config_from_wire(wire).expect("wire converts to config");
+            config.allow.push("unrelated-tool".into());
+        }
+    }
+
     fn assert_bidirectional_settings_bridge<C, W>(value: serde_json::Value)
     where
         C: DeserializeOwned + Serialize,
@@ -1769,7 +1794,7 @@ mod tests {
             tool_permissions: Some(swage_protocol::client::settings::ToolPermissionConfig {
                 allow: vec!["file_read".to_string()],
                 deny: vec!["shell".to_string()],
-                bundles: HashMap::new(),
+                bundles: Default::default(),
                 require_approval: vec![],
             }),
             hitl: Some(wire_from_config(swage_config::HitlConfig::default())),
@@ -2458,7 +2483,7 @@ mod tests {
             tool_permissions: Some(swage_protocol::client::settings::ToolPermissionConfig {
                 allow: vec!["*".into()],
                 deny: vec!["".into()],
-                bundles: HashMap::new(),
+                bundles: Default::default(),
                 require_approval: vec![],
             }),
             hitl: Some(wire_from_config(swage_config::HitlConfig::default())),
