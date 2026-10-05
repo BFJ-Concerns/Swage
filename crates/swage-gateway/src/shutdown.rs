@@ -23,6 +23,7 @@
 //! ```
 
 use std::collections::HashSet;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tokio::time;
@@ -36,6 +37,9 @@ use swage_storage::store::{
 };
 
 use crate::state::AppState;
+
+pub(crate) const SCHEDULE_INTERRUPTION_REASON: &str =
+    "gateway stopped while schedule run was running";
 
 /// Wait for SIGTERM or SIGINT, then log and return.
 ///
@@ -71,6 +75,7 @@ pub async fn graceful_shutdown() {
 /// added while the cleanup loop runs (the server has already stopped accepting
 /// new connections at that point).
 pub async fn shutdown_active_turns(state: &AppState) {
+    state.turn_shutdown_started.store(true, Ordering::Release);
     let turns = state.active_turns.lock().await;
     let count = turns.len();
     for token in turns.values() {
@@ -180,7 +185,7 @@ pub async fn recover_orphaned_background_runs(
 ) -> Result<BackgroundRunRecoveryCounts, StorageError> {
     Ok(BackgroundRunRecoveryCounts {
         schedule_runs_failed: storage
-            .recover_incomplete_schedule_runs("gateway stopped while schedule run was running")
+            .recover_incomplete_schedule_runs(SCHEDULE_INTERRUPTION_REASON)
             .await?,
         background_jobs_retried: storage
             .recover_running_background_jobs("gateway stopped while background job was running")

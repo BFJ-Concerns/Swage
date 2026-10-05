@@ -1264,7 +1264,27 @@ async fn run_body(
         crate::turn::TurnInput::text(&input).with_origin(swage_storage::MessageOrigin::Schedule),
         turn_id,
     )
-    .await?;
+    .await;
+
+    // Cancellation can return either no reply or partial text. Only an
+    // interrupted turn during shutdown takes the same failure path as restart
+    // recovery; a genuine no-reply completion keeps its ordinary error.
+    if state
+        .turn_shutdown_started
+        .load(std::sync::atomic::Ordering::Acquire)
+        && state
+            .storage
+            .get_turn(turn_id)
+            .await?
+            .is_some_and(|turn| turn.state == swage_storage::TurnState::Interrupted)
+    {
+        return Err(RunFailure {
+            message: crate::shutdown::SCHEDULE_INTERRUPTION_REASON.into(),
+            output: output.ok(),
+            delivery_attempted: false,
+        });
+    }
+    let output = output?;
 
     // Delivery runs after a successful turn: a failure here still fails the
     // run, but the output the turn produced is preserved on the row.

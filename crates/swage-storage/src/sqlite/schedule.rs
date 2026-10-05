@@ -6,8 +6,9 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    GateConfig, GateDecision, NewSchedule, NewScheduleRun, Schedule, ScheduleCreator, ScheduleRun,
-    ScheduleRunState, ScheduleRunUpdate, SessionPolicy, UpdateSchedule,
+    GateConfig, GateDecision, NewDeliveryRecord, NewSchedule, NewScheduleRun, Schedule,
+    ScheduleCreator, ScheduleRun, ScheduleRunState, ScheduleRunUpdate, SessionPolicy,
+    UpdateSchedule,
 };
 use crate::sqlite::SqliteStorage;
 use crate::store::ScheduleStore;
@@ -688,8 +689,38 @@ impl ScheduleStore for SqliteStorage {
     ) -> Result<u64, StorageError> {
         let error_message = error_message.to_string();
         self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
             let now = Utc::now().to_rfc3339();
-            let changed = conn.execute(
+            // Recovery owns both the settlement and its delivery account.
+            // Keep any account already written before the process stopped.
+            let unaccounted_runs = {
+                let mut statement = tx.prepare(
+                    "SELECT id FROM schedule_runs
+                     WHERE state IN ('pending', 'running')
+                       AND NOT EXISTS (
+                           SELECT 1 FROM delivery_records
+                           WHERE run_id = schedule_runs.id
+                       )",
+                )?;
+                statement
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            for run_id in unaccounted_runs {
+                super::delivery::insert_delivery_record(
+                    &tx,
+                    NewDeliveryRecord {
+                        session_id: None,
+                        run_id: Some(parse_uuid(&run_id)?),
+                        turn_id: None,
+                        target: serde_json::json!({ "kind": "no_delivery" }),
+                        content: String::new(),
+                        status: "not_delivered".into(),
+                        error: Some(error_message.clone()),
+                    },
+                )?;
+            }
+            let changed = tx.execute(
                 "UPDATE schedule_runs
                  SET state = 'failed',
                      error_message = ?1,
@@ -697,6 +728,7 @@ impl ScheduleStore for SqliteStorage {
                  WHERE state IN ('pending', 'running')",
                 params![&error_message, now],
             )?;
+            tx.commit()?;
             Ok(changed as u64)
         })
         .await
@@ -1142,11 +1174,26 @@ mod tests {
             .unwrap();
         assert_eq!(count, 2);
 
+        let deliveries = crate::store::DeliveryStore::list_delivery_records(&storage)
+            .await
+            .unwrap();
+        assert_eq!(
+            deliveries.len(),
+            2,
+            "recovery accounts for both incomplete runs"
+        );
         for id in [running.id, pending.id] {
             let recovered = storage.get_schedule_run(id).await.unwrap().unwrap();
             assert_eq!(recovered.state, ScheduleRunState::Failed);
             assert_eq!(recovered.error_message.as_deref(), Some("gateway stopped"));
             assert!(recovered.completed_at.is_some());
+            let record = deliveries
+                .iter()
+                .find(|record| record.run_id == Some(id))
+                .unwrap();
+            assert_eq!(record.status, "not_delivered");
+            assert_eq!(record.target, serde_json::json!({ "kind": "no_delivery" }));
+            assert_eq!(record.error, recovered.error_message);
         }
 
         let untouched = storage
@@ -1156,6 +1203,106 @@ mod tests {
             .unwrap();
         assert_eq!(untouched.state, ScheduleRunState::Completed);
         assert_eq!(untouched.output_text.as_deref(), Some("done"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recovery_rolls_back_when_the_delivery_account_cannot_be_written() {
+        let (storage, topic_id, _) = make_storage_with_session().await;
+        let schedule = storage
+            .create_schedule(fresh_schedule(topic_id))
+            .await
+            .unwrap();
+        let run = storage
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule.id,
+                ScheduleRunTrigger::Tick,
+                None,
+            ))
+            .await
+            .unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER refuse_recovery_delivery BEFORE INSERT ON delivery_records
+             BEGIN SELECT RAISE(ABORT, 'delivery write refused'); END;",
+                )
+            })
+            .await
+            .unwrap();
+        let result = storage
+            .recover_incomplete_schedule_runs("gateway stopped")
+            .await;
+        assert!(
+            result.is_err(),
+            "recovery must report a delivery write failure"
+        );
+        let unchanged = storage.get_schedule_run(run.id).await.unwrap().unwrap();
+        assert_eq!(
+            unchanged.state,
+            ScheduleRunState::Pending,
+            "failed recording must not settle the run"
+        );
+        assert!(unchanged.error_message.is_none());
+        assert!(unchanged.completed_at.is_none());
+        assert!(
+            crate::store::DeliveryStore::list_delivery_records(&storage)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        storage
+            .with_conn(|conn| conn.execute_batch("DROP TRIGGER refuse_recovery_delivery"))
+            .await
+            .unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER refuse_recovery_settlement BEFORE UPDATE ON schedule_runs
+             BEGIN SELECT RAISE(ABORT, 'settlement refused'); END;",
+                )
+            })
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .recover_incomplete_schedule_runs("gateway stopped")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            storage
+                .get_schedule_run(run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            ScheduleRunState::Pending
+        );
+        assert!(
+            crate::store::DeliveryStore::list_delivery_records(&storage)
+                .await
+                .unwrap()
+                .is_empty(),
+            "failed settlement must not leave a delivery account"
+        );
+        storage
+            .with_conn(|conn| conn.execute_batch("DROP TRIGGER refuse_recovery_settlement"))
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .recover_incomplete_schedule_runs("gateway stopped")
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            crate::store::DeliveryStore::list_delivery_records(&storage)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
