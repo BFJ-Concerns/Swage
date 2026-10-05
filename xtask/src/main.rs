@@ -1512,15 +1512,18 @@ mod tests {
             "cannot find any documented gate stages in Verification gate section"
         );
 
-        let static_stages: Vec<_> = gate_function_body(&source, "check_gate")
-            .lines()
-            .filter_map(|line| {
-                let line = line.trim();
-                line.strip_suffix("()?;")
-                    .or_else(|| line.strip_suffix("()"))
-                    .map(gate_stage_name)
-            })
-            .collect();
+        let mut static_stages = Vec::new();
+        for line in gate_function_body(&source, "check_gate").lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with("//") || line == "Ok(())" {
+                continue;
+            }
+            let call = line
+                .strip_suffix("()?;")
+                .or_else(|| line.strip_suffix("()"))
+                .unwrap_or_else(|| panic!("unrecognised gate source line in check_gate: {line}"));
+            static_stages.push(gate_stage_name(call));
+        }
         assert!(
             !static_stages.is_empty(),
             "cannot find any executed gate stages in xtask function check_gate"
@@ -1533,8 +1536,25 @@ mod tests {
         let mut executed = Vec::new();
         let mut delegated = 0;
         let mut final_stages = 0;
+        // Only the current result-collection wrapper is non-stage scaffolding.
+        // Keep exact lines: a new call inside a match arm or wrapper must fail.
+        let verify_scaffolding = [
+            "run_with_final_sweep(\"verify\", || {",
+            "match (test_result, projection_result) {",
+            "(Ok(()), Ok(())) => Ok(()),",
+            "(Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),",
+            "(Err(test_error), Err(projection_error)) => Err(format!(",
+            "\"test suite failed: {test_error}; protocol projection freshness check failed: {projection_error}\"",
+            ")",
+            ".into()),",
+            "}",
+            "})",
+        ];
         for line in gate_function_body(&source, "verify").lines() {
             let line = line.trim();
+            if line.is_empty() || line.starts_with("//") {
+                continue;
+            }
             if line == "check_gate()?;" {
                 executed.extend_from_slice(&static_stages);
                 delegated += 1;
@@ -1546,6 +1566,11 @@ mod tests {
                 // These calls retain both results so neither final stage is skipped.
                 executed.push(gate_stage_name(call));
                 final_stages += 1;
+            } else {
+                assert!(
+                    verify_scaffolding.contains(&line),
+                    "unrecognised gate source line in verify: {line}"
+                );
             }
         }
         assert_eq!(
