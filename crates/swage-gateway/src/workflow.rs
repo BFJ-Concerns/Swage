@@ -2621,6 +2621,7 @@ async fn execute_workflow_agent_turn(
         requested_model,
         Some(provider_failure.clone()),
         reuse_persisted_input,
+        None,
     ));
     let timeout = timeout_ms.map(std::time::Duration::from_millis);
     let mut timeout_wait = Box::pin(async {

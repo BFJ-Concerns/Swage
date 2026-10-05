@@ -141,7 +141,7 @@ pub(crate) enum TurnAttendance {
 // Turn record exists.
 #[tracing::instrument(
     name = "turn",
-    skip(state, input, ws_tx, subscription, composition, compaction_focus),
+    skip(state, input, ws_tx, subscription, composition, compaction_focus, session_delivery),
     fields(turn_id = tracing::field::Empty),
 )]
 #[allow(clippy::too_many_arguments)]
@@ -164,6 +164,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
     requested_model: Option<String>,
     provider_failure_observer: Option<ProviderFailureObserver>,
     reuse_persisted_input: bool,
+    session_delivery: Option<crate::turn_queue::SessionEventDelivery>,
 ) -> Result<(), GatewayError> {
     let TurnInput {
         text: content,
@@ -880,8 +881,18 @@ pub(super) async fn process_turn_with_composition_and_focus(
         tracing::warn!(error = %error, "failed to shut down turn sandbox");
     }
 
+    // A queue-started turn has a relay between its producer and the session.
+    // Keep the session occupied until every event, including TurnComplete,
+    // has entered its listeners' ordered channels before another drain starts.
+    let delivery_result = if let Some(delivery) = session_delivery {
+        delivery.finish().await
+    } else {
+        Ok(())
+    };
+
     // Cleanup: remove the cancellation token regardless of outcome.
     release_active_turn(state, session_id).await;
+    delivery_result?;
 
     // A turn that ended on its own hands the session to whatever queued
     // behind it; a stopped turn leaves the queue standing (C60).

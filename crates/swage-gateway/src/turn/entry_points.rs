@@ -157,6 +157,7 @@ pub(crate) async fn process_turn_with_existing_turn_and_focus_and_model(
         requested_model,
         None,
         false,
+        None,
     )
     .await
 }
@@ -198,6 +199,7 @@ pub(crate) async fn process_turn_with_composition(
         None,
         None,
         false,
+        None,
     )
     .await
 }
@@ -224,6 +226,7 @@ pub(crate) async fn process_turn_with_composition_and_model(
     requested_model: Option<String>,
     provider_failure_observer: Option<ProviderFailureObserver>,
     reuse_persisted_input: bool,
+    session_delivery: Option<crate::turn_queue::SessionEventDelivery>,
 ) -> Result<(), GatewayError> {
     process_turn_with_composition_and_focus(
         state,
@@ -244,6 +247,7 @@ pub(crate) async fn process_turn_with_composition_and_model(
         requested_model,
         provider_failure_observer,
         reuse_persisted_input,
+        session_delivery,
     )
     .await
 }
