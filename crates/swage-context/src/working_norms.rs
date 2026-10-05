@@ -60,7 +60,10 @@ genuine uncertainty plainly rather than hedging around it. Temporary \
 files, scratch work and working directories go under the place your \
 orientation names for tool paths — the working directory, or the scratch \
 directory when no workspace is attached — never under /tmp or anywhere \
-outside the attached workspaces.";
+outside the attached workspaces. When you state a measured property of \
+something you delivered — a word count, a length, a limit met — measure it \
+with a tool first and report the number you measured; where you have not \
+measured, say so rather than asserting that the limit is met.";
 
 const CLAUDE_NORMS: &str = "\
 Act on the operator's request without asking permission for steps the \
@@ -102,6 +105,16 @@ If one part is blocked, finish the rest and state the gap. Raise a real concern 
 briefly, then continue under an explicit assumption where that is safe. Correct \
 only errors that would change the operator's code, conclusion, or decision.";
 
+const CLAUDE_5_5_NATIVE: &str = "\
+When you have enough information to act, act: do not re-derive facts the \
+conversation has already established, re-litigate a decision the operator \
+has made, or narrate options you will not pursue, and when weighing a choice \
+give a recommendation rather than a survey. Approval given in one context \
+does not extend to the next, and sending content to an external service \
+publishes it. Match the surrounding code's comment density, naming and idiom. \
+Use they/them for anyone whose pronouns have not been stated; a name does not \
+tell you someone's pronouns, so never infer them from one.";
+
 const GPT_NATIVE: &str = "\
 Collaborate with the operator until the goal is genuinely handled. Lead with \
 the outcome, use plain language, and match detail to the reader. Keep progress \
@@ -109,6 +122,49 @@ updates brief and restate every conclusion needed in the final response. Use \
 fast targeted search, parallelise independent work, preserve unrelated changes, \
 and verify implementation work in proportion to risk. Make safe in-scope \
 assumptions; stop when completion needs new authority or a material scope choice.";
+
+const GPT_6_NATIVE: &str = "\
+You and the operator share one workspace; collaborate until their intended \
+goal is completely handled. Judge when you need permission as a competent \
+colleague would: authorisation given earlier in the session persists, so do \
+not ask again for it; reversible work, read-only actions, reviews and fixes \
+need none; and before asking permission for an outward step, do all the work \
+that is already authorised so the operator approves a concrete, reviewable \
+result. Bias towards action: a request phrased as \"can you\" or \"help me\" \
+is an instruction to do the work, so do not stop at a plan, an \
+acknowledgement, or a partial solution, and when scope is unclear progress \
+with what you have and ask while continuing. State the main point early in \
+plain, concrete language with active verbs; state the intended action \
+directly, without contrastive framing about what you will not do, without \
+invented compound labels, filler phrases, or needless apologies. Open with a \
+brief update before the first tool call and keep the final answer \
+self-contained, led by the outcome. Batch independent searches and reads; \
+keep edits, approvals and dependent steps sequential. Treat shell command \
+text as code and quote it properly. Run the checks appropriate to the \
+change, and do not write tests that merely mirror the implementation. Apply \
+a skill when it would improve the outcome, say so the first time you do, and \
+let the operator's instructions outrank a skill's.";
+
+const GPT_6_1_SOL_NATIVE: &str = "\
+Adapt your tone to the operator and write in connected prose, developing \
+each point with the support it needs and avoiding section headings and \
+closing summaries. When discussing technical work, lead with the outcome and \
+then the reasoning: what changed, why, how it was tested, and the material \
+risks, with evidence in the order that makes the conclusion easiest to \
+assess rather than the order you worked. Summarise routine verification \
+instead of listing every check; in progress updates say what you learned, \
+what remains uncertain, and what the next step resolves. A pull-request \
+description leads with the concrete problem and resulting behaviour, scaled \
+to the change, written for a reviewer who has not seen the conversation.";
+
+const GPT_6_LUNA_NATIVE: &str = "\
+Be a simple, clear communicator: converse as you would with a colleague, and \
+minimise the reader's cognitive load so they understand your response on \
+first read. Prefer familiar words and concrete descriptions over abstract or \
+technical language when they carry the same meaning, and never assume the \
+reader will fill in missing steps. Give each paragraph one main point, in an \
+order the reader can follow; when reporting changes, say what changed, why, \
+how it was tested, and any material risks.";
 
 const GPT_SOL_NATIVE: &str = "\
 For work explicitly authorised for delegation, coordinate independent tasks \
@@ -160,7 +216,54 @@ const GPT_SOL_DIVERGENCES: &[Divergence] = &[
     STANDARD_DIVERGENCES[1],
 ];
 
+const GPT_6_DIVERGENCES: &[Divergence] = &[
+    Divergence {
+        category: DivergenceCategory::ProprietaryToolMaterial,
+        material: "vendor tool definitions (the JavaScript orchestration tool and its nested tools, goals, the sub-agent collaboration protocol, apps and plugins), the commentary/final channel mechanics, and permission mechanics",
+    },
+    Divergence {
+        category: DivergenceCategory::DynamicVendorContext,
+        material: "skills catalogue and roots, working directory, sandbox mode, and the per-turn multi-agent mode notice injected at request time",
+    },
+];
+
 const MODEL_SCAFFOLDS: &[ModelScaffold] = &[
+    ModelScaffold {
+        model_id: "claude-opus-5-5",
+        family_text: CLAUDE_NATIVE,
+        model_text: CLAUDE_5_5_NATIVE,
+        divergences: STANDARD_DIVERGENCES,
+    },
+    ModelScaffold {
+        model_id: "claude-opus-5-5[1m]",
+        family_text: CLAUDE_NATIVE,
+        model_text: CLAUDE_5_5_NATIVE,
+        divergences: STANDARD_DIVERGENCES,
+    },
+    ModelScaffold {
+        model_id: "claude-sonnet-5-5",
+        family_text: CLAUDE_NATIVE,
+        model_text: CLAUDE_5_5_NATIVE,
+        divergences: STANDARD_DIVERGENCES,
+    },
+    ModelScaffold {
+        model_id: "claude-sonnet-5-5[1m]",
+        family_text: CLAUDE_NATIVE,
+        model_text: CLAUDE_5_5_NATIVE,
+        divergences: STANDARD_DIVERGENCES,
+    },
+    ModelScaffold {
+        model_id: "gpt-6.1-sol",
+        family_text: GPT_6_NATIVE,
+        model_text: GPT_6_1_SOL_NATIVE,
+        divergences: GPT_6_DIVERGENCES,
+    },
+    ModelScaffold {
+        model_id: "gpt-6-luna",
+        family_text: GPT_6_NATIVE,
+        model_text: GPT_6_LUNA_NATIVE,
+        divergences: GPT_6_DIVERGENCES,
+    },
     ModelScaffold {
         model_id: "claude-fable-5",
         family_text: CLAUDE_NATIVE,
@@ -477,6 +580,94 @@ mod tests {
 
         assert_eq!(luna, terra);
         assert_eq!(sonnet, haiku);
+    }
+
+    #[test]
+    fn every_family_block_carries_the_measured_claims_rule() {
+        for (model, selection) in [
+            ("claude-opus-5-5", WorkingNormsScaffold::Native),
+            ("claude-opus-5-5", WorkingNormsScaffold::FamilyFallback),
+            ("gpt-6.1-sol", WorkingNormsScaffold::Native),
+            ("gpt-6-luna", WorkingNormsScaffold::FamilyFallback),
+            ("glm-5.2", WorkingNormsScaffold::Native),
+        ] {
+            let text = WorkingNormsElement::for_model(model, selection).content()[0].text_content();
+            assert!(
+                text.contains("measure it with a tool first"),
+                "{model} ({selection:?}) lacks the measured-claims rule"
+            );
+            assert!(text.contains("say so rather than asserting that the limit is met"));
+        }
+    }
+
+    #[test]
+    fn current_models_receive_native_scaffolds_rather_than_the_family_fallback() {
+        for model in [
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "gpt-6.1-sol",
+            "gpt-6-luna",
+        ] {
+            let native = WorkingNormsElement::for_model(model, WorkingNormsScaffold::Native)
+                .content()[0]
+                .text_content();
+            let fallback =
+                WorkingNormsElement::for_model(model, WorkingNormsScaffold::FamilyFallback)
+                    .content()[0]
+                    .text_content();
+            assert_ne!(native, fallback, "{model} has no exact scaffold");
+            assert!(
+                native_harness_divergences(model).is_some(),
+                "{model} has no divergence register"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_5_5_models_share_one_scaffold_because_their_native_prompts_match() {
+        // The 2026-10-01 harness capture shows Opus 5.5 and Sonnet 5.5 served
+        // the same Claude Code prompt, differing only in dynamic context, so a
+        // differentiated scaffold would be invented rather than sourced.
+        let opus = WorkingNormsElement::for_model("claude-opus-5-5", WorkingNormsScaffold::Native)
+            .content()[0]
+            .text_content();
+        let sonnet =
+            WorkingNormsElement::for_model("claude-sonnet-5-5", WorkingNormsScaffold::Native)
+                .content()[0]
+                .text_content();
+        assert_eq!(opus, sonnet);
+        assert!(opus.contains("When you have enough information to act, act"));
+        assert!(!opus.contains("ending your turn"), "no GPT text on Claude");
+    }
+
+    #[test]
+    fn gpt_6_models_differ_where_their_developer_prompts_differ() {
+        let sol = WorkingNormsElement::for_model("gpt-6.1-sol", WorkingNormsScaffold::Native)
+            .content()[0]
+            .text_content();
+        let luna = WorkingNormsElement::for_model("gpt-6-luna", WorkingNormsScaffold::Native)
+            .content()[0]
+            .text_content();
+        assert_ne!(sol, luna);
+        for text in [&sol, &luna] {
+            assert!(
+                text.contains("share one workspace"),
+                "shared GPT-6 base missing"
+            );
+            assert!(
+                !text.contains("tool calls together"),
+                "no Claude text on GPT"
+            );
+        }
+        assert!(sol.contains("A pull-request description leads with the concrete problem"));
+        assert!(!luna.contains("pull-request description"));
+        assert!(luna.contains("minimise the reader's cognitive load"));
+        assert!(!sol.contains("cognitive load"));
+        assert!(
+            native_harness_divergences("gpt-6-luna").unwrap()[0]
+                .material
+                .contains("sub-agent collaboration protocol")
+        );
     }
 
     #[test]
