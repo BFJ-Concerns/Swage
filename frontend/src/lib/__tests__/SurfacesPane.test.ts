@@ -8,7 +8,9 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { mount, unmount, flushSync } from "svelte";
 import { fromStore, writable } from "svelte/store";
+import { compile } from "svelte/compiler";
 import SurfacesPane from "../components/SurfacesPane.svelte";
+import surfacesPaneSource from "../components/SurfacesPane.svelte?raw";
 import type { SurfacesStore } from "../stores/surfaces";
 import type { SurfaceResponse } from "../protocol/SurfaceResponse";
 import type { SurfaceModuleView } from "../protocol/SurfaceModuleView";
@@ -212,5 +214,42 @@ describe("SurfacesPane module controls", () => {
     await settled();
     expect(store.writeModule).toHaveBeenLastCalledWith(SURFACE_ID, "m-1", "# Mine, edited", 4);
     expect(document.querySelector("article.module textarea")).toBeNull();
+  });
+
+  it("renders document tables as padded, separated cells", () => {
+    const rota = "| Name | Shift | Cost | Status |\n| --- | --- | --- | --- |\n| Priya | Morning | 280 | Confirmed |";
+    const store = fakeStore(surface([module("m-1", rota, 0)]));
+    component = mount(SurfacesPane, {
+      target: document.body,
+      props: { store, sessionId: SESSION_ID },
+    });
+    flushSync();
+
+    const content = document.querySelector("article.module .module-content");
+    const table = content?.querySelector("table");
+    expect(table).not.toBeNull();
+    expect(Array.from(table!.querySelectorAll("th")).map((cell) => cell.textContent)).toEqual([
+      "Name", "Shift", "Cost", "Status",
+    ]);
+
+    // Vitest does not load component styles, so apply the pane's own
+    // stylesheet under the scope class the mounted pane carries (Svelte adds
+    // none to an element no rule targets, leaving the cells unstyled).
+    const scope = Array.from(content!.classList).find((name) => name.startsWith("svelte-")) ??
+      "svelte-unstyled";
+    const { css } = compile(surfacesPaneSource, { filename: "SurfacesPane.svelte", css: "external", cssHash: () => scope });
+    const style = document.createElement("style");
+    style.textContent = css?.code ?? "";
+    document.head.append(style);
+    try {
+      for (const cell of table!.querySelectorAll("th, td")) {
+        const computed = getComputedStyle(cell);
+        // Beyond the browser default's 1px, which lets cell texts touch.
+        expect(parseFloat(computed.paddingLeft)).toBeGreaterThanOrEqual(4);
+        expect(parseFloat(computed.paddingRight)).toBeGreaterThanOrEqual(4);
+      }
+    } finally {
+      style.remove();
+    }
   });
 });
