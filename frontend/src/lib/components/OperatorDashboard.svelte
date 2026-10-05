@@ -406,8 +406,8 @@
           {#if overview.devices.length === 0}
             <p class="empty-copy">
               No devices are attached. To attach one, have the device redeem a one-time pairing code
-              from this gateway, then run <code>swage device connect</code> on it; the Registration and
-              pairing section of the documentation walks through both steps.
+              from this gateway, then run <code>swage device connect</code> on it;
+              the Registration and pairing section of the documentation walks through both steps.
             </p>
           {/if}
           {#each overview.devices as device (device.device_id)}
