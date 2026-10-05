@@ -1713,6 +1713,137 @@ async fn empty_successful_run_records_a_distinct_state() {
 // Restart recovery
 // ---------------------------------------------------------------------------
 
+/// Signals when the scheduled turn reaches the provider, then emits nothing.
+struct NonAnsweringProvider {
+    started: Mutex<Option<oneshot::Sender<()>>>,
+}
+
+#[async_trait]
+impl LlmProvider for NonAnsweringProvider {
+    fn model_id(&self) -> &str {
+        "non-answering-mock"
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        unreachable!("the interrupted schedule does not gate")
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unreachable!("the interrupted schedule does not use tool completion")
+    }
+
+    fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        let started = self.started.lock().unwrap().take().unwrap();
+        Box::pin(futures::stream::once(async move {
+            started.send(()).unwrap();
+            std::future::pending().await
+        }))
+    }
+}
+
+async fn assert_shutdown_accounts_for_in_flight_schedule(via_http: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let (started_tx, started_rx) = oneshot::channel();
+    let state = test_state(
+        &dir.path().join("shutdown.db"),
+        NonAnsweringProvider {
+            started: Mutex::new(Some(started_tx)),
+        },
+    );
+    let router = build_router(state.clone());
+    let session_id = create_conversation(&router).await;
+    let created = schedule::create_schedule(
+        &state,
+        one_shot_request(session_id, Utc::now() + Duration::seconds(5)),
+        ScheduleCreator::User,
+    )
+    .await
+    .unwrap();
+    let mut handles = schedule::tick_once(&state, created.next_run_at.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(handles.len(), 1);
+    tokio::time::timeout(std::time::Duration::from_secs(10), started_rx)
+        .await
+        .expect("the scheduled turn must reach the provider")
+        .unwrap();
+
+    let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
+    assert_eq!(runs.len(), 1);
+    let run_id = runs[0].id;
+    let turn_id = runs[0].turn_id.unwrap();
+    assert_eq!(runs[0].state, ScheduleRunState::Running);
+    assert!(state.active_turns.lock().await.contains_key(&session_id));
+
+    if via_http {
+        // The CLI stop signals this endpoint; startup then cancels active turns.
+        let (status, _) = request_json(&router, "POST", "/api/shutdown", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(state.shutdown_signal.is_cancelled());
+    }
+    // SIGTERM/SIGINT reach this same cleanup without the HTTP endpoint.
+    swage_gateway::shutdown::shutdown_active_turns(&state).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), handles.remove(0))
+        .await
+        .expect("the cancelled schedule must settle")
+        .unwrap();
+
+    let run = state
+        .storage
+        .get_schedule_run(run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let turn = state.storage.get_turn(turn_id).await.unwrap().unwrap();
+    assert_eq!(turn.state, TurnState::Interrupted);
+    assert!(turn.assistant_response.is_none());
+    assert_eq!(run.state, ScheduleRunState::Failed);
+    assert_eq!(
+        run.error_message.as_deref(),
+        Some("gateway stopped while schedule run was running"),
+        "a shutdown-cancelled schedule must name the interruption"
+    );
+    let deliveries = state.storage.list_delivery_records().await.unwrap();
+    let records: Vec<_> = deliveries
+        .iter()
+        .filter(|record| record.run_id == Some(run_id))
+        .collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].target, json!({ "kind": "no_delivery" }));
+    assert_eq!(records[0].status, "not_delivered");
+    assert!(records[0].content.is_empty());
+    assert_eq!(records[0].error, run.error_message);
+
+    let counts = swage_gateway::shutdown::recover_orphaned_background_runs(&*state.storage)
+        .await
+        .unwrap();
+    assert_eq!(counts.schedule_runs_failed, 0);
+    assert_eq!(
+        serde_json::to_value(state.storage.list_delivery_records().await.unwrap()).unwrap(),
+        serde_json::to_value(deliveries).unwrap(),
+        "restart recovery must preserve the shutdown account"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn graceful_http_shutdown_records_interruption_for_in_flight_schedule() {
+    assert_shutdown_accounts_for_in_flight_schedule(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn graceful_signal_shutdown_records_interruption_for_in_flight_schedule() {
+    assert_shutdown_accounts_for_in_flight_schedule(false).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn restart_recovery_fails_runs_orphaned_by_a_previous_process() {
     let dir = tempfile::tempdir().unwrap();
