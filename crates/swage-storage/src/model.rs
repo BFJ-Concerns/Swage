@@ -34,7 +34,7 @@ pub struct ContextSnapshotRecord {
 ///
 /// Lifecycle: Pending (created) → Processing (LLM call started), potentially
 /// suspended in AwaitingApproval or Delegating, then terminal (Completed /
-/// Incomplete / Failed / Interrupted).
+/// Refused / Incomplete / Failed / Interrupted).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnState {
@@ -44,6 +44,8 @@ pub enum TurnState {
     Processing,
     /// Turn finished successfully.
     Completed,
+    /// The provider explicitly refused the request.
+    Refused,
     /// The provider stopped at its output limit, preserving partial work.
     Incomplete,
     /// Turn ended with an error.
@@ -80,7 +82,11 @@ impl TurnState {
     /// Whether no more work may run as part of this turn.
     pub const fn is_terminal(&self) -> bool {
         match self {
-            Self::Completed | Self::Incomplete | Self::Failed | Self::Interrupted => true,
+            Self::Completed
+            | Self::Refused
+            | Self::Incomplete
+            | Self::Failed
+            | Self::Interrupted => true,
             Self::Pending | Self::Processing | Self::AwaitingApproval | Self::Delegating => false,
         }
     }
@@ -92,6 +98,7 @@ impl std::fmt::Display for TurnState {
             TurnState::Pending => "pending",
             TurnState::Processing => "processing",
             TurnState::Completed => "completed",
+            TurnState::Refused => "refused",
             TurnState::Incomplete => "incomplete",
             TurnState::Failed => "failed",
             TurnState::Interrupted => "interrupted",
@@ -110,6 +117,7 @@ impl FromStr for TurnState {
             "pending" => Ok(TurnState::Pending),
             "processing" => Ok(TurnState::Processing),
             "completed" => Ok(TurnState::Completed),
+            "refused" => Ok(TurnState::Refused),
             "incomplete" => Ok(TurnState::Incomplete),
             "failed" => Ok(TurnState::Failed),
             "interrupted" => Ok(TurnState::Interrupted),

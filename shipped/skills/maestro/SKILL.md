@@ -32,11 +32,16 @@ No modes or flags — read the world:
   absent — scaffold present or not — is an unsigned commission: name
   that state and its route (a commissioning conversation resumes the
   draft and lands the signature), and write nothing here.
-- **Commission exists, no `build/` directory in the annexe** → fresh
-  phase: survey the codebase against the commission through dispatched
-  recon (Grunt Work, below), judge the spine the remaining work needs,
-  and begin.
-- **`build/` exists** → resume or re-entry: read `build/spine.md`, the
+- **Commission exists, no ledger header (`build/ledger.md`) in the
+  annexe** → fresh phase: survey the codebase against the commission
+  through dispatched recon (Grunt Work, below), judge the spine the
+  remaining work needs, and begin. Structural state is the ledger header,
+  never the bare directory: a `build/` holding other records — a
+  commission's audit output, a stray file — is not a phase to resume, and
+  nothing in it is the operator's to move or delete before this phase
+  starts. Write the header there as the first act, beside whatever the
+  directory already holds.
+- **`build/ledger.md` exists** → resume or re-entry: read `build/spine.md`, the
   ledger header `build/ledger.md`, and the status board
   (`grep -H '^\*\*State' build/obligations/*.md`) first — the board
   locates records; it is not a read, so open the work list only after
@@ -70,8 +75,8 @@ No modes or flags — read the world:
   assembly seat's landing discipline, *Stack Rulings*). A
   re-entry that tore code out owes its own audit window; one that only
   added exemplars journals that no new audit is due.
-- **Whenever `build/` exists, sweep the commission before trusting that
-  work list.** The ledger records only what was known when the spine was
+- **Whenever the ledger header exists, sweep the commission before trusting
+  that work list.** The ledger records only what was known when the spine was
   last judged sufficient, so a commission delta is invisible from
   `build/`: re-read the commission and the annexe's task list as they
   stand now — and where the commission carries a commitment register,

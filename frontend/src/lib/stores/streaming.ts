@@ -103,7 +103,7 @@ export interface StreamingStoreOptions {
       timestamp: string;
       turn_state: Extract<
         MessageView["turn_state"],
-        "completed" | "incomplete" | "failed" | "interrupted"
+        "completed" | "refused" | "incomplete" | "failed" | "interrupted"
       >;
       thread_id?: string;
       turn_id?: string;
@@ -256,7 +256,7 @@ export function createStreamingStore(
     content: string,
     turn_state: Extract<
       MessageView["turn_state"],
-      "completed" | "incomplete" | "failed" | "interrupted"
+      "completed" | "refused" | "incomplete" | "failed" | "interrupted"
     >,
     turn_id?: string,
     tool_calls?: ToolCallView[],
@@ -274,16 +274,17 @@ export function createStreamingStore(
     }, conversationId);
   }
 
-  // Commits any accumulated content to the conversation store. Called when a
-  // turn ends before the server explicitly completes it (error or cancellation).
-  function settlePartialResponse(
+  // Commits the response and any settled tool calls to the conversation.
+  function settleResponse(
     conversationId: string | null,
     stream: InternalStreamState,
-    turnState: Extract<MessageView["turn_state"], "failed" | "interrupted">,
+    turnState: Extract<MessageView["turn_state"], "completed" | "refused" | "incomplete" | "failed" | "interrupted">,
+    turnId?: string,
+    toolCalls?: ToolCallView[],
   ): void {
     const streamedContent = get(stream.streamedContentStore);
-    if (streamedContent) {
-      pushAssistantMessage(conversationId, streamedContent, turnState);
+    if (streamedContent || (toolCalls?.length ?? 0) > 0) {
+      pushAssistantMessage(conversationId, streamedContent, turnState, turnId, toolCalls);
     }
     stream.streamedContentStore.set("");
   }
@@ -415,22 +416,8 @@ export function createStreamingStore(
           break;
 
         case "turn_complete":
-          // The gateway has committed the turn. Preserve the reply with
-          // its terminal state and return to idle.
-          {
-            const streamedContent = get(stream.streamedContentStore);
-            const activeToolCalls = get(stream.activeToolCallsStore);
-            if (streamedContent || activeToolCalls.length > 0) {
-              pushAssistantMessage(
-                ownerId,
-                streamedContent,
-                event.incomplete_reason ? "incomplete" : "completed",
-                event.turn_id,
-                activeToolCalls,
-              );
-            }
-          }
-          stream.streamedContentStore.set("");
+          // Preserve the terminal state and tool calls in the conversation.
+          settleResponse(ownerId, stream, event.incomplete_reason ? "incomplete" : "completed", event.turn_id, get(stream.activeToolCallsStore));
           stream.turnErrorStore.set(null);
           setStreamActive(ownerId, stream, false);
           stream.turnStartedAtStore.set(null);
@@ -439,20 +426,26 @@ export function createStreamingStore(
           stream.providerRetryStore.set(null);
           break;
 
-        case "error":
+        case "error": {
           // Turn failed mid-stream. Preserve whatever the user saw so the
           // conversation history reflects the partial response.
-          settlePartialResponse(ownerId, stream, "failed");
+          const refused = event.code === "provider_refused";
+          settleResponse(
+            ownerId, stream, refused ? "refused" : "failed", undefined,
+            refused ? get(stream.activeToolCallsStore) : undefined,
+          );
           stream.turnErrorStore.set({ code: event.code, message: event.message });
           setStreamActive(ownerId, stream, false);
           stream.turnStartedAtStore.set(null);
-          // activeToolCalls are preserved so the UI can show what was
-          // in-flight when the error occurred.
+          // Refused turns own their calls in history; other errors retain
+          // live calls so the UI can show what was in flight.
+          if (refused) stream.activeToolCallsStore.set([]);
           stream.providerRetryStore.set(null);
           break;
+        }
 
         case "output_schema_failed": {
-          settlePartialResponse(ownerId, stream, "failed");
+          settleResponse(ownerId, stream, "failed");
           const details = event.errors
             .map((error) =>
               error.path
@@ -486,7 +479,7 @@ export function createStreamingStore(
           if (get(stream.streamedContentStore)) {
             // Preserve partial content (they may want to read what was
             // generated before they stopped it); the calls stay beside it.
-            settlePartialResponse(ownerId, stream, "interrupted");
+            settleResponse(ownerId, stream, "interrupted");
             stream.activeToolCallsStore.set(settledCalls);
           } else if (options?.conversationStore?.settleUnansweredRequest) {
             // No reply: the turn's account rides on its request, where the
@@ -509,7 +502,7 @@ export function createStreamingStore(
           // The gateway is shutting down. Preserve any partial content and
           // surface the shutdown as a turn error so the UI can notify the user.
           // The WebSocket will close shortly after this event arrives.
-          settlePartialResponse(ownerId, stream, "failed");
+          settleResponse(ownerId, stream, "failed");
           stream.turnErrorStore.set({ code: "gateway_shutdown", message: event.reason });
           setStreamActive(ownerId, stream, false);
           stream.turnStartedAtStore.set(null);
@@ -630,11 +623,11 @@ export function createStreamingStore(
         !stream ||
         !get(stream.isStreamingStore) ||
         stream.activeTurnGeneration !== recoveredTurnGeneration ||
-        lastMessage?.role !== "assistant" ||
-        !["completed", "failed", "interrupted"].includes(lastMessage.turn_state ?? "")
+        (lastMessage?.role !== "assistant" && lastMessage?.origin !== "platform") ||
+        !["completed", "refused", "failed", "interrupted"].includes(lastMessage?.turn_state ?? "")
       ) return;
 
-      // The HTTP refresh recovered the terminal assistant message that the
+      // The HTTP refresh recovered the terminal reply or platform account that the
       // dropped socket could not deliver. Normal token events intentionally
       // carry no turn ID, so the monotonically increasing local generation
       // fences a later start that races the refresh. The durable conversation
