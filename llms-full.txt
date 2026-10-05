@@ -220,9 +220,12 @@ workspace roots appear as `Topic`.
 ## Search configuration
 
 `[tools.search]` configures `web_search`. SearxNG is the only supported backend.
-The fields are `provider_type` (must be `"searxng"`) and `base_url` (the
-SearxNG instance URL). Unsupported provider types are refused when configuration
-loads and when settings are saved.
+The only fields are `provider_type` (must be `"searxng"`) and `base_url` (the
+SearxNG instance URL). Unsupported provider types and unrecognised keys are
+refused when configuration loads and when settings are saved.
+
+The web search provider can be edited in the web UI under **Settings**; saved
+changes apply to new turns.
 
 ## Tool permission model
 
@@ -353,8 +356,8 @@ not found.
 
 ### Sandbox isolation
 
-Local tool calls that are eligible for sandboxed execution run inside a
-two-layer sandbox (`swage-sandbox`):
+When sandboxing is enabled, eligible local tool calls run inside a two-layer
+sandbox (`swage-sandbox`):
 
 1. **Bubblewrap (bwrap)** — Linux namespace isolation (PID, network, mount,
    user, IPC, UTS). `--unshare-all` with `--die-with-parent`. Read-only
@@ -386,20 +389,23 @@ completion requests.
 
 | Option | Type | Default |
 |---|---|---|
-| `sandbox.enabled` | bool | `true` |
+| `sandbox.enabled` | bool | `false` |
 | `sandbox.allow_degraded_execution` | bool | `false` |
 
-Setting `sandbox.enabled = false` does not by itself disable sandboxing —
-it tells the dispatcher to skip sandbox setup, which counts as degraded
-execution. The dispatcher requires the explicit opt-in
-`sandbox.allow_degraded_execution = true` before it will proceed without a
-sandbox. Without that opt-in, dispatcher construction fails with
-`SandboxError::Unavailable`. To run unsandboxed, set both:
+With no sandbox setting in the configuration cascade, per-turn sandboxing
+defaults off. A topic inherits sandbox settings from the global configuration;
+an agent can override them. When `sandbox.enabled` resolves to `false`, local
+gateway turns run unsandboxed without requiring `allow_degraded_execution`.
+The persisted turn boundary is `Degraded` with reason
+`sandbox_disabled_by_configuration`. A declared install boundary, such as a
+container image, takes precedence over sandbox settings and remains the
+recorded boundary.
+
+To enable sandboxing for a topic, add this to its `config.toml`:
 
 ```toml
 [sandbox]
-enabled = false
-allow_degraded_execution = true
+enabled = true
 ```
 
 When `enabled` is true and sandbox setup fails at runtime, the recovery
@@ -688,6 +694,46 @@ entirely.
 <!-- source: agent-docs/interfaces-and-tooling.md -->
 
 # Interfaces and tooling
+
+## Settings memory view
+
+Settings has a **Memory** tab that lists every memory page — general and
+per-topic — and lets the operator read any page in full. A chat box on the
+tab changes memory by sending an instruction to the platform's curator; the
+curator's reply and every page it changed (returned whole) are shown in the
+same view.
+
+Three API routes support this:
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/api/memory/pages?topic_id=` | GET | List every page in one scope (`MemoryPageListResponse`: `scope`, `pages[]` each with `reference` and `summary`) |
+| `/api/memory/page?reference=&topic_id=` | GET | Read one page whole (`MemoryPageResponse`: `reference`, `summary`, `body`) |
+| `/api/memory/instructions` | POST | Instruct the curator (`MemoryInstructionRequest`: `scope`, `instruction`) → `MemoryInstructionResponse`: `reply`, `pages_changed[]` (each a `MemoryPageResponse`), `curator_session_id`, `turn_id` |
+
+All three routes are in the client route manifest. The scope selector
+(`MemoryScopeSelector`) is `General` or `Topic { topic_id }`: absent
+`topic_id` addresses the general memory. The curator is the only way a page
+changes from Settings — there is no direct page-editing endpoint.
+
+The curator's notices (from its background curation) link to the page they
+name: the Settings route `/settings/memory?reference=<ref>` opens the Memory
+tab with that page selected.
+
+## Operator history
+
+The operator history pane (`OperatorHistoryPane.svelte`) reads
+`GET /api/operator/history` (`OperatorHistoryResponse`) and the filterable
+audit record (`GET /api/audit/events`).
+
+Configuration changes carry the whole prior and new state of the named
+entity. The pane derives a per-field diff from those two snapshots:
+nested settings are named by their path (e.g. "Context › Assembly"),
+and each changed field shows its prior and new value in a table.
+The whole prior and new objects are kept collapsed beneath each entry.
+
+The pane also shows variant selections (location, variant, reason, session,
+turn) and assembly decisions.
 
 ## Turn context inspector
 
@@ -1141,6 +1187,27 @@ it disconnected.
 Every connect, disconnect, invocation, and settlement lands in the audit
 trail under the device's id.
 
+## Gateway lifecycle
+
+### Status
+
+`swage gateway status` (`cli/status.rs`) reports the running gateway's
+state: PID, bound address, uptime, and health. When no runtime metadata
+file exists and no running gateway can be recovered at the configured
+address, it prints "Gateway is not running" and exits successfully (exit 0).
+When stale metadata points to a dead PID, it removes the stale file, prints
+"Gateway is not running (stale PID file removed)", and exits with an error.
+
+### Start recovery
+
+`swage gateway start` (`cli/start.rs`) checks for an existing gateway
+before spawning. If runtime metadata names a PID that has terminated (even
+if the parent process has not yet reaped it), it cleans up the stale
+metadata file and proceeds with a fresh start. If no metadata file exists,
+it probes the configured address for a running gateway whose metadata was
+lost, and if found, writes recovery metadata and reports it as already
+running.
+
 ## Wire error contract
 
 Every failed HTTP response on the client surface carries
@@ -1253,15 +1320,15 @@ Most logic is Rust, but `xtask` shells out for some checks (e.g.
 
 | Recipe | What it runs |
 |---|---|
-| `just check-gate` | Tracked-local-state, format, Rust/frontend type, frontend design-token, and clippy checks; no tests |
+| `just check-gate` | The six static stages below; no tests |
 | `just check` | `cargo check --workspace` + frontend type check (`npm run check`) |
 | `just test` | Full test suite with failure aggregation (see below) |
 | `just verify` (alias: `just ci`) | `check-gate`, then the test and projection stages below; the gate CI runs |
 
 ### Verify stages
 
-`check-gate` runs stages 1--5 and aborts on the first failure (`?` operator).
-Stages 6--7 run regardless; their results are combined.
+`check-gate` runs stages 1–6 and aborts on the first failure (`?` operator).
+Stages 7–8 run regardless; their results are combined.
 
 | # | Stage | Short-circuits? |
 |---|---|---|
@@ -1269,9 +1336,17 @@ Stages 6--7 run regardless; their results are combined.
 | 2 | Format check (`cargo fmt --all -- --check` + `just --fmt --check`) | Yes |
 | 3 | Type check (`cargo check --workspace` + frontend) | Yes |
 | 4 | Frontend design-token check | Yes |
-| 5 | Clippy (`-D warnings`) | Yes |
-| 6 | Test suite (Rust with `--no-fail-fast`, frontend, desktop smoke) | No |
-| 7 | Projection freshness (`git diff --exit-code` on generated files) | No |
+| 5 | Shipped-workflow parse check (`check_shipped_workflows_parse`) | Yes |
+| 6 | Clippy (`-D warnings`) | Yes |
+| 7 | Test suite (Rust, frontend, desktop smoke) | No |
+| 8 | Projection freshness (`git diff --exit-code` on generated files) | No |
+
+The Rust test runner is selected by the `SWAGE_TEST_RUNNER` environment
+variable. When set to `nextest`, Rust tests run under `cargo nextest run`
+with a `ci` profile (which retries flaky tests), followed by a separate
+`cargo test --workspace --doc` stage for doctests (nextest cannot run
+doctests). When set to `cargo` or unset, Rust tests run under
+`cargo test --workspace --no-fail-fast`.
 
 When both tests and projections fail, both errors surface in one message.
 The test suite aggregates Rust, frontend, and desktop-smoke failures into a
@@ -1334,11 +1409,44 @@ successfully:
 
 - An interrupted call (no result, no status): `"tool call did not report a
   result; its outcome is unknown"` with status `"interrupted"`.
+- A call stopped with its turn: status `"cancelled"`.
 - A call that ran but whose result could not be recorded: `"tool call ran,
   but its result could not be recorded"` with status `"result_unavailable"`.
 
 When a tool-call result cannot be recorded (the settlement write fails),
 the turn ends as `Failed` — the result is not silently dropped.
+
+Stopping a turn ends a shell command running inside the sandbox — in both
+bubblewrap and fallback modes — and its tool-call record settles as
+`"cancelled"`.
+
+## Turn completion states
+
+`TurnState` (`swage-protocol::client::conversation`) names the states a
+turn passes through:
+
+| State | Meaning |
+|---|---|
+| `Pending` | Queued but not yet started |
+| `Processing` | In flight |
+| `Completed` | Finished successfully |
+| `Incomplete` | The reply was cut short by the output token limit |
+| `Failed` | An error ended the turn |
+| `Interrupted` | Cancelled by the user or a restart |
+| `AwaitingApproval` | Paused for a human approval decision |
+| `Delegating` | Dispatching a child turn |
+
+An incomplete turn's `turn_complete` WebSocket event and persisted message
+carry an `incomplete_reason` naming the cause (e.g. the output token limit).
+The partial text the model produced is retained and displayed.
+
+A failed, interrupted or cancelled turn keeps its explanation text and its
+tool calls in the conversation after a reload. The tool calls are attached
+to the request the turn answered, so the work the agent performed is
+visible. A failed turn offers **Retry** in the web UI.
+
+Failed shell commands and workflow runs show as failed on their tool rows,
+both during the turn and after reload.
 
 ## Hosted documentation
 
