@@ -720,6 +720,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
         &config,
     )?;
     let model_name = config.default_model_id().to_string();
+    let provider_route = crate::startup::selected_provider_route(&config);
     let agent_handle = launch_turn_runtime(
         state,
         RuntimeLaunch {
@@ -764,6 +765,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
             activity_tracker: &activity_tracker,
             pricing_config: &pricing_config,
             model_name: &model_name,
+            provider_route: provider_route.as_deref(),
             provider_failure_observer: provider_failure_observer.as_ref(),
         },
         event_rx,

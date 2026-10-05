@@ -38,6 +38,9 @@ pub(super) struct TurnProjection<'a> {
     pub(super) activity_tracker: &'a ActivityTracker,
     pub(super) pricing_config: &'a PricingConfig,
     pub(super) model_name: &'a str,
+    /// The configured provider and endpoint serving the turn, named in the
+    /// error a provider failure shows.
+    pub(super) provider_route: Option<&'a str>,
     pub(super) provider_failure_observer: Option<&'a ProviderFailureObserver>,
 }
 
@@ -70,6 +73,7 @@ pub(super) async fn project_agent_events(
         activity_tracker,
         pricing_config,
         model_name,
+        provider_route,
         provider_failure_observer,
     } = projection;
     let mut turn_id: Option<Uuid> = None;
@@ -548,6 +552,10 @@ pub(super) async fn project_agent_events(
                 message,
                 provider_failure,
             } => {
+                let message = match provider_route.filter(|_| provider_failure) {
+                    Some(route) => format!("{route}: {message}"),
+                    None => message,
+                };
                 if provider_failure && let Some(observer) = provider_failure_observer {
                     *observer.lock().unwrap_or_else(|error| error.into_inner()) =
                         Some(message.clone());

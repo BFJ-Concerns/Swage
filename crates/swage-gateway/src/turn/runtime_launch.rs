@@ -189,9 +189,10 @@ pub(super) async fn launch_turn_runtime(
         let codex_state = state.clone();
         tokio::spawn(async move { crate::codex::run_turn(codex_state, codex_request).await })
     } else {
+        let provider = crate::startup::selected_model_provider(state, config).await;
         let mut agent_builder = AgentBuilder::new()
             .config(agent_config)
-            .provider(state.active_provider())
+            .provider(Arc::clone(&provider))
             .storage(state.storage.clone())
             .tool_dispatcher(dispatcher)
             .approval_registrar(build_approval_registrar(state.approval_channels.clone()))
@@ -241,11 +242,8 @@ pub(super) async fn launch_turn_runtime(
         // outcome is written into the turn's audit snapshot so a clamp or an
         // unsupported `off` is reconstructable from the record.
         let effort = requested_effort.map(|requested| {
-            let capability = effort_capability_for_model(
-                config,
-                &config.models.default,
-                state.active_provider().as_ref(),
-            );
+            let capability =
+                effort_capability_for_model(config, &config.models.default, provider.as_ref());
             swage_core::resolve_effort(requested, &capability)
         });
         if let Some(resolved) = effort.as_ref() {
