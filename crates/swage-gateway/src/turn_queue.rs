@@ -694,6 +694,14 @@ mod tests {
         )
         .await
         .unwrap();
+        let delivery = state
+            .turn_event_deliveries
+            .lock()
+            .await
+            .get(&first_turn)
+            .unwrap()
+            .clone();
+        let settling = delivery.lock().await.as_ref().unwrap().finish.clone();
         let listeners = state.session_listeners.lock().await;
         proceed.cancel();
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -719,6 +727,19 @@ mod tests {
                 .await
                 .is_err(),
             "a failed drained turn must deliver its setup error before releasing the session"
+        );
+        // The relay's own signal proves release has reached settlement. The
+        // listener mutex keeps it there while we observe the product's guard.
+        tokio::time::timeout(std::time::Duration::from_secs(10), settling.cancelled())
+            .await
+            .unwrap();
+        assert!(
+            state.active_turns.lock().await.contains_key(&session_id),
+            "the session guard must remain held while the failed turn's relay settles"
+        );
+        assert!(
+            drain_queue(&state, session_id).await.unwrap().is_none(),
+            "an arriving drain must refuse the session while the failed relay is settling"
         );
         assert_eq!(
             state
