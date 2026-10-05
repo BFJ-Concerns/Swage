@@ -35,6 +35,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Queued messages and the turn they start reach every open view in order; a queued message no longer overtakes the reply before it.
+
 - Provider refusals keep a visible account in the conversation with a way to retry or amend the request, instead of an empty reply. Exhausted empty provider responses retain their own failure account.
 - Updating a schedule’s agent is refused with guidance to create a new schedule with that agent, rather than reporting success with the existing agent.
 

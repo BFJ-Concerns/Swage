@@ -805,6 +805,121 @@ async fn a_message_sent_during_an_active_turn_queues_and_runs_as_the_next_turn()
     );
 }
 
+/// Queue announcements preserve turn order on real sockets and stay in their session.
+#[tokio::test(flavor = "multi_thread")]
+async fn queued_messages_reach_real_sockets_in_turn_order_and_stay_in_their_session() {
+    crate::support::journey(async {
+    let (tx1, rx1) = tokio::sync::mpsc::channel(10);
+    let (tx2, rx2) = tokio::sync::mpsc::channel(10);
+    let provider = ChannelProvider::new(vec![rx1, rx2]);
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let state = AppState::new_with_config_root(
+        storage.clone(), storage, Arc::new(provider),
+        swage_config::ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]), None,
+        root.path().to_path_buf(),
+    );
+    let router = build_router(state);
+    let gateway = crate::support::LiveTestGateway::start(router.clone(), root).await;
+    let addr = gateway.address;
+    let (_, session) = http(&router, "POST", "/api/conversations").await;
+    let id = session["id"].as_str().unwrap();
+    let (_, other) = http(&router, "POST", "/api/conversations").await;
+    let (mut writer, mut reader) = connect_ws(addr, id).await;
+    let (mut other_writer, mut other_reader) =
+        connect_ws(addr, other["id"].as_str().unwrap()).await;
+    ws_send(
+        &mut writer,
+        json!({"type":"send_message", "content":"First"}),
+    )
+    .await;
+    tx1.send(StreamChunk::Delta {
+        content: "first reply".into(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        ws_recv_until(&mut reader, |event| event["type"] == "token").await["content"],
+        "first reply"
+    );
+    ws_send(
+        &mut writer,
+        json!({"type":"send_message", "content":"Second"}),
+    )
+    .await;
+    let queued = ws_recv_until(&mut reader, |event| event["type"] == "message_queued").await;
+    assert_eq!(queued["queued"]["content"], "Second");
+    // Make the next provider's first token ready before the current turn ends.
+    tx2.send(StreamChunk::Delta {
+        content: "second reply".into(),
+    })
+    .await
+    .unwrap();
+    tx2.send(StreamChunk::Done {
+        finish_reason: None,
+    })
+    .await
+    .unwrap();
+    drop(tx2);
+    tx1.send(StreamChunk::Done {
+        finish_reason: None,
+    })
+    .await
+    .unwrap();
+    drop(tx1);
+    let mut relevant = Vec::new();
+    let mut completions = 0;
+    while completions < 2 {
+        let event = ws_recv(&mut reader).await;
+        if event["type"] == "turn_complete" {
+            completions += 1;
+        }
+        if [
+            "turn_complete",
+            "message_appended",
+            "queue_drained",
+            "token",
+        ]
+        .contains(&event["type"].as_str().unwrap())
+        {
+            relevant.push(event);
+        }
+    }
+    assert_eq!(
+        relevant
+            .iter()
+            .map(|event| event["type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "turn_complete",
+            "message_appended",
+            "queue_drained",
+            "token",
+            "turn_complete"
+        ],
+        "real WebSocket delivery must preserve completion, drain rows, drain and next turn order"
+    );
+    assert_eq!(relevant[1]["message"]["content"], "Second");
+    assert_eq!(relevant[2]["queued_ids"], json!([queued["queued"]["id"]]));
+    assert_eq!(relevant[3]["content"], "second reply");
+    assert_eq!(relevant[4]["turn_id"], relevant[2]["turn_id"]);
+    // A response sent after the journey fences the other socket's preceding traffic.
+    ws_send(
+        &mut other_writer,
+        json!({"type":"ordering_probe"}),
+    )
+    .await;
+    let other_event = ws_recv(&mut other_reader).await;
+    assert_eq!(
+        other_event["type"], "error",
+        "another session must receive none of the queue or turn events"
+    );
+    writer.close().await.unwrap();
+    other_writer.close().await.unwrap();
+    }).await;
+}
+
 // ===========================================================================
 // Built-in tools and task execution — cross-task integration tests
 // ===========================================================================
