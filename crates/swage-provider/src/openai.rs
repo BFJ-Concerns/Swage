@@ -17,7 +17,7 @@ use swage_core::{
 };
 
 use crate::http::{HttpClient, SseEvent};
-use crate::provider::{LlmProvider, ProviderConfig, spawn_stream_forwarder};
+use crate::provider::{LlmProvider, ModelOutputWitness, ProviderConfig, spawn_stream_forwarder};
 
 /// Known native-harness mismatch retained while this provider deliberately
 /// remains on Chat Completions. Recording it does not make it an admitted
@@ -639,16 +639,29 @@ impl OpenAiProvider {
             if let Some(ref reason) = choice.finish_reason {
                 let finish = Self::parse_finish_reason(Some(reason));
 
-                // Emit any accumulated tool calls before Done.
-                let tool_calls = tool_acc.take();
-                let mut chunks = tool_calls
-                    .into_iter()
-                    .map(|tool_call| StreamChunk::ToolUse {
-                        call_id: tool_call.call_id,
-                        name: tool_call.name,
-                        arguments: tool_call.arguments,
-                    })
-                    .collect::<Vec<_>>();
+                // The terminal choice may still carry text; emit it, then any
+                // accumulated tool calls, before Done.
+                let mut chunks = Vec::new();
+                if let Some(chunk) = Self::parse_reasoning_delta(&choice.delta) {
+                    chunks.push(chunk);
+                }
+                if let Some(ref content) = choice.delta.content
+                    && !content.is_empty()
+                {
+                    chunks.push(StreamChunk::Delta {
+                        content: content.clone(),
+                    });
+                }
+                chunks.extend(
+                    tool_acc
+                        .take()
+                        .into_iter()
+                        .map(|tool_call| StreamChunk::ToolUse {
+                            call_id: tool_call.call_id,
+                            name: tool_call.name,
+                            arguments: tool_call.arguments,
+                        }),
+                );
                 if let Some(usage) = usage {
                     chunks.push(usage);
                 }
@@ -893,6 +906,7 @@ impl LlmProvider for OpenAiProvider {
 
             tokio::pin!(sse_stream);
             let mut tool_acc = ToolCallAccumulator::new();
+            let mut output = ModelOutputWitness::default();
 
             'events: while let Some(result) = sse_stream.next().await {
                 let event = match result {
@@ -900,7 +914,7 @@ impl LlmProvider for OpenAiProvider {
                         let _ = tx.send(StreamChunk::Error {
                             message: e.to_string(),
                         });
-                        break;
+                        return;
                     }
                     Ok(ev) => ev,
                 };
@@ -913,19 +927,27 @@ impl LlmProvider for OpenAiProvider {
                     if is_done {
                         let remaining = tool_acc.take();
                         for tc in remaining {
-                            let _ = tx.send(StreamChunk::ToolUse {
+                            let tool_use = output.observe(StreamChunk::ToolUse {
                                 call_id: tc.call_id,
                                 name: tc.name,
                                 arguments: tc.arguments,
                             });
+                            let _ = tx.send(tool_use.expect("a tool call is model output"));
                         }
                     }
 
+                    let Some(chunk) = output.observe(chunk) else {
+                        let _ = tx.send(output.anomaly("Chat Completions"));
+                        return;
+                    };
                     let _ = tx.send(chunk);
                     if is_done {
                         break 'events;
                     }
                 }
+            }
+            if !output.completed {
+                let _ = tx.send(output.anomaly("Chat Completions"));
             }
         })
     }
@@ -1745,6 +1767,23 @@ mod tests {
         let mut acc = ToolCallAccumulator::new();
         let chunk = OpenAiProvider::parse_stream_event(&event, &mut acc);
         assert!(matches!(chunk, Some(StreamChunk::Delta { content }) if content == "Hello"));
+    }
+
+    #[test]
+    fn parse_stream_event_terminal_choice_keeps_its_text() {
+        let event = SseEvent {
+            event_type: None,
+            data: r#"{"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}"#.into(),
+        };
+        let mut acc = ToolCallAccumulator::new();
+        let chunks = OpenAiProvider::parse_stream_event_chunks(&event, &mut acc);
+        assert!(
+            matches!(
+                chunks.as_slice(),
+                [StreamChunk::Delta { content }, StreamChunk::Done { .. }] if content == "done"
+            ),
+            "{chunks:?}"
+        );
     }
 
     #[test]

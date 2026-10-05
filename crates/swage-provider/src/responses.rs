@@ -24,7 +24,7 @@ use swage_core::{
 use crate::openai::{is_openai_reasoning_model, openai_effort_capability, openai_reasoning_effort};
 
 use crate::http::{HttpClient, SseEvent};
-use crate::provider::{LlmProvider, ProviderConfig, spawn_stream_forwarder};
+use crate::provider::{LlmProvider, ModelOutputWitness, ProviderConfig, spawn_stream_forwarder};
 
 /// Enumerated divergences from the native GPT harness's Responses request,
 /// recorded in the provider snapshot so every capture comparison reads them
@@ -759,6 +759,7 @@ impl LlmProvider for ResponsesProvider {
 
             tokio::pin!(sse_stream);
             let mut saw_tool_call = false;
+            let mut output = ModelOutputWitness::default();
 
             'events: while let Some(result) = sse_stream.next().await {
                 let event = match result {
@@ -766,7 +767,7 @@ impl LlmProvider for ResponsesProvider {
                         let _ = tx.send(StreamChunk::Error {
                             message: e.to_string(),
                         });
-                        break;
+                        return;
                     }
                     Ok(ev) => ev,
                 };
@@ -774,12 +775,19 @@ impl LlmProvider for ResponsesProvider {
                 for chunk in
                     ResponsesProvider::parse_stream_event_chunks(&event, &mut saw_tool_call)
                 {
+                    let Some(chunk) = output.observe(chunk) else {
+                        let _ = tx.send(output.anomaly("Responses"));
+                        return;
+                    };
                     let is_done = matches!(chunk, StreamChunk::Done { .. });
                     let _ = tx.send(chunk);
                     if is_done {
                         break 'events;
                     }
                 }
+            }
+            if !output.completed {
+                let _ = tx.send(output.anomaly("Responses"));
             }
         })
     }

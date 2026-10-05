@@ -59,6 +59,45 @@ impl Drop for AbortTaskOnDrop {
     }
 }
 
+/// Tracks whether a streamed response carried model output, so an adapter can
+/// refuse a stream that ends — or completes — without any.
+///
+/// A body that is not the adapter's protocol (an HTML page, another
+/// protocol's event stream) parses to no events and never completes; a
+/// completion with no text and no tool call carries nothing the model said.
+/// Either is a provider failure, not an empty reply.
+#[derive(Default)]
+pub(crate) struct ModelOutputWitness {
+    saw_output: bool,
+    /// The stream delivered its completion after model output.
+    pub(crate) completed: bool,
+}
+
+impl ModelOutputWitness {
+    /// Record `chunk`, returning it to forward, or `None` when it is a
+    /// completion that arrived without any model output.
+    pub(crate) fn observe(&mut self, chunk: StreamChunk) -> Option<StreamChunk> {
+        match &chunk {
+            StreamChunk::Delta { content } if !content.is_empty() => self.saw_output = true,
+            StreamChunk::ToolUse { .. } => self.saw_output = true,
+            StreamChunk::Done { .. } if !self.saw_output => return None,
+            StreamChunk::Done { .. } => self.completed = true,
+            _ => {}
+        }
+        Some(chunk)
+    }
+
+    /// The failure a stream without model output settles with.
+    pub(crate) fn anomaly(&self, protocol: &str) -> StreamChunk {
+        StreamChunk::ProviderAnomaly {
+            message: format!(
+                "the endpoint returned no {protocol} model output; \
+                 check that its URL and protocol serve this model"
+            ),
+        }
+    }
+}
+
 /// Start a forwarding task when its returned stream is first polled.
 ///
 /// The task belongs to the returned stream: dropping the stream aborts the

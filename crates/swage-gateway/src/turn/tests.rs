@@ -19412,3 +19412,135 @@ async fn selected_responses_entry_sharing_an_upstream_id_is_served_by_its_own_pr
         "the error names the configured provider and endpoint: {error}"
     );
 }
+
+/// Serves `{route}` on a fresh local port with a successful response of the
+/// given content type and body.
+async fn spawn_fixed_body_endpoint(
+    route: &'static str,
+    content_type: &'static str,
+    body: &'static str,
+) -> String {
+    use axum::{Router, http::header, routing::post};
+
+    let app = Router::new().route(
+        route,
+        post(move || async move { ([(header::CONTENT_TYPE, content_type)], body) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fixed-body endpoint");
+    let addr = listener.local_addr().expect("fixed-body endpoint address");
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve fixed-body endpoint");
+    });
+    format!("http://{addr}/v1")
+}
+
+/// Runs one turn against a single configured provider and returns the
+/// settled turn state with the error events the conversation showed.
+async fn turn_against_single_provider(
+    protocol: swage_config::Protocol,
+    base_url: &str,
+) -> (TurnState, Vec<String>) {
+    let (storage, session_id) = make_storage_with_session().await;
+    let mut config = swage_config::ResolvedConfig::default();
+    config.providers.entries.insert(
+        "configured-endpoint".into(),
+        swage_config::ProviderEndpointConfig {
+            worker_staleness_threshold_ms: None,
+            protocol,
+            api_key_secret_ref: None,
+            api_key_env: None,
+            base_url: Some(base_url.to_string()),
+            command: None,
+            state_dir: None,
+        },
+    );
+    config.providers.default = "configured-endpoint".into();
+    config.models.entries.insert(
+        "selected".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "configured-endpoint".into(),
+            model_id: "gpt-6-luna".into(),
+            ..Default::default()
+        },
+    );
+    config.models.default = "selected".into();
+    let secret_manager = crate::secret::SecretManager::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+    );
+    let runtime_provider = crate::startup::create_provider(&config, &secret_manager).await;
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        runtime_provider,
+        config,
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("Hi"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("provider failure is surfaced as an event");
+
+    let thread = state.storage.list_by_session(session_id).await.unwrap()[0].clone();
+    let turn = state.storage.list_turns_by_thread(thread.id).await.unwrap()[0].clone();
+    let errors = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|event| match event {
+            ServerEvent::Error { message, .. } => Some(message),
+            _ => None,
+        })
+        .collect();
+    (turn.state, errors)
+}
+
+#[tokio::test]
+async fn html_from_a_chat_completions_endpoint_fails_the_turn_naming_provider_and_endpoint() {
+    let base_url = spawn_fixed_body_endpoint(
+        "/v1/chat/completions",
+        "text/html",
+        "<!doctype html><html><body>Sign in</body></html>",
+    )
+    .await;
+
+    let (state, errors) =
+        turn_against_single_provider(swage_config::Protocol::OpenAi, &base_url).await;
+
+    assert_eq!(state, TurnState::Failed, "errors: {errors:?}");
+    let route = format!("provider 'configured-endpoint' at {base_url}");
+    assert!(
+        errors.iter().any(|error| error.contains(&route)),
+        "the failure names provider and endpoint: {errors:?}"
+    );
+}
+
+#[tokio::test]
+async fn chat_completions_stream_at_a_responses_endpoint_fails_the_turn_naming_provider_and_endpoint()
+ {
+    let base_url = spawn_fixed_body_endpoint(
+        "/v1/responses",
+        "text/event-stream",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+    )
+    .await;
+
+    let (state, errors) =
+        turn_against_single_provider(swage_config::Protocol::OpenAiResponses, &base_url).await;
+
+    assert_eq!(state, TurnState::Failed, "errors: {errors:?}");
+    let route = format!("provider 'configured-endpoint' at {base_url}");
+    assert!(
+        errors.iter().any(|error| error.contains(&route)),
+        "the failure names provider and endpoint: {errors:?}"
+    );
+}
