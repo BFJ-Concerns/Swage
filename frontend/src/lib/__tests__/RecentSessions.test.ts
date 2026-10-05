@@ -304,3 +304,35 @@ describe("RecentSessions schedule groups", () => {
     expect(childRows()).toBe(11);
   });
 });
+
+describe("RecentSessions message previews", () => {
+  let component: MountedComponent | undefined;
+
+  beforeEach(() => {
+    vi.mocked(sessionsApi.listRecentSessions).mockReset();
+    localStorage.clear();
+  });
+  afterEach(() => {
+    if (component) unmount(component);
+    component = undefined;
+    document.body.replaceChildren();
+  });
+
+  it("renders the source message as plain text", async () => {
+    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValueOnce([
+      conversationEntry(makeSession({ message_preview: "**Amber Cabinet** - **Size:** `120 × 60 cm`" })),
+    ]);
+    component = mount(RecentSessions, { target: document.body, props: { onSelectSession: vi.fn() } });
+    await settle();
+    expect(document.querySelector(".row.source .preview")?.textContent).toBe("Amber Cabinet - Size: 120 × 60 cm");
+  });
+
+  it("renders a nested session's link label without its destination", async () => {
+    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValueOnce([
+      conversationEntry(makeSession(), [makeSession({ id: "child", origin: { kind: "delegation", parent_session_id: "conv-1" }, message_preview: "[Open child](swage://session/child-id)" })]),
+    ]);
+    component = mount(RecentSessions, { target: document.body, props: { onSelectSession: vi.fn() } });
+    await settle();
+    expect(document.querySelector(".row.nested .preview")?.textContent).toBe("Open child");
+  });
+});

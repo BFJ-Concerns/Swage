@@ -14,7 +14,7 @@ import type { ConnectionStore } from "../stores/connection";
 import type { ConversationStore } from "../stores/conversations";
 import { createStreamingStore, type StreamingStore } from "../stores/streaming";
 import type { ConversationBranch } from "../types";
-import { makeConversationDetail } from "./fixtures/conversations";
+import { makeConversationDetail, makeConversationSummary } from "./fixtures/conversations";
 
 type MountedComponent = ReturnType<typeof mount>;
 
@@ -271,5 +271,26 @@ describe("ConversationChannel pending approval", () => {
     expect(streamingStore.streamFor?.(conversationId)?.isStreaming).toBe(true);
     expect(document.querySelector(".message.assistant.streaming")).toBeNull();
     expect(document.querySelector(".cursor")).toBeNull();
+  });
+});
+
+describe("ConversationChannel session previews", () => {
+  let component: MountedComponent | undefined;
+
+  afterEach(() => {
+    if (component) unmount(component);
+    component = undefined;
+    document.body.replaceChildren();
+  });
+
+  it.each([
+    ["**Amber Cabinet** - **Size:** `120 × 60 cm`", "Amber Cabinet - Size: 120 × 60 cm"],
+    ["## Ingredients\n\n| Name | ID |\n| --- | --- |\n| Lentils | 42 |", "Ingredients Name ID Lentils 42"],
+    ["[Open child](swage://session/child-id)", "Open child"],
+  ])("shows the latest message as a plain selector label: %s", (source, expected) => {
+    const store = makeConversationStore([], null);
+    const summary = makeConversationSummary({ id: store.activeConversation!.id, message_preview: source });
+    component = mountChannel({ ...store, conversations: [summary] });
+    expect(document.querySelector('select[aria-label="Active conversation"] option')?.textContent).toBe(expected);
   });
 });

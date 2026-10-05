@@ -5,6 +5,7 @@
 <script lang="ts">
   import type { ConversationStore } from "../stores/conversations";
   import { relativeTime } from "../utils/relative-time";
+  import { messagePreview } from "../message-preview";
 
   interface Props {
     // Injected by App.svelte once all stores are wired. Undefined during
@@ -63,6 +64,7 @@
         {#each store.conversations as conversation (conversation.id)}
           {@const isActive = store.activeConversation?.id === conversation.id}
           {@const isPendingDelete = pendingDelete === conversation.id}
+          {@const preview = messagePreview(conversation.message_preview ?? "New conversation")}
 
           <li
             class="conversation-item"
@@ -75,7 +77,7 @@
               <div class="item-header">
                 <!-- Preview: the last message, or a label for new conversations. -->
                 <span class="preview">
-                  {conversation.message_preview ?? "New conversation"}
+                  {preview}
                 </span>
 
                 <!-- Warn when a turn was interrupted (e.g. by disconnection). -->
@@ -104,7 +106,7 @@
                 <button
                   class="delete-btn"
                   title="Delete conversation"
-                  aria-label={`Delete conversation: ${conversation.message_preview ?? "New conversation"}`}
+                  aria-label={`Delete conversation: ${preview}`}
                   onclick={(e) => requestDelete(conversation.id, e)}
                 >
                   <span aria-hidden="true">×</span>

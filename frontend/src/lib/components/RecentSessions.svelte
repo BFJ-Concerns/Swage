@@ -15,6 +15,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listRecentSessions } from "../api/sessions";
+  import { messagePreview } from "../message-preview";
   import { relativeTime } from "../utils/relative-time";
   import type { RecentSession } from "../protocol/RecentSession";
   import type { RecentSessionsEntry } from "../protocol/RecentSessionsEntry";
@@ -137,7 +138,7 @@
   function sourceLabel(entry: RecentSessionsEntry): string {
     switch (entry.source.kind) {
       case "conversation":
-        return entry.source.session.message_preview ?? "New conversation";
+        return messagePreview(entry.source.session.message_preview ?? "New conversation");
       case "schedule":
         return conciseLabel(entry.source.message);
       case "workflow_run":
@@ -251,7 +252,7 @@
               {#each entry.automated as automated (automated.id)}
                 <li>
                   <button type="button" class="row nested" onclick={() => onSelectSession?.(automated.id)}>
-                    <span class="preview">{automated.message_preview ?? originLabel(automated)}</span>
+                    <span class="preview">{messagePreview(automated.message_preview ?? originLabel(automated))}</span>
                     <span class="meta">
                       {originLabel(automated)} · {automated.agent_id}
                       {#if automated.has_running_turn}<span class="running">running</span>{/if}
