@@ -1,10 +1,11 @@
 #![cfg(target_os = "linux")]
 
 use std::{
+    cell::Cell,
     ffi::CString,
     fs,
     io::Read,
-    net::TcpListener,
+    net::{Ipv4Addr, SocketAddr},
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::ffi::OsStrExt,
@@ -25,7 +26,7 @@ struct GatewayProbe {
     root: tempfile::TempDir,
     runtime: tempfile::TempDir,
     home: tempfile::TempDir,
-    port: u16,
+    port: Cell<u16>,
     explicit_root: bool,
     xdg_runtime: bool,
     metadata_events: AsyncFd<fs::File>,
@@ -45,13 +46,6 @@ impl GatewayProbe {
     }
 
     fn with_environment(explicit_root: bool, xdg_runtime: bool) -> Self {
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .expect("failed to reserve a loopback port for the gateway probe");
-        let port = listener
-            .local_addr()
-            .expect("failed to read the reserved loopback address")
-            .port();
-        drop(listener);
         let root = tempfile::TempDir::new().expect("failed to create the probe root");
         let runtime = super::support::scratch_tempdir();
         let home = tempfile::TempDir::new().expect("failed to create the probe home");
@@ -70,7 +64,7 @@ impl GatewayProbe {
             runtime,
             home,
             metadata_events,
-            port,
+            port: Cell::new(0),
             explicit_root,
             xdg_runtime,
         }
@@ -108,17 +102,23 @@ impl GatewayProbe {
         );
     }
 
-    async fn assert_ready_after_start(&self, output: Output, previous_pid: Option<u32>) {
+    async fn assert_ready_after_start(
+        &self,
+        output: Output,
+        previous_pid: Option<u32>,
+        requested_port: u16,
+    ) {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             output.status.success() || stderr.contains("gateway did not become ready within 5s"),
             "gateway start failed before readiness\nstdout: {}\nstderr: {stderr}",
             String::from_utf8_lossy(&output.stdout),
         );
-        self.wait_for_ready_process(previous_pid).await;
+        self.wait_for_ready_process(previous_pid, requested_port)
+            .await;
     }
 
-    async fn wait_for_ready_process(&self, previous_pid: Option<u32>) -> u32 {
+    async fn wait_for_ready_process(&self, previous_pid: Option<u32>, requested_port: u16) -> u32 {
         loop {
             if let Ok(metadata) = RuntimeMetadata::load_from(&self.metadata_path())
                 && Some(metadata.pid) != previous_pid
@@ -127,7 +127,21 @@ impl GatewayProbe {
                     !metadata.is_stale(),
                     "gateway published a dead PID: {metadata:?}"
                 );
-                assert_eq!(metadata.address, format!("http://127.0.0.1:{}", self.port));
+                let address: SocketAddr = metadata
+                    .address
+                    .strip_prefix("http://")
+                    .expect("gateway publishes an HTTP address")
+                    .parse()
+                    .expect("gateway publishes its bound socket address");
+                assert_eq!(address.ip(), Ipv4Addr::LOCALHOST);
+                assert_ne!(
+                    address.port(),
+                    0,
+                    "gateway must publish the actual assigned port"
+                );
+                if requested_port != 0 {
+                    assert_eq!(address.port(), requested_port);
+                }
                 // Startup publishes metadata after binding. The live request can
                 // wait for the server to accept it; a failed health check is a
                 // product failure, not a reason to retry or extend a deadline.
@@ -135,6 +149,7 @@ impl GatewayProbe {
                     .health()
                     .await
                     .expect("published replacement must serve its health endpoint");
+                self.port.set(address.port());
                 return metadata.pid;
             }
             // The directory watch is installed before any CLI invocation. An
@@ -178,8 +193,7 @@ impl GatewayProbe {
     }
 
     async fn start(&self) {
-        let port = self.port.to_string();
-        self.assert_ready_after_start(self.run(&["gateway", "start", "--port", &port]), None)
+        self.assert_ready_after_start(self.run(&["gateway", "start", "--port", "0"]), None, 0)
             .await;
     }
 
@@ -277,10 +291,10 @@ async fn assert_restart_recovers_without_swage_home(probe: GatewayProbe) {
     let first_pid = probe.pid();
     fs::remove_file(probe.metadata_path()).expect("failed to remove live runtime metadata");
 
-    let port = probe.port.to_string();
+    let port = probe.port.get().to_string();
     let output = probe.run(&["gateway", "restart", "--force", "--port", &port]);
     probe
-        .assert_ready_after_start(output, Some(first_pid))
+        .assert_ready_after_start(output, Some(first_pid), probe.port.get())
         .await;
 
     let second_pid = probe.pid();
@@ -335,17 +349,17 @@ async fn restart_preserves_running_environment_and_still_starts_when_nothing_is_
         let live_log = probe.root.path().join("gateway.log");
         fs::remove_file(&live_log).expect("failed to remove the initial gateway log");
 
-        let port = probe.port.to_string();
+        let port = "0";
         let mut restart = probe.command();
         let output = restart
             .env_remove("SWAGE_HOME")
             .env("HOME", invoking_home.path())
             .env("XDG_RUNTIME_DIR", invoking_runtime.path())
-            .args(["gateway", "restart", "--force", "--port", &port])
+            .args(["gateway", "restart", "--force", "--port", port])
             .output()
             .expect("failed to invoke gateway restart");
         probe
-            .assert_ready_after_start(output, Some(first_pid))
+            .assert_ready_after_start(output, Some(first_pid), 0)
             .await;
 
         let second_pid = probe.pid();
@@ -372,8 +386,8 @@ async fn restart_preserves_running_environment_and_still_starts_when_nothing_is_
         probe.stop();
         assert!(!probe.metadata_path().exists());
 
-        let output = probe.run(&["gateway", "restart", "--force", "--port", &port]);
-        probe.assert_ready_after_start(output, None).await;
+        let output = probe.run(&["gateway", "restart", "--force", "--port", port]);
+        probe.assert_ready_after_start(output, None, 0).await;
         assert!(probe.metadata_path().exists());
     })
     .await;
@@ -394,7 +408,7 @@ async fn foreground_restart_preserves_running_environment() {
         fs::hard_link(probe.metadata_path(), &invoking_metadata)
             .expect("failed to expose runtime metadata to the restart command");
 
-        let port = probe.port.to_string();
+        let port = "0";
         let mut restart = tokio::process::Command::from(probe.command())
             .kill_on_drop(true)
             .env_remove("SWAGE_HOME")
@@ -406,13 +420,13 @@ async fn foreground_restart_preserves_running_environment() {
                 "--force",
                 "--foreground",
                 "--port",
-                &port,
+                port,
             ])
             .spawn()
             .expect("failed to invoke foreground gateway restart");
 
         let second_pid = tokio::select! {
-            pid = probe.wait_for_ready_process(Some(first_pid)) => pid,
+            pid = probe.wait_for_ready_process(Some(first_pid), 0) => pid,
             status = restart.wait() => panic!("foreground restart exited before readiness: {status:?}"),
         };
         let environment = process_environment(second_pid);
