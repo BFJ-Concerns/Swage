@@ -2,8 +2,11 @@
 //!
 //! Walks the directory tree, skipping hidden directories, node_modules, target,
 //! and .git. Returns matching lines in "path:line_number: content" format,
-//! truncated if the total output exceeds the configured size limit.
+//! truncated if the total output exceeds the configured size limit. Binary
+//! files are recognised from their leading bytes and never read in full.
 
+use std::fs::File;
+use std::io::{BufRead, BufReader, Cursor, Read};
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -13,7 +16,7 @@ use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
 use crate::tool::workspace::{
-    continuable_output_value, is_binary_content, location_approval_error, resolve_context_path,
+    continuable_output_value, location_approval_error, read_text_sample, resolve_context_path,
 };
 
 // ---------------------------------------------------------------------------
@@ -181,19 +184,8 @@ fn search_dir(dir: &Path, workspace_root: &Path, pattern: &str, results: &mut Ve
 }
 
 fn search_file(path: &Path, workspace_root: &Path, pattern: &str, results: &mut Vec<String>) {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(_) => return,
-    };
-
-    // Skip binary files — they produce garbled output and are rarely useful.
-    if is_binary_content(&bytes) {
+    let Ok(file) = File::open(path) else {
         return;
-    }
-
-    let text = match std::str::from_utf8(&bytes) {
-        Ok(t) => t,
-        Err(_) => return, // Invalid UTF-8 — skip
     };
 
     // Make the path relative to the workspace root for readable output.
@@ -202,11 +194,32 @@ fn search_file(path: &Path, workspace_root: &Path, pattern: &str, results: &mut 
         .unwrap_or(path)
         .to_string_lossy();
 
-    for (line_num, line) in text.lines().enumerate() {
+    if let Some(matches) = search_text(file, &rel, pattern) {
+        results.extend(matches);
+    }
+}
+
+/// Returns "rel:line_num: line" for every line of `source` that contains
+/// `pattern`, or `None` when the source is not readable text.
+///
+/// The source is read line by line after its classification sample, so a
+/// binary file is skipped without being read further and a large text file is
+/// never held whole.
+fn search_text(mut source: impl Read, rel: &str, pattern: &str) -> Option<Vec<String>> {
+    // Skip binary files — they produce garbled output and are rarely useful.
+    let sample = read_text_sample(&mut source).ok().flatten()?;
+
+    let mut matches = Vec::new();
+    let lines = BufReader::new(Cursor::new(sample).chain(source)).lines();
+    for (line_num, line) in lines.enumerate() {
+        // A line that is not UTF-8 or cannot be read leaves the file unsearchable
+        // as text — skip it whole.
+        let line = line.ok()?;
         if line.to_lowercase().contains(pattern) {
-            results.push(format!("{}:{}: {}", rel, line_num + 1, line));
+            matches.push(format!("{}:{}: {}", rel, line_num + 1, line));
         }
     }
+    Some(matches)
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +329,71 @@ mod tests {
             .await
             .unwrap();
         assert!(!val["output"].as_str().unwrap().contains("binary.bin"));
+    }
+
+    /// An endless stream of NUL bytes, standing in for a binary file too large
+    /// to hold in memory. Reading more than a mebibyte of it fails the test.
+    struct EndlessBinary {
+        consumed: usize,
+    }
+
+    impl Read for EndlessBinary {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            assert!(
+                self.consumed < 1 << 20,
+                "binary content was read past its classification sample"
+            );
+            buf.fill(0);
+            self.consumed += buf.len();
+            Ok(buf.len())
+        }
+    }
+
+    #[test]
+    fn binary_content_is_not_read_past_its_sample() {
+        let source = EndlessBinary { consumed: 0 };
+        assert_eq!(search_text(source, "model.gguf", "pattern"), None);
+    }
+
+    #[tokio::test]
+    async fn finds_matches_across_and_past_the_classification_sample() {
+        let dir = TempDir::new().unwrap();
+        let mut content = "a".repeat(8188);
+        content.push_str(" needle one\n");
+        content.push_str(&"filler\n".repeat(2000));
+        content.push_str("needle two\n");
+        std::fs::write(dir.path().join("long.txt"), content).unwrap();
+
+        let val = tool(&dir)
+            .execute(json!({ "pattern": "needle" }), &ctx(&dir))
+            .await
+            .unwrap();
+        let output = val["output"].as_str().unwrap();
+        assert!(output.starts_with("long.txt:1: aaa"), "got: {output}");
+        assert!(output.contains(" needle one\n"), "got: {output}");
+        assert!(
+            output.ends_with("\nlong.txt:2002: needle two"),
+            "got: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn skips_non_utf8_file_even_after_a_match() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("latin1.txt"),
+            b"needle first\ncaf\xe9 later\n",
+        )
+        .unwrap();
+        let val = tool(&dir)
+            .execute(json!({ "pattern": "needle" }), &ctx(&dir))
+            .await
+            .unwrap();
+        assert!(
+            val["output"].as_str().unwrap().contains("No matches"),
+            "got: {}",
+            val["output"]
+        );
     }
 
     #[tokio::test]
