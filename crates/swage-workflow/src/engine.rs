@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use rquickjs::{
-    AsyncContext, AsyncRuntime, CatchResultExt, Context, Function, Promise, Runtime,
+    AsyncContext, AsyncRuntime, CatchResultExt, CaughtError, Context, Function, Promise, Runtime,
     context::intrinsic::{Eval, Json, MapSet, Promise as PromiseIntrinsic, RegExp, RegExpCompiler},
     prelude::Async,
 };
@@ -1647,7 +1647,28 @@ impl WorkflowEngine {
                     .into_future::<String>()
                     .await
                     .catch(&ctx)
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| {
+                        // rquickjs's exception display hard-codes "Error", losing
+                        // the unknown-option name assigned before worker dispatch.
+                        if let CaughtError::Exception(exception) = &error
+                            && exception
+                                .as_object()
+                                .get::<_, String>("name")
+                                .is_ok_and(|name| name == "UnknownAgentOptionError")
+                        {
+                            let mut message = String::from("UnknownAgentOptionError:");
+                            if let Some(detail) = exception.message() {
+                                message.push(' ');
+                                message.push_str(&detail);
+                            }
+                            if let Some(stack) = exception.stack() {
+                                message.push('\n');
+                                message.push_str(&stack);
+                            }
+                            return message;
+                        }
+                        error.to_string()
+                    })
             });
         tokio::pin!(execution);
         let result = tokio::select! {
@@ -2844,6 +2865,34 @@ mod tests {
             })
         );
         assert!(host.agent_requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn uncaught_unknown_agent_option_keeps_its_name_before_dispatch() {
+        for source in [
+            r#"await agent("inspect the unit", { bogusOption: true });"#,
+            r#"await parallel([() => agent("inspect the unit", { bogusOption: true })]);"#,
+            r#"await pipeline(["unit"], () => agent("inspect the unit", { bogusOption: true }));"#,
+        ] {
+            let host = Arc::new(SurfaceHost::new());
+            let error = WorkflowEngine::new(EngineLimits::default())
+                .execute_hosted(
+                    source,
+                    "null",
+                    CancellationToken::new(),
+                    Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                    ScriptCapabilities::default(),
+                )
+                .await
+                .expect_err("unknown option must fail the run");
+
+            let message = error.to_string();
+            assert!(
+                message.contains("UnknownAgentOptionError: unknown agent() option 'bogusOption'"),
+                "the recorded failure must name the author error and option: {message}"
+            );
+            assert!(host.agent_requests.lock().unwrap().is_empty());
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
