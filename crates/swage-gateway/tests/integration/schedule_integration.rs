@@ -1739,6 +1739,20 @@ async fn restart_recovery_fails_runs_orphaned_by_a_previous_process() {
     };
     let schedule_a = make_schedule().await.unwrap();
     let schedule_b = make_schedule().await.unwrap();
+    let schedule_c = make_schedule().await.unwrap();
+    let accounted = state
+        .storage
+        .create_schedule_run(NewScheduleRun::pending(
+            schedule_c.id,
+            ScheduleRunTrigger::Tick,
+            Some(Utc::now()),
+        ))
+        .await
+        .unwrap();
+    swage_gateway::channel_gateway::record_no_delivery(&state, accounted.id, "existing account")
+        .await
+        .unwrap();
+    let before = state.storage.list_delivery_records().await.unwrap();
 
     let pending = state
         .storage
@@ -1773,7 +1787,8 @@ async fn restart_recovery_fails_runs_orphaned_by_a_previous_process() {
     let counts = swage_gateway::shutdown::recover_orphaned_background_runs(&*state.storage)
         .await
         .unwrap();
-    assert_eq!(counts.schedule_runs_failed, 2);
+    assert_eq!(counts.schedule_runs_failed, 3);
+    let deliveries = state.storage.list_delivery_records().await.unwrap();
 
     for run_id in [pending.id, running.id] {
         let run = state
@@ -1790,7 +1805,46 @@ async fn restart_recovery_fails_runs_orphaned_by_a_previous_process() {
                 .contains("gateway stopped")
         );
         assert!(run.completed_at.is_some());
+        let records: Vec<_> = deliveries
+            .iter()
+            .filter(|record| record.run_id == Some(run_id))
+            .collect();
+        assert_eq!(
+            records.len(),
+            1,
+            "each recovered run needs one delivery account"
+        );
+        let record = records[0];
+        assert_eq!(record.target, serde_json::json!({ "kind": "no_delivery" }));
+        assert_eq!(record.status, "not_delivered");
+        assert!(record.content.is_empty());
+        assert_eq!(record.error, run.error_message);
+        assert_eq!(
+            record.error.as_deref(),
+            Some("gateway stopped while schedule run was running")
+        );
     }
+    let existing: Vec<_> = deliveries
+        .iter()
+        .filter(|record| record.run_id == Some(accounted.id))
+        .collect();
+    assert_eq!(
+        existing.len(),
+        1,
+        "recovery preserves an existing delivery account"
+    );
+    assert_eq!(
+        serde_json::to_value(existing[0]).unwrap(),
+        serde_json::to_value(&before[0]).unwrap()
+    );
+    let counts = swage_gateway::shutdown::recover_orphaned_background_runs(&*state.storage)
+        .await
+        .unwrap();
+    assert_eq!(counts.schedule_runs_failed, 0);
+    assert_eq!(
+        serde_json::to_value(state.storage.list_delivery_records().await.unwrap()).unwrap(),
+        serde_json::to_value(deliveries).unwrap()
+    );
 }
 
 // ---------------------------------------------------------------------------
