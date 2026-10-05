@@ -1141,6 +1141,7 @@ async fn native_file_fixture(
 ) -> (
     swage_tool::context::MockToolContext,
     swage_gateway::tool_executor::GatewayExecutionStrategy,
+    Arc<SqliteStorage>,
 ) {
     use swage_storage::{NewSession, SessionOrigin, SessionStore};
     let (router, storage) = make_test_router();
@@ -1200,10 +1201,10 @@ async fn native_file_fixture(
         tx,
         device,
         Arc::new(swage_gateway::secret::SecretManager::new(storage.clone())),
-        storage,
+        storage.clone(),
         None,
     );
-    (context, strategy)
+    (context, strategy, storage)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1217,7 +1218,7 @@ async fn native_file_write_respects_attachment_access_on_local_and_sandboxed_tur
         for writable in [false, true] {
             let root = tempfile::tempdir().unwrap();
             std::fs::write(root.path().join("existing.txt"), "original").unwrap();
-            let (ctx, strategy) =
+            let (ctx, strategy, _) =
                 native_file_fixture(root.path(), writable, sandboxed, false, true).await;
             for path in ["nested/denied-probe.txt", "existing.txt"] {
                 let result = strategy
@@ -1265,7 +1266,7 @@ async fn native_file_edit_respects_attachment_access_on_local_and_sandboxed_turn
             for path in ["first.txt", "second.txt"] {
                 std::fs::write(root.path().join(path), "original").unwrap();
             }
-            let (ctx, strategy) =
+            let (ctx, strategy, _) =
                 native_file_fixture(root.path(), writable, sandboxed, false, true).await;
             let result = strategy.execute(&FileEditTool, "file_edit", &json!({"changes": [
                 {"path": "first.txt", "edits": [{"type": "replace", "old_text": "original", "new_text": "changed"}]},
@@ -1336,7 +1337,7 @@ async fn native_file_mutations_refuse_read_only_targets_before_remote_dispatch()
     use swage_tool::dispatch::ToolExecutionStrategy;
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("existing.txt"), "original").unwrap();
-    let (ctx, strategy) = native_file_fixture(root.path(), false, false, true, true).await;
+    let (ctx, strategy, _) = native_file_fixture(root.path(), false, false, true, true).await;
     let error = strategy
         .execute(
             &FileWriteTool,
@@ -1387,7 +1388,7 @@ async fn native_file_mutations_keep_read_only_access_for_untrusted_attachments()
     std::fs::write(root.path().join("existing.txt"), "original").unwrap();
     // Even a caller with this permitted working root cannot turn a declared
     // read-only attachment into a writable one by clearing its trust flag.
-    let (ctx, strategy) = native_file_fixture(root.path(), false, false, false, false).await;
+    let (ctx, strategy, _) = native_file_fixture(root.path(), false, false, false, false).await;
     let write = strategy
         .execute(
             &FileWriteTool,
@@ -1406,4 +1407,235 @@ async fn native_file_mutations_keep_read_only_access_for_untrusted_attachments()
         std::fs::read_to_string(root.path().join("existing.txt")).unwrap(),
         "original"
     );
+}
+
+async fn additional_native_attachment(
+    storage: &SqliteStorage,
+    ctx: &swage_tool::context::MockToolContext,
+    path: &std::path::Path,
+    writable: bool,
+) -> swage_storage::WorkspaceAttachment {
+    use swage_storage::{NewWorkspaceAttachment, SessionStore};
+    let session = storage
+        .get_session(Uuid::parse_str(&ctx.session_id).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    storage
+        .create_workspace_attachment(NewWorkspaceAttachment {
+            topic_id: session.topic_id,
+            label: "additional workspace".into(),
+            path: path.to_string_lossy().into_owned(),
+            permissions: if writable {
+                vec!["read".into(), "write".into()]
+            } else {
+                vec!["read".into()]
+            },
+            is_trusted: true,
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_edit_remote_preflight_refuses_trimmed_read_only_path() {
+    use swage_gateway::tool::file_edit::FileEditTool;
+    use swage_tool::dispatch::ToolExecutionStrategy;
+    let home = tempfile::tempdir().unwrap();
+    let mut env_guard = ProcessEnvGuard::new();
+    env_guard.set_swage_home(home.path());
+    let writable = tempfile::tempdir().unwrap();
+    let read_only = tempfile::tempdir().unwrap();
+    let target = read_only.path().join("existing.txt");
+    std::fs::write(&target, "original").unwrap();
+    let (mut ctx, strategy, storage) =
+        native_file_fixture(writable.path(), true, false, true, true).await;
+    additional_native_attachment(&storage, &ctx, read_only.path(), false).await;
+    ctx.allowed_paths = vec![read_only.path().to_path_buf()];
+    let result = strategy.execute(&FileEditTool, "file_edit", &json!({"changes": [
+        {"path": format!("  {}  ", target.display()), "edits": [{"type": "replace", "old_text": "original", "new_text": "bad"}]}
+    ]}), &ctx).await;
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+    let error = result.expect_err("remote preflight must refuse the trimmed read-only target");
+    assert!(error.to_string().contains("read-only access"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_mutations_allow_active_writable_child_of_read_only_attachment() {
+    use swage_gateway::tool::{file_edit::FileEditTool, file_write::FileWriteTool};
+    use swage_storage::SessionStore;
+    use swage_tool::dispatch::ToolExecutionStrategy;
+    let home = tempfile::tempdir().unwrap();
+    let mut env_guard = ProcessEnvGuard::new();
+    env_guard.set_swage_home(home.path());
+    let root = tempfile::tempdir().unwrap();
+    let child = root.path().join("child");
+    std::fs::create_dir(&child).unwrap();
+    std::fs::write(child.join("existing.txt"), "original").unwrap();
+    let (mut ctx, strategy, storage) =
+        native_file_fixture(root.path(), false, false, false, true).await;
+    let attachment = additional_native_attachment(&storage, &ctx, &child, true).await;
+    storage
+        .set_session_active_workspace(
+            Uuid::parse_str(&ctx.session_id).unwrap(),
+            Some(attachment.id),
+        )
+        .await
+        .unwrap();
+    ctx.working_directory = child.clone();
+    ctx.allowed_paths = vec![root.path().to_path_buf()];
+    let write = strategy
+        .execute(
+            &FileWriteTool,
+            "file_write",
+            &json!({"path": "probe.txt", "content": "written"}),
+            &ctx,
+        )
+        .await;
+    let edit = strategy.execute(&FileEditTool, "file_edit", &json!({"changes": [
+        {"path": "existing.txt", "edits": [{"type": "replace", "old_text": "original", "new_text": "edited"}]}
+    ]}), &ctx).await;
+    assert!(
+        write.is_ok(),
+        "active writable child write failed: {write:?}"
+    );
+    assert!(edit.is_ok(), "active writable child edit failed: {edit:?}");
+    assert_eq!(
+        std::fs::read_to_string(child.join("probe.txt")).unwrap(),
+        "written"
+    );
+    assert_eq!(
+        std::fs::read_to_string(child.join("existing.txt")).unwrap(),
+        "edited"
+    );
+    let denied = strategy
+        .execute(
+            &FileWriteTool,
+            "file_write",
+            &json!({"path": root.path().join("denied.txt"), "content": "bad"}),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+    assert!(denied.to_string().contains("read-only access"), "{denied}");
+    assert!(!root.path().join("denied.txt").exists());
+}
+
+async fn native_lookup_failure_refuses(remote: bool) {
+    use swage_gateway::tool::{file_edit::FileEditTool, file_write::FileWriteTool};
+    use swage_tool::dispatch::ToolExecutionStrategy;
+    let home = tempfile::tempdir().unwrap();
+    let mut env_guard = ProcessEnvGuard::new();
+    env_guard.set_swage_home(home.path());
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("existing.txt"), "original").unwrap();
+    let (ctx, strategy, storage) =
+        native_file_fixture(root.path(), true, false, remote, true).await;
+    storage
+        .with_conn(|conn| {
+            conn.execute_batch(
+                "ALTER TABLE workspace_attachments RENAME TO unavailable_workspace_attachments",
+            )
+        })
+        .await
+        .unwrap();
+    let write = strategy
+        .execute(
+            &FileWriteTool,
+            "file_write",
+            &json!({"path": "nested/probe.txt", "content": "bad"}),
+            &ctx,
+        )
+        .await;
+    let edit = strategy.execute(&FileEditTool, "file_edit", &json!({"changes": [
+        {"path": "existing.txt", "edits": [{"type": "replace", "old_text": "original", "new_text": "bad"}]}
+    ]}), &ctx).await;
+    assert!(!root.path().join("nested").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("existing.txt")).unwrap(),
+        "original"
+    );
+    for result in [write, edit] {
+        let error = result.expect_err("attachment lookup failure must refuse mutation");
+        assert!(
+            error
+                .to_string()
+                .contains("Cannot check workspace write access"),
+            "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("no such table: workspace_attachments"),
+            "{error}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_mutations_local_refuse_attachment_lookup_failure() {
+    native_lookup_failure_refuses(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_mutations_remote_refuse_attachment_lookup_failure() {
+    native_lookup_failure_refuses(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_edit_mixed_access_batch_preserves_both_files_in_either_order() {
+    use swage_gateway::tool::file_edit::FileEditTool;
+    use swage_tool::dispatch::ToolExecutionStrategy;
+    let home = tempfile::tempdir().unwrap();
+    let mut env_guard = ProcessEnvGuard::new();
+    env_guard.set_swage_home(home.path());
+    for sandboxed in [false, true] {
+        for remote in [false, true] {
+            for read_only_first in [false, true] {
+                let writable = tempfile::tempdir().unwrap();
+                let read_only = tempfile::tempdir().unwrap();
+                let first = writable.path().join("first.txt");
+                let second = read_only.path().join("second.txt");
+                for path in [&first, &second] {
+                    std::fs::write(path, "original").unwrap();
+                }
+                let (mut ctx, strategy, storage) =
+                    native_file_fixture(writable.path(), true, sandboxed, remote, true).await;
+                additional_native_attachment(&storage, &ctx, read_only.path(), false).await;
+                ctx.allowed_paths = vec![read_only.path().to_path_buf()];
+                let paths = if read_only_first {
+                    [&second, &first]
+                } else {
+                    [&first, &second]
+                };
+                let changes: Vec<_> = paths
+                    .into_iter()
+                    .map(|path| {
+                        json!({"path": path, "edits": [
+                            {"type": "replace", "old_text": "original", "new_text": "bad"}
+                        ]})
+                    })
+                    .collect();
+                let result = strategy
+                    .execute(
+                        &FileEditTool,
+                        "file_edit",
+                        &json!({"changes": changes}),
+                        &ctx,
+                    )
+                    .await;
+                for path in [&first, &second] {
+                    assert_eq!(
+                        std::fs::read_to_string(path).unwrap(),
+                        "original",
+                        "batch changed {}",
+                        path.display()
+                    );
+                }
+                let error =
+                    result.expect_err("mixed-access batch must refuse before writing either file");
+                assert!(error.to_string().contains("read-only access"), "{error}");
+            }
+        }
+    }
 }

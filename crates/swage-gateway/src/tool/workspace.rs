@@ -198,19 +198,27 @@ pub async fn require_workspace_write_access(
         crate::turn::load_workspace_attachment_access(gateway.storage(), session.topic_id)
             .await
             .map_err(|error| failure(format!("Cannot check workspace write access: {error}")))?;
-    for access in attachments {
-        let root = access
-            .grant
-            .path
-            .canonicalize()
-            .unwrap_or(access.grant.path);
-        if path.starts_with(&root) && !access.grant.can_write {
-            return Err(failure(format!(
-                "Permission denied: workspace '{}' has read-only access: {}",
-                access.attachment.label,
-                path.display()
-            )));
-        }
+    // A more specific attachment overrides its parent. Equally specific,
+    // conflicting declarations retain the read-only restriction.
+    let effective = attachments
+        .into_iter()
+        .filter_map(|access| {
+            let root = access
+                .grant
+                .path
+                .canonicalize()
+                .unwrap_or_else(|_| access.grant.path.clone());
+            path.starts_with(&root).then_some((root, access))
+        })
+        .max_by_key(|(root, access)| (root.components().count(), !access.grant.can_write));
+    if let Some((_, access)) = effective
+        && !access.grant.can_write
+    {
+        return Err(failure(format!(
+            "Permission denied: workspace '{}' has read-only access: {}",
+            access.attachment.label,
+            path.display()
+        )));
     }
     Ok(())
 }
@@ -228,8 +236,8 @@ pub(crate) async fn require_native_file_write_access(
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|change| change["path"].as_str())
-            .collect(),
+            .map(|change| super::file_edit::parse_change_path(change, tool_name))
+            .collect::<Result<Vec<_>, _>>()?,
         _ => return Ok(()),
     };
     for requested in paths {

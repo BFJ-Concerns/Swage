@@ -380,10 +380,27 @@ async fn native_file_mutations_in_sandbox_child_refuse_without_attachment_author
     let mut env_guard = ProcessEnvGuard::new();
     env_guard.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
     for bubblewrap in [false, true] {
-        assert!(
-            !bubblewrap || find_bwrap().is_ok(),
-            "bubblewrap is required for this route coverage"
-        );
+        if bubblewrap {
+            let available = match find_bwrap() {
+                Ok(path) => tokio::process::Command::new(path)
+                    .args(["--unshare-all", "--ro-bind", "/", "/", "--", "/bin/true"])
+                    .output()
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(|output| {
+                        if output.status.success() {
+                            Ok(())
+                        } else {
+                            Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+                        }
+                    }),
+                Err(error) => Err(error.to_string()),
+            };
+            if let Err(reason) = available {
+                eprintln!("skipping native file mutation bubblewrap leg: {reason}");
+                continue;
+            }
+        }
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("existing.txt"), "original").unwrap();
         // The working directory is deliberately writable at the OS boundary:
@@ -423,6 +440,10 @@ async fn native_file_mutations_in_sandbox_child_refuse_without_attachment_author
         assert_eq!(
             std::fs::read_to_string(root.path().join("existing.txt")).unwrap(),
             "original"
+        );
+        eprintln!(
+            "native file mutation refusal passed: {}",
+            if bubblewrap { "bubblewrap" } else { "fallback" }
         );
     }
 }
