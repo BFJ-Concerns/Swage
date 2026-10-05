@@ -21,6 +21,7 @@
   let openScheduleId = $state<string | null>(null);
   let scheduleRuns = $state<Record<string, ScheduleRun[]>>({});
   let showHistory = $state(false);
+  const approvalsIdle = $derived((overview?.approvals.length ?? 0) === 0);
 
   function describeSpec(schedule: Schedule): string {
     if (schedule.spec.kind === "interval") return schedule.spec.every;
@@ -212,7 +213,13 @@
         </div>
       </article>
 
-      <article class="panel">
+      <!-- With nothing pending, Approvals shrinks to a full-width strip so
+           Schedules can take the whole row instead of sharing it with an empty pane. -->
+      <article
+        class="panel"
+        class:panel-wide={approvalsIdle}
+        class:panel-compact={approvalsIdle}
+      >
         <div class="panel-head">
           <div>
             <p class="panel-kicker">Approvals</p>
@@ -259,7 +266,7 @@
         </div>
       </article>
 
-      <article class="panel">
+      <article class="panel" class:panel-wide={approvalsIdle}>
         <div class="panel-head">
           <div>
             <p class="panel-kicker">Schedules</p>
@@ -632,6 +639,10 @@
 
   .panel-wide {
     grid-column: 1 / -1;
+  }
+
+  .panel-compact {
+    padding-block: 10px;
   }
 
   .panel-head {
