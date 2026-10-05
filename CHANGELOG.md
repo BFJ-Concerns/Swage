@@ -37,6 +37,8 @@ All notable changes to Swage are documented in this file.
 - Denying a tool approval identifies the user's denial in the tool card and the feedback sent to the model, distinct from an approval timeout.
 - The session archive-delay field states its one-day minimum and visibly refuses smaller values without changing the saved delay.
 - Queued messages and the turn they start reach every open view in order; a queued message no longer overtakes the reply before it.
+- A turn for a selected model goes only to that model's configured provider, with its saved URL and protocol: when that provider is unreachable, fails, or answers with something other than model output (an HTML page, another protocol's stream), the turn fails with an error naming that provider and its endpoint instead of being answered by another configured model. This holds when two models share an upstream model id on different providers, when a topic or agent overrides the provider entry’s URL or protocol, and when the selected model is absent from the gateway’s startup configuration.
+- Provider streams that stop at an output limit or content filter before producing text retain that finish cause instead of reporting an endpoint with no model output.
 - Provider refusals keep a visible account in the conversation with a way to retry or amend the request, instead of an empty reply. Exhausted empty provider responses retain their own failure account.
 - Updating a schedule’s agent is refused with guidance to create a new schedule with that agent, rather than reporting success with the existing agent.
 - Tool bundles appear in a stable order in Settings.
@@ -59,7 +61,6 @@ All notable changes to Swage are documented in this file.
 - File search, read and edit recognise a binary file from its first 8 KiB and read no further, and file search reads text line by line. A search reaching multi-gigabyte model weights no longer holds each file whole in memory, which had grown the gateway past 20 GB.
 - Provider rejections that cannot succeed on retry, such as an unknown model or failed authentication, end the turn immediately without a retry countdown.
 
-- A turn for a selected model goes only to that model's configured provider, with its saved URL and protocol: when that provider is unreachable, fails, or answers with something other than model output (an HTML page, another protocol's stream), the turn fails with an error naming that provider and its endpoint instead of being answered by another configured model. This holds when two models share an upstream model id on different providers.
 - Underscores in fill-in blanks, such as `__:__`, render literally in assistant messages while ordinary underscore emphasis still renders as emphasis.
 - PEM private keys are redacted whole, including their body and footer; truncated keys are redacted through the end of the input, and overlapping secret matches leave no plaintext tail.
 - Retry badges name the model requested for the current turn.

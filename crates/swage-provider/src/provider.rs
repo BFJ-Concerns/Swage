@@ -65,21 +65,26 @@ impl Drop for AbortTaskOnDrop {
 /// A body that is not the adapter's protocol (an HTML page, another
 /// protocol's event stream) parses to no events and never completes; a
 /// completion with no text and no tool call carries nothing the model said.
-/// Either is a provider failure, not an empty reply.
+/// Either is a provider failure unless an explicit finish cause names an
+/// output limit or content filter, which must reach the caller unchanged.
 #[derive(Default)]
 pub(crate) struct ModelOutputWitness {
     saw_output: bool,
-    /// The stream delivered its completion after model output.
+    /// The stream delivered a completion with model output or a limit/filter cause.
     pub(crate) completed: bool,
 }
 
 impl ModelOutputWitness {
     /// Record `chunk`, returning it to forward, or `None` when it is a
-    /// completion that arrived without any model output.
+    /// completion without model output or an output-limit/content-filter cause.
     pub(crate) fn observe(&mut self, chunk: StreamChunk) -> Option<StreamChunk> {
         match &chunk {
             StreamChunk::Delta { content } if !content.is_empty() => self.saw_output = true,
             StreamChunk::ToolUse { .. } => self.saw_output = true,
+            StreamChunk::Done {
+                finish_reason:
+                    Some(swage_core::FinishReason::Length | swage_core::FinishReason::ContentFilter),
+            } => self.completed = true,
             StreamChunk::Done { .. } if !self.saw_output => return None,
             StreamChunk::Done { .. } => self.completed = true,
             _ => {}

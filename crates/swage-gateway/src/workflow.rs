@@ -14796,7 +14796,7 @@ mod tests {
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
-            config,
+            crate::test_support::with_mock_provider_entries(config),
             crate::tool::ToolDispatcher::allow_all(vec![
                 Arc::new(NamedTool::new("shell")) as Arc<dyn crate::tool::Tool>
             ]),
@@ -25855,7 +25855,7 @@ protocol = "openai"
             },
         );
         state.replace_runtime(
-            config,
+            crate::test_support::with_mock_provider_entries(config),
             state.active_provider(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
         );
@@ -28369,7 +28369,7 @@ protocol = "openai"
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
-            config,
+            crate::test_support::with_mock_provider_entries(config),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );

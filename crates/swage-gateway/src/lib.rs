@@ -126,6 +126,24 @@ pub(crate) mod test_support {
         )
     }
 
+    /// Give catalogue models provider entries when an in-process mock serves them.
+    pub(crate) fn with_mock_provider_entries(
+        mut config: swage_config::ResolvedConfig,
+    ) -> swage_config::ResolvedConfig {
+        for model in config.models.entries.values() {
+            config
+                .providers
+                .entries
+                .entry(model.provider_id.clone())
+                .or_insert_with(|| swage_config::ProviderEndpointConfig {
+                    protocol: swage_config::Protocol::OpenAi,
+                    base_url: Some("http://mock-provider.invalid/v1".into()),
+                    ..Default::default()
+                });
+        }
+        config
+    }
+
     static SWAGE_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static XDG_RUNTIME_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
