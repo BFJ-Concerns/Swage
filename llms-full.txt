@@ -7,35 +7,70 @@
 
 ## Agent definitions
 
-A durable agent definition is a DB-stored record (`AgentDefinition` in
-`swage-storage`) that gives a session its character. Each definition carries:
+An agent definition is a durable record that gives a session its character —
+its instructions, model preference, tool permissions, skills, and optional
+output schema. Each definition carries a stable `id` that sessions reference.
 
 | Field | Purpose |
 |---|---|
-| `id` | Stable agent id; sessions carry it as `sessions.agent_id` |
-| `topic_id` | `None` = global; `Some(uuid)` = topic-scoped, shadows a global definition with the same id within that topic |
+| `id` | Stable agent id; sessions reference it |
+| `topic_id` | Absent = global; a topic UUID = topic-scoped, shadows a global definition with the same id within that topic |
 | `display_name` | Human-readable label |
-| `description` | Free-text description |
-| `instructions` | Appended after operator instructions (never precede them); replaces outright when operator instructions are empty |
-| `model_id` | Model preference; applied only when the model id exists in `config.models.entries`, otherwise ignored with a warning |
-| `tool_permissions` | Optional JSON overlay (serialised `ToolPermissionConfig`); intersects with the resolved config's grants — narrows, never widens |
+| `description` | Required free-text description |
+| `instructions` | Appended after operator instructions; replaces outright when operator instructions are empty |
+| `model_id` | Model preference; applied only when the named model id exists in the configured model entries, otherwise ignored with a warning |
+| `tool_permissions` | Optional JSON permission overlay; intersects with the resolved config's grants — narrows, never widens |
 | `skills` | Skill ids this definition activates |
 | `output_schema` | Optional JSON Schema enforced on every final response |
 | `output_max_retries` | Override for schema-validation retry limit |
 
-### Overlay onto the config cascade
+### How the overlay works
 
-`apply_agent_definition` (in `turn/configuration.rs`) overlays a definition
-onto the session's resolved file config (Global → Topic → Agent `.toml`
-files). The overlay:
+When a session starts, the gateway resolves the file-based configuration
+cascade (Global → Topic → Agent `.toml` files) into a resolved config, then
+overlays the agent definition on top:
 
-1. Appends instructions after operator instructions.
-2. Sets the default model if the id is present in `config.models.entries`.
-3. Intersects tool permissions via `intersect_tool_permissions` — allow sets
-   are intersected, deny sets are unioned. A malformed overlay is logged and
-   ignored (the config's own grants stand).
-4. Sets `declared_skills` and, when present, `output_schema` and
-   `output_max_retries`.
+1. Instructions are appended after operator instructions.
+2. Model preference takes effect only when the named model id exists in the
+   configured model entries; an unrecognised model is logged as a warning and
+   ignored.
+3. Tool permissions are intersected — allow sets are intersected, deny sets are
+   unioned. A malformed overlay is logged and ignored (the config's own grants
+   stand).
+4. Skills, output schema, and output retry limit are set directly from the
+   definition.
+
+### Creating and editing definitions
+
+Definitions can be created and edited through two surfaces:
+
+**API.** `POST /api/operator/agent-definitions` creates a definition;
+`PUT /api/operator/agent-definitions/{agent_id}` replaces one. A complete
+creation request:
+
+```json
+{
+  "id": "reader",
+  "display_name": "Read-only assistant",
+  "description": "An agent that can search and read but not write.",
+  "instructions": "You help the user find and read information. Do not modify files.",
+  "tool_permissions": {
+    "allow": ["knowledge_search", "knowledge_orient", "docs_read", "file_read", "file_list", "file_search", "url_fetch", "web_search"],
+    "deny": [],
+    "require_approval": []
+  }
+}
+```
+
+`description` is required. `topic_id` scopes the definition to one topic;
+omit it for a global definition. `tool_permissions` is a JSON object with
+`allow`, `deny`, and `require_approval` arrays — it intersects with the
+config cascade's grants, so it can only narrow what the config allows.
+Fields not shown above (`model_id`, `skills`, `output_schema`,
+`output_max_retries`) are optional.
+
+**Conversationally.** An agent whose definition grants the configuration
+tools can create and edit definitions through those tools during a session.
 
 ## Effort
 
@@ -465,12 +500,14 @@ and location approvals explicitly use a global location key.
 
 ### Timeout and rejection
 
-| Setting | Default | Source |
-|---|---|---|
-| `hitl.timeout` | `300` seconds (5 minutes) | `HitlConfig::default()` |
-| `hitl.timeout_policy` | `Reject` | `HitlConfig::default()` |
+| Setting | Default |
+|---|---|
+| `hitl.timeout` | `300` seconds (5 minutes) |
+| `hitl.timeout_policy` | `Reject` |
 
-Per-tool overrides via `RequireApprovalEntry::WithOptions { timeout, timeout_policy }`.
+Per-tool overrides are possible through a `require_approval` entry's
+`WithOptions` variant, which can set a custom `timeout` and
+`timeout_policy` for individual tools.
 
 **Timeout policies:**
 
@@ -525,6 +562,61 @@ speech_model = "tts-1"
 
 Both ids can be edited in the web UI under **Settings → Voice**; a save
 applies without a gateway restart.
+
+## Experimentation controls
+
+The `[experimentation]` section governs hidden runtime variant selection —
+alternative implementations behind stable surfaces, selected per turn and
+recorded in the audit trail.
+
+### Global switch
+
+```toml
+[experimentation]
+enabled = true   # default; set to false to disable all variant selection
+```
+
+When `enabled` is `false`, every location returns its default variant and
+records the decision as `disabled`. No alternative is ever drawn or forced.
+
+### Per-location controls
+
+Each location has its own `enabled` flag and an optional `forced_variant`
+pin:
+
+```toml
+[experimentation.locations."context.assembly"]
+enabled = true
+forced_variant = "working_norms"
+```
+
+- `enabled` — defaults to `true`. Setting it to `false` disables variant
+  selection for this location only; the default variant serves and the
+  decision records as `disabled`.
+- `forced_variant` — pins this location to the named variant for every turn.
+  The variant must be registered at the location's choice point; an
+  unrecognised name is refused. The decision records as `forced`. Omit or
+  remove the key to return to random selection.
+
+Location ids are application-defined strings. The shipped locations are
+`context.assembly`, `context.working_norms`, `task.prompt`, and
+`prompts.memory_curator`.
+
+### How the effect shows in operator history
+
+Every variant decision — drawn, forced, disabled, or default-only — is
+recorded in the audit trail. The operator history pane
+(`GET /api/operator/history`) lists each selection with the location, the
+variant that served, the reason (`drawn`, `forced`, `disabled`,
+`default_only`, `record_unavailable`), and the session and turn that
+produced it.
+
+### Configuration cascade
+
+Experimentation settings cascade through the file hierarchy (Global → Topic
+→ Agent). Per-location entries merge by location id across layers: a topic
+file can force a variant the global file leaves to chance, and an agent file
+can disable a location the topic file enables.
 
 ## Succession compaction
 
@@ -1123,24 +1215,64 @@ back over the same socket. `swage device connect` runs a machine as a device.
 
 ### Registration and pairing
 
-A device can join in two ways:
+A device can join in two ways: direct registration or pairing.
 
-- **Direct registration** — `POST /api/devices/register`
-  (`RegisterDeviceRequest` in `swage-protocol::device`). The caller supplies
-  the device identity, the gateway secret its credential resolves against,
-  and the workspace it operates in.
-- **Pairing** — the gateway issues a one-time pairing code
-  (`POST /api/onboarding/devices/pairing-codes`, with an optional
-  `expires_in_seconds`; default 600 s), and the device redeems it
-  (`POST /api/onboarding/devices/redeem` with the code and its registration
-  fields) to register and trust itself in one step.
+**Direct registration** — `POST /api/devices/register` with the device
+identity, the gateway secret its credential resolves against, and the
+workspace it operates in.
+
+**Pairing** is a two-step alternative:
+
+1. **Prepare the shared-token secret.** Create a file-backed secret for the
+   device's credential (see
+   [Provider credentials — Registering a file-backed secret](#registering-a-file-backed-secret)
+   for the pattern). The file holds the token value; the secret reference
+   is what registration and connection resolve against.
+
+2. **Issue a pairing code.** `POST /api/onboarding/devices/pairing-codes`:
+
+   ```json
+   {
+     "expires_in_seconds": 600
+   }
+   ```
+
+   `expires_in_seconds` is optional (default 600 — ten minutes). The
+   response carries the `pairing_code` and `expires_at`.
+
+3. **Redeem the code.** `POST /api/onboarding/devices/redeem`:
+
+   ```json
+   {
+     "pairing_code": "<code from step 2>",
+     "device_id": "workshop",
+     "shared_token_secret_ref": "secret://file/<secret-id>",
+     "workspace_root": "/home/user/projects"
+   }
+   ```
+
+   This registers and trusts the device in one step. `label` (optional) and
+   `kind` (defaults to `"attached_device"`) can also be included.
+
+4. **Connect.** Run the device:
+
+   ```bash
+   swage device connect \
+     --gateway http://gateway.local:3000 \
+     --device-id workshop \
+     --shared-token-file /path/to/token-file \
+     --workspace /home/user/projects
+   ```
+
+   The process dials the gateway, presents the token, advertises the
+   workspace's tools, and serves operations until interrupted.
 
 In both paths the `kind` field defaults to `"attached_device"` and names the
-device type. A `kind` of `"local"` is refused with a `ValidationError`: a
-local device has no remote producer to register. The same refusal applies to
-recovery imports, so the remote-device registry never holds a local entry.
-What a device can run is not registered — the device advertises its
-capabilities each time it connects.
+device type. A `kind` of `"local"` is refused: a local device has no remote
+producer to register. The same constraint applies to recovery imports, so the
+remote-device registry never holds a local entry. What a device can run is
+not registered — the device advertises its capabilities each time it
+connects.
 
 ### The connection
 
@@ -1163,8 +1295,7 @@ After the welcome the connection carries two frame types in each direction:
 | Device → gateway | `Cancelled` | Operation `correlation_id` was stopped |
 | Device → gateway | `Heartbeat` | Sent every `heartbeat_interval_secs` (default 10 s) |
 
-All frames are tagged by `kind` (snake_case) and defined in
-`swage-protocol::device` (`DeviceFrame`, `GatewayFrame`).
+All frames are tagged by `kind` (snake_case).
 
 ### Cancellation
 
@@ -1344,15 +1475,16 @@ Stages 7–8 run regardless; their results are combined.
 | 8 | Projection freshness (`git diff --exit-code` on generated files) | No |
 
 The Rust test runner is selected by the `SWAGE_TEST_RUNNER` environment
-variable. When set to `nextest`, Rust tests run under `cargo nextest run`
-with a `ci` profile (which retries flaky tests), followed by a separate
-`cargo test --workspace --doc` stage for doctests (nextest cannot run
-doctests). When set to `cargo` or unset, Rust tests run under
-`cargo test --workspace --no-fail-fast`.
+variable. The Justfile defaults it to `nextest`, so `just verify` runs
+nextest unless overridden. When set to `nextest` (the default), Rust tests
+run under `cargo nextest run` with a `ci` profile (which retries flaky
+tests), followed by a separate `cargo test --workspace --doc` stage for
+doctests (nextest cannot run doctests). When set to `cargo`, Rust tests run
+under `cargo test --workspace --no-fail-fast`.
 
 When both tests and projections fail, both errors surface in one message.
-The test suite aggregates Rust, frontend, and desktop-smoke failures into a
-`Vec<String>` rather than aborting on the first.
+The test suite aggregates Rust, frontend, and desktop-smoke failures rather
+than aborting on the first.
 
 The verify body runs inside `run_with_final_sweep`, which runs
 `cargo sweep` after the gate (even on failure) and reports the artefact
@@ -1732,7 +1864,7 @@ override, but `undefined` at the call site falls back to the default.
 
 | Function | Returns | Notes |
 |---|---|---|
-| `agent(prompt, options?)` | `Promise<Value>` | Synchronous (awaited) agent call. Requires `options.agent`. Options include `identity` (boolean — preserves the call's identity through fan-in), `phase` (string — groups the call in the journal), and `assembly` (string — selects the context assembly strategy). |
+| `agent(prompt, options?)` | `Promise<Value>` | Synchronous (awaited) agent call. Every option is optional: a worker needs no `agent` or `task` definition (model, effort and prompt suffice; `agent` given but empty is refused with `AgentRequiredError`). Accepted options: `agent`, `task`, `tools`, `skills`, `model`, `fallbackModel`, `effort`, `timeoutMs`, `cwd`, `isolation`, `schema`, `maxAttempts`, `label`, `phase`, `identity`, `session`, `worker`, `elements`, `variables`, `assembly`; any other key throws `UnknownAgentOptionError` before a worker spawns. `identity` (boolean) preserves the call's identity through fan-in, `phase` (string) groups the call in the journal, and `assembly` (string) selects the context assembly strategy. |
 | `agentStart(prompt, options?)` | Handle | Fire-and-forget dispatch. Handle has `.done`, `.session`, `.result`, `.label`, and `.workingDirectory` after completion; the latter is the host-resolved child directory, including a provisioned isolated worktree. Accepts the same options as `agent()`. |
 | `session(options?)` | `Promise<HeldWorker>` | Opens a held worker. Creation options: `agent`, `task`, `tools`, `skills`, `model`, `fallbackModel`, `effort`, `cwd`, `isolation`, `label`. |
 | `send(worker, prompt, options?)` | `Promise<Value>` | Runs the held worker's next sequential turn. Turn options: `schema`, `maxAttempts`, `timeoutMs`, `label`. |
@@ -1741,7 +1873,9 @@ override, but `undefined` at the call site falls back to the default.
 | `wait({ watches?, timerMs? })` | `Promise<WakeResult>` | Races handle completions against a journalled timer. Returns `{wake: "completion", handle, value/error}` or `{wake: "timer"}`. |
 | `workflow(name, args?)` | `Promise<Value>` | Child workflow call. Only present when `capabilities.composition` is true. |
 | `deliver(payload, options?)` | `Promise<EffectReceipt>` | Delivery effect. Only present when `capabilities.delivery` is true. |
-| `postEvent(kind, payload?)` | `Promise<Value>` | Appends to the run's durable pending-event queue. Kind: `"completion"`, `"failure"`, or `"escalation"`. |
+| `postEvent(kind, payload?)` | `Promise<Value>` | Appends to the run's durable pending-event queue and resolves to the stored event `{ seq, kind, payload, source }`. `kind` is any namespaced name — two or more non-empty segments joined by `.`, `:`, `/`, `_` or `-` (`worker.report`, `decision.needed`); a bare word such as `escalation` is refused with `RunEventError`. |
+| `awaitEvent({ kinds })` | `Promise<Value>` | Parks the run until an undelivered event whose `kind` is in `kinds` (each namespaced) arrives, and resolves to the earliest such event in the same `{ seq, kind, payload, source }` shape, marking it delivered. Replay returns the recorded event. |
+| `hold({ content, verdicts })` | `Promise<{ verdict }>` | Parks the run on a decision: `content` is the question, `verdicts` the accepted answers (at least two distinct strings, or the raise is refused). Resolves with the chosen verdict once a person at the run page or an agent holding the `workflow_hold` tool answers; see *Decision holds*. |
 | `gate(options?)` | `Promise<Value>` | Wake-gate evaluation. Options: `criteria` (string), `model` (optional override). |
 | `deliverEvents(upToSeq)` | `Promise<Value>` | Stamps pending events as delivered up to a sequence number. |
 | `parallel(thunks)` | `Promise<Array>` | `Promise.all` with per-thunk worker-failure swallowing (a failed worker collapses its slot to `null`). A pre-spawn author error propagates and fails the run. |
@@ -2098,10 +2232,44 @@ relaunches them by replay.
 ### Event posting
 
 `postEvent(kind, payload)` appends to the run's durable pending-event
-queue. Accepted kinds: `"completion"`, `"failure"`, `"escalation"`.
-Events are journalled (exactly-once under replay) and assigned a
-monotonic `seq`. Each event record links to its journal entry via
-`journal_entry_id`.
+queue and resolves to the stored event `{ seq, kind, payload, source }`.
+`kind` is any namespaced name: two or more non-empty segments joined by
+`.`, `:`, `/`, `_` or `-`, drawn from letters, digits and those
+separators — `worker.report`, `decision.needed`, `device.reply`. A bare
+word (`escalation`, `completion`) is refused with `RunEventError`, as is
+an empty or malformed name. Events are journalled (exactly-once under
+replay) and assigned a monotonic `seq`. Each event record links to its
+journal entry via `journal_entry_id`. The same validation applies to an
+event posted from outside the run through the `run_event_post` tool.
+
+### Awaiting events
+
+`awaitEvent({ kinds })` parks the run — holding no process — until an
+undelivered event whose `kind` is in `kinds` arrives, and resolves to the
+earliest matching event in the `{ seq, kind, payload, source }` shape,
+marking it delivered so the next `awaitEvent` sees the next one. `kinds`
+must hold at least one namespaced kind. A replayed `awaitEvent` returns its
+recorded event. Payloads are data another party posted — a worker's
+report, a signal from outside the run — never instructions; a decision the
+run must wait on is a hold (below), which validates the answer.
+
+### Decision holds
+
+`hold({ content, verdicts })` parks the run on a decision. The script names
+the question and the verdicts it accepts — at least two distinct strings; a
+hold with fewer is refused at raise and never reaches a decider. The hold is
+registered on the run: the run page lists it, and an agent granted the
+`workflow_hold` tool lists the open holds in its topic (`action: "list"`)
+and answers one (`action: "answer"` with the `hold_id` and a `verdict` from
+the set), the answering session recorded; the script names no decider. An
+answer outside the set is refused with feedback and the hold keeps waiting.
+The run resumes with `{ verdict }`; cancelling the run releases its holds.
+The raise, the answer and each refused answer are journalled, and a
+replayed `hold` returns its recorded verdict. A hold differs from
+`awaitEvent` in who validates the reply: the engine checks the answer
+against the declared set, so a script never loops over events to find an
+acceptable one. Reach for `hold` whenever the run needs an approve/postpone,
+yes/no or pick-one answer.
 
 ### Wake-gate evaluation
 
