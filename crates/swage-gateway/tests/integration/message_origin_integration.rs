@@ -96,7 +96,7 @@ async fn stored_origin(
     prefix: &str,
 ) -> swage_storage::MessageOrigin {
     let thread = storage.list_by_session(session_id).await.unwrap()[0].clone();
-    let rows: Vec<_> = MessageStore::list_by_thread(storage, thread.id)
+    let rows: Vec<_> = storage.list_messages_by_thread(thread.id)
         .await
         .unwrap()
         .into_iter()
@@ -162,11 +162,11 @@ async fn a_delegated_brief_is_recorded_and_projected_as_the_delegations() {
 
     let child = storage.list_sessions_by_agent_id("agent-b").await.unwrap()[0].clone();
     let messages = conversation_messages(&client, address, child.id).await;
-    let brief = projected(&messages, "Summarise the quarterly report");
+    let brief = projected(&messages, "Delegated Task\n\nSummarise the quarterly report");
     assert_eq!(brief["role"], "user", "the brief still reaches the model as its task");
     assert_eq!(brief["origin"], "delegation");
     assert_eq!(
-        stored_origin(&storage, child.id, "Summarise the quarterly report").await,
+        stored_origin(&storage, child.id, "Delegated Task\n\nSummarise the quarterly report").await,
         swage_storage::MessageOrigin::Delegation
     );
 }
@@ -202,7 +202,7 @@ async fn a_delegated_completion_notice_is_the_delegations_and_only_typed_prompts
             sender_agent_id: "researcher".into(),
             recipient_agent_id: parent_agent,
             kind: MessageKind::Result,
-            correlation_id: None,
+            correlation_id: Some(Uuid::new_v4()),
             payload: json!({"response": "Gathered 3 sources."}),
         })
         .await
