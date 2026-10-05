@@ -1696,3 +1696,94 @@ async fn native_file_approval_missing_read_keeps_workspace_and_granted_path_read
         );
     }
 }
+
+async fn native_missing_directory_approval(tool_name: &str) {
+    let _guard = SwageHomeGuard::isolate();
+    let files = tempfile::TempDir::new().unwrap();
+    let project = files.path().join("project");
+    let sibling = files.path().join("other-Annexe");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::create_dir(&sibling).unwrap();
+    let arguments = |path: &str| {
+        if tool_name == "file_search" {
+            json!({"path": path, "pattern": "marker"})
+        } else {
+            json!({"path": path})
+        }
+    };
+    let provider = MockProvider::new(vec![
+        native_call("missing", tool_name, arguments("../not-created-Annexe")),
+        native_done(),
+        native_call("sibling", tool_name, arguments("../other-Annexe")),
+        native_done(),
+    ]);
+    let mut config = ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    config.sandbox.allow_degraded_execution = true;
+    let (router, addr, storage) =
+        start_test_server_with_tools(provider, config, native_file_tools()).await;
+    let (_, conversation) = http(&router, "POST", "/api/conversations").await;
+    let id = conversation["id"].as_str().unwrap();
+    attach_native_workspace(&storage, id, &project).await;
+    let (mut sink, mut stream) = connect_ws(addr, id).await;
+    for call_id in ["missing", "sibling"] {
+        ws_send(
+            &mut sink,
+            json!({"type": "send_message", "content": call_id}),
+        )
+        .await;
+        let mut prompts = 0;
+        let complete = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let event = ws_recv_lenient(&mut stream).await.unwrap();
+                if event["type"] == "approval_required" {
+                    prompts += 1;
+                    let expected = files.path().join(if call_id == "missing" { "not-created-Annexe" } else { "other-Annexe" });
+                    assert_eq!(event["context"]["path"], expected.to_string_lossy().as_ref(), "a directory approval must not cover its siblings");
+                    assert_eq!(event["context"]["access"], "read");
+                    let approval_id = event["approval_id"].as_str().unwrap();
+                    let (status, body) = live_http_json(addr, reqwest::Method::POST,
+                        &format!("/api/approvals/{approval_id}"),
+                        Some(json!({"decision": if call_id == "missing" { "approved" } else { "rejected" }, "scope": "session"}))).await;
+                    assert_eq!(status, StatusCode::OK, "{body}");
+                    let approval = storage.get_approval(approval_id.parse().unwrap()).await.unwrap().unwrap();
+                    assert_eq!(approval.context.as_ref().unwrap()["path"], expected.to_string_lossy().as_ref());
+                }
+                if event["type"] == "turn_complete" { break event; }
+                assert_ne!(event["type"], "error", "{event}");
+            }
+        }).await.expect("directory-read turn completes");
+        assert_eq!(
+            prompts, 1,
+            "a grant must not suppress another sibling's approval"
+        );
+        let call = native_result(&storage, &complete, call_id).await;
+        if call_id == "missing" {
+            let result = call.result.as_deref().unwrap();
+            assert!(!result.contains("requires read approval"), "{result}");
+            if tool_name == "file_list" {
+                assert_eq!(call.status.as_deref(), Some("error"), "{result}");
+                assert!(
+                    result.contains("Directory not found: ../not-created-Annexe"),
+                    "{result}"
+                );
+            } else {
+                assert_eq!(call.status.as_deref(), Some("success"), "{result}");
+                assert!(result.contains("No matches found"), "{result}");
+            }
+        } else {
+            assert_eq!(call.status.as_deref(), Some("rejected"));
+        }
+        assert!(!files.path().join("not-created-Annexe").exists());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_approval_missing_list_grants_only_that_directory() {
+    native_missing_directory_approval("file_list").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_file_approval_missing_search_grants_only_that_directory() {
+    native_missing_directory_approval("file_search").await;
+}
