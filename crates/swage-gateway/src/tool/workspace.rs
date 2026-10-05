@@ -5,12 +5,15 @@
 //! path operations within those runtime-provided boundaries.
 
 use serde_json::{Value, json};
-use std::io;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use swage_core::ToolError;
 use swage_tool::context::ToolContext;
 
 const TOOL_OUTPUT_ROOT: &str = ".swage/tool-output";
+
+/// How many leading bytes of a file decide whether it is text or binary.
+const BINARY_SAMPLE_BYTES: usize = 8192;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -197,14 +200,54 @@ pub fn validate_new_path(workspace_root: &Path, requested: &str) -> Result<PathB
     Ok(resolved)
 }
 
+/// A file as the file tools see it: text content, or a binary file recognised
+/// from its leading sample.
+pub enum FileContent {
+    Text(Vec<u8>),
+    Binary { len: u64 },
+}
+
+/// Reads a file for a file tool. Text is read whole; a binary file is never
+/// read past its classification sample, so a multi-gigabyte model or archive
+/// costs a few kilobytes rather than its size in memory.
+pub async fn read_file_content(path: &Path) -> io::Result<FileContent> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let mut file = std::fs::File::open(&path)?;
+        match read_text_sample(&mut file)? {
+            Some(mut bytes) => {
+                file.read_to_end(&mut bytes)?;
+                Ok(FileContent::Text(bytes))
+            }
+            None => Ok(FileContent::Binary {
+                len: file.metadata()?.len(),
+            }),
+        }
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+/// Reads the classification sample from the start of `source`, returning it
+/// when the content is text and `None` when it is binary. Nothing past the
+/// sample is read, so the caller decides whether the rest is worth reading.
+pub fn read_text_sample(source: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
+    let mut sample = Vec::with_capacity(BINARY_SAMPLE_BYTES);
+    source
+        .by_ref()
+        .take(BINARY_SAMPLE_BYTES as u64)
+        .read_to_end(&mut sample)?;
+    Ok((!is_binary_content(&sample)).then_some(sample))
+}
+
 /// Heuristic check: returns `true` if `bytes` appears to be binary content.
 ///
 /// Scans the first 8 KiB for null bytes (reliable binary indicator) and
 /// checks the ratio of non-UTF-8 bytes. Plain text files may contain a few
 /// high bytes, but binary files tend to have many.
-pub fn is_binary_content(bytes: &[u8]) -> bool {
+fn is_binary_content(bytes: &[u8]) -> bool {
     // Only inspect the first 8 KiB — enough to classify most files quickly.
-    let sample = &bytes[..bytes.len().min(8192)];
+    let sample = &bytes[..bytes.len().min(BINARY_SAMPLE_BYTES)];
 
     if sample.is_empty() {
         return false;
