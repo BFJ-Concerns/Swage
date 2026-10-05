@@ -577,6 +577,19 @@ The `[experimentation]` section governs hidden runtime variant selection —
 alternative implementations behind stable surfaces, selected per turn and
 recorded in the audit trail.
 
+### When changes take effect
+
+The gateway reads `[experimentation]` from `config.toml` at startup. It does
+not watch the file afterwards, and the Settings save route does not include
+experimentation fields — editing these keys while the gateway is running has
+no effect until it restarts:
+
+- **Desktop (managed gateway):** use the restart control in the web UI's
+  Settings page, or `POST /api/settings/restart`. The control appears when
+  the settings response's `can_restart` field is `true`.
+- **CLI / systemd:** `swage gateway restart`.
+- **Standalone process:** stop and start the process.
+
 ### Global switch
 
 ```toml
@@ -586,6 +599,7 @@ enabled = true   # default; set to false to disable all variant selection
 
 When `enabled` is `false`, every location returns its default variant and
 records the decision as `disabled`. No alternative is ever drawn or forced.
+Restart the gateway after changing this key.
 
 ### Per-location controls
 
@@ -605,6 +619,8 @@ forced_variant = "family-fallback"
   The variant must be registered at the location's choice point; an
   unrecognised name is refused. The decision records as `forced`. Omit or
   remove the key to return to random selection.
+
+Restart the gateway after changing either key.
 
 Location ids are application-defined strings. The shipped locations are
 `context.assembly`, `context.working_norms`, `task.prompt`, and

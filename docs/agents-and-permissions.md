@@ -541,6 +541,21 @@ different context assembly, a different working-norms text — selecting one
 per turn and recording every decision in the audit trail. The
 `[experimentation]` section of `config.toml` governs this.
 
+### When changes take effect
+
+The gateway reads the `[experimentation]` section from `config.toml` once, at
+startup. Nothing watches the file afterwards, and the web UI's Settings page
+does not expose experimentation controls — so editing these keys while the
+gateway is running has no effect until the gateway restarts.
+
+How to restart depends on how the gateway runs:
+
+- **Desktop (managed gateway):** the Settings page shows a restart control
+  when the gateway supports it. The same action is available through the API
+  at `POST /api/settings/restart`.
+- **CLI / systemd:** run `swage gateway restart`.
+- **Standalone process:** stop and start the process.
+
 ### Disabling experimentation
 
 A global switch turns all variant selection off:
@@ -551,7 +566,8 @@ enabled = false
 ```
 
 When disabled, every location uses its default variant and the decision is
-recorded as such. Experimentation is on by default.
+recorded as such. Experimentation is on by default. Restart the gateway
+after changing this setting.
 
 ### Per-location controls
 
@@ -571,6 +587,8 @@ forced_variant = "family-fallback"
   every turn. The variant must be registered at the location's choice point;
   an unrecognised name is refused. Remove the key to return to random
   selection.
+
+Restart the gateway after changing either key.
 
 The shipped locations are `context.assembly`, `context.working_norms`,
 `task.prompt`, and `prompts.memory_curator`.
