@@ -373,15 +373,38 @@ A device can join through direct registration or pairing.
 identity, the gateway secret its credential resolves against, and the
 workspace it operates in.
 
-**Pairing** walks through four steps:
+**Pairing** walks through six steps. The first two happen on the gateway
+host; the last two on the device machine; the middle pair are API calls from
+wherever is convenient.
 
-1. **Prepare the shared-token secret.** Create a file-backed secret for the
-   device's credential — the file holds the token value, and the secret
-   reference is what registration and connection resolve against. See
-   [Provider credentials — Registering a file-backed secret](#registering-a-file-backed-secret)
-   for the pattern.
+1. **Create the token file on the gateway host.** Write a plain-text file
+   holding only the shared token value (a trailing newline is fine — the
+   file is trimmed on read):
 
-2. **Issue a pairing code.** Send `POST /api/onboarding/devices/pairing-codes`
+   ```bash
+   # On the gateway host
+   head -c 32 /dev/urandom | base64 > /var/lib/swage/device-tokens/workshop.token
+   ```
+
+2. **Register the token file as a secret.** Send
+   `POST /api/secrets` with a file-backed secret that points at the token
+   file. No `json_pointer` — the entire file is the token:
+
+   ```json
+   {
+     "name": "workshop-token",
+     "material_kind": "shared_token",
+     "owner_kind": "operator",
+     "backend_kind": "file",
+     "scope_kind": "device",
+     "scope_id": "workshop",
+     "external_reference": "/var/lib/swage/device-tokens/workshop.token"
+   }
+   ```
+
+   The response carries the `secret_id`.
+
+3. **Issue a pairing code.** Send `POST /api/onboarding/devices/pairing-codes`
    with an optional `expires_in_seconds` (default 600 — ten minutes):
 
    ```json
@@ -392,12 +415,12 @@ workspace it operates in.
 
    The response carries the `pairing_code` and `expires_at`.
 
-3. **Redeem the code.** Send `POST /api/onboarding/devices/redeem` to
+4. **Redeem the code.** Send `POST /api/onboarding/devices/redeem` to
    register and trust the device in one step:
 
    ```json
    {
-     "pairing_code": "<code from step 2>",
+     "pairing_code": "<code from step 3>",
      "device_id": "workshop",
      "shared_token_secret_ref": "secret://file/<secret-id>",
      "workspace_root": "/home/user/projects"
@@ -407,18 +430,28 @@ workspace it operates in.
    `label` (optional) and `kind` (defaults to `"attached_device"`) can
    also be included.
 
-4. **Connect.** Run the device with the CLI:
+5. **Create the same token file on the device machine.** Copy or recreate
+   the file so the device holds the same value the gateway resolves:
+
+   ```bash
+   # On the device machine — same content as the gateway's file
+   cat > /home/user/.swage/workshop.token
+   ```
+
+6. **Connect.** Run the device with the CLI:
 
    ```bash
    swage device connect \
      --gateway http://gateway.local:3000 \
      --device-id workshop \
-     --shared-token-file /path/to/token-file \
+     --shared-token-file /home/user/.swage/workshop.token \
      --workspace /home/user/projects
    ```
 
-   The process dials the gateway, presents the shared token, advertises the
-   workspace's tools, and serves operations until interrupted.
+   `--shared-token-file` points at the device's local copy. The process
+   reads it, dials the gateway, presents the token for comparison against
+   the registered secret, advertises the workspace's tools, and serves
+   operations until interrupted.
 
 In both paths the `kind` field defaults to `attached_device` and names the
 device type; registering with kind `local` is refused, since a local device
