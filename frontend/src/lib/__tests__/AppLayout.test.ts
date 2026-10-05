@@ -333,6 +333,18 @@ describe("AppLayout shell navigation", () => {
     expect(options[0]).toContain("No topic");
   });
 
+  it("places the session-start control above the recent sessions so a growing list cannot push it down", () => {
+    component = mountLayout({ hasCurrentTopic: false, pendingStart: null });
+
+    const start = document.querySelector('[aria-label="Start a session"]');
+    const recent = document.querySelector('[aria-label="Recent sessions"]');
+    expect(start).not.toBeNull();
+    expect(recent).not.toBeNull();
+    expect(
+      start!.compareDocumentPosition(recent!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("starts a session in the chosen scope without creating a conversation", () => {
     const onStartSession = vi.fn();
     const conversationStore = mockConversationStore();

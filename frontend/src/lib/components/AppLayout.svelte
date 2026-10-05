@@ -316,8 +316,9 @@
   </main>
 {:else if !inScope}
   <!--
-    The front door: every scope's recent sessions first, then the control
-    that starts a new one — with a topic, or without.
+    The front door: the control that starts a new session — with a topic, or
+    without — then every scope's recent sessions, so a growing list never
+    pushes the start control down the page.
   -->
   <main class="landing">
     <div class="landing-bar">
@@ -325,11 +326,6 @@
       <button type="button" onclick={() => onNavigate?.("/settings/providers")}>Settings</button>
       {#if onSelectTheme}<ThemeToggle mode={themeMode} onSelect={onSelectTheme} />{/if}
     </div>
-    <RecentSessions
-      topics={topicStore?.topics ?? []}
-      onSelectSession={(id) => void conversationStore.selectConversation(id)}
-      onOpenWorkflowRun={(id) => onNavigate?.(`/workflow-runs/${encodeURIComponent(id)}`)}
-    />
     <div class="landing-start">
       <SessionStart
         topics={topicStore?.topics ?? []}
@@ -339,6 +335,11 @@
         {onCreateTopic}
       />
     </div>
+    <RecentSessions
+      topics={topicStore?.topics ?? []}
+      onSelectSession={(id) => void conversationStore.selectConversation(id)}
+      onOpenWorkflowRun={(id) => onNavigate?.(`/workflow-runs/${encodeURIComponent(id)}`)}
+    />
   </main>
 {:else if activeSurface === "operator"}
   <main class="operator"><OperatorDashboard /></main>
