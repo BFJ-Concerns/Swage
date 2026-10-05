@@ -504,7 +504,8 @@ impl Agent {
     /// - Supports cooperative cancellation via `request.cancellation_token`
     ///
     /// Turn state transitions: Pending → Processing → Completed (or Interrupted on
-    /// cancellation, Failed on error).
+    /// cancellation, Refused on provider refusal, Incomplete on an output limit,
+    /// Failed on error).
     pub async fn process_turn_streaming(
         &self,
         request: TurnRequest,
@@ -1325,6 +1326,21 @@ impl Agent {
                 }
                 chunk = stream.next() => {
                     match chunk {
+                        Some(StreamChunk::Done { finish_reason: Some(swage_core::FinishReason::Refusal) }) => {
+                            self.persist_terminal_response(execution, &format!("{accumulated_prefix}{text}")).await?;
+                            if *usage_reported {
+                                self.storage.update_tokens(execution.turn_id, (*total_input_tokens).into(), (*total_output_tokens).into()).await?;
+                            }
+                            self.storage.update_turn_state(execution.turn_id, TurnState::Refused).await?;
+                            self.storage.update_state(execution.thread_id, ThreadState::Idle).await?;
+                            let _ = event_tx.send(AgentEvent::ProviderRoundSettled {
+                                turn_id: execution.turn_id,
+                                round,
+                                outcome: ProviderRoundOutcome::Responded { tool_calls: 0 },
+                            });
+                            let _ = event_tx.send(AgentEvent::ProviderRefused { turn_id: execution.turn_id });
+                            return Err(AgentError::ProviderRefused);
+                        }
                         None => break,
                         Some(StreamChunk::Done { finish_reason }) => {
                             if finish_reason == Some(swage_core::FinishReason::Length) {
@@ -1393,6 +1409,7 @@ impl Agent {
                             ));
                         }
                         Some(StreamChunk::ProviderAnomaly { message }) => {
+                            self.persist_terminal_response(execution, &format!("{accumulated_prefix}{text}")).await?;
                             self.fail_turn_and_idle(execution.turn_id, execution.thread_id).await;
                             let _ = event_tx.send(AgentEvent::ProviderRoundSettled {
                                 turn_id: execution.turn_id,
@@ -2540,6 +2557,40 @@ impl Agent {
     // -----------------------------------------------------------------------
     // Leak detection
     // -----------------------------------------------------------------------
+
+    /// Preserve terminal response text and the assistant row that owns recorded
+    /// tool effects in conversation projections, including tool-only turns.
+    async fn persist_terminal_response(
+        &self,
+        execution: &TurnExecutionContext,
+        text: &str,
+    ) -> Result<(), AgentError> {
+        let safe_content = self.scan_output(text);
+        if safe_content.is_empty()
+            && self
+                .storage
+                .list_tool_calls_by_turn(execution.turn_id)
+                .await?
+                .is_empty()
+        {
+            return Ok(());
+        }
+        self.storage
+            .append_message(swage_storage::model::AppendMessage {
+                thread_id: execution.thread_id,
+                attachments: Vec::new(),
+                turn_id: Some(execution.turn_id),
+                role: Role::Assistant,
+                origin: swage_storage::MessageOrigin::Assistant,
+                content: safe_content.clone(),
+                agent_id: self.config.agent_id.clone(),
+            })
+            .await?;
+        self.storage
+            .update_response(execution.turn_id, &safe_content)
+            .await?;
+        Ok(())
+    }
 
     async fn persist_cancelled_partial(&self, thread_id: Uuid, turn_id: Uuid, text: &str) {
         if text.is_empty() {

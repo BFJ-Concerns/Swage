@@ -48,7 +48,7 @@ export interface ConversationStore {
     timestamp: string;
     turn_state: Extract<
       MessageView["turn_state"],
-      "completed" | "incomplete" | "failed" | "interrupted"
+      "completed" | "refused" | "incomplete" | "failed" | "interrupted"
     >;
     /** The thread the reply belongs to; absent means the thread in view. */
     thread_id?: string;
@@ -162,6 +162,7 @@ export function createConversationStore(): ConversationStore {
       content: string;
       timestamp: string;
       turn_state: MessageView["turn_state"];
+      origin?: MessageView["origin"];
     },
   ): void {
     const conversations = get(conversationsStore);
@@ -170,8 +171,8 @@ export function createConversationStore(): ConversationStore {
 
     const nextSummary: ConversationSummary = {
       ...updatedSummary,
-      last_activity: message.timestamp,
-      ...(message.content ? { message_preview: message.content } : {}),
+      last_activity: message.origin === "platform" ? updatedSummary.last_activity : message.timestamp,
+      ...(message.content && message.origin !== "platform" ? { message_preview: message.content } : {}),
       has_interrupted_turn:
         updatedSummary.has_interrupted_turn || message.turn_state === "interrupted",
     };
@@ -236,7 +237,7 @@ export function createConversationStore(): ConversationStore {
 
     activeConversationStore.set({
       ...activeConversation,
-      last_activity: message.timestamp,
+      last_activity: message.origin === "platform" ? activeConversation.last_activity : message.timestamp,
       messages: [
         ...activeConversation.messages,
         appendedMessage,

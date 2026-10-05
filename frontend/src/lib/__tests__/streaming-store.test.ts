@@ -29,7 +29,7 @@ import {
   createStreamingStore,
   withConversationAutoCreate,
 } from "../stores/streaming";
-import type { ServerEvent } from "../types";
+import type { MessageView, ServerEvent } from "../types";
 
 // ---------------------------------------------------------------------------
 // Mock dependency factories
@@ -85,6 +85,22 @@ describe("initial state", () => {
 // ---------------------------------------------------------------------------
 
 describe("reconnect reconciliation", () => {
+  it.each(["refused", "failed"])("clears a live projection when a recovered platform account records %s", (state) => {
+    const messages: MessageView[] = [{
+      role: "user", origin: "platform", content: "The provider did not complete this request.",
+      timestamp: "2026-10-04T20:00:00Z", turn_state: state as MessageView["turn_state"], turn_id: "recovered-turn",
+    }];
+    const store = createStreamingStore({ conversationStore: {
+      get activeConversation() { return { messages }; },
+      appendOptimisticUserMessage: () => {}, appendAssistantMessage: () => {},
+    } });
+    store.startTurn("Request before the socket dropped");
+    const generation = store.activeTurnGeneration;
+    store.handleServerEvent({ type: "token", content: "partial" });
+    store.reconcileAfterReconnect(generation);
+    expect(store.isStreaming).toBe(false);
+    expect(store.streamedContent).toBe("");
+  });
   it("clears a live projection when the recovered same turn is terminal", () => {
     const messages = [{
       role: "assistant" as const,
@@ -549,6 +565,51 @@ describe("turn_complete", () => {
 // ---------------------------------------------------------------------------
 
 describe("error events", () => {
+  it.each(["", "I cannot fulfil that request."])("retains earlier tool calls after Retry when a refusal has text %j", (content) => {
+    const conv = createMockConversationStore();
+    const conn = createMockConnectionStore();
+    const store = createStreamingStore({ conversationStore: conv, connectionStore: conn });
+
+    store.startTurn("read the file");
+    store.handleServerEvent({
+      type: "tool_start", call_id: "call-1", tool: "file_read",
+      arguments: { path: "README.md" },
+    });
+    store.handleServerEvent({
+      type: "tool_end", call_id: "call-1", tool: "file_read",
+      result: "contents", status: "success", duration_ms: 8,
+      truncated: false, total_bytes: 8,
+    });
+    store.handleServerEvent({ type: "token", content });
+    store.handleServerEvent({ type: "error", code: "provider_refused", message: "The model refused this request." });
+
+    // Retry uses the same startTurn path as the conversation's Retry button.
+    store.startTurn("read the file");
+    expect(conn.sendMessage).toHaveBeenCalledTimes(2);
+    expect(store.activeToolCalls).toEqual([]);
+    expect(conv.getMessages().filter(message => message.role === "assistant")).toEqual([
+      expect.objectContaining({
+        content,
+        turn_state: "refused",
+        tool_calls: [expect.objectContaining({
+          call_id: "call-1", tool: "file_read", arguments: { path: "README.md" },
+          result: "contents", status: "success",
+        })],
+      }),
+    ]);
+  });
+
+  it("keeps a streamed refusal as refused rather than failed", () => {
+    const conv = createMockConversationStore();
+    const store = createStreamingStore({ conversationStore: conv });
+    store.startTurn("question");
+    store.handleServerEvent({ type: "token", content: "I cannot fulfil that request." });
+    store.handleServerEvent({ type: "error", code: "provider_refused", message: "The model refused this request." });
+    const reply = conv.getMessages().find(message => message.role === "assistant");
+    expect(reply?.turn_state).toBe("refused");
+    expect(reply?.content).toBe("I cannot fulfil that request.");
+    expect(store.isStreaming).toBe(false);
+  });
   it("sets isStreaming to false", () => {
     const store = createStreamingStore();
     store.startTurn("question");
