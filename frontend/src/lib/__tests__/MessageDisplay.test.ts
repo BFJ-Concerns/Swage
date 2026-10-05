@@ -950,3 +950,45 @@ describe("branching from a message", () => {
     expect(document.querySelector('button[aria-label="Branch from this message"]')).toBeNull();
   });
 });
+
+describe("assistant message width", () => {
+  // jsdom computes no layout, so the width contract is read from the
+  // component's own style rules: which selectors carry the prose cap.
+  type Rule = { selectors: string[]; body: string };
+  function styleRules(source: string): Rule[] {
+    const style = source.slice(source.indexOf("<style>"), source.indexOf("</style>"));
+    const stripped = style.replace(/\/\*[\s\S]*?\*\//g, "");
+    return [...stripped.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({
+      selectors: m[1].split(",").map((s) => s.trim().replace(/^<style>\s*/, "")),
+      body: m[2],
+    }));
+  }
+  function maxWidthFor(rules: Rule[], selector: string): string | undefined {
+    let value: string | undefined;
+    for (const rule of rules) {
+      if (!rule.selectors.includes(selector)) continue;
+      const m = rule.body.match(/max-width:\s*([^;]+);/);
+      if (m) value = m[1].trim();
+    }
+    return value;
+  }
+
+  it("lets the assistant reply span the column while prose keeps its line-length cap", async () => {
+    const source = (await import("../components/MessageDisplay.svelte?raw")).default as string;
+    const rules = styleRules(source);
+    expect(maxWidthFor(rules, ".message-content")).toBe("80ch");
+    expect(maxWidthFor(rules, ".assistant-content")).toBe("none");
+    expect(maxWidthFor(rules, ".markdown-body :global(p)")).toBe("80ch");
+    expect(maxWidthFor(rules, ".markdown-body :global(table)")).toBe("100%");
+    expect(maxWidthFor(rules, ".markdown-body :global(pre)")).toBeUndefined();
+  });
+
+  it("scrolls a wide table inside itself rather than breaking cell words", async () => {
+    const source = (await import("../components/MessageDisplay.svelte?raw")).default as string;
+    const rules = styleRules(source);
+    const table = rules.filter((r) => r.selectors.includes(".markdown-body :global(table)"));
+    expect(table.map((r) => r.body).join(";")).toMatch(/overflow-x:\s*auto/);
+    const cell = rules.filter((r) => r.selectors.includes(".markdown-body :global(td)"));
+    expect(cell.map((r) => r.body).join(";")).toMatch(/word-break:\s*normal/);
+  });
+});
