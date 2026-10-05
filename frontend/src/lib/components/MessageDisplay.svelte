@@ -604,6 +604,13 @@
     max-width: 80ch;
   }
 
+  /* An assistant reply spans the conversation column, as tool blocks do, so
+     tables and code blocks have room; the readable line-length cap sits on
+     its prose elements instead (see the markdown body rules). */
+  .assistant-content {
+    max-width: none;
+  }
+
   :global(body.display-density-comfortable) .message-display {
     gap: 18px;
   }
@@ -744,6 +751,17 @@
     margin: 0 0 0.75em;
   }
 
+  .markdown-body :global(p),
+  .markdown-body :global(ul),
+  .markdown-body :global(ol),
+  .markdown-body :global(h1),
+  .markdown-body :global(h2),
+  .markdown-body :global(h3),
+  .markdown-body :global(h4),
+  .markdown-body :global(blockquote) {
+    max-width: 80ch;
+  }
+
   .markdown-body :global(p:last-child) {
     margin-bottom: 0;
   }
@@ -819,9 +837,14 @@
     text-underline-offset: 2px;
   }
 
+  /* A table wider than the column scrolls inside itself, as pre does,
+     rather than wrapping its cells mid-word or widening the bubble. */
   .markdown-body :global(table) {
+    display: block;
+    overflow-x: auto;
+    width: max-content;
+    max-width: 100%;
     border-collapse: collapse;
-    width: 100%;
     margin: 0.5em 0;
     font-size: 0.875em;
     border: 1px solid var(--ink);
@@ -832,6 +855,8 @@
     border: 1px solid var(--rule-soft);
     padding: 6px 10px;
     text-align: left;
+    word-break: normal;
+    overflow-wrap: normal;
   }
 
   .markdown-body :global(th) {
