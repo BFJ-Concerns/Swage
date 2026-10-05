@@ -15,19 +15,33 @@ use super::{
     shutdown_sandbox_guard,
 };
 
-pub(super) async fn release_active_turn(state: &AppState, session_id: Uuid) {
-    state.active_turns.lock().await.remove(&session_id);
-}
-
-async fn release_active_turn_on_error<T, E>(
+/// Keep the session occupied until the drained turn's buffered events have
+/// entered its listeners, on every terminal path.
+pub(super) async fn release_active_turn(
     state: &AppState,
     session_id: Uuid,
-    result: Result<T, E>,
-) -> Result<T, E> {
-    if result.is_err() {
-        release_active_turn(state, session_id).await;
+    turn_id: Uuid,
+) -> Result<(), GatewayError> {
+    let delivery = state
+        .turn_event_deliveries
+        .lock()
+        .await
+        .get(&turn_id)
+        .cloned();
+    if let Some(delivery) = delivery {
+        // Settlement serialises releases for this turn without holding the registry.
+        let mut delivery = delivery.lock().await;
+        let Some(relay) = delivery.take() else {
+            return Ok(());
+        };
+        let result = relay.finish().await;
+        state.active_turns.lock().await.remove(&session_id);
+        state.turn_event_deliveries.lock().await.remove(&turn_id);
+        result
+    } else {
+        state.active_turns.lock().await.remove(&session_id);
+        Ok(())
     }
-    result
 }
 
 /// Record the turn's terminal state and release the session. Every path a
@@ -41,13 +55,9 @@ pub(crate) async fn record_terminal_state_and_release(
     turn_state: TurnState,
 ) -> Result<(), GatewayError> {
     let drains_queue = crate::turn_queue::drains_queue_after(turn_state.clone());
-    release_active_turn_on_error(
-        state,
-        session_id,
-        state.storage.update_turn_state(turn_id, turn_state).await,
-    )
-    .await?;
-    release_active_turn(state, session_id).await;
+    let recorded = state.storage.update_turn_state(turn_id, turn_state).await;
+    release_active_turn(state, session_id, turn_id).await?;
+    recorded?;
     if drains_queue {
         crate::turn_queue::spawn_drain(state.clone(), session_id);
     }

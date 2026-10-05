@@ -30,6 +30,9 @@ use crate::state::AppState;
 use crate::subscription::SubscriptionState;
 use crate::turn::{TurnAttendance, TurnInput, attachment_records, message_attachments};
 
+pub(crate) type TurnEventDeliveries =
+    std::collections::HashMap<Uuid, Arc<Mutex<Option<SessionEventDelivery>>>>;
+
 /// Settlement of the task carrying a turn's events into session listeners.
 /// Finishing closes its receiver to further sends and delivers its buffered events.
 pub(crate) struct SessionEventDelivery {
@@ -141,30 +144,12 @@ pub async fn drain_queue(state: &AppState, session_id: Uuid) -> Result<Option<Uu
     let turn = drained.turn;
     let thread_id = turn.thread_id;
 
-    // Every recorded row reaches every open view; then the queue is
-    // announced empty.
-    for recorded in &drained.messages {
-        state
-            .send_to_session(
-                session_id,
-                &ServerEvent::MessageAppended {
-                    session_id,
-                    message: message_view(recorded.clone(), pending_turn_state(), Vec::new())?,
-                },
-            )
-            .await;
-    }
+    let cancellation = tokio_util::sync::CancellationToken::new();
     state
-        .send_to_session(
-            session_id,
-            &ServerEvent::QueueDrained {
-                session_id,
-                turn_id: turn.id,
-                queued_ids: drained.queued_ids.clone(),
-            },
-        )
-        .await;
-
+        .active_turns
+        .lock()
+        .await
+        .insert(session_id, cancellation.clone());
     // The turn's events reach every open view of the session through the
     // per-session channel: no single client owns a turn the queue started.
     let (events_tx, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
@@ -188,41 +173,87 @@ pub async fn drain_queue(state: &AppState, session_id: Uuid) -> Result<Option<Uu
             }
         }
     });
-    let delivery = SessionEventDelivery { finish, task };
-    let input = TurnInput {
-        text: turn.user_input.clone().unwrap_or_default(),
-        // Attachments already sit on the recorded rows; the turn rebuilds
-        // its history from them.
-        attachments: Vec::new(),
-        origin: drained
-            .messages
-            .first()
-            .map(|message| message.origin)
-            .unwrap_or(MessageOrigin::User),
-    };
-    Box::pin(crate::turn::process_turn_with_composition_and_model(
-        state,
-        session_id,
-        Some(thread_id),
-        input,
-        events_tx,
-        Arc::new(Mutex::new(SubscriptionState::new(
-            state.active_config().observability.force_on,
-        ))),
-        None,
-        None,
-        None,
-        None,
-        Some(turn.id),
-        TurnAttendance::Attended,
-        Default::default(),
-        None,
-        None,
-        None,
-        true,
-        Some(delivery),
-    ))
-    .await?;
+    state.turn_event_deliveries.lock().await.insert(
+        turn.id,
+        Arc::new(Mutex::new(Some(SessionEventDelivery { finish, task }))),
+    );
+    let result = async {
+        // Every recorded row reaches every open view; then the queue is
+        // announced empty.
+        for recorded in &drained.messages {
+            state
+                .send_to_session(
+                    session_id,
+                    &ServerEvent::MessageAppended {
+                        session_id,
+                        message: message_view(recorded.clone(), pending_turn_state(), Vec::new())?,
+                    },
+                )
+                .await;
+        }
+        state
+            .send_to_session(
+                session_id,
+                &ServerEvent::QueueDrained {
+                    session_id,
+                    turn_id: turn.id,
+                    queued_ids: drained.queued_ids.clone(),
+                },
+            )
+            .await;
+
+        let input = TurnInput {
+            text: turn.user_input.clone().unwrap_or_default(),
+            // Attachments already sit on the recorded rows; the turn rebuilds
+            // its history from them.
+            attachments: Vec::new(),
+            origin: drained
+                .messages
+                .first()
+                .map(|message| message.origin)
+                .unwrap_or(MessageOrigin::User),
+        };
+        Box::pin(crate::turn::process_turn_with_composition_and_model(
+            state,
+            session_id,
+            Some(thread_id),
+            input,
+            events_tx,
+            Arc::new(Mutex::new(SubscriptionState::new(
+                state.active_config().observability.force_on,
+            ))),
+            None,
+            None,
+            None,
+            Some(cancellation),
+            Some(turn.id),
+            TurnAttendance::Attended,
+            Default::default(),
+            None,
+            None,
+            None,
+            true,
+        ))
+        .await
+    }
+    .await;
+    // Errors before the coordinator's terminal paths still belong to this drain.
+    // A turn-keyed handle prevents this fallback from releasing a later turn.
+    if state
+        .turn_event_deliveries
+        .lock()
+        .await
+        .contains_key(&turn.id)
+    {
+        crate::turn::turn_release::record_terminal_state_and_release(
+            state,
+            session_id,
+            turn.id,
+            TurnState::Failed,
+        )
+        .await?;
+    }
+    result?;
     Ok(Some(turn.id))
 }
 
@@ -583,6 +614,159 @@ mod tests {
                 "next_token",
                 "next_complete"
             ]
+        );
+    }
+
+    struct PauseFirstInbound {
+        reached: tokio_util::sync::CancellationToken,
+        proceed: tokio_util::sync::CancellationToken,
+    }
+
+    #[async_trait::async_trait]
+    impl swage_hook::Hook for PauseFirstInbound {
+        fn name(&self) -> &str {
+            "pause-first-inbound"
+        }
+        async fn execute(&self, event: &swage_hook::HookEvent) -> swage_hook::HookOutcome {
+            if matches!(event, swage_hook::HookEvent::BeforeInbound { content } if content == "first queued")
+            {
+                self.reached.cancel();
+                self.proceed.cancelled().await;
+            }
+            swage_hook::HookOutcome::Continue
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_setup_failure_waits_for_delivery_before_the_next_drain() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut state, session_id) = crate::turn::tests::make_state_with_storage_and_root(
+            reply("after failure"),
+            Arc::new(crate::turn::tests::MockStorage::new()),
+            Some(root.path().to_path_buf()),
+        )
+        .await;
+        let reached = CancellationToken::new();
+        let proceed = CancellationToken::new();
+        let mut hooks = swage_hook::HookRegistry::new();
+        hooks.register(swage_hook::HookRegistration::new(Arc::new(
+            PauseFirstInbound {
+                reached: reached.clone(),
+                proceed: proceed.clone(),
+            },
+        )));
+        state.hook_registry = Some(Arc::new(hooks));
+        state.fail_next_dispatcher_builds(1);
+        let thread = resolve_thread_for_session(state.storage.as_ref(), session_id, None)
+            .await
+            .unwrap();
+        let (listener, mut events) = mpsc::unbounded_channel();
+        state.listen_to_session(session_id, listener).await;
+        state
+            .active_turns
+            .lock()
+            .await
+            .insert(session_id, CancellationToken::new());
+        queue_input(
+            &state,
+            session_id,
+            thread.id,
+            TurnInput::text("first queued"),
+        )
+        .await
+        .unwrap();
+        state.active_turns.lock().await.remove(&session_id);
+        let draining = state.clone();
+        let mut first = tokio::spawn(async move { drain_queue(&draining, session_id).await });
+        tokio::time::timeout(std::time::Duration::from_secs(10), reached.cancelled())
+            .await
+            .unwrap();
+        let first_turn = loop {
+            if let ServerEvent::QueueDrained { turn_id, .. } = events.recv().await.unwrap() {
+                break turn_id;
+            }
+        };
+        let second = queue_input(
+            &state,
+            session_id,
+            thread.id,
+            TurnInput::text("second queued"),
+        )
+        .await
+        .unwrap();
+        let listeners = state.session_listeners.lock().await;
+        proceed.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if state
+                    .storage
+                    .get_turn(first_turn)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .state
+                    == TurnState::Failed
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), &mut first)
+                .await
+                .is_err(),
+            "a failed drained turn must deliver its setup error before releasing the session"
+        );
+        assert_eq!(
+            state
+                .storage
+                .list_queued_turn_inputs(session_id)
+                .await
+                .unwrap()
+                .iter()
+                .map(|input| input.id)
+                .collect::<Vec<_>>(),
+            vec![second.id],
+            "the next drain must leave its input queued until the setup error is delivered"
+        );
+        drop(listeners);
+        let mut delivered = Vec::new();
+        loop {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(10), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let done = matches!(&event, ServerEvent::TurnComplete { .. });
+            match event {
+                ServerEvent::Error { code, .. } if code == "sandbox_unavailable" => {
+                    delivered.push("setup_error")
+                }
+                ServerEvent::MessageAppended { .. } => delivered.push("next_row"),
+                ServerEvent::QueueDrained { .. } => delivered.push("next_drain"),
+                ServerEvent::Token { .. } => delivered.push("next_token"),
+                ServerEvent::TurnComplete { .. } => delivered.push("next_complete"),
+                _ => {}
+            }
+            if done {
+                break;
+            }
+        }
+        assert_eq!(
+            delivered,
+            vec![
+                "setup_error",
+                "next_row",
+                "next_drain",
+                "next_token",
+                "next_complete"
+            ]
+        );
+        assert!(
+            first.await.unwrap().is_err(),
+            "the first drain must actually fail setup"
         );
     }
 
