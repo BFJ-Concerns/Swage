@@ -90,7 +90,7 @@ pub async fn ws_handler(
 /// If the client disconnects while a turn is active, the turn continues in the
 /// background and writes its result to storage.
 async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid) {
-    let (mut ws_sink, mut ws_stream) = socket.split();
+    let (ws_sink, mut ws_stream) = socket.split();
 
     // Per-connection observability subscription state. Initialised with
     // force_on from config so all events are delivered when the gateway is
@@ -101,81 +101,16 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
 
     // Subscribe to the server-wide broadcast channel before spawning the
     // forwarding task so no broadcast events (e.g. Shutdown) are missed.
-    let mut bcast_rx = state.broadcast.subscribe();
+    let bcast_rx = state.broadcast.subscribe();
     // Channel that turn processing uses to send events back to this connection.
-    let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let (tx, rx) = mpsc::unbounded_channel::<ServerEvent>();
     // A turn no connection owns — one the queue started — reaches this
     // connection through the same channel: lossless, in order.
     state.listen_to_session(session_id, tx.clone()).await;
 
     // Spawn a forwarding task: reads from both the per-turn mpsc channel and
     // the server-wide broadcast channel, writing each event to the WebSocket.
-    let mut forward_task = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                // Per-turn events (Token, ToolStart, ToolEnd, TurnComplete, etc.)
-                event = rx.recv() => {
-                    match event {
-                        None => break, // All senders dropped — turn and connection done.
-                        Some(event) => {
-                            let is_shutdown = matches!(event, ServerEvent::Shutdown { .. });
-                            match serde_json::to_string(&event) {
-                                Ok(json) => {
-                                    if ws_sink.send(Message::Text(json.into())).await.is_err() {
-                                        // Client disconnected — stop forwarding.
-                                        break;
-                                    }
-                                    if is_shutdown {
-                                        break;
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::error!(error = %e, "failed to serialise server event");
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Server-wide broadcast events are filtered here rather than
-                // through per-connection subscriptions.
-                result = bcast_rx.recv() => {
-                    match result {
-                        Ok(event) => {
-                            if !broadcast_event_matches_session(session_id, &event) {
-                                continue;
-                            }
-                            let is_shutdown = matches!(event, ServerEvent::Shutdown { .. });
-                            match serde_json::to_string(&event) {
-                                Ok(json) => {
-                                    // Attempt the send; ignore the result for broadcast events.
-                                    let _ = ws_sink.send(Message::Text(json.into())).await;
-                                    if is_shutdown {
-                                        // Server is going down — close after delivering the event.
-                                        break;
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::error!(error = %e, "failed to serialise broadcast event");
-                                }
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            // The broadcast buffer overflowed; skip the missed events.
-                            tracing::warn!(n, "broadcast receiver lagged, {n} event(s) dropped");
-                        }
-                        Err(broadcast::error::RecvError::Closed) => {
-                            // Broadcast sender dropped (server shutdown) — close cleanly.
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Send a close frame when the forwarding loop exits for any reason.
-        let _ = ws_sink.send(Message::Close(None)).await;
-    });
+    let mut forward_task = tokio::spawn(forward_events(ws_sink, session_id, rx, bcast_rx));
 
     if state.shutdown_signal.is_cancelled() {
         let _ = tx.send(ServerEvent::Shutdown {
@@ -263,6 +198,81 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
     crate::presence::record_client_disconnected(&state, session_id).await;
 }
 
+/// Forward the connection's ordered session stream and unrelated broadcasts.
+async fn forward_events<S>(
+    mut ws_sink: S,
+    session_id: Uuid,
+    mut rx: mpsc::UnboundedReceiver<ServerEvent>,
+    mut bcast_rx: broadcast::Receiver<ServerEvent>,
+) where
+    S: futures::Sink<Message> + Unpin,
+{
+    loop {
+        tokio::select! {
+            // Per-turn events (Token, ToolStart, ToolEnd, TurnComplete, etc.)
+            event = rx.recv() => {
+                match event {
+                    None => break, // All senders dropped — turn and connection done.
+                    Some(event) => {
+                        let is_shutdown = matches!(event, ServerEvent::Shutdown { .. });
+                        match serde_json::to_string(&event) {
+                            Ok(json) => {
+                                if ws_sink.send(Message::Text(json.into())).await.is_err() {
+                                    // Client disconnected — stop forwarding.
+                                    break;
+                                }
+                                if is_shutdown {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "failed to serialise server event");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Server-wide broadcast events are filtered here rather than
+            // through per-connection subscriptions.
+            result = bcast_rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        if !broadcast_event_matches_session(session_id, &event) {
+                            continue;
+                        }
+                        let is_shutdown = matches!(event, ServerEvent::Shutdown { .. });
+                        match serde_json::to_string(&event) {
+                            Ok(json) => {
+                                // Attempt the send; ignore the result for broadcast events.
+                                let _ = ws_sink.send(Message::Text(json.into())).await;
+                                if is_shutdown {
+                                    // Server is going down — close after delivering the event.
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "failed to serialise broadcast event");
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        // The broadcast buffer overflowed; skip the missed events.
+                        tracing::warn!(n, "broadcast receiver lagged, {n} event(s) dropped");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        // Broadcast sender dropped (server shutdown) — close cleanly.
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Send a close frame when the forwarding loop exits for any reason.
+    let _ = ws_sink.send(Message::Close(None)).await;
+}
+
 pub(super) fn broadcast_event_matches_session(session_id: Uuid, event: &ServerEvent) -> bool {
     match event {
         // A recorded message is for the conversation it joined and no other.
@@ -282,5 +292,100 @@ pub(super) fn broadcast_event_matches_session(session_id: Uuid, event: &ServerEv
         | ServerEvent::WorkflowEntryCompleted { .. }
         | ServerEvent::WorkflowRunCompleted { .. } => true,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::thread_selection::resolve_thread_for_session;
+    use crate::turn::TurnInput;
+    use swage_core::{FinishReason, StreamChunk};
+
+    #[tokio::test]
+    async fn ready_queue_and_turn_events_reach_the_socket_in_emission_order() {
+        // Repeat with both inputs ready: an unbiased merge must not get lucky.
+        for _ in 0..64 {
+            let root = tempfile::tempdir().unwrap();
+            let (state, session_id) = crate::turn::tests::make_state_with_storage_and_root(
+                vec![
+                    StreamChunk::Delta {
+                        content: "next reply".into(),
+                    },
+                    StreamChunk::Done {
+                        finish_reason: Some(FinishReason::Stop),
+                    },
+                ],
+                Arc::new(crate::turn::tests::MockStorage::new()),
+                Some(root.path().to_path_buf()),
+            )
+            .await;
+            let thread = resolve_thread_for_session(state.storage.as_ref(), session_id, None)
+                .await
+                .unwrap();
+            let broadcast = state.broadcast.subscribe();
+            let (sender, receiver) = mpsc::unbounded_channel();
+            state.listen_to_session(session_id, sender.clone()).await;
+            sender
+                .send(ServerEvent::TurnComplete {
+                    incomplete_reason: None,
+                    turn_id: Uuid::new_v4(),
+                    input_tokens: None,
+                    output_tokens: None,
+                    cost_microcents: None,
+                    structured_output: None,
+                })
+                .unwrap();
+            state
+                .active_turns
+                .lock()
+                .await
+                .insert(session_id, Default::default());
+            crate::turn_queue::queue_input(&state, session_id, thread.id, TurnInput::text("next"))
+                .await
+                .unwrap();
+            state.active_turns.lock().await.remove(&session_id);
+            crate::turn_queue::drain_queue(&state, session_id)
+                .await
+                .unwrap();
+            let (sink, mut output) = futures::channel::mpsc::unbounded::<Message>();
+            let forwarding = tokio::spawn(forward_events(sink, session_id, receiver, broadcast));
+            let mut events = Vec::new();
+            for _ in 0..6 {
+                let message =
+                    tokio::time::timeout(std::time::Duration::from_secs(10), output.next())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let Message::Text(text) = message else {
+                    panic!("expected a server event");
+                };
+                events.push(serde_json::from_str::<serde_json::Value>(&text).unwrap());
+            }
+            // Stop only after observing the full sequence; shutdown must not hide a
+            // broadcast the old two-input forwarder delivered late.
+            sender
+                .send(ServerEvent::Shutdown {
+                    reason: "test finished".into(),
+                })
+                .unwrap();
+            forwarding.await.unwrap();
+            let kinds: Vec<_> = events
+                .iter()
+                .map(|event| event["type"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                kinds,
+                vec![
+                    "turn_complete",
+                    "message_queued",
+                    "message_appended",
+                    "queue_drained",
+                    "token",
+                    "turn_complete"
+                ],
+                "the socket must preserve the producer's session event order"
+            );
+        }
     }
 }

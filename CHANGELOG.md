@@ -35,6 +35,7 @@ All notable changes to Swage are documented in this file.
 - The workflow-authoring skill states event-kind names as the gateway accepts them: segments are joined by `.`, `:` or `/` only, with `_` and `-` allowed inside a segment but never separating one.
 - Denying a tool approval identifies the user's denial in the tool card and the feedback sent to the model, distinct from an approval timeout.
 - The session archive-delay field states its one-day minimum and visibly refuses smaller values without changing the saved delay.
+- Queued messages and the turn they start reach every open view in order; a queued message no longer overtakes the reply before it.
 - Provider refusals keep a visible account in the conversation with a way to retry or amend the request, instead of an empty reply. Exhausted empty provider responses retain their own failure account.
 - Updating a schedule’s agent is refused with guidance to create a new schedule with that agent, rather than reporting success with the existing agent.
 - Tool bundles appear in a stable order in Settings.
