@@ -820,7 +820,7 @@ async fn queued_messages_reach_real_sockets_in_turn_order_and_stay_in_their_sess
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]), None,
         root.path().to_path_buf(),
     );
-    let router = build_router(state);
+    let router = build_router(state.clone());
     let gateway = crate::support::LiveTestGateway::start(router.clone(), root).await;
     let addr = gateway.address;
     let (_, session) = http(&router, "POST", "/api/conversations").await;
@@ -904,16 +904,15 @@ async fn queued_messages_reach_real_sockets_in_turn_order_and_stay_in_their_sess
     assert_eq!(relevant[2]["queued_ids"], json!([queued["queued"]["id"]]));
     assert_eq!(relevant[3]["content"], "second reply");
     assert_eq!(relevant[4]["turn_id"], relevant[2]["turn_id"]);
-    // A response sent after the journey fences the other socket's preceding traffic.
-    ws_send(
-        &mut other_writer,
-        json!({"type":"ordering_probe"}),
-    )
-    .await;
+    // Fence through the same ordered session path as any leaked queue events.
+    state.send_to_session(
+        uuid::Uuid::parse_str(other["id"].as_str().unwrap()).unwrap(),
+        &swage_protocol::client::websocket::ServerEvent::Token { content: "isolation fence".into() },
+    ).await;
     let other_event = ws_recv(&mut other_reader).await;
     assert_eq!(
-        other_event["type"], "error",
-        "another session must receive none of the queue or turn events"
+        other_event, json!({"type": "token", "content": "isolation fence"}),
+        "another session must receive none of the queue or turn events before its ordered fence"
     );
     writer.close().await.unwrap();
     other_writer.close().await.unwrap();
