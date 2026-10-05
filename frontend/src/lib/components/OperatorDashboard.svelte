@@ -708,6 +708,11 @@
     color: var(--ink-soft);
   }
 
+  .empty-copy code {
+    text-transform: none;
+    letter-spacing: normal;
+  }
+
   .primary-line {
     display: flex;
     align-items: center;

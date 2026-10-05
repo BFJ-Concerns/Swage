@@ -2,7 +2,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 
+import { compile } from "svelte/compiler";
+
 import OperatorDashboard from "../components/OperatorDashboard.svelte";
+import operatorDashboardSource from "../components/OperatorDashboard.svelte?raw";
 import * as operatorApi from "../api/operator";
 import type { OperatorOverview } from "../types";
 import { makeSchedule } from "./fixtures/schedules";
@@ -115,6 +118,7 @@ describe("OperatorDashboard", () => {
       component = undefined;
     }
 
+    document.head.querySelectorAll("style").forEach((style) => style.remove());
     while (document.body.firstChild) {
       document.body.removeChild(document.body.firstChild);
     }
@@ -279,6 +283,18 @@ describe("OperatorDashboard", () => {
     expect(emptyCopy).toContain("No devices are attached.");
     expect(emptyCopy).toContain("one-time pairing code");
     expect(emptyCopy).toContain("swage device connect");
+    const command = devicesPanel!.querySelector(".empty-copy code") as HTMLElement | null;
+    expect(command?.textContent).toBe("swage device connect");
+    // jsdom loads no component CSS, so apply the component's compiled styles
+    // under the scope class the mounted paragraph carries.
+    const scope = Array.from(command!.parentElement!.classList).find((name) => name.startsWith("svelte-"));
+    expect(scope).toBeDefined();
+    const { css } = compile(operatorDashboardSource, { filename: "OperatorDashboard.svelte" });
+    const style = document.createElement("style");
+    style.textContent = (css?.code ?? "").replace(/svelte-[a-z0-9]+/g, scope!);
+    document.head.appendChild(style);
+    expect(getComputedStyle(command!.parentElement!).textTransform).toBe("uppercase");
+    expect(getComputedStyle(command!).textTransform).toBe("none");
     expect(emptyCopy).toContain("Registration and pairing");
   });
 
