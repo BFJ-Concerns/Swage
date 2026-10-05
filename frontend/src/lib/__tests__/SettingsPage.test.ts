@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
+import { fromStore, writable } from "svelte/store";
 
 import SettingsPage from "../components/SettingsPage.svelte";
 import type { Schedule } from "../protocol/Schedule";
@@ -720,6 +721,53 @@ describe("SettingsPage", () => {
     await waitForSaveCall();
     await flushUi();
     expect(document.body.textContent).toContain("Archive delay saved as 1 day.");
+  });
+
+  it("explains why voice autosave is blocked by an invalid archive draft", async () => {
+    const tab = writable<"automation" | "voice">("automation");
+    const currentTab = fromStore(tab);
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { get tab() { return currentTab.current; }, topicId: null },
+    });
+    await flushUi();
+
+    const delay = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Archive sessions after days"]',
+    )!;
+    delay.value = "0";
+    delay.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    await flushUi();
+
+    tab.set("voice");
+    await flushUi();
+    expect(document.querySelector('input[aria-label="Archive sessions after days"]')).toBeNull();
+    const transcription = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Transcription model"]',
+    )!;
+    transcription.value = "whisper-1";
+    transcription.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    await flushUi();
+
+    expect(settingsApi.saveSettings).not.toHaveBeenCalled();
+    expect(transcription.value).toBe("whisper-1");
+    expect(document.querySelector('[role="alert"]')?.textContent ?? "")
+      .toContain("Fix the archive delay in Automation before saving.");
+
+    tab.set("automation");
+    await flushUi();
+    const correction = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Archive sessions after days"]',
+    )!;
+    correction.value = "14";
+    correction.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    await flushUi();
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls[0][0].voice)
+      .toEqual({ transcription_model: "whisper-1" });
+    expect(document.querySelector('[role="alert"]')).toBeNull();
   });
 
   it("saves the voice model routes from the voice tab", async () => {
