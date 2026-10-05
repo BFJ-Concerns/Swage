@@ -606,8 +606,9 @@
 
   /* An assistant reply spans the conversation column, as tool blocks do, so
      tables and code blocks have room; the readable line-length cap sits on
-     its prose elements instead (see the markdown body rules). */
-  .assistant-content {
+     its prose elements instead (see the markdown body rules). Platform-written
+     messages keep the bubble cap. */
+  .message:not(.platform) .assistant-content {
     max-width: none;
   }
 

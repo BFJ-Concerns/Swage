@@ -963,21 +963,27 @@ describe("assistant message width", () => {
       body: m[2],
     }));
   }
-  function maxWidthFor(rules: Rule[], selector: string): string | undefined {
+  // The effective declaration for one selector: the last one in source order,
+  // across rules and within a rule, as the cascade resolves equal specificity.
+  function declared(rules: Rule[], selector: string, property: string): string | undefined {
     let value: string | undefined;
+    const pattern = new RegExp(`(?:^|;)\\s*${property}:\\s*([^;]+)`, "g");
     for (const rule of rules) {
       if (!rule.selectors.includes(selector)) continue;
-      const m = rule.body.match(/max-width:\s*([^;]+);/);
-      if (m) value = m[1].trim();
+      for (const m of rule.body.matchAll(pattern)) value = m[1].trim();
     }
     return value;
   }
+  const maxWidthFor = (rules: Rule[], selector: string) => declared(rules, selector, "max-width");
 
   it("lets the assistant reply span the column while prose keeps its line-length cap", async () => {
     const source = (await import("../components/MessageDisplay.svelte?raw")).default as string;
     const rules = styleRules(source);
     expect(maxWidthFor(rules, ".message-content")).toBe("80ch");
-    expect(maxWidthFor(rules, ".assistant-content")).toBe("none");
+    expect(maxWidthFor(rules, ".message:not(.platform) .assistant-content")).toBe("none");
+    // Platform-written messages share the assistant markup but keep the cap.
+    expect(maxWidthFor(rules, ".assistant-content")).toBeUndefined();
+    expect(maxWidthFor(rules, ".message.platform .message-content")).toBeUndefined();
     expect(maxWidthFor(rules, ".markdown-body :global(p)")).toBe("80ch");
     expect(maxWidthFor(rules, ".markdown-body :global(table)")).toBe("100%");
     expect(maxWidthFor(rules, ".markdown-body :global(pre)")).toBeUndefined();
@@ -986,9 +992,8 @@ describe("assistant message width", () => {
   it("scrolls a wide table inside itself rather than breaking cell words", async () => {
     const source = (await import("../components/MessageDisplay.svelte?raw")).default as string;
     const rules = styleRules(source);
-    const table = rules.filter((r) => r.selectors.includes(".markdown-body :global(table)"));
-    expect(table.map((r) => r.body).join(";")).toMatch(/overflow-x:\s*auto/);
-    const cell = rules.filter((r) => r.selectors.includes(".markdown-body :global(td)"));
-    expect(cell.map((r) => r.body).join(";")).toMatch(/word-break:\s*normal/);
+    expect(declared(rules, ".markdown-body :global(table)", "overflow-x")).toBe("auto");
+    expect(declared(rules, ".markdown-body :global(td)", "word-break")).toBe("normal");
+    expect(declared(rules, ".markdown-body :global(td)", "overflow-wrap")).toBe("normal");
   });
 });
