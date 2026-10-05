@@ -418,4 +418,18 @@ describe("passed one-shot cards", () => {
     expect(operatorApi.triggerSchedule).toHaveBeenCalledWith(schedule.id);
     expect(operatorApi.resumeSchedule).not.toHaveBeenCalled();
   });
+  it("keeps the lifecycle badge when a passed one-shot has no runs", async () => {
+    vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValue({ runs: [] });
+    const card = await renderCard();
+    expect(card.querySelector(".schedule-facts .status")?.textContent?.trim()).toBe("completed");
+  });
+  it("offers only Run again for an active passed one-shot", async () => {
+    vi.mocked(operatorApi.listSchedules).mockResolvedValue({ schedules: [{ ...schedule, status: "active" }] });
+    const card = await renderCard();
+    const actions = [...card.querySelectorAll(".row-actions button")]
+      .map(button => button.textContent?.trim())
+      .filter(label => label !== "Runs" && label !== "Hide runs");
+    expect(actions).toEqual(["Run again"]);
+  });
+
 });
