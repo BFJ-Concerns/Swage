@@ -981,6 +981,53 @@ fn swage_database_path() -> Result<PathBuf, swage_config::ConfigProblem> {
     swage_config::discovery::resolve_root().map(|root| root.join("swage.db"))
 }
 
+/// The provider that serves a turn for the configuration's selected model.
+///
+/// The runtime provider routes a request to the first catalogue entry whose
+/// upstream model id it names, so two entries sharing an upstream id (one per
+/// protocol, say) are indistinguishable to it. When an earlier entry in the
+/// runtime order shares the selected entry's upstream id, the turn gets a
+/// provider built from its own configuration, where the selected entry leads.
+pub(crate) async fn selected_model_provider(
+    state: &crate::state::AppState,
+    config: &swage_config::ResolvedConfig,
+) -> Arc<dyn swage_provider::LlmProvider> {
+    let runtime = state.active_provider();
+    let Some(selected) = config.models.entries.get(&config.models.default) else {
+        return runtime;
+    };
+    let runtime_config = state.active_config();
+    let first_serving_entry =
+        ordered_runtime_model_ids(&runtime_config)
+            .into_iter()
+            .find(|entry| {
+                runtime_config
+                    .models
+                    .entries
+                    .get(entry)
+                    .is_some_and(|model| model.model_id == selected.model_id)
+            });
+    if first_serving_entry.as_deref() == Some(config.models.default.as_str()) {
+        return runtime;
+    }
+    create_provider(config, &state.secret_manager).await
+}
+
+/// Names the configured provider and endpoint serving the selected model,
+/// for error copy the user reads when that provider fails.
+pub(crate) fn selected_provider_route(config: &swage_config::ResolvedConfig) -> Option<String> {
+    let model = config.models.entries.get(&config.models.default)?;
+    let provider = config.providers.entries.get(&model.provider_id)?;
+    if provider.protocol == swage_config::Protocol::Codex {
+        return None;
+    }
+    Some(format!(
+        "provider '{}' at {}",
+        model.provider_id,
+        provider_base_url(provider)
+    ))
+}
+
 /// Create the LLM provider from resolved configuration.
 pub(crate) async fn create_provider(
     config: &swage_config::ResolvedConfig,

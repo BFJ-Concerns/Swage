@@ -19258,3 +19258,157 @@ async fn operation_outcome_failed_workflow_is_recorded_and_streamed() {
         assert!(events.iter().any(|event| matches!(event, ServerEvent::ToolEnd { call_id, status, .. } if call_id == id && status == expected)), "missing {expected} ToolEnd for {id}: {events:?}");
     }
 }
+
+/// Serves `{route}` on a fresh local port, recording each request body and
+/// answering with a non-retriable rejection so the turn settles at once.
+async fn spawn_rejecting_capture_endpoint(
+    route: &'static str,
+) -> (String, Arc<std::sync::Mutex<Vec<serde_json::Value>>>) {
+    use axum::{Json, Router, http::StatusCode, routing::post};
+
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = Arc::clone(&bodies);
+    let app = Router::new().route(
+        route,
+        post(move |Json(body): Json<serde_json::Value>| {
+            let captured = Arc::clone(&captured);
+            async move {
+                captured.lock().unwrap().push(body);
+                (StatusCode::BAD_REQUEST, "endpoint rejected the model")
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind capture endpoint");
+    let addr = listener.local_addr().expect("capture endpoint address");
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve capture endpoint");
+    });
+    (format!("http://{addr}/v1"), bodies)
+}
+
+#[tokio::test]
+async fn selected_responses_entry_sharing_an_upstream_id_is_served_by_its_own_provider() {
+    let (chat_url, chat_bodies) = spawn_rejecting_capture_endpoint("/v1/chat/completions").await;
+    let (responses_url, responses_bodies) = spawn_rejecting_capture_endpoint("/v1/responses").await;
+    let (storage, session_id) = make_storage_with_session().await;
+    storage
+        .set_session_selected_model(session_id, Some("sol-responses".into()))
+        .await
+        .expect("select session model");
+
+    let mut config = swage_config::ResolvedConfig::default();
+    for (provider_id, protocol, base_url) in [
+        ("proxy-openai", swage_config::Protocol::OpenAi, &chat_url),
+        (
+            "proxy-responses",
+            swage_config::Protocol::OpenAiResponses,
+            &responses_url,
+        ),
+    ] {
+        config.providers.entries.insert(
+            provider_id.into(),
+            swage_config::ProviderEndpointConfig {
+                worker_staleness_threshold_ms: None,
+                protocol,
+                api_key_secret_ref: None,
+                api_key_env: None,
+                base_url: Some(base_url.clone()),
+                command: None,
+                state_dir: None,
+            },
+        );
+    }
+    config.providers.default = "proxy-openai".into();
+    // Both entries name the same upstream model; the runtime order puts
+    // `sol` first, so routing by upstream id alone reaches the chat endpoint.
+    for (entry, provider_id) in [
+        ("sol", "proxy-openai"),
+        ("sol-responses", "proxy-responses"),
+    ] {
+        config.models.entries.insert(
+            entry.into(),
+            swage_config::ModelEndpointConfig {
+                provider_id: provider_id.into(),
+                model_id: "gpt-6.1-sol".into(),
+                ..Default::default()
+            },
+        );
+    }
+    config.models.default = "sol".into();
+
+    let secret_manager = crate::secret::SecretManager::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+    );
+    let runtime_provider = crate::startup::create_provider(&config, &secret_manager).await;
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        runtime_provider,
+        config,
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("Hi"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("provider failure is surfaced as an event");
+
+    assert!(
+        chat_bodies.lock().unwrap().is_empty(),
+        "the chat completions endpoint of another entry must not be called: {:?}",
+        chat_bodies.lock().unwrap()
+    );
+    let responses_bodies = responses_bodies.lock().unwrap().clone();
+    assert!(
+        !responses_bodies.is_empty(),
+        "the selected entry's own endpoint receives the turn"
+    );
+    for body in &responses_bodies {
+        assert!(
+            body["input"].is_array() && body.get("messages").is_none(),
+            "a Responses request carries input items: {body}"
+        );
+    }
+
+    let thread = state.storage.list_by_session(session_id).await.unwrap()[0].clone();
+    let turn = state.storage.list_turns_by_thread(thread.id).await.unwrap()[0].clone();
+    let snapshot: serde_json::Value = serde_json::from_str(
+        &state
+            .storage
+            .get_snapshot(turn.id)
+            .await
+            .unwrap()
+            .expect("turn snapshot"),
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot["provider_visible"]["requests"][0]["request"]["protocol"], "responses",
+        "the turn record names the protocol sent: {}",
+        snapshot["provider_visible"]
+    );
+
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let error = events
+        .iter()
+        .find_map(|event| match event {
+            ServerEvent::Error { message, .. } => Some(message.as_str()),
+            _ => None,
+        })
+        .expect("the failed turn shows an error");
+    assert!(
+        error.contains(&format!("provider 'proxy-responses' at {responses_url}")),
+        "the error names the configured provider and endpoint: {error}"
+    );
+}
