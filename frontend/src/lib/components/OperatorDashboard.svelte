@@ -11,7 +11,7 @@
     triggerSchedule,
   } from "../api/operator";
   import type { OperatorOverview } from "../types";
-  import StatusBadge from "./StatusBadge.svelte";
+  import StatusBadge, { type Register } from "./StatusBadge.svelte";
   import OperatorHistoryPane from "./OperatorHistoryPane.svelte";
   import type { Schedule } from "../protocol/Schedule";
   import type { ScheduleRun } from "../protocol/ScheduleRun";
@@ -57,6 +57,12 @@
 
   function describeRunState(run: ScheduleRun): string {
     return run.state === "completed_empty" ? "completed empty" : run.state;
+  }
+
+  function runRegister(run: ScheduleRun): Register {
+    if (run.state === "completed" || run.state === "completed_empty") return "calm";
+    if (run.state === "failed") return "wants-a-human";
+    return "not-yet";
   }
 
   function passedOneShot(schedule: Schedule): boolean {
@@ -298,13 +304,7 @@
                   <span>{schedule.message}</span>
                   <StatusBadge
                     register={latestRun
-                      ? latestRun.state === "failed"
-                        ? "wants-a-human"
-                        : latestRun.state === "running" || latestRun.state === "pending"
-                          ? "in-motion"
-                          : latestRun.state === "completed" || latestRun.state === "completed_empty"
-                            ? "calm"
-                            : "not-yet"
+                      ? runRegister(latestRun)
                       : schedule.status === "active" ? "calm" : "not-yet"}
                     label={latestRun ? describeRunState(latestRun) : schedule.status}
                   />
@@ -365,11 +365,7 @@
                       <div class="run-entry">
                         <div class="primary-line">
                           <StatusBadge
-                            register={run.state === "completed" || run.state === "completed_empty"
-                              ? "calm"
-                              : run.state === "failed"
-                                ? "wants-a-human"
-                                : "not-yet"}
+                            register={runRegister(run)}
                             label={describeRunState(run)}
                           />
                           <span class="mono">{run.trigger}</span>

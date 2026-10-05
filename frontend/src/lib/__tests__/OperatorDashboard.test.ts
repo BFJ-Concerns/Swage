@@ -515,4 +515,30 @@ describe("passed one-shot cards", () => {
     expect(vi.mocked(operatorApi.fetchScheduleRuns).mock.calls).toEqual([[schedule.id], [schedule.id]]);
     expect(card.querySelector(".primary-line .badge")?.textContent?.trim()).toBe("running");
   });
+  it("keeps the lifecycle badge when a passed one-shot has no runs", async () => {
+    vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValue({ runs: [] });
+    const card = await renderCard();
+    expect(card.querySelector(".primary-line .badge")?.textContent?.trim()).toBe("completed");
+  });
+  it("offers only Run again for an active passed one-shot", async () => {
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOverview({ schedules: { schedules: [{ ...schedule, status: "active" }] } }));
+    const card = await renderCard();
+    const actions = [...card.querySelectorAll(".action-row button")]
+      .map(button => button.textContent?.trim())
+      .filter(label => label !== "Runs" && label !== "Hide runs");
+    expect(actions).toEqual(["Run again"]);
+  });
+  it.each(["running", "pending"] as const)("uses the same register for a %s card and its run row", async (state) => {
+    vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValue({ runs: [{ ...latest, state }] });
+    const card = await renderCard();
+    [...card.querySelectorAll("button")].find(button => button.textContent?.trim() === "Runs")!.click();
+    await settleUi();
+    const cardBadge = card.querySelector<HTMLElement>(".primary-line .badge")!;
+    const runBadge = card.querySelector<HTMLElement>(".run-history .badge")!;
+    expect(cardBadge.textContent?.trim()).toBe(state);
+    expect(runBadge.textContent?.trim()).toBe(state);
+    expect(cardBadge.style.getPropertyValue("--badge-hue")).toBe("var(--status-not-yet-hue)");
+    expect(runBadge.style.getPropertyValue("--badge-hue")).toBe("var(--status-not-yet-hue)");
+  });
+
 });

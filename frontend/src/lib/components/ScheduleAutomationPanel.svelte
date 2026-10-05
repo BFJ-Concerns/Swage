@@ -370,29 +370,39 @@
           {/if}
         </div>
         <div class="scope-toggle row-actions">
-          <button
-            type="button"
-            onclick={() => runNow(schedule)}
-            disabled={actionId === schedule.id}
-          >
-            {actionId === schedule.id ? "Running…" : passedOneShot(schedule) ? "Run again" : "Run now"}
-          </button>
-          {#if schedule.status === "active"}
+          {#if passedOneShot(schedule)}
             <button
               type="button"
-              onclick={() => setPaused(schedule, true)}
+              onclick={() => runNow(schedule)}
               disabled={actionId === schedule.id}
             >
-              Pause
+              {actionId === schedule.id ? "Running…" : "Run again"}
             </button>
-          {:else if !passedOneShot(schedule)}
+          {:else}
             <button
               type="button"
-              onclick={() => setPaused(schedule, false)}
+              onclick={() => runNow(schedule)}
               disabled={actionId === schedule.id}
             >
-              Resume
+              {actionId === schedule.id ? "Running…" : "Run now"}
             </button>
+            {#if schedule.status === "active"}
+              <button
+                type="button"
+                onclick={() => setPaused(schedule, true)}
+                disabled={actionId === schedule.id}
+              >
+                Pause
+              </button>
+            {:else}
+              <button
+                type="button"
+                onclick={() => setPaused(schedule, false)}
+                disabled={actionId === schedule.id}
+              >
+                Resume
+              </button>
+            {/if}
           {/if}
         </div>
         <div class="run-history" aria-label={`Run history for ${schedule.message}`}>
