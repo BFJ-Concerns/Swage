@@ -591,44 +591,78 @@ mod tests {
 
     #[test]
     fn socket_under_tmp_is_bound_over_the_tmpfs_overlay() {
-        let config = basic_config();
-        let socket = Path::new("/tmp/swage-1000/swage-sandbox-0000.sock");
-        let cmd = build_bwrap_command_with_path(
-            Path::new("/usr/bin/bwrap"),
-            &config,
-            socket,
-            Path::new("/usr/bin/swage-agent"),
-        )
-        .unwrap();
+        // The long-path fallback socket, and a socket under a runtime
+        // directory that itself lies under /tmp.
+        let layouts = [
+            (Path::new("/tmp/swage-1000/swage-sandbox-0000.sock"), None),
+            (
+                Path::new("/tmp/swx-run/swage/swage-sandbox-0000.sock"),
+                Some(Path::new("/tmp/swx-run")),
+            ),
+        ];
+        for (socket, runtime_dir) in layouts {
+            let cmd = build_bwrap_command_with_path(
+                Path::new("/usr/bin/bwrap"),
+                &basic_config(),
+                socket,
+                Path::new("/usr/bin/swage-agent"),
+            )
+            .unwrap();
+            let args = args_of(&cmd);
+            let tmpfs = args
+                .windows(2)
+                .position(|w| w == [OsStr::new("--tmpfs"), OsStr::new("/tmp")])
+                .expect("command overlays /tmp with tmpfs");
 
-        let args = args_of(&cmd);
-        let tmpfs = args
-            .windows(2)
-            .position(|w| w == [OsStr::new("--tmpfs"), OsStr::new("/tmp")])
-            .expect("command overlays /tmp with tmpfs");
-        let bind_targets: Vec<(usize, &OsStr)> = args
-            .windows(3)
-            .enumerate()
-            .filter(|(_, w)| w[0] == OsStr::new("--bind") && w[1] == w[2])
-            .map(|(i, w)| (i, w[2]))
-            .collect();
-        let socket_bind = bind_targets
-            .iter()
-            .find(|(_, target)| *target == socket.as_os_str())
-            .unwrap_or_else(|| {
-                panic!("socket file must be bound into the sandbox; args: {args:?}")
-            });
-        assert!(
-            socket_bind.0 > tmpfs,
-            "socket bind must follow the /tmp tmpfs or the overlay hides it; args: {args:?}"
-        );
-        for ancestor in socket.ancestors().skip(1) {
+            // Every bind-type mount, whatever its flavour: (position, source, destination).
+            let binds: Vec<(usize, &Path, &Path)> = args
+                .windows(3)
+                .enumerate()
+                .filter(|(_, w)| {
+                    let flag = w[0].to_string_lossy();
+                    flag.starts_with("--") && flag.contains("bind")
+                })
+                .map(|(i, w)| (i, Path::new(w[1]), Path::new(w[2])))
+                .collect();
+
+            // The read-only root `/ /` precedes the tmpfs, which then hides
+            // /tmp; every other ancestor of the socket, /tmp and the runtime
+            // directory must never appear as a bind source or destination.
+            let mut forbidden: Vec<&Path> = socket
+                .ancestors()
+                .skip(1)
+                .filter(|ancestor| *ancestor != Path::new("/"))
+                .collect();
+            forbidden.push(Path::new("/tmp"));
+            forbidden.extend(runtime_dir);
+            for (_, source, destination) in &binds {
+                for path in &forbidden {
+                    assert!(
+                        source != path && destination != path,
+                        "{} must not be exposed by any bind; args: {args:?}",
+                        path.display()
+                    );
+                }
+            }
+
+            let socket_binds: Vec<&(usize, &Path, &Path)> = binds
+                .iter()
+                .filter(|(_, source, destination)| *source == socket || *destination == socket)
+                .collect();
+            assert_eq!(
+                socket_binds.len(),
+                1,
+                "exactly one bind must carry the socket; args: {args:?}"
+            );
+            let (position, source, destination) = *socket_binds[0];
+            assert_eq!(
+                (args[position], source, destination),
+                (OsStr::new("--bind"), socket, socket),
+                "the socket file itself must be bound at its own path; args: {args:?}"
+            );
             assert!(
-                !bind_targets
-                    .iter()
-                    .any(|(_, target)| *target == ancestor.as_os_str()),
-                "only the socket itself may be exposed, not {}; args: {args:?}",
-                ancestor.display()
+                position > tmpfs,
+                "socket bind must follow the /tmp tmpfs or the overlay hides it; args: {args:?}"
             );
         }
     }
