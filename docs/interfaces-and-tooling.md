@@ -1,5 +1,5 @@
 ---
-description: Network binding, the web UI's context inspector, conversation branching, image attachments and reference admission, surfaces, workspace relinking, delivery targets, devices (registration, the dial-in connection, cancellation, and presence), tool-call recording and replay, hosted documentation, voice capabilities, the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, route handling, the gateway's built-in tool inventory, and workspace tool output
+description: Network binding, the Settings memory view, operator history, the web UI's context inspector, conversation branching, image attachments and reference admission, surfaces, workspace relinking, delivery targets, devices (registration, the dial-in connection, cancellation, and presence), tool-call recording and replay, turn completion states (incomplete, failed, interrupted, cancelled), hosted documentation, voice capabilities, gateway lifecycle (status and start recovery), the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, route handling, the gateway's built-in tool inventory, and workspace tool output
 ---
 
 # Interfaces and tooling
@@ -56,6 +56,33 @@ Public-internet binding is not supported until authentication exists.
 The host machine's own firewall must also permit inbound connections on the
 chosen port — a correctly bound gateway is unreachable from the LAN if the
 firewall drops the traffic.
+
+## Settings memory view
+
+The **Memory** tab in Settings lists every memory page — general and
+per-topic — and lets you read any page in full. A chat box at the bottom of
+the tab changes memory by sending an instruction to the platform's curator.
+The curator processes the instruction and returns its reply alongside every
+page it changed, shown in the same view so you can see exactly what was
+updated.
+
+The curator's background notices link directly to the page they name:
+clicking a notice opens the Memory tab with that page selected.
+
+Memory is the only way the operator reads and edits pages from Settings; there
+is no direct page-editing interface — every change runs through the curator.
+
+## Operator history
+
+The operator history pane shows a timeline of configuration changes,
+variant selections, and assembly decisions, all read from the gateway's
+local audit trail.
+
+Each configuration change entry names the changed fields with their prior
+and new values. Nested settings appear by their path — for example,
+"Context > Assembly" — so you can see at a glance what moved. The
+whole prior and new objects are kept collapsed beneath each entry for
+the complete picture.
 
 ## Turn context inspector
 
@@ -403,8 +430,49 @@ replayed into the conversation history so the model sees what happened.
 Completed tool calls replay with their recorded results. A tool call that
 was interrupted or whose result could not be recorded replays with an
 explicit unknown-outcome text rather than replaying as though it returned
-successfully. When a tool-call result cannot be recorded (the settlement
-write fails), the turn ends as failed — the result is not silently dropped.
+successfully. A tool call stopped with its turn settles as cancelled. When a
+tool-call result cannot be recorded (the settlement write fails), the turn
+ends as failed — the result is not silently dropped.
+
+Stopping a turn ends a shell command running inside the sandbox — in both
+bubblewrap and fallback modes — and its tool-call record settles as
+cancelled.
+
+## Turn completion states
+
+A turn passes through several states as it runs. The two worth knowing
+about at the end are:
+
+- **Incomplete** — the reply was cut short by the output token limit. The
+  partial text the model produced is kept, and the conversation shows an
+  incomplete marker with the cause.
+- **Failed** — an error ended the turn. A failed turn keeps its explanation
+  and any tool calls it made, visible in the conversation after a reload.
+  The web UI offers **Retry** on a failed turn.
+
+An interrupted or cancelled turn also keeps its tool calls and any
+explanation text, attached to the request it answered.
+
+Failed shell commands and workflow runs show as failed on their tool
+rows, both live and after reload.
+
+## Gateway lifecycle
+
+### Status
+
+`swage gateway status` reports the running gateway's state — PID, address,
+uptime, and health — or prints "Gateway is not running" and exits
+successfully when no gateway is found. Stale metadata (a PID that is no
+longer alive) is cleaned up automatically.
+
+### Start recovery
+
+`swage gateway start` cleans up after a hard kill: if the previous
+gateway's process has terminated but its metadata file remains, the stale
+file is removed and a fresh start proceeds. If a running gateway has lost
+its metadata (for example after a metadata directory was cleaned), the
+start command probes the configured address, recovers the metadata, and
+reports the gateway as already running rather than starting a duplicate.
 
 ## API error contract
 
@@ -526,9 +594,10 @@ a workspace crate that orchestrates the gate. Most logic is Rust, but `xtask`
 shells out for some checks — for example, the tracked-local-state check runs
 `scripts/check-tracked-local-state.sh`.
 
-The gate runs seven stages in order. The first five abort immediately on failure
-— a formatting problem or a type error is not worth running the full test
-suite against. The last two always run, and their results are combined:
+The gate runs eight stages in order. The first six abort immediately on
+failure — a formatting problem or a type error is not worth running the
+full test suite against. The last two always run, and their results are
+combined:
 
 1. **Tracked-local-state check** — catches runtime state directories that were
    accidentally committed.
@@ -537,11 +606,16 @@ suite against. The last two always run, and their results are combined:
    type checker.
 4. **Frontend design-token check** — rejects literal visual values in
    components where a semantic design token is required.
-5. **Clippy** — with warnings treated as errors.
-6. **Test suite** — Rust tests (with `--no-fail-fast` so all crates run even
-   if one fails), frontend tests, and the desktop smoke test. Individual
-   failures are collected rather than aborting on the first.
-7. **Projection freshness** — a `git diff` that verifies the committed
+5. **Shipped-workflow parse check** — verifies that every shipped workflow
+   script parses without error.
+6. **Clippy** — with warnings treated as errors.
+7. **Test suite** — Rust tests, frontend tests, and the desktop smoke test.
+   Individual failures are collected rather than aborting on the first. The
+   Rust test runner is selected by the `SWAGE_TEST_RUNNER` environment
+   variable: `nextest` runs tests under `cargo nextest run` with a `ci`
+   profile (which retries flaky tests) plus a separate doctest stage;
+   `cargo` or unset runs `cargo test --workspace --no-fail-fast`.
+8. **Projection freshness** — a `git diff` that verifies the committed
    TypeScript bindings and JSON Schemas match what the tests just regenerated.
 
 When both the test suite and the projection check fail, the gate reports both
@@ -550,7 +624,7 @@ a green local run means CI will pass.
 
 Other useful recipes:
 
-- `just check-gate` — the first five static stages above, before any tests.
+- `just check-gate` — the first six static stages above, before any tests.
 - `just check` — the narrower Rust and frontend type check only.
 - `just test` — the test suite alone, with the same failure-aggregation
   behaviour as the verify gate.
