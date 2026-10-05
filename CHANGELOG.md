@@ -39,6 +39,7 @@ All notable changes to Swage are documented in this file.
 - Updating a schedule’s agent is refused with guidance to create a new schedule with that agent, rather than reporting success with the existing agent.
 
 - Tool bundles appear in a stable order in Settings.
+- After an approval decision, the model is told plainly whether the person approved or denied the tool call: a denied call reads as the user's final denial (it did not run and nothing is pending), and an approved call's result names the approval scope, once or for the session. Successful calls confirm they ran; calls refused by parameter validation say they were approved but did not run. Approval feedback leaves the tool payload, stored output metadata and hook input unchanged.
 - File search, read and edit recognise a binary file from its first 8 KiB and read no further, and file search reads text line by line. A search reaching multi-gigabyte model weights no longer holds each file whole in memory, which had grown the gateway past 20 GB.
 - Underscores in fill-in blanks, such as `__:__`, render literally in assistant messages while ordinary underscore emphasis still renders as emphasis.
 - PEM private keys are redacted whole, including their body and footer; truncated keys are redacted through the end of the input, and overlapping secret matches leave no plaintext tail.

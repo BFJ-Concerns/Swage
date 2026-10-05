@@ -23,7 +23,7 @@ use swage_storage::{NewToolCall, NewTurn, Storage, ThreadState, TurnState};
 use swage_tool::dispatch::ToolDispatcher;
 use swage_tool::output::ToolOutput;
 
-use crate::approval::{ApprovalChannelRegistrar, PreToolUseOutcome};
+use crate::approval::{ApprovalChannelRegistrar, PreToolUseOutcome, ToolDispatchResult};
 use crate::config::AgentConfig;
 use crate::context::{AgentToolContext, TurnExecutionContext};
 use crate::error::AgentError;
@@ -307,6 +307,198 @@ mod approval_tests {
                         && event.approval_id.as_deref() == Some(approval_id.as_str())
                 }),
             "human rejection must emit its settlement log"
+        );
+    }
+
+    fn deciding_registrar(
+        decision: crate::approval::ApprovalDecisionValue,
+        scope: crate::approval::ApprovalDecisionScope,
+        reason: Option<&'static str>,
+    ) -> ApprovalChannelRegistrar {
+        Arc::new(move |_approval_id, sender| {
+            sender
+                .send(crate::approval::ApprovalDecision {
+                    decision,
+                    scope,
+                    reason: reason.map(Into::into),
+                })
+                .expect("registered sender accepts the decision");
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn denied_tool_call_feedback_names_the_user_denial_not_the_reason() {
+        let (agent, execution) = approval_fixture(deciding_registrar(
+            crate::approval::ApprovalDecisionValue::Rejected,
+            crate::approval::ApprovalDecisionScope::Once,
+            Some("approval card"),
+        ))
+        .await;
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = agent
+            .handle_approval_gate(
+                &execution,
+                ApprovalKind::Tool,
+                Some("file_write".into()),
+                None,
+                None,
+                "Allow file_write?".into(),
+                None,
+                std::time::Duration::from_secs(5),
+                swage_core::ApprovalTimeoutPolicy::Reject,
+                &event_tx,
+                &tokio_util::sync::CancellationToken::new(),
+                &mut TurnApprovalScope::default(),
+            )
+            .await
+            .expect("approval gate");
+
+        let crate::approval::ApprovalGateOutcome::Rejected { feedback } = outcome else {
+            panic!("expected a rejected outcome, got {outcome:?}");
+        };
+        assert_eq!(
+            feedback, "The user denied this tool call. It did not run, and no approval is pending.",
+            "the denial must read as final and carry no UI reason string"
+        );
+    }
+
+    struct EchoTool;
+
+    #[async_trait::async_trait]
+    impl swage_tool::tool::Tool for EchoTool {
+        fn name(&self) -> &str {
+            "echo"
+        }
+
+        fn description(&self) -> &str {
+            "Echoes input."
+        }
+
+        fn parameters(&self) -> Value {
+            serde_json::json!({ "type": "object", "properties": { "text": { "type": "string" } } })
+        }
+
+        async fn execute(
+            &self,
+            params: Value,
+            _ctx: &dyn swage_tool::context::ToolContext,
+        ) -> Result<Value, swage_core::ToolError> {
+            Ok(params)
+        }
+    }
+
+    fn approval_required_echo_dispatcher() -> ToolDispatcher {
+        let mut registry = swage_tool::registry::ToolRegistry::new();
+        registry
+            .register(Arc::new(EchoTool))
+            .expect("registration should succeed");
+        ToolDispatcher::new(
+            Arc::new(registry),
+            swage_tool::permission::PermissionConfig {
+                allow: vec!["*".into()],
+                deny: vec![],
+                bundles: std::collections::HashMap::new(),
+                require_approval: vec![swage_tool::permission::RequireApprovalEntry {
+                    tool_name: "echo".into(),
+                    timeout_secs: Some(5),
+                    timeout_policy: None,
+                }],
+            },
+            Arc::new(swage_tool::rate_limit::RateLimiter::new()),
+            swage_tool::rate_limit::RateLimitConfig::default(),
+            Arc::new(LeakDetector::default()),
+            false,
+        )
+    }
+
+    async fn dispatch_echo_approved_with(
+        scope: crate::approval::ApprovalDecisionScope,
+        arguments: Value,
+    ) -> ToolDispatchResult {
+        let (mut agent, execution) = approval_fixture(deciding_registrar(
+            crate::approval::ApprovalDecisionValue::Approved,
+            scope,
+            Some("approval card"),
+        ))
+        .await;
+        agent.tool_dispatcher = Some(approval_required_echo_dispatcher());
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let call = ToolCall {
+            call_id: "call-1".into(),
+            name: "echo".into(),
+            arguments,
+        };
+        agent
+            .dispatch_tool_call(
+                &call,
+                &execution,
+                &[],
+                &event_tx,
+                &tokio_util::sync::CancellationToken::new(),
+                &mut TurnApprovalScope::default(),
+            )
+            .await
+            .expect("approved dispatch")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn approval_validation_failure_does_not_claim_execution() {
+        let result = dispatch_echo_approved_with(
+            crate::approval::ApprovalDecisionScope::Once,
+            serde_json::json!({ "text": 42 }),
+        )
+        .await;
+        let text = result.model_content(&result.content);
+        assert!(result.is_error);
+        assert_eq!(result.status, "error");
+        assert!(text.contains("invalid parameters"));
+        assert!(
+            text.contains("[The user approved this tool call once; it did not run.]")
+                && !text.contains("ran after approval"),
+            "validation prevented execution: {text}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn approved_tool_call_result_carries_the_approval_note() {
+        let result = dispatch_echo_approved_with(
+            crate::approval::ApprovalDecisionScope::Once,
+            serde_json::json!({ "text": "ran" }),
+        )
+        .await;
+        let text = result.content.clone();
+        assert!(!result.is_error, "approved call must succeed: {text}");
+        assert_eq!(result.status, "success");
+        let output: Value =
+            serde_json::from_str(&text).unwrap_or_else(|_| Value::String(text.clone()));
+        assert_eq!(
+            output,
+            serde_json::json!({ "text": "ran" }),
+            "approval must preserve the serialised tool payload"
+        );
+        let model_text = result.model_content(&text);
+        let (note, output) = model_text
+            .split_once('\n')
+            .unwrap_or_else(|| panic!("once-approved result must note the approval: {text}"));
+        assert_eq!(
+            note, "[The user approved this tool call once; it ran after approval.]",
+            "the approval note must lead the result"
+        );
+        let output: Value = serde_json::from_str(output).expect("tool output follows the note");
+        assert_eq!(output, serde_json::json!({ "text": "ran" }));
+
+        let result = dispatch_echo_approved_with(
+            crate::approval::ApprovalDecisionScope::Session,
+            serde_json::json!({ "text": "ran" }),
+        )
+        .await;
+        let text = result.model_content(&result.content);
+        assert!(
+            text.starts_with(
+                "[The user approved this tool call for this session; it ran after approval.]\n"
+            ),
+            "session-approved result must lead with the approval scope: {text}"
         );
     }
 }
@@ -791,14 +983,14 @@ impl Agent {
                     let start = std::time::Instant::now();
 
                     // PreToolUse hook — may block, request approval, or proceed.
-                    let (result_content, mut is_error, status) = match self
+                    let dispatch_result = match self
                         .dispatch_pre_tool_use(&call.name, &call.arguments)
                         .await
                     {
                         Err(AgentError::HookBlocked { reason, .. }) => {
-                            (reason, true, "blocked".to_string())
+                            (reason, true, "blocked".to_string()).into()
                         }
-                        Err(e) => (format!("hook error: {e}"), true, "error".to_string()),
+                        Err(e) => (format!("hook error: {e}"), true, "error".to_string()).into(),
                         Ok(PreToolUseOutcome::RequestApproval {
                             prompt,
                             context,
@@ -841,20 +1033,23 @@ impl Agent {
                                     )
                                     .await?
                                 {
-                                    ApprovalGateOutcome::Approved => {
+                                    ApprovalGateOutcome::Approved { scope } => {
                                         // Approved — proceed with normal dispatch.
-                                        self.dispatch_tool_call(
-                                            call,
-                                            &execution,
-                                            &llm_request.messages,
-                                            &event_tx,
-                                            &cancel_token,
-                                            &mut approval_scope,
+                                        crate::approval::with_user_approval_note(
+                                            self.dispatch_tool_call(
+                                                call,
+                                                &execution,
+                                                &llm_request.messages,
+                                                &event_tx,
+                                                &cancel_token,
+                                                &mut approval_scope,
+                                            )
+                                            .await?,
+                                            scope,
                                         )
-                                        .await?
                                     }
                                     ApprovalGateOutcome::Rejected { feedback } => {
-                                        (feedback, true, "rejected".to_string())
+                                        (feedback, true, "rejected".to_string()).into()
                                     }
                                     ApprovalGateOutcome::Interrupted => {
                                         return Err(AgentError::Cancelled);
@@ -876,8 +1071,11 @@ impl Agent {
                     };
 
                     let duration_ms = start.elapsed().as_millis() as u64;
+                    let result_content = &dispatch_result.content;
+                    let mut is_error = dispatch_result.is_error;
+                    let status = &dispatch_result.status;
 
-                    let result_value: Value = serde_json::from_str(&result_content)
+                    let result_value: Value = serde_json::from_str(result_content)
                         .unwrap_or_else(|_| Value::String(result_content.clone()));
                     let result_metadata = extract_tool_result_metadata(&result_value);
 
@@ -894,7 +1092,7 @@ impl Agent {
                         } {
                         "error".to_string()
                     } else {
-                        status
+                        status.clone()
                     };
 
                     // PostToolUse hook — informational, fire-and-forget.
@@ -902,12 +1100,15 @@ impl Agent {
                         .await;
 
                     // Leak detection on tool result before feeding back to the model.
-                    let safe_result = self.scan_output(&result_content);
+                    let scanned_result = self.scan_output(result_content);
                     let model_result = compact_tool_result_for_model_with_reference(
-                        &safe_result,
+                        &scanned_result,
                         is_error,
                         tool_result_reference(&turn.id.to_string(), &call.call_id),
                     );
+
+                    let model_result = dispatch_result.model_content(&model_result);
+                    let safe_result = dispatch_result.model_content(&scanned_result);
 
                     // Settle the started row. The raw result stays in the
                     // store; the scanned model-facing text is what history
@@ -922,7 +1123,7 @@ impl Agent {
                         .storage
                         .update_tool_call_result(
                             record.id,
-                            &result_content,
+                            result_content,
                             &model_result,
                             &status,
                             duration_ms as i64,
@@ -1586,17 +1787,30 @@ impl Agent {
 
 fn tool_dispatch_result(
     result: Result<ToolOutput, swage_core::ToolError>,
-) -> Result<(String, bool, String), AgentError> {
+) -> Result<ToolDispatchResult, AgentError> {
     match result {
         Ok(output) => {
             let result_str = serde_json::to_string(&output.result).unwrap_or_default();
-            Ok((result_str, false, "success".to_string()))
+            Ok((result_str, false, "success".to_string()).into())
         }
-        Err(error) => Ok((
-            format_tool_error_for_model(&error),
-            true,
-            "error".to_string(),
-        )),
+        Err(error) => {
+            let execution_prevented = matches!(
+                error,
+                swage_core::ToolError::InvalidParameters { .. }
+                    | swage_core::ToolError::NotFound { .. }
+                    | swage_core::ToolError::PermissionDenied { .. }
+                    | swage_core::ToolError::RequiresApproval { .. }
+                    | swage_core::ToolError::RequiresLocationApproval { .. }
+            );
+            let mut result: ToolDispatchResult = (
+                format_tool_error_for_model(&error),
+                true,
+                "error".to_string(),
+            )
+                .into();
+            result.execution_prevented = execution_prevented;
+            Ok(result)
+        }
     }
 }
 
@@ -1729,7 +1943,7 @@ impl Agent {
         timeout_policy: Option<swage_core::ApprovalTimeoutPolicy>,
         skip_tool_permission_gate: bool,
         dispatch_started_at: std::time::Instant,
-    ) -> Result<(String, bool, String), AgentError> {
+    ) -> Result<ToolDispatchResult, AgentError> {
         use crate::approval::{ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS};
 
         let gate_timeout =
@@ -1798,7 +2012,7 @@ impl Agent {
             )
             .await?
         {
-            ApprovalGateOutcome::Approved => {
+            ApprovalGateOutcome::Approved { scope } => {
                 let result = if skip_tool_permission_gate {
                     self.race_tool_dispatch(
                         dispatcher.dispatch_approved(
@@ -1831,9 +2045,10 @@ impl Agent {
                     .await?
                 };
                 tool_dispatch_result(result)
+                    .map(|result| crate::approval::with_user_approval_note(result, scope))
             }
             ApprovalGateOutcome::Rejected { feedback } => {
-                Ok((feedback, true, "rejected".to_string()))
+                Ok((feedback, true, "rejected".to_string()).into())
             }
             ApprovalGateOutcome::Interrupted => Err(AgentError::Cancelled),
         }
@@ -1842,7 +2057,7 @@ impl Agent {
     /// Dispatch a single tool call through the dispatcher, handling the
     /// config-driven approval gate when `RequiresApproval` is returned.
     ///
-    /// Returns `Ok((result_content, is_error, status))` on normal completion
+    /// Returns the payload, status and approval feedback on normal completion
     /// (including rejections), or `Err` when the turn must be interrupted
     /// (timeout with interrupt policy, or storage errors).
     /// One-line display headline for a call, from the tool's declared
@@ -1863,7 +2078,7 @@ impl Agent {
         event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
         cancel_token: &tokio_util::sync::CancellationToken,
         approval_scope: &mut TurnApprovalScope,
-    ) -> Result<(String, bool, String), AgentError> {
+    ) -> Result<ToolDispatchResult, AgentError> {
         // Emit ToolStart — client can render a "running…" indicator.
         let _ = event_tx.send(AgentEvent::ToolStart {
             call_id: call.call_id.clone(),
@@ -1877,7 +2092,8 @@ impl Agent {
                 "no tool dispatcher configured".to_string(),
                 true,
                 "error".to_string(),
-            ));
+            )
+                .into());
         };
 
         let ctx = AgentToolContext::new(
@@ -1911,7 +2127,7 @@ impl Agent {
         {
             Ok(output) => {
                 let result_str = serde_json::to_string(&output.result).unwrap_or_default();
-                Ok((result_str, false, "success".to_string()))
+                Ok((result_str, false, "success".to_string()).into())
             }
             Err(swage_core::ToolError::RequiresApproval {
                 name: _,
@@ -1946,7 +2162,7 @@ impl Agent {
                         Ok(output) => {
                             let result_str =
                                 serde_json::to_string(&output.result).unwrap_or_default();
-                            return Ok((result_str, false, "success".to_string()));
+                            return Ok((result_str, false, "success".to_string()).into());
                         }
                         Err(swage_core::ToolError::RequiresLocationApproval {
                             path,
@@ -1974,11 +2190,7 @@ impl Agent {
                                 .await;
                         }
                         Err(e) => {
-                            return Ok((
-                                format_tool_error_for_model(&e),
-                                true,
-                                "error".to_string(),
-                            ));
+                            return tool_dispatch_result(Err(e));
                         }
                     }
                 }
@@ -2000,9 +2212,9 @@ impl Agent {
                     )
                     .await?
                 {
-                    ApprovalGateOutcome::Approved => {
+                    ApprovalGateOutcome::Approved { scope } => {
                         // Re-dispatch skipping the permission check.
-                        match self
+                        let result = match self
                             .race_tool_dispatch(
                                 dispatcher.dispatch_approved(
                                     &call.name,
@@ -2021,7 +2233,7 @@ impl Agent {
                             Ok(output) => {
                                 let result_str =
                                     serde_json::to_string(&output.result).unwrap_or_default();
-                                Ok((result_str, false, "success".to_string()))
+                                Ok((result_str, false, "success".to_string()).into())
                             }
                             Err(swage_core::ToolError::RequiresLocationApproval {
                                 path,
@@ -2047,13 +2259,12 @@ impl Agent {
                                 )
                                 .await
                             }
-                            Err(e) => {
-                                Ok((format_tool_error_for_model(&e), true, "error".to_string()))
-                            }
-                        }
+                            Err(e) => tool_dispatch_result(Err(e)),
+                        };
+                        result.map(|result| crate::approval::with_user_approval_note(result, scope))
                     }
                     ApprovalGateOutcome::Rejected { feedback } => {
-                        Ok((feedback, true, "rejected".to_string()))
+                        Ok((feedback, true, "rejected".to_string()).into())
                     }
                     ApprovalGateOutcome::Interrupted => {
                         // State transitions already done by handle_approval_gate.
@@ -2108,7 +2319,8 @@ impl Agent {
                                 .to_string(),
                             true,
                             "error".to_string(),
-                        ));
+                        )
+                            .into());
                     }
                 };
 
@@ -2117,7 +2329,8 @@ impl Agent {
                         "delegation is not available — topic context is missing".to_string(),
                         true,
                         "error".to_string(),
-                    ));
+                    )
+                        .into());
                 };
 
                 let transferred_context = match context {
@@ -2193,7 +2406,7 @@ impl Agent {
                             success: incomplete_reason.is_none(),
                         });
                         let result_str = serde_json::to_string(&result).unwrap_or_default();
-                        Ok((result_str, false, "success".to_string()))
+                        Ok((result_str, false, "success".to_string()).into())
                     }
                     Ok(crate::delegation::DelegationOutcome::Detached(detached)) => {
                         // The delegate has started, not completed. The actual
@@ -2201,7 +2414,7 @@ impl Agent {
                         // message correlated to delegate_message_id.
                         let result_str =
                             serde_json::to_string(&detached.tool_output()).unwrap_or_default();
-                        Ok((result_str, false, "success".to_string()))
+                        Ok((result_str, false, "success".to_string()).into())
                     }
                     Err(e) => {
                         let _ = event_tx.send(AgentEvent::DelegationCompleted {
@@ -2209,11 +2422,11 @@ impl Agent {
                             target_agent_id: target_agent_id.clone(),
                             success: false,
                         });
-                        Ok((format!("delegation failed: {e}"), true, "error".to_string()))
+                        Ok((format!("delegation failed: {e}"), true, "error".to_string()).into())
                     }
                 }
             }
-            Err(e) => Ok((format_tool_error_for_model(&e), true, "error".to_string())),
+            Err(e) => tool_dispatch_result(Err(e)),
         }
     }
 }
@@ -2415,7 +2628,7 @@ impl Agent {
                     decision: crate::approval::ApprovalDecisionValue::Approved,
                     reason: d.reason,
                 });
-                Ok(ApprovalGateOutcome::Approved)
+                Ok(ApprovalGateOutcome::Approved { scope: d.scope })
             }
             GateResult::Decision(d) => {
                 // Rejected by human.
@@ -2423,6 +2636,7 @@ impl Agent {
                     .reason
                     .clone()
                     .unwrap_or_else(|| "rejected by reviewer".into());
+                let feedback = crate::approval::user_denied_feedback();
                 self.resume_after_approval_decision(
                     approval.id,
                     execution.turn_id,
@@ -2441,9 +2655,7 @@ impl Agent {
                     reason = %reason_text,
                     "tool approval rejected and settled"
                 );
-                Ok(ApprovalGateOutcome::Rejected {
-                    feedback: format!("Tool call rejected: {reason_text}"),
-                })
+                Ok(ApprovalGateOutcome::Rejected { feedback })
             }
             GateResult::Timeout => {
                 // Timeout or channel dropped — apply policy.
