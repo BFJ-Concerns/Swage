@@ -68,6 +68,8 @@ pub struct AppState {
     pub voice_provider: Arc<RwLock<Arc<dyn VoiceProvider>>>,
     /// Resolved configuration (server, provider, workspace, etc.).
     pub config: ResolvedConfig,
+    /// Drained-turn relays keyed by turn, settled before releasing their session.
+    pub(crate) turn_event_deliveries: Arc<AsyncMutex<crate::turn_queue::TurnEventDeliveries>>,
     /// Maps session_id → CancellationToken for turns currently being processed.
     /// Used by `cancel_turn` and by graceful shutdown to interrupt active work.
     pub active_turns: Arc<AsyncMutex<HashMap<Uuid, CancellationToken>>>,
@@ -348,6 +350,7 @@ impl AppState {
                 "voice is unavailable for the configured runtime",
             )))),
             config: config.clone(),
+            turn_event_deliveries: Arc::new(AsyncMutex::new(HashMap::new())),
             active_turns: Arc::new(AsyncMutex::new(HashMap::new())),
             active_workflow_runs: Arc::new(AsyncMutex::new(HashMap::new())),
             active_workflow_workers: Arc::new(AsyncMutex::new(HashMap::new())),

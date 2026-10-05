@@ -176,7 +176,7 @@ pub(super) async fn settle_turn_dispatcher(
                     let _ = ws_tx.send(ServerEvent::Cancelled {});
                     // Preserve the client-visible interrupt ordering: the old turn
                     // remains active until its cancellation event has been sent.
-                    release_active_turn(state, session_id).await;
+                    release_active_turn(state, session_id, prepared_turn_id).await?;
                     return Ok(SettledDispatcher::Interrupted);
                 }
             }
