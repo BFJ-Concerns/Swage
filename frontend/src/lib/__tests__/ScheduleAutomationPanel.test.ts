@@ -369,3 +369,53 @@ describe("ScheduleAutomationPanel", () => {
     expect(document.body.textContent).toContain("Enter a gate model");
   });
 });
+
+
+describe("passed one-shot cards", () => {
+  let component: MountedComponent | undefined;
+  const schedule = makeSchedule({
+    status: "completed",
+    spec: { kind: "one_shot", at: "2026-01-01T00:00:00Z" },
+    next_run_at: null,
+  });
+  const older: ScheduleRun = {
+    id: "older", schedule_id: schedule.id, trigger: "tick", state: "completed",
+    created_at: "2026-01-01T00:00:00Z",
+  };
+  const latest: ScheduleRun = {
+    ...older, id: "latest", state: "failed", created_at: "2026-01-01T00:01:00Z",
+    error_message: "405 Method Not Allowed",
+  };
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValue({ runs: [older, latest] });
+    vi.mocked(operatorApi.listSchedules).mockResolvedValue({ schedules: [schedule] });
+  });
+  afterEach(() => {
+    if (component) unmount(component);
+    component = undefined;
+    document.body.replaceChildren();
+  });
+  async function renderCard(): Promise<Element> {
+    component = mount(ScheduleAutomationPanel, { target: document.body, props: { topicId: null, sessionId: null } });
+    await flushUi();
+    return document.querySelector(".schedule-row")!;
+  }
+  it.each(["failed", "running", "completed_empty"] as const)("shows the newest %s run on the unopened card", async (state) => {
+    vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValue({ runs: [older, { ...latest, state }] });
+    const card = await renderCard();
+    expect(card.querySelector(".schedule-facts .status")?.textContent?.trim()).toBe(state === "completed_empty" ? "completed empty" : state);
+  });
+  it("runs the passed one-shot again through the manual trigger", async () => {
+    vi.mocked(operatorApi.triggerSchedule).mockResolvedValue({ run: { ...latest, state: "completed" } });
+    const card = await renderCard();
+    const buttons = [...card.querySelectorAll("button")];
+    const runAgain = buttons.find(button => button.textContent?.trim() === "Run again");
+    expect(runAgain).toBeDefined();
+    expect(buttons.some(button => button.textContent?.trim() === "Resume")).toBe(false);
+    runAgain!.click();
+    await flushUi();
+    expect(operatorApi.triggerSchedule).toHaveBeenCalledWith(schedule.id);
+    expect(operatorApi.resumeSchedule).not.toHaveBeenCalled();
+  });
+});
