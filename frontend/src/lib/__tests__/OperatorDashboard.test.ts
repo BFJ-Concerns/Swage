@@ -508,11 +508,11 @@ describe("passed one-shot cards", () => {
     const future = makeSchedule({ id: "future", spec: { kind: "one_shot", at: "2099-01-01T00:00:00Z" } });
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOverview({ schedules: { schedules: [schedule, recurring, future] } }));
     const card = await renderCard();
-    expect(operatorApi.fetchScheduleRuns.mock.calls).toEqual([[schedule.id]]);
+    expect(vi.mocked(operatorApi.fetchScheduleRuns).mock.calls).toEqual([[schedule.id]]);
     vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValue({ runs: [older, { ...latest, state: "running" }] });
     [...document.querySelectorAll("button")].find(button => button.textContent?.trim() === "Refresh")!.click();
     await settleUi();
-    expect(operatorApi.fetchScheduleRuns.mock.calls).toEqual([[schedule.id], [schedule.id]]);
+    expect(vi.mocked(operatorApi.fetchScheduleRuns).mock.calls).toEqual([[schedule.id], [schedule.id]]);
     expect(card.querySelector(".primary-line .badge")?.textContent?.trim()).toBe("running");
   });
 });
