@@ -268,7 +268,7 @@ describe("ConversationChannel pending approval", () => {
     component = mountChannel(conversationStore, streamingStore);
 
     const conversationId = conversationStore.activeConversation!.id;
-    expect(streamingStore.streamFor(conversationId).isStreaming).toBe(true);
+    expect(streamingStore.streamFor?.(conversationId)?.isStreaming).toBe(true);
     expect(document.querySelector(".message.assistant.streaming")).toBeNull();
     expect(document.querySelector(".cursor")).toBeNull();
   });
