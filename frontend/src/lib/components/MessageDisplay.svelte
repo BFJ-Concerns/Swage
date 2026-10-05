@@ -621,6 +621,14 @@
     max-width: 80ch;
   }
 
+  /* An assistant reply spans the conversation column, as tool blocks do, so
+     tables and code blocks have room; the readable line-length cap sits on
+     its prose elements instead (see the reply rules after the markdown body).
+     Platform-written messages keep the bubble cap. */
+  .message:not(.platform) .assistant-content {
+    max-width: none;
+  }
+
   :global(body.display-density-comfortable) .message-display {
     gap: 18px;
   }
@@ -859,5 +867,33 @@
     font-size: 11px;
     letter-spacing: 0.12em;
     text-transform: uppercase;
+  }
+
+  /* An assistant reply spans the column, so its prose carries the readable
+     line-length cap while tables and code blocks use the full width. A table
+     wider than the column scrolls inside itself, as pre does, rather than
+     wrapping its cells mid-word or widening the reply. Platform-written
+     messages keep the bubble cap and the markdown rules above unchanged. */
+  .message:not(.platform) .markdown-body :global(p),
+  .message:not(.platform) .markdown-body :global(ul),
+  .message:not(.platform) .markdown-body :global(ol),
+  .message:not(.platform) .markdown-body :global(h1),
+  .message:not(.platform) .markdown-body :global(h2),
+  .message:not(.platform) .markdown-body :global(h3),
+  .message:not(.platform) .markdown-body :global(h4),
+  .message:not(.platform) .markdown-body :global(blockquote) {
+    max-width: 80ch;
+  }
+
+  .message:not(.platform) .markdown-body :global(table) {
+    display: block;
+    overflow-x: auto;
+    width: max-content;
+    max-width: 100%;
+  }
+
+  .message:not(.platform) .markdown-body :global(th),
+  .message:not(.platform) .markdown-body :global(td) {
+    word-break: normal;
   }
 </style>
