@@ -1713,13 +1713,15 @@ async fn empty_successful_run_records_a_distinct_state() {
 // Restart recovery
 // ---------------------------------------------------------------------------
 
-/// Signals when the scheduled turn reaches the provider, then emits nothing.
-struct NonAnsweringProvider {
+/// Emits optional partial text, signals that the stream is being consumed,
+/// then waits indefinitely without completing the response.
+struct PendingProvider {
     started: Mutex<Option<oneshot::Sender<()>>>,
+    partial_output: Option<String>,
 }
 
 #[async_trait]
-impl LlmProvider for NonAnsweringProvider {
+impl LlmProvider for PendingProvider {
     fn model_id(&self) -> &str {
         "non-answering-mock"
     }
@@ -1743,20 +1745,30 @@ impl LlmProvider for NonAnsweringProvider {
         _request: CompletionRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
         let started = self.started.lock().unwrap().take().unwrap();
-        Box::pin(futures::stream::once(async move {
-            started.send(()).unwrap();
-            std::future::pending().await
-        }))
+        let partial = self
+            .partial_output
+            .clone()
+            .map(|content| StreamChunk::Delta { content });
+        Box::pin(
+            futures::stream::iter(partial).chain(futures::stream::once(async move {
+                started.send(()).unwrap();
+                std::future::pending().await
+            })),
+        )
     }
 }
 
-async fn assert_shutdown_accounts_for_in_flight_schedule(via_http: bool) {
+async fn assert_shutdown_accounts_for_in_flight_schedule(
+    via_http: bool,
+    partial_output: Option<&str>,
+) {
     let dir = tempfile::tempdir().unwrap();
     let (started_tx, started_rx) = oneshot::channel();
     let state = test_state(
         &dir.path().join("shutdown.db"),
-        NonAnsweringProvider {
+        PendingProvider {
             started: Mutex::new(Some(started_tx)),
+            partial_output: partial_output.map(str::to_owned),
         },
     );
     let router = build_router(state.clone());
@@ -1805,8 +1817,9 @@ async fn assert_shutdown_accounts_for_in_flight_schedule(via_http: bool) {
         .unwrap();
     let turn = state.storage.get_turn(turn_id).await.unwrap().unwrap();
     assert_eq!(turn.state, TurnState::Interrupted);
-    assert!(turn.assistant_response.is_none());
+    assert_eq!(turn.assistant_response.as_deref(), partial_output);
     assert_eq!(run.state, ScheduleRunState::Failed);
+    assert_eq!(run.output_text.as_deref(), partial_output);
     assert_eq!(
         run.error_message.as_deref(),
         Some("gateway stopped while schedule run was running"),
@@ -1836,12 +1849,66 @@ async fn assert_shutdown_accounts_for_in_flight_schedule(via_http: bool) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn graceful_http_shutdown_records_interruption_for_in_flight_schedule() {
-    assert_shutdown_accounts_for_in_flight_schedule(true).await;
+    assert_shutdown_accounts_for_in_flight_schedule(true, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn graceful_signal_shutdown_records_interruption_for_in_flight_schedule() {
-    assert_shutdown_accounts_for_in_flight_schedule(false).await;
+    assert_shutdown_accounts_for_in_flight_schedule(false, None).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn graceful_shutdown_keeps_partial_output_without_delivering_it() {
+    assert_shutdown_accounts_for_in_flight_schedule(true, Some("unfinished output")).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_failure_without_reply_keeps_its_existing_error() {
+    for shutdown_started in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(
+            &dir.path().join("no-reply.db"),
+            MockProvider::new(vec![vec![StreamChunk::Error {
+                message: "provider ended without a reply".into(),
+            }]]),
+        );
+        let router = build_router(state.clone());
+        let session_id = create_conversation(&router).await;
+        let created = schedule::create_schedule(
+            &state,
+            one_shot_request(session_id, Utc::now() + Duration::seconds(5)),
+            ScheduleCreator::User,
+        )
+        .await
+        .unwrap();
+        if shutdown_started {
+            // A shutdown marker alone cannot turn a provider failure without
+            // a reply into a cancellation; no turn is active here.
+            swage_gateway::shutdown::shutdown_active_turns(&state).await;
+        }
+        tick_to_completion(&state, created.next_run_at.unwrap()).await;
+        let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
+        assert_eq!(runs.len(), 1);
+        let run = &runs[0];
+        assert_eq!(run.state, ScheduleRunState::Failed);
+        let turn = state
+            .storage
+            .get_turn(run.turn_id.unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(turn.state, TurnState::Failed);
+        assert!(turn.assistant_response.is_none());
+        assert_eq!(
+            run.error_message.as_deref(),
+            Some("validation error: automated turn completed without assistant response")
+        );
+        let records = state.storage.list_delivery_records().await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].run_id, Some(run.id));
+        assert_eq!(records[0].target, json!({ "kind": "no_delivery" }));
+        assert_eq!(records[0].error, run.error_message);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
