@@ -1,40 +1,75 @@
 ---
-description: Agent definitions, operator guidance (AGENTS.md), tool permissions, approval mechanics, dispatch-bound grant intersection, effort resolution, topic-targeted session creation, context configuration, succession compaction, and voice configuration
+description: Agent definitions, operator guidance (AGENTS.md), tool permissions, approval mechanics, dispatch-bound grant intersection, effort resolution, topic-targeted session creation, context configuration, voice configuration, experimentation controls, and succession compaction
 ---
 
 # Agents and permissions
 
 ## Agent definitions
 
-A durable agent definition is a DB-stored record (`AgentDefinition` in
-`swage-storage`) that gives a session its character. Each definition carries:
+An agent definition is a durable record that gives a session its character —
+its instructions, model preference, tool permissions, skills, and optional
+output schema. Each definition carries a stable `id` that sessions reference.
 
 | Field | Purpose |
 |---|---|
-| `id` | Stable agent id; sessions carry it as `sessions.agent_id` |
-| `topic_id` | `None` = global; `Some(uuid)` = topic-scoped, shadows a global definition with the same id within that topic |
+| `id` | Stable agent id; sessions reference it |
+| `topic_id` | Absent = global; a topic UUID = topic-scoped, shadows a global definition with the same id within that topic |
 | `display_name` | Human-readable label |
-| `description` | Free-text description |
-| `instructions` | Appended after operator instructions (never precede them); replaces outright when operator instructions are empty |
-| `model_id` | Model preference; applied only when the model id exists in `config.models.entries`, otherwise ignored with a warning |
-| `tool_permissions` | Optional JSON overlay (serialised `ToolPermissionConfig`); intersects with the resolved config's grants — narrows, never widens |
+| `description` | Required free-text description |
+| `instructions` | Appended after operator instructions; replaces outright when operator instructions are empty |
+| `model_id` | Model preference; applied only when the named model id exists in the configured model entries, otherwise ignored with a warning |
+| `tool_permissions` | Optional JSON permission overlay; intersects with the resolved config's grants — narrows, never widens |
 | `skills` | Skill ids this definition activates |
 | `output_schema` | Optional JSON Schema enforced on every final response |
 | `output_max_retries` | Override for schema-validation retry limit |
 
-### Overlay onto the config cascade
+### How the overlay works
 
-`apply_agent_definition` (in `turn/configuration.rs`) overlays a definition
-onto the session's resolved file config (Global → Topic → Agent `.toml`
-files). The overlay:
+When a session starts, the gateway resolves the file-based configuration
+cascade (Global → Topic → Agent `.toml` files) into a resolved config, then
+overlays the agent definition on top:
 
-1. Appends instructions after operator instructions.
-2. Sets the default model if the id is present in `config.models.entries`.
-3. Intersects tool permissions via `intersect_tool_permissions` — allow sets
-   are intersected, deny sets are unioned. A malformed overlay is logged and
-   ignored (the config's own grants stand).
-4. Sets `declared_skills` and, when present, `output_schema` and
-   `output_max_retries`.
+1. Instructions are appended after operator instructions.
+2. Model preference takes effect only when the named model id exists in the
+   configured model entries; an unrecognised model is logged as a warning and
+   ignored.
+3. Tool permissions are intersected — allow sets are intersected, deny sets are
+   unioned. A malformed overlay is logged and ignored (the config's own grants
+   stand).
+4. Skills, output schema, and output retry limit are set directly from the
+   definition.
+
+### Creating and editing definitions
+
+Definitions can be created and edited through two surfaces:
+
+**API.** `POST /api/operator/agent-definitions` creates a definition;
+`PUT /api/operator/agent-definitions/{agent_id}` replaces one. A complete
+creation request:
+
+```json
+{
+  "id": "reader",
+  "display_name": "Read-only assistant",
+  "description": "An agent that can search and read but not write.",
+  "instructions": "You help the user find and read information. Do not modify files.",
+  "tool_permissions": {
+    "allow": ["knowledge_search", "knowledge_orient", "docs_read", "file_read", "file_list", "file_search", "url_fetch", "web_search"],
+    "deny": [],
+    "require_approval": []
+  }
+}
+```
+
+`description` is required. `topic_id` scopes the definition to one topic;
+omit it for a global definition. `tool_permissions` is a JSON object with
+`allow`, `deny`, and `require_approval` arrays — it intersects with the
+config cascade's grants, so it can only narrow what the config allows.
+Fields not shown above (`model_id`, `skills`, `output_schema`,
+`output_max_retries`) are optional.
+
+**Conversationally.** An agent whose definition grants the configuration
+tools can create and edit definitions through those tools during a session.
 
 ## Effort
 
@@ -464,12 +499,14 @@ and location approvals explicitly use a global location key.
 
 ### Timeout and rejection
 
-| Setting | Default | Source |
-|---|---|---|
-| `hitl.timeout` | `300` seconds (5 minutes) | `HitlConfig::default()` |
-| `hitl.timeout_policy` | `Reject` | `HitlConfig::default()` |
+| Setting | Default |
+|---|---|
+| `hitl.timeout` | `300` seconds (5 minutes) |
+| `hitl.timeout_policy` | `Reject` |
 
-Per-tool overrides via `RequireApprovalEntry::WithOptions { timeout, timeout_policy }`.
+Per-tool overrides are possible through a `require_approval` entry's
+`WithOptions` variant, which can set a custom `timeout` and
+`timeout_policy` for individual tools.
 
 **Timeout policies:**
 
@@ -524,6 +561,61 @@ speech_model = "tts-1"
 
 Both ids can be edited in the web UI under **Settings → Voice**; a save
 applies without a gateway restart.
+
+## Experimentation controls
+
+The `[experimentation]` section governs hidden runtime variant selection —
+alternative implementations behind stable surfaces, selected per turn and
+recorded in the audit trail.
+
+### Global switch
+
+```toml
+[experimentation]
+enabled = true   # default; set to false to disable all variant selection
+```
+
+When `enabled` is `false`, every location returns its default variant and
+records the decision as `disabled`. No alternative is ever drawn or forced.
+
+### Per-location controls
+
+Each location has its own `enabled` flag and an optional `forced_variant`
+pin:
+
+```toml
+[experimentation.locations."context.assembly"]
+enabled = true
+forced_variant = "working_norms"
+```
+
+- `enabled` — defaults to `true`. Setting it to `false` disables variant
+  selection for this location only; the default variant serves and the
+  decision records as `disabled`.
+- `forced_variant` — pins this location to the named variant for every turn.
+  The variant must be registered at the location's choice point; an
+  unrecognised name is refused. The decision records as `forced`. Omit or
+  remove the key to return to random selection.
+
+Location ids are application-defined strings. The shipped locations are
+`context.assembly`, `context.working_norms`, `task.prompt`, and
+`prompts.memory_curator`.
+
+### How the effect shows in operator history
+
+Every variant decision — drawn, forced, disabled, or default-only — is
+recorded in the audit trail. The operator history pane
+(`GET /api/operator/history`) lists each selection with the location, the
+variant that served, the reason (`drawn`, `forced`, `disabled`,
+`default_only`, `record_unavailable`), and the session and turn that
+produced it.
+
+### Configuration cascade
+
+Experimentation settings cascade through the file hierarchy (Global → Topic
+→ Agent). Per-location entries merge by location id across layers: a topic
+file can force a variant the global file leaves to chance, and an agent file
+can disable a location the topic file enables.
 
 ## Succession compaction
 
