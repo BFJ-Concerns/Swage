@@ -580,7 +580,9 @@ fn approval_root_for_request(
     let raw = if Path::new(requested).is_absolute() {
         PathBuf::from(requested)
     } else {
-        ctx.working_directory().join(requested)
+        canonical_existing_root(ctx.working_directory())
+            .ok()?
+            .join(requested)
     };
     let normalised = normalise_path(&raw);
     // Missing parents are part of the requested location, not a reason to
@@ -718,6 +720,63 @@ mod tests {
             validate_new_path(dir.path(), "link").is_err(),
             "symlink cycle must refuse resolution"
         );
+    }
+
+    #[cfg(unix)]
+    fn symlinked_working_directory_sibling_grant(write: bool) {
+        let files = tmp_workspace();
+        let real = files.path().join("real");
+        let links = files.path().join("links");
+        std::fs::create_dir_all(real.join("project")).unwrap();
+        std::fs::create_dir_all(real.join("project-Annexe")).unwrap();
+        std::fs::create_dir(&links).unwrap();
+        std::os::unix::fs::symlink(real.join("project"), links.join("project")).unwrap();
+        std::fs::write(real.join("project-Annexe/source.txt"), "marker").unwrap();
+        let mut ctx = swage_tool::context::MockToolContext {
+            agent_id: "agent".into(),
+            session_id: "session".into(),
+            working_directory: links.join("project"),
+            allowed_paths: vec![],
+            user_info: None,
+            call_id: None,
+            turn_id: None,
+        };
+        let request = if write {
+            "../project-Annexe/new/report.md"
+        } else {
+            "../project-Annexe/source.txt"
+        };
+        let error = location_approval_error(
+            if write { "file_write" } else { "file_read" },
+            &ctx,
+            request,
+            if write { "write" } else { "read" },
+            false,
+        );
+        let ToolError::RequiresLocationApproval { path, .. } = error else {
+            panic!("location approval expected")
+        };
+        ctx.allowed_paths.push(PathBuf::from(path));
+        let resolved = if write {
+            resolve_new_context_path(&ctx, request)
+        } else {
+            resolve_context_path(&ctx, request)
+        };
+        assert!(
+            resolved.is_ok(),
+            "the location grant must release the sibling request: {resolved:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_working_directory_sibling_read_is_released_by_its_grant() {
+        symlinked_working_directory_sibling_grant(false);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_working_directory_sibling_write_is_released_by_its_grant() {
+        symlinked_working_directory_sibling_grant(true);
     }
 
     // --- validate_path ---

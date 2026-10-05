@@ -1998,19 +1998,12 @@ pub async fn decide_approval(
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
         .ok_or_else(|| ApiError::not_found("approval", approval_id))?;
-    let sender = crate::approval_scope::claim_approval_waiter(&state, &approval).await?;
     let decision = ApprovalDecision {
         decision: req.decision,
         scope: req.scope,
         reason: req.reason.clone(),
     };
-    if sender.send(decision).is_err() {
-        crate::approval_scope::expire_approval(&state, &approval, None).await?;
-        return Err(ApiError::conflict(
-            "approval request expired; retry the operation".to_string(),
-        ));
-    }
-    crate::approval_scope::apply_approval_scope(&state, &approval, req.decision, req.scope).await?;
+    crate::approval_scope::decide_approval(&state, &approval, decision).await?;
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({

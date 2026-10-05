@@ -1263,12 +1263,26 @@ async fn native_result(
 }
 
 async fn native_approval_scope(scope: &str, read: bool) {
+    native_approval_scope_with_workspace(scope, read, false).await;
+}
+
+async fn native_approval_scope_with_workspace(scope: &str, read: bool, symlink: bool) {
     let _guard = SwageHomeGuard::isolate();
     let files = tempfile::TempDir::new().unwrap();
     let project = files.path().join("project");
     let annexe = files.path().join("project-Annexe");
     std::fs::create_dir(&project).unwrap();
     std::fs::create_dir(&annexe).unwrap();
+    let project = if symlink {
+        let links = files.path().join("links");
+        std::fs::create_dir(&links).unwrap();
+        let link = links.join("project");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&project, &link).unwrap();
+        link
+    } else {
+        project
+    };
     // Only the input to the read is seeded; the write's effect must come from the native tool.
     std::fs::write(annexe.join("source.txt"), "native approval marker").unwrap();
     let write = || {
@@ -1786,4 +1800,10 @@ async fn native_file_approval_missing_list_grants_only_that_directory() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_file_approval_missing_search_grants_only_that_directory() {
     native_missing_directory_approval("file_search").await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_file_approval_symlinked_workspace_releases_sibling_write() {
+    native_approval_scope_with_workspace("session", false, true).await;
 }
