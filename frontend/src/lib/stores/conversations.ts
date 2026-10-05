@@ -160,7 +160,7 @@ export function createConversationStore(): ConversationStore {
 
     const nextSummary: ConversationSummary = {
       ...updatedSummary,
-      last_activity: message.timestamp,
+      last_activity: message.origin === "platform" ? updatedSummary.last_activity : message.timestamp,
       ...(message.content && message.origin !== "platform" ? { message_preview: message.content } : {}),
       has_interrupted_turn:
         updatedSummary.has_interrupted_turn || message.turn_state === "interrupted",
@@ -226,7 +226,7 @@ export function createConversationStore(): ConversationStore {
 
     activeConversationStore.set({
       ...activeConversation,
-      last_activity: message.timestamp,
+      last_activity: message.origin === "platform" ? activeConversation.last_activity : message.timestamp,
       messages: [
         ...activeConversation.messages,
         appendedMessage,
