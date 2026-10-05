@@ -109,6 +109,10 @@ pub struct AppState {
     /// orderly drain.
     pub shutdown_signal: CancellationToken,
 
+    /// Whether graceful shutdown has begun cancelling active turns. Process
+    /// signals reach that cleanup without signalling the HTTP shutdown token.
+    pub(crate) turn_shutdown_started: Arc<AtomicBool>,
+
     /// Routes approval decisions from WebSocket handlers to waiting agent tasks.
     ///
     /// When an agent suspends on a tool awaiting human approval it inserts a
@@ -357,6 +361,7 @@ impl AppState {
             activity_tracker: Arc::new(ActivityTracker::new()),
             broadcast,
             shutdown_signal: CancellationToken::new(),
+            turn_shutdown_started: Arc::new(AtomicBool::new(false)),
             approval_channels: Arc::new(Mutex::new(HashMap::new())),
             session_approval_grants: Arc::new(Mutex::new(HashSet::new())),
             hook_registry,
