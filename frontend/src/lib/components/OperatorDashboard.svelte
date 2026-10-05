@@ -287,7 +287,7 @@
                   {/if}
                   · created by {describeCreator(schedule.creator)}
                 </p>
-                {#if schedule.next_run_at}
+                {#if schedule.status !== "paused" && schedule.next_run_at}
                   <p class="detail-copy">
                     next run {new Date(schedule.next_run_at).toLocaleString()}
                   </p>

@@ -2512,6 +2512,7 @@ struct WorkflowTurnAttempt {
     provider_failure: Option<String>,
 }
 
+#[derive(Clone, Copy)]
 enum FallbackFailure {
     Provider,
     UnknownModel,
@@ -3115,10 +3116,10 @@ async fn run_ephemeral_agent_call_with_admission(
     });
     let primary_error = match primary.outcome {
         Err(error) => {
-            if fallback_failure(&error).is_some_and(|failure| {
-                fallback_is_eligible(failure, emitted_output, dispatched_tool)
-            }) {
-                Some(error.to_string())
+            if let Some(failure) = fallback_failure(&error)
+                && fallback_is_eligible(failure, emitted_output, dispatched_tool)
+            {
+                Some((error.to_string(), failure))
             } else {
                 return Err(error.to_string().into());
             }
@@ -3148,8 +3149,9 @@ async fn run_ephemeral_agent_call_with_admission(
             if let Some(message) = primary.provider_failure
                 && fallback_is_eligible(FallbackFailure::Provider, emitted_output, dispatched_tool)
             {
-                Some(format!(
-                    "AgentCallError: provider failed before output: {message}"
+                Some((
+                    format!("AgentCallError: provider failed before output: {message}"),
+                    FallbackFailure::Provider,
                 ))
             } else if let Some(turn) =
                 turn.filter(|turn| turn.state != swage_storage::TurnState::Completed)
@@ -3166,7 +3168,7 @@ async fn run_ephemeral_agent_call_with_admission(
     };
     let final_events = match primary_error {
         None => primary.events,
-        Some(error) => {
+        Some((error, failure)) => {
             let Some(fallback_model) = request
                 .session
                 .is_none()
@@ -3190,6 +3192,9 @@ async fn run_ephemeral_agent_call_with_admission(
             {
                 admission.admit(route.provider_id).await?;
             }
+            // Catalogue resolution fails before input is persisted; a
+            // provider failure occurs after the prompt is in the thread.
+            let reuse_persisted_input = matches!(failure, FallbackFailure::Provider);
             let fallback = execute_workflow_agent_turn(
                 state,
                 session_id,
@@ -3203,7 +3208,7 @@ async fn run_ephemeral_agent_call_with_admission(
                 composition,
                 journal_entry_id,
                 Some(fallback_model.clone()),
-                true,
+                reuse_persisted_input,
             )
             .await?;
             fallback.outcome.map_err(|fallback_error| {
@@ -11189,13 +11194,22 @@ mod tests {
             .expect("research sweep run");
         assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
         let output = run.final_output.expect("terminal research report");
+        // The gatherer for the comparison source claimed a recording the
+        // knowledge base does not hold: the store decides, and the report
+        // says both what the gatherer claimed and what the store shows.
+        assert_eq!(output["failed_sources"].as_array().map(Vec::len), Some(1));
         assert_eq!(
-            output["failed_sources"],
-            serde_json::json!([{
-                "url": "https://example.test/failed",
-                "reason": "unreachable"
-            }])
+            output["failed_sources"][0]["url"],
+            "https://example.test/failed"
         );
+        let failure_reason = output["failed_sources"][0]["reason"]
+            .as_str()
+            .expect("failed source carries its reason");
+        assert!(
+            failure_reason.contains("holds no observation for this source"),
+            "{failure_reason}"
+        );
+        assert!(failure_reason.ends_with("unreachable"), "{failure_reason}");
         assert_eq!(
             output["withheld_claims"],
             serde_json::json!([{
@@ -11208,7 +11222,14 @@ mod tests {
             .as_str()
             .and_then(|id| Uuid::parse_str(id).ok())
             .expect("terminal finding carries a citation id returned by knowledge_cite");
-        assert!(output["findings"][0].get("quote").is_none());
+        // Each finding carries its own trail — the accepted quote, the cited
+        // observation and the source's origin — so a reader follows the claim
+        // to its evidence without a backend lookup.
+        assert_eq!(output["findings"][0]["quote"], RESEARCH_SWEEP_QUOTE);
+        assert_eq!(
+            output["findings"][0]["source"],
+            "https://example.test/landed"
+        );
 
         let observations = storage
             .list_observations_by_topic(topic.id)
@@ -11233,6 +11254,10 @@ mod tests {
             .expect("persisted citation");
         assert_eq!(citation.observation_id, observations[0].id);
         assert_eq!(citation.quoted_text, RESEARCH_SWEEP_QUOTE);
+        assert_eq!(
+            output["findings"][0]["observation_id"],
+            citation.observation_id.to_string()
+        );
 
         let requests = provider.requests.lock().expect("requests");
         // Scope, gather (fetch, record, report) ×2 sources, organise ×2, synthesise ×2.
@@ -12235,8 +12260,12 @@ mod tests {
             } else if text.contains("Deliver research findings.") {
                 match tool_result("cite-landed") {
                     Some(result) => scripted_text_output(&format!(
-                        r#"{{"findings":[{{"claim":"The landed source supports the purpose.","citation_id":"{}"}}],"withheld":[{{"claim":"The comparison is conclusive.","reason":"The comparison source was unreachable."}}]}}"#,
-                        result["citation_id"].as_str().expect("citation id")
+                        r#"{{"findings":[{{"claim":"The landed source supports the purpose.","citation_id":"{}","quote":"{}","observation_id":"{}","source":"https://example.test/landed"}}],"withheld":[{{"claim":"The comparison is conclusive.","reason":"The comparison source was unreachable."}}]}}"#,
+                        result["citation_id"].as_str().expect("citation id"),
+                        result["quote"].as_str().expect("accepted quote"),
+                        result["observation_id"]
+                            .as_str()
+                            .expect("cited observation"),
                     )),
                     None => {
                         let observation_id = self
@@ -15145,7 +15174,7 @@ mod tests {
                 outputs: std::sync::Mutex::new(outputs),
                 requests: std::sync::Mutex::new(vec![]),
             }),
-            swage_config::ResolvedConfig::default(),
+            crate::turn::tests::sandboxed_turn_config(),
             crate::tool::ToolDispatcher::allow_all(vec![
                 Arc::new(crate::turn::tests::SandboxedFileTool::new("file_read"))
                     as Arc<dyn crate::tool::Tool>,
@@ -15882,7 +15911,7 @@ mod tests {
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider,
-            swage_config::ResolvedConfig::default(),
+            crate::turn::tests::sandboxed_turn_config(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
@@ -25860,6 +25889,15 @@ protocol = "openai"
             "the unknown model must fail before a provider request"
         );
         assert_eq!(requests[0].model.as_deref(), Some("fallback-wire"));
+        assert_eq!(
+            requests[0]
+                .messages
+                .iter()
+                .filter(|message| message.text_content() == "answer")
+                .count(),
+            1,
+            "an unknown primary must pass the original prompt to its fallback exactly once"
+        );
 
         let (state, storage, provider, topic_id) = fallback_test_state(vec![
             vec![swage_core::StreamChunk::Error {
@@ -26420,7 +26458,7 @@ protocol = "openai"
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(provider) as Arc<dyn swage_provider::LlmProvider>,
-            swage_config::ResolvedConfig::default(),
+            crate::turn::tests::sandboxed_turn_config(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
@@ -26571,7 +26609,7 @@ protocol = "openai"
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(provider) as Arc<dyn swage_provider::LlmProvider>,
-            swage_config::ResolvedConfig::default(),
+            crate::turn::tests::sandboxed_turn_config(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
@@ -26777,7 +26815,7 @@ protocol = "openai"
             Arc::new(PendingWithoutEvidenceProvider {
                 pending: Arc::clone(&pending),
             }),
-            swage_config::ResolvedConfig::default(),
+            crate::turn::tests::sandboxed_turn_config(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );

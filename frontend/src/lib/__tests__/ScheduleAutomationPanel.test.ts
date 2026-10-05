@@ -90,6 +90,39 @@ describe("ScheduleAutomationPanel", () => {
     vi.clearAllMocks();
   });
 
+  it.each([false, true])("hides a paused schedule's next run while retaining an active schedule's (gated: %s)", async (gated) => {
+    const nextRun = "2026-01-01T01:00:00Z";
+    const paused = makeSchedule({
+      id: "paused-schedule",
+      message: "Paused reminder",
+      status: "paused",
+      spec: { kind: "interval", every: "every 1 minutes" },
+      gate: gated ? { model: "cheap", criteria: null } : null,
+      next_run_at: nextRun,
+    });
+    const active = {
+      ...paused,
+      id: "active-schedule",
+      message: "Active reminder",
+      status: "active" as const,
+    };
+    vi.mocked(operatorApi.listSchedules).mockResolvedValue({ schedules: [paused, active] });
+    component = mount(ScheduleAutomationPanel, {
+      target: document.body,
+      props: { topicId: "topic-1", sessionId: "session-1" },
+    });
+    await flushUi();
+
+    const rows = [...document.querySelectorAll(".schedule-row")];
+    const pausedRow = rows.find((row) => row.textContent?.includes("Paused reminder"));
+    const activeRow = rows.find((row) => row.textContent?.includes("Active reminder"));
+    expect(pausedRow).toBeDefined();
+    expect(activeRow).toBeDefined();
+    expect(activeRow?.textContent).toContain(new Date(nextRun).toLocaleString());
+    expect(pausedRow?.textContent).not.toContain(new Date(nextRun).toLocaleString());
+    expect(pausedRow?.textContent).not.toContain("next");
+  });
+
   it("lists schedules with their status and run history", async () => {
     component = mount(ScheduleAutomationPanel, {
       target: document.body,
@@ -278,6 +311,39 @@ describe("ScheduleAutomationPanel", () => {
         { kind: "file", path: "notes.md" },
       ],
     });
+  });
+
+  it("shows a gate's declaration flags on its schedule, so unobserved criteria are visible before the first fire", async () => {
+    const message =
+      "This gate declares no files to observe, so its criteria are decided against the schedule's own record alone.";
+    const flagged = makeSchedule({
+      id: "flagged",
+      message: "Work the inbox.",
+      gate: { model: "cheap", criteria: "run only when inbox/todo.txt is non-empty" },
+      gate_warnings: [{ kind: "unobserved_criteria", message }],
+    });
+    const seeing = makeSchedule({
+      id: "seeing",
+      message: "Watch the inbox.",
+      gate: {
+        model: "cheap",
+        criteria: "run only when inbox/todo.txt is non-empty",
+        observations: [{ kind: "file", path: "inbox/todo.txt" }],
+      },
+    });
+    vi.mocked(operatorApi.listSchedules).mockResolvedValue({ schedules: [flagged, seeing] });
+    component = mount(ScheduleAutomationPanel, {
+      target: document.body,
+      props: { topicId: "topic-1", sessionId: "session-1" },
+    });
+    await flushUi();
+
+    const rows = [...document.querySelectorAll(".schedule-row")];
+    const flaggedRow = rows.find((row) => row.textContent?.includes("Work the inbox."));
+    const seeingRow = rows.find((row) => row.textContent?.includes("Watch the inbox."));
+    expect(flaggedRow?.querySelector(".gate-warning")?.textContent).toBe(message);
+    expect(seeingRow?.querySelector(".gate-warning")).toBeNull();
+    expect(seeingRow?.textContent).toContain("watching 1 file");
   });
 
   it("blocks a ticked gate with a blank model before submitting", async () => {

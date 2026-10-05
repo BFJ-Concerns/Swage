@@ -10,7 +10,8 @@ use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
 use crate::tool::workspace::{
-    continuable_output_value, is_binary_content, location_approval_error, resolve_context_path,
+    FileContent, continuable_output_value, location_approval_error, read_file_content,
+    resolve_context_path,
 };
 
 // ---------------------------------------------------------------------------
@@ -72,8 +73,7 @@ impl Tool for FileReadTool {
         let resolved = resolve_context_path(ctx, &path_str)
             .map_err(|_| location_approval_error(self.name(), ctx, &path_str, "read"))?;
 
-        // Read raw bytes from disk.
-        let bytes = tokio::fs::read(&resolved.path).await.map_err(|e| {
+        let content = read_file_content(&resolved.path).await.map_err(|e| {
             let message = match e.kind() {
                 std::io::ErrorKind::NotFound => format!("File not found: {path_str}"),
                 std::io::ErrorKind::PermissionDenied => {
@@ -87,16 +87,18 @@ impl Tool for FileReadTool {
             }
         })?;
 
-        // Reject binary files — they cannot be meaningfully displayed as text.
-        if is_binary_content(&bytes) {
-            return Err(ToolError::ExecutionFailed {
-                name: self.name().to_owned(),
-                message: format!(
-                    "File appears to be binary ({} bytes). Cannot display binary content.",
-                    bytes.len()
-                ),
-            });
-        }
+        let bytes = match content {
+            FileContent::Text(bytes) => bytes,
+            // Reject binary files — they cannot be meaningfully displayed as text.
+            FileContent::Binary { len } => {
+                return Err(ToolError::ExecutionFailed {
+                    name: self.name().to_owned(),
+                    message: format!(
+                        "File appears to be binary ({len} bytes). Cannot display binary content."
+                    ),
+                });
+            }
+        };
 
         // Convert to UTF-8, replacing any invalid sequences rather than failing.
         let text = String::from_utf8_lossy(&bytes).into_owned();

@@ -377,14 +377,16 @@ pub(super) async fn project_agent_events(
                 turn_id,
                 attempt,
                 max_retries,
-                provider,
+                provider: _,
                 wait_ms,
             } => {
+                // The client displays this field as the requested model. A retry
+                // decorator's identity can still name the provider's default.
                 let retry_event = ServerEvent::ProviderRetryStarted {
                     turn_id,
                     attempt,
                     max_retries,
-                    provider,
+                    provider: model_name.to_owned(),
                     wait_ms,
                 };
                 if subscription.lock().await.should_deliver(&retry_event) {
@@ -395,14 +397,14 @@ pub(super) async fn project_agent_events(
                 turn_id,
                 attempt,
                 max_retries,
-                provider,
+                provider: _,
                 success,
             } => {
                 let retry_event = ServerEvent::ProviderRetrySettled {
                     turn_id,
                     attempt,
                     max_retries,
-                    provider,
+                    provider: model_name.to_owned(),
                     success,
                 };
                 if subscription.lock().await.should_deliver(&retry_event) {
@@ -424,6 +426,8 @@ pub(super) async fn project_agent_events(
             }
             AgentEvent::TurnCompleted {
                 turn_id,
+                incomplete_reason,
+                incomplete_account,
                 input_tokens,
                 output_tokens,
                 structured_output,
@@ -491,7 +495,22 @@ pub(super) async fn project_agent_events(
                     }
                 }
 
+                if let Some(account) = incomplete_account {
+                    match crate::service::message_view(
+                        *account,
+                        Some(swage_protocol::client::conversation::TurnState::Incomplete),
+                        Vec::new(),
+                    ) {
+                        Ok(view) => {
+                            crate::service::announce_appended_message(state, session_id, view)
+                        }
+                        Err(error) => {
+                            record_integrity_lost.get_or_insert(error.to_string());
+                        }
+                    }
+                }
                 let _ = ws_tx.send(ServerEvent::TurnComplete {
+                    incomplete_reason,
                     turn_id,
                     input_tokens: ws_input,
                     output_tokens: ws_output,
@@ -506,6 +525,16 @@ pub(super) async fn project_agent_events(
                 if provider_failure && let Some(observer) = provider_failure_observer {
                     *observer.lock().unwrap_or_else(|error| error.into_inner()) =
                         Some(message.clone());
+                }
+                if let Some(reason) = record_failure_explanation(
+                    state,
+                    session_id,
+                    turn_id.unwrap_or(prepared_turn_id),
+                    &message,
+                )
+                .await
+                {
+                    record_integrity_lost.get_or_insert(reason);
                 }
                 let _ = ws_tx.send(ServerEvent::Error {
                     code: "agent_error".to_string(),
@@ -533,10 +562,12 @@ pub(super) async fn project_agent_events(
                 });
             }
             AgentEvent::DelegationCompleted {
+                incomplete_reason,
                 target_agent_id,
                 success,
             } => {
                 let _ = ws_tx.send(ServerEvent::DelegationCompleted {
+                    incomplete_reason,
                     parent_turn_id: turn_id.unwrap_or(prepared_turn_id),
                     child_turn_id: None,
                     target_agent_id,
@@ -622,4 +653,37 @@ pub(crate) fn route_approval_agent_event(
         }
         _ => false,
     }
+}
+
+/// Keep the explanation a failed turn showed the person, so the
+/// conversation shows it after a reload as it did live.
+///
+/// Reconstructive record (record_durability.rs): the turn's Failed state is
+/// the constitutive fact; the explanation enriches it. Its loss is named in
+/// the trail; `Some(reason)` means even that could not be recorded, and the
+/// caller escalates.
+pub(super) async fn record_failure_explanation(
+    state: &AppState,
+    session_id: Uuid,
+    turn_id: Uuid,
+    message: &str,
+) -> Option<String> {
+    let error = state
+        .storage
+        .record_turn_failure_message(turn_id, message)
+        .await
+        .err()?;
+    tracing::warn!(%error, %turn_id, "failed to persist failure_message");
+    record_durability::record_reconstruction_gap(
+        state.storage.as_ref(),
+        Some(session_id),
+        turn_id,
+        "failure_message",
+        &error,
+    )
+    .await
+    .err()
+    .map(|gap_error| {
+        format!("failure explanation could not be persisted or recorded as missing: {gap_error}")
+    })
 }

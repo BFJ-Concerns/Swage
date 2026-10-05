@@ -246,17 +246,50 @@ Judge semantically: does the built thing fit the brief; does it fit the commissi
 
 Every command your verdict leans on is evidenced by the command line as executed plus enough of its actual output to support the claim — or an explicit "could not run: <reason>"; a run cited with neither is an unevidenced claim, not a completed check. Report to the findings contract: examined (what you read, ran, and exercised — and what you could not), findings (each with severity, confidence, a verbatim evidence quote or command output, and unresolved_prior — true only when it restates a finding from the earlier verdict that its fix round failed to resolve, false otherwise, and always false on a first verification), rejected_concerns, confidence in your own read (bounded by the unseen list) and its one-line why. Write the same content to ${unitDir}/${refixRound !== null ? `verdict-refix-${refixRound}.md` : "verdict.md"}.
 
-Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one and put nothing schema-shaped in any other fence. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
+Reply with a single JSON value conforming to the schema. Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — every JSON value in your reply is checked against the schema and the LAST valid one is read, so use exactly one fence and put nothing schema-shaped after it. A reply that is the bare JSON value alone, with no prose at all, also works. Never restate the schema or show a sample answer; the only JSON value in your reply is your actual answer.`;
+
+let fixReport = null;
+const autonomousRounds = [];
 
 // The verifier is a held worker of the opposite family: opened blind to the
 // builder's session, then continued for every re-verification, so the
 // claims it derived before reading the report are what it re-examines.
-const verifier = await session({
-  model: "claude-opus-5-5", effort: "medium", cwd: worktree, label: "verifier",
-});
+const verifierEnvelope = { model: "claude-opus-5-5", effort: "medium", cwd: worktree, label: "verifier" };
+let verifier = await session(verifierEnvelope);
 dispatching("verify", "re-briefed", "cross-family verification is independent by design: a fresh reader of the opposite family, sharing nothing with the builder's session; its re-verifications continue this worker");
-let verdict = await send(verifier, verifyPrompt(null, null), { schema: findingsSchema, label: "verify" });
-if (!verdict) throw new Error("verifier stage returned nothing usable — re-run, never read as clean");
+
+// A verifier turn that exhausts the findings schema returns null: the reader
+// replied, but nothing it said validated as a findings report. That is a
+// failed verification, never a clean one and never the operator's to
+// untangle. The recovery is one fresh reader of the same envelope — a held
+// worker cannot be re-shaped, and a second attempt by the reader that
+// drifted repeats the drift — and a second exhaustion ends the run with an
+// explicit outcome. The exhausted turns stay in the run record under their
+// labels; the journal line names them so the cause can be read before any
+// re-dispatch.
+const verifyTurn = async (label, prompt) => {
+  let result = await send(verifier, prompt, { schema: findingsSchema, label });
+  if (result !== null) return result;
+  log(`[verify] ${label}: the verifier replied, but nothing it said validated against the findings schema; its turns are in the run record under label ${label}. Re-briefing one fresh reader of the same envelope.`);
+  await close(verifier);
+  verifier = await session(verifierEnvelope);
+  dispatching(label, "re-briefed", "the previous reader exhausted the findings schema; a fresh reader of the same envelope replaces it, because a held worker cannot be re-shaped and a second attempt by the reader that drifted repeats the drift");
+  result = await send(verifier, prompt, { schema: findingsSchema, label: `${label}:retry` });
+  if (result !== null) return result;
+  log(`[verify] ${label}: the replacement reader also exhausted the findings schema; this unit's verification has failed.`);
+  return null;
+};
+// The explicit failed outcome: nothing landed, no verdict exists, and the
+// envelope says why. The lead treats it as a failed unit to re-dispatch
+// after reading the exhausted turns, never as a clean result.
+const verificationFailed = (label) => ({
+  outcome: "verification-failed",
+  reason: `the verifier produced no schema-valid findings report at stage ${label} across two readers; their replies are in the run record under labels ${label} and ${label}:retry`,
+  sketch, buildReport, verdict: null, fixReport, autonomous_rounds: autonomousRounds, landing: null,
+});
+
+let verdict = await verifyTurn("verify", verifyPrompt(null, null));
+if (verdict === null) return verificationFailed("verify");
 if (!verdict.examined || !verdict.examined.trim())
   throw new Error("verifier examined-account empty — invalid report, re-run");
 
@@ -291,11 +324,9 @@ const autoFixSchema = {
 
 const autoFixPrompt = (round) => `The verifier raised findings against your unit (${unitDir}/${round === 0 ? "verdict.md" : `verdict-refix-${round - 1}.md`}), at least one of them severe. No orchestrator triage has happened yet: every finding in that verdict is yours to fix.${rulings.length ? `\n\nThe orchestrator's rulings below hold the brief's standing, and a conflicting ruling supersedes it — delivering what a ruling withheld is a defect, not a fix. Where two conflict, the later governs.\n<orchestrator-rulings>\n${rulings.map((r, i) => `${i + 1}. ${r}`).join("\n")}\n</orchestrator-rulings>\n` : ""} Your brief's standing constraints remain in force: work only in ${worktree}; never push, open PRs, or merge the unit's work outward — publication is the landing stage's, though merging the integration lane into the unit branch stays permitted where the work needs it; the spine exemplar's imitation boundary still binds. A finding you cannot fix honestly as written — the demanded proof or change cannot be produced without manufacturing state or asserting something untrue, or the finding disputes the brief or a ruling rather than the work — goes to blocked in your reply and in ${unitDir}/report.md, with why. A duplication finding whose verdict routes it to filing (adoption needs a cross-unit extraction) is not yours either — leave it as it stands rather than growing the unit's diff. Fix the rest. Commit as you go. Verify each fix with the checks covering the surfaces it touched — no project gate re-runs per fix round; the lane gate covers the composed result. Then make the whole of ${unitDir}/report.md true about the current tree — re-derive what changed from git log over the unit's commits and correct every section the fixes dated (built, tried-and-abandoned, verification, confidence, any commit inventory), not just the sections a finding quoted.
 
-Reply with JSON: summary (what you fixed, in two or three sentences), head_commit (the new head), blocked (the findings deliberately left unfixed, each by its 0-based index in the verdict, with why; empty array when none). Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — the FIRST fenced block in your reply is the one that is read, so use exactly one. A reply that is the bare JSON value alone also works.`;
+Reply with JSON: summary (what you fixed, in two or three sentences), head_commit (the new head), blocked (the findings deliberately left unfixed, each by its 0-based index in the verdict, with why; empty array when none). Reason first if you need to, then give the JSON inside a single \`\`\`json fenced code block — every JSON value in your reply is checked against the schema and the LAST valid one is read, so use exactly one fence and put nothing schema-shaped after it. A reply that is the bare JSON value alone also works.`;
 
-let fixReport = null;
 let rounds = 0;
-const autonomousRounds = [];
 let handover = null;
 
 while (severesIn(verdict).length) {
@@ -312,10 +343,8 @@ while (severesIn(verdict).length) {
   fixReport = autoFix.summary;
   const verifierIdle = await idleReading(verifier);
   dispatching(`verify:refix:${rounds}`, "continued", `a re-verification after its own verdict: the reader re-examines the claims it derived and the fix delta against what it already saw (${verifierIdle.phrase}; continued regardless)`);
-  verdict = await send(verifier, verifyPrompt(rounds, "autonomous"), {
-    schema: findingsSchema, label: `verify:refix:${rounds}`,
-  });
-  if (!verdict) throw new Error("re-verification returned nothing usable — re-run, never read as clean");
+  verdict = await verifyTurn(`verify:refix:${rounds}`, verifyPrompt(rounds, "autonomous"));
+  if (verdict === null) return verificationFailed(`verify:refix:${rounds}`);
   if (!verdict.examined || !verdict.examined.trim())
     throw new Error("re-verifier examined-account empty — invalid report, re-run");
   rounds++;
@@ -419,10 +448,8 @@ while (true) {
   );
   const verifierIdle = await idleReading(verifier);
   dispatching(`verify:refix:${rounds}`, "continued", `a re-verification after its own verdict, over the delta the orchestrator's dispositions authorised (${verifierIdle.phrase}; continued regardless)`);
-  verdict = await send(verifier, verifyPrompt(rounds, "directed"), {
-    schema: findingsSchema, label: `verify:refix:${rounds}`,
-  });
-  if (!verdict) throw new Error("re-verification returned nothing usable — re-run, never read as clean");
+  verdict = await verifyTurn(`verify:refix:${rounds}`, verifyPrompt(rounds, "directed"));
+  if (verdict === null) return verificationFailed(`verify:refix:${rounds}`);
   if (!verdict.examined || !verdict.examined.trim())
     throw new Error("re-verifier examined-account empty — invalid report, re-run");
   rounds++;
@@ -439,6 +466,7 @@ const landingSchema = {
     landed: { type: "boolean" },
     detail: { type: "string" },
     merge_commit: { type: "string" },
+    already_integrated: { type: "boolean" },
     pr_number: { type: "integer" },
     pr_url: { type: "string" },
     blocked_on: { type: "string" },
@@ -447,8 +475,8 @@ const landingSchema = {
 
 const landPrompt =
   mergePolicy === "direct-merge"
-    ? `Land the finished unit. First read ${annexeConfigPath} for push_policy. From ${worktree}, merge the unit branch into the repository's main branch. A conflicted merge is yours to resolve: keep both sides' behaviour (the brief's known sibling overlaps say where the sides meet), then run the project's full gate — the whole-tree suite — on the resolved tree; the resolution stands only when it is green. Report as blocked ({landed:false, blocked_on:"conflict", detail: what contradicts what}) only a genuine semantic contradiction — the same knob given different semantics, intent the sides cannot both keep — or a resolution whose gate stays red; abort the merge before reporting. Push main only if push_policy is "push-on-land"; under "hold-for-user" the merge stays local and detail says so. Reply with {landed, detail, merge_commit} — landed true only if the merge commit exists on main (verify with git log). Reply with the JSON last.`
-    : `Publish the finished unit as a blocked PR. First read ${annexeConfigPath} for push_policy: under "hold-for-user", do NOT push — reply {landed:false, blocked_on:"push_policy hold-for-user", detail:...} and stop. Otherwise: write ${unitDir}/pr.md whole from ${unitDir}/report.md (What changed / Why / What must be true / Known gaps), push the branch (git push -u origin <branch>), open the PR via the forge API — POST /api/v1/repos/<owner>/<repo>/pulls, title "WIP: <unit title>", body from pr.md, head the branch, base ${integrationBranch} (the unit's integration lane — the structural branch for lane units, whose promotion PR carries them to main later; the parent branch for a stacked unit whose work builds on a sibling's unmerged branch; or main itself for a Lane: main unit); tokens under ~/.config/forgejo/ (instances.toml maps the origin host to url and token). Never push refs/for/* (AGit is forbidden — no tracked branch, no multiline body); on auth failure reply {landed:false, blocked_on:"forge auth", detail:...}. Confirm by API read that the PR exists with a non-empty body; landed is true only on that confirmation. Reply with {landed, detail, pr_number, pr_url} — the JSON last.`;
+    ? `Land the finished unit. First read ${annexeConfigPath} for push_policy. From ${worktree}, merge the unit branch into the repository's main branch. A conflicted merge is yours to resolve: keep both sides' behaviour (the brief's known sibling overlaps say where the sides meet), then run the project's full gate — the whole-tree suite — on the resolved tree; the resolution stands only when it is green. Report as blocked ({landed:false, blocked_on:"conflict", detail: what contradicts what}) only a genuine semantic contradiction — the same knob given different semantics, intent the sides cannot both keep — or a resolution whose gate stays red; abort the merge before reporting. Push main only if push_policy is "push-on-land"; under "hold-for-user" the merge stays local and detail says so. A merge that reports the branch already contained in main ("Already up to date") is an already-integrated unit, not a blocked landing: nothing changed, so there is nothing to abort — run the full gate on main as usual and reply {landed:true, already_integrated:true, merge_commit: the main commit that contains the branch head, detail: "already integrated; gate green" or "already integrated; gate red: <what failed>"} — a red gate on a main this unit did not change is lane state for the orchestrator, never a blocked landing. Reply with {landed, detail, merge_commit} — landed true only if the merge commit exists on main (verify with git log) or main already contains the branch head. landed:false always carries blocked_on naming what blocked the landing. Reply with the JSON last.`
+    : `Publish the finished unit as a blocked PR. First read ${annexeConfigPath} for push_policy: under "hold-for-user", do NOT push — reply {landed:false, blocked_on:"push_policy hold-for-user", detail:...} and stop. Otherwise: write ${unitDir}/pr.md whole from ${unitDir}/report.md (What changed / Why / What must be true / Known gaps), push the branch (git push -u origin <branch>), open the PR via the forge API — POST /api/v1/repos/<owner>/<repo>/pulls, title "WIP: <unit title>", body from pr.md, head the branch, base ${integrationBranch} (the unit's integration lane — the structural branch for lane units, whose promotion PR carries them to main later; the parent branch for a stacked unit whose work builds on a sibling's unmerged branch; or main itself for a Lane: main unit); tokens under ~/.config/forgejo/ (instances.toml maps the origin host to url and token). Never push refs/for/* (AGit is forbidden — no tracked branch, no multiline body); on auth failure reply {landed:false, blocked_on:"forge auth", detail:...}. Confirm by API read that the PR exists with a non-empty body; landed is true only on that confirmation. Before pushing, check whether ${integrationBranch} already contains the branch head (git fetch, then git merge-base --is-ancestor <branch> origin/${integrationBranch}): if it does, there is nothing to publish — reply {landed:true, already_integrated:true, detail: the containing commit} with no PR opened and no pr_number. landed:false always carries blocked_on naming what blocked the landing. Reply with {landed, detail, pr_number, pr_url} — the JSON last.`;
 
 // The landing continues the builder while its session is warm — it knows
 // the unit it is publishing — and re-briefs a fresh worker once the triage
@@ -464,6 +492,24 @@ if (builderIdle.stale === false) {
   dispatching("land", "re-briefed", `the landing is mechanical and ${unitDir}/report.md carries what it needs; ${builderIdle.stale === true ? "the builder's session is cold" : "the route declares no staleness threshold, so warmth is unknown"} (${builderIdle.phrase})`);
   landing = await agent(landPrompt, { schema: landingSchema, cwd: worktree, label: "land", timeoutMs: 1800000 });
 }
+// A landing turn that exhausts the landing schema returns null: the worker
+// replied, but nothing it said validated. One fresh worker is re-briefed
+// (report.md carries what a landing needs); a second exhaustion is a
+// blocked landing whose blocked_on names the cause, so the envelope keeps
+// the shape the lead reads and the journal says where the replies are.
+if (landing === null) {
+  log("[land] the landing worker replied, but nothing it said validated against the landing schema; its turns are in the run record under label land. Re-briefing one fresh worker.");
+  dispatching("land:retry", "re-briefed", "the previous landing worker exhausted the landing schema; a fresh worker reads report.md and lands from it");
+  landing = await agent(landPrompt, { schema: landingSchema, cwd: worktree, label: "land:retry", timeoutMs: 1800000 });
+  if (landing === null) {
+    log("[land] the replacement landing worker also exhausted the landing schema; the landing is blocked.");
+    landing = {
+      landed: false,
+      blocked_on: "landing reply never validated against the landing schema",
+      detail: "two landing workers replied without a schema-valid landing report; their turns are in the run record under labels land and land:retry — read them before re-dispatching",
+    };
+  }
+}
 // Closed on the success path so the journal records intent; the early
 // returns above are run-ending, and a run ending by any path closes every
 // worker it still holds.
@@ -474,4 +520,23 @@ await close(verifier);
 // obligation's evidence from this returned envelope (references/ledger.md),
 // and files issues_findings — sub-severe findings accepted by default at the
 // land — to the annexe issue log.
-return { outcome: landing && landing.landed ? "landed" : "landing-blocked", sketch, buildReport, verdict, fixReport, autonomous_rounds: autonomousRounds, issues_findings: issuesFindings, landing };
+// A reply that claims a no-op and a publication at once is no verdict: the
+// envelope keeps the shape the lead reads, with blocked_on naming the
+// contradiction, rather than classifying on one half of it.
+if (landing && landing.landed && landing.already_integrated === true
+    && (landing.pr_number !== undefined || (landing.pr_url && landing.pr_url.trim()))) {
+  log(`[land] the landing reply contradicts itself: already_integrated with a PR (${landing.pr_number ?? landing.pr_url}); not read as a landing.`);
+  landing = {
+    landed: false,
+    blocked_on: "landing reply contradicts itself: already_integrated together with a PR",
+    detail: `the worker replied ${JSON.stringify(landing)}; read its turns in the run record before re-dispatching`,
+  };
+}
+// Three landing outcomes, derived from the returned envelope: "landed" (a
+// merge commit or a confirmed PR), "already-integrated" (the lane already
+// held the branch head; landed stays true so the lead reads it as done), and
+// "landing-blocked" (landed false, with blocked_on naming the cause).
+const landingOutcome = !landing || !landing.landed
+  ? "landing-blocked"
+  : landing.already_integrated === true ? "already-integrated" : "landed";
+return { outcome: landingOutcome, sketch, buildReport, verdict, fixReport, autonomous_rounds: autonomousRounds, issues_findings: issuesFindings, landing };

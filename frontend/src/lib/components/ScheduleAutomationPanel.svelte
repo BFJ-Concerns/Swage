@@ -344,13 +344,18 @@
                 }`
               : ""}
           </span>
+          {#each schedule.gate_warnings ?? [] as warning (warning.kind)}
+            <p class="gate-warning" role="note">{warning.message}</p>
+          {/each}
         </div>
         <div class="schedule-facts">
           <span class="status status-{schedule.status}">{schedule.status}</span>
           <span class="creator creator-{schedule.creator.kind}"
             >by {describeCreator(schedule.creator)}</span
           >
-          <span>next {formatTime(schedule.next_run_at ?? null)}</span>
+          {#if schedule.status !== "paused"}
+            <span>next {formatTime(schedule.next_run_at ?? null)}</span>
+          {/if}
         </div>
         <div class="scope-toggle row-actions">
           <button
@@ -487,6 +492,12 @@
     display: flex;
     align-items: center;
     gap: 8px;
+  }
+
+  .gate-warning {
+    margin: 0.25rem 0 0;
+    font-size: 0.85rem;
+    color: var(--ink-orange);
   }
 
   .gate-toggle input[type="checkbox"] {

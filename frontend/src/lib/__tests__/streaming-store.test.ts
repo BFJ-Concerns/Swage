@@ -1311,3 +1311,16 @@ describe("withConversationAutoCreate", () => {
     expect(connection.sendMessage).not.toHaveBeenCalled();
   });
 });
+
+
+describe("output-limit completion", () => {
+  it("keeps streamed partial work incomplete when the provider reaches its limit", () => {
+    const conversations = createMockConversationStore();
+    const store = createStreamingStore({ conversationStore: conversations });
+    store.handleServerEvent({ type: "token", content: "The answer ends at a" });
+    store.handleServerEvent(JSON.parse('{"type":"turn_complete","turn_id":"limited-turn","incomplete_reason":"max_tokens"}'));
+    expect(conversations.getMessages()[0].turn_state).toBe("incomplete");
+    expect(conversations.getMessages()[0].content).toBe("The answer ends at a");
+    expect(store.isStreaming).toBe(false);
+  });
+});

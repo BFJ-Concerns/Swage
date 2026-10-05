@@ -1519,7 +1519,7 @@ impl Tool for SecretEchoTool {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_tool_call_is_recorded_before_it_runs_and_settled_as_interrupted_on_cancel() {
+async fn a_tool_call_is_recorded_before_it_runs_and_settled_as_cancelled_on_cancel() {
     let (storage, topic, session, thread) = setup_conversation("agent-a").await;
     let provider = Arc::new(StreamingProvider::new(vec![vec![
         StreamChunk::ToolUse {
@@ -1581,14 +1581,14 @@ async fn a_tool_call_is_recorded_before_it_runs_and_settled_as_interrupted_on_ca
         .await
         .expect("calls");
     assert_eq!(settled.len(), 1);
-    assert_eq!(settled[0].status.as_deref(), Some("interrupted"));
+    assert_eq!(settled[0].status.as_deref(), Some("cancelled"));
     assert_eq!(
         settled[0].result.as_deref(),
-        Some(swage_storage::store::INTERRUPTED_TOOL_RESULT)
+        Some(swage_storage::store::CANCELLED_TOOL_RESULT)
     );
     assert!(
         settled[0].model_result.is_some(),
-        "an interrupted call replays"
+        "a cancelled call replays"
     );
 }
 

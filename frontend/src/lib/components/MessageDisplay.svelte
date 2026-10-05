@@ -4,7 +4,7 @@
 -->
 <script lang="ts">
   import DOMPurify from "dompurify";
-  import { marked } from "marked";
+  import { marked, Tokenizer } from "marked";
   import { markedHighlight } from "marked-highlight";
   import hljs from "highlight.js/lib/core";
   import bash from "highlight.js/lib/languages/bash";
@@ -67,6 +67,19 @@
   hljs.registerLanguage("yml", yaml);
 
   marked.use(
+    {
+      tokenizer: {
+        emStrong(src, maskedSrc, prevChar) {
+          const token = Tokenizer.prototype.emStrong.call(this, src, maskedSrc, prevChar);
+          // Underscore-delimited punctuation is a fill-in blank in assistant
+          // templates; keep its delimiters instead of emphasising the punctuation.
+          if (token?.raw.startsWith("_") && /^[\p{P}\p{S}]+$/u.test(token.text)) {
+            return undefined;
+          }
+          return token;
+        },
+      },
+    },
     markedHighlight({
       langPrefix: "hljs language-",
       highlight(code, lang) {
@@ -165,6 +178,42 @@
   const shouldRenderMarkdown = $derived(displayPreferences.conversation_rendering === "markdown");
   // Live tool calls for the current in-progress turn.
   const activeToolCalls = $derived(stream?.activeToolCalls ?? streamingStore?.activeToolCalls ?? []);
+
+  // A turn that ended without a reply carries its account — state, tool
+  // calls, failure explanation — on its request, since no assistant message
+  // exists to hold it.
+  function endedWithoutReply(message: (typeof messages)[number]): boolean {
+    if (message.role === "assistant") return false;
+    if (message.turn_state !== "failed" && message.turn_state !== "interrupted") return false;
+    if (!message.turn_id) {
+      // A request settled live, before the gateway's record names its turn:
+      // a reply would follow it directly.
+      return messages[messages.indexOf(message) + 1]?.role !== "assistant";
+    }
+    return !messages.some((other) => other.role === "assistant" && other.turn_id === message.turn_id);
+  }
+
+  // What Retry resends for a failed turn, shown on the message holding the
+  // turn's account: the request itself when no reply came, or — under a
+  // partial reply — the request that partial reply answered.
+  function retryContent(message: (typeof messages)[number]): string | null {
+    if (message.turn_state !== "failed") return null;
+    if (endedWithoutReply(message)) return message.content;
+    if (message.role !== "assistant" || !message.turn_id) return null;
+    const turnMessages = messages.filter((other) => other.turn_id === message.turn_id);
+    if (turnMessages[turnMessages.length - 1] !== message) return null;
+    return turnMessages.find((other) => isPersonsMessage(other))?.content ?? null;
+  }
+
+  // Retry resends the request through the ordinary send path.
+  function retry(content: string): void {
+    streamingStore?.startTurn(content);
+  }
+
+  // The request a live failure answered: the latest message the person sent.
+  const lastPersonsMessage = $derived(
+    [...messages].reverse().find((message) => isPersonsMessage(message)) ?? null,
+  );
 
   function shouldShowModel(role: "user" | "assistant"): boolean {
     return (
@@ -268,7 +317,7 @@
           <div
             class="message-content assistant-content markdown-body"
             class:interrupted={message.turn_state === "interrupted" ||
-              message.turn_state === "failed"}
+              message.turn_state === "failed" || message.turn_state === "incomplete"}
           >
             {#if shouldRenderMarkdown}
               <!-- marked output is trusted (server-generated content only). -->
@@ -281,10 +330,33 @@
             {#if message.turn_state === "interrupted"}
               <!-- Subtle notice below the partial response. -->
               <p class="interrupted-notice">↩ Response interrupted</p>
+            {:else if message.turn_state === "incomplete"}
+              <p class="interrupted-notice">⚠ Response incomplete</p>
             {:else if message.turn_state === "failed"}
               <p class="interrupted-notice">⚠ Response failed</p>
             {/if}
           </div>
+        {/if}
+        {#if endedWithoutReply(message)}
+          {#if message.tool_calls && message.tool_calls.length > 0}
+            <div class="tool-calls-history">
+              {#each buildToolCallTree(message.tool_calls) as toolCall (toolCall.call_id)}
+                <ToolCallDisplay {toolCall} isLive={false} />
+              {/each}
+            </div>
+          {/if}
+          <p class="interrupted-notice">
+            {message.turn_state === "interrupted" ? "↩ Interrupted before a reply" : "⚠ No reply — the turn failed"}
+          </p>
+        {/if}
+        {#if message.failure_message}
+          <div class="turn-error" role="alert">
+            <span class="error-icon" aria-hidden="true">⚠</span>
+            <span class="error-message">{message.failure_message}</span>
+          </div>
+        {/if}
+        {#if retryContent(message) !== null && !isStreaming}
+          <button class="branch-link" onclick={() => retry(retryContent(message)!)}>Retry</button>
         {/if}
         {#if shouldShowModel(message.role) && message.model}
           <div class="message-model">{message.model}</div>
@@ -376,6 +448,9 @@
         <span class="error-icon" aria-hidden="true">⚠</span>
         <span class="error-message">{turnError.message}</span>
       </div>
+      {#if lastPersonsMessage && !isStreaming}
+        <button class="branch-link" onclick={() => retry(lastPersonsMessage.content)}>Retry</button>
+      {/if}
     {/if}
   {/if}
 </div>

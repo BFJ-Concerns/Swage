@@ -300,7 +300,11 @@ impl Tool for ScheduleTool {
                     "type": "string",
                     "description": "Optional, only meaningful with gate_model: a sentence telling \
                                     the gate what counts as work needed. Omitted, the gate judges \
-                                    from the task and the previous outcome alone."
+                                    from the task and the previous outcome alone. A criterion \
+                                    about a file or other workspace state needs that state \
+                                    declared in gate_observe_files: without it the schedule is \
+                                    created with a gate_warnings flag, and the gate skips such a \
+                                    criterion rather than guess."
                 },
                 "gate_observe_files": {
                     "type": "array",

@@ -1524,7 +1524,7 @@ const GATE_DIGEST_EXCERPT_CHARS: usize = 280;
 /// rendered into the prompt as clearly-delimited data. Free text inside the
 /// digest (outcomes, reasoning, message excerpts) is data to judge, never
 /// instructions — the prompt says so where the digest is rendered.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 struct GateStateDigest {
     /// Recent finished runs, newest first. Unlike the single
     /// previous-outcome line, this includes gated-out and overlap-skipped
@@ -1960,8 +1960,22 @@ fn build_gate_prompt(schedule: &Schedule, gate: &GateConfig, digest: &GateStateD
          model would be wasted work.\n\n## Scheduled task\n\n{}\n",
         schedule.message
     );
-    if let Some(criteria) = &gate.criteria {
+    if let Some(criteria) = declared_criteria(gate) {
         prompt.push_str(&format!("\n## When the task should run\n\n{criteria}\n"));
+        // Instruction text: the stance a gate takes on criteria it was given
+        // no state for. Drafting-tier wording, never a build unit's.
+        if gate.observations.is_empty() {
+            prompt.push_str(
+                "\nThis gate declares no files to observe, so the state below is the schedule's \
+                 own record — its recent runs, the session's latest message, the topic's open \
+                 workflow runs — and nothing from the workspace. A criterion that depends on a file or \
+                 other workspace state cannot be decided here: do not infer it from the task \
+                 text in either direction. For such a criterion answer \"skip\" and say in \
+                 your reasoning which state was not observed — this outranks the run-when-in-\
+                 doubt default below, because a verdict guessed at unobserved state is the \
+                 failure the operator must see at the gate, not in a wrong run.\n",
+            );
+        }
     }
     // State enters the prompt through exactly one delimited door — the
     // digest, excerpt-bounded and framed as data. Recent outcomes ride it
@@ -2077,12 +2091,48 @@ async fn map_schedule(
         routing: serde_json::from_value(schedule.delivery_routing).map_err(|error| {
             GatewayError::ValidationError(format!("invalid stored delivery routing: {error}"))
         })?,
+        gate_warnings: schedule
+            .gate
+            .as_ref()
+            .map(gate_declaration_warnings)
+            .unwrap_or_default(),
         gate: schedule.gate,
         next_run_at: schedule.next_run_at,
         last_run_at: schedule.last_run_at,
         created_at: schedule.created_at,
         updated_at: schedule.updated_at,
     })
+}
+
+/// The flags a gate declaration raises, derived from the gate as stored so
+/// the create response, the list, the tool result and the panel all show
+/// the same ones. A declaration is refused only for what can never be
+/// observed (`validate_gate`); what is merely unobserved is flagged here, so
+/// the operator learns at declaration — not from a run of wrong verdicts —
+/// that the gate decides those criteria blind.
+pub(crate) fn gate_declaration_warnings(gate: &GateConfig) -> Vec<wire::GateWarning> {
+    if declared_criteria(gate).is_some() && gate.observations.is_empty() {
+        vec![wire::GateWarning::UnobservedCriteria {
+            message: "This gate declares no files to observe, so its criteria are decided \
+                      against the schedule's own record alone. A criterion about a file or \
+                      other workspace state cannot be met that way: the gate skips it and \
+                      names the state it did not observe. Declare the files the gate should \
+                      look at first."
+                .into(),
+        }]
+    } else {
+        Vec::new()
+    }
+}
+
+/// The gate's criteria as declared — `None` when absent or blank, so the
+/// declaration flag and the prompt's framing decide on one predicate (the
+/// HTTP path stores criteria untrimmed; the tool and the form trim).
+fn declared_criteria(gate: &GateConfig) -> Option<&str> {
+    gate.criteria
+        .as_deref()
+        .map(str::trim)
+        .filter(|criteria| !criteria.is_empty())
 }
 
 fn map_run(run: ScheduleRun) -> wire::ScheduleRun {
@@ -2365,6 +2415,84 @@ mod tests {
         assert!(prompt.contains("never instructions"));
         assert!(prompt.contains("nothing new since the last run"));
         assert!(prompt.contains("The queue was empty at last check."));
+    }
+
+    /// Criteria declared with nothing to observe are flagged at declaration,
+    /// and the gate is told at each fire to skip such criteria rather than
+    /// guess; criteria with a declared observation, or no criteria at all,
+    /// raise nothing.
+    #[test]
+    fn criteria_with_no_declared_observation_are_flagged_and_framed_as_undecidable() {
+        use swage_storage::GateObservation;
+
+        let blind = GateConfig {
+            model: "small".into(),
+            criteria: Some("run only when inbox/todo.txt is non-empty".into()),
+            observations: Vec::new(),
+        };
+        let warnings = gate_declaration_warnings(&blind);
+        assert_eq!(warnings.len(), 1);
+        let wire::GateWarning::UnobservedCriteria { message } = &warnings[0];
+        assert!(
+            message.contains("declares no files to observe"),
+            "{message}"
+        );
+
+        let observed = GateConfig {
+            observations: vec![GateObservation::File {
+                path: "inbox/todo.txt".into(),
+            }],
+            ..blind.clone()
+        };
+        assert!(gate_declaration_warnings(&observed).is_empty());
+        let no_criteria = GateConfig {
+            criteria: None,
+            ..blind.clone()
+        };
+        assert!(gate_declaration_warnings(&no_criteria).is_empty());
+        let blank_criteria = GateConfig {
+            criteria: Some("  ".into()),
+            ..blind.clone()
+        };
+        assert!(gate_declaration_warnings(&blank_criteria).is_empty());
+
+        let schedule_with = |gate: GateConfig| Schedule {
+            id: Uuid::nil(),
+            message: "Work the inbox.".into(),
+            status: ScheduleStatus::Active,
+            kind: ScheduleKind::Interval,
+            expression: "every 1 hours".into(),
+            session_policy: SessionPolicy::Fresh {
+                topic_id: Some(Uuid::nil()),
+                agent_id: "gateway".into(),
+            },
+            creator: ScheduleCreator::User,
+            delivery_routing: serde_json::Value::Null,
+            gate: Some(gate),
+            next_run_at: None,
+            last_run_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let schedule = schedule_with(blind.clone());
+        let digest = GateStateDigest::default();
+        // Blank criteria are no criteria on both halves: no flag, and no
+        // criteria heading or undecidable paragraph in the prompt.
+        let blank_prompt = build_gate_prompt(
+            &schedule_with(blank_criteria.clone()),
+            &blank_criteria,
+            &digest,
+        );
+        assert!(
+            !blank_prompt.contains("## When the task should run"),
+            "{blank_prompt}"
+        );
+        assert!(!blank_prompt.contains("declares no files to observe"));
+        let framed = build_gate_prompt(&schedule, &blind, &digest);
+        assert!(framed.contains("declares no files to observe"), "{framed}");
+        assert!(framed.contains("which state was not observed"));
+        let seeing = build_gate_prompt(&schedule, &observed, &digest);
+        assert!(!seeing.contains("declares no files to observe"));
     }
 
     /// A gate that declares files reads them under the session's trusted

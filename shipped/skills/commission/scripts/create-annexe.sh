@@ -3,8 +3,9 @@
 # create-annexe.sh — bring a project's annexe into existence, idempotently.
 #
 # An annexe is the planning sibling of a code repo `foo`: a repo named
-# `foo-Annexe` on the same Forgejo account, holding intent (README.md, the
-# commission), ideas, issues, and orchestrator scratch. This script is the
+# `foo-Annexe`, on the same forge account when the project has one and
+# local-only when it has none, holding intent (README.md, the commission),
+# ideas, issues, and orchestrator scratch. This script is the
 # single front door for "make sure the annexe exists and is complete". It is
 # safe to re-run: it creates only what is missing, so it doubles as the
 # existence check, the first-time scaffolder, and the repair for a half-built
@@ -26,16 +27,21 @@
 #                                       clone" case), then repair — never
 #                                       clobber an existing annexe
 #   * absent both                    -> init, scaffold, commit, push-to-create
+#   * no --remote                    -> local-only: init or repair, commit,
+#                                       never probe, clone, or push
 #
 # Usage:
-#   create-annexe.sh --annexe-dir <path> --remote <host-alias:account> \
+#   create-annexe.sh --annexe-dir <path> [--remote <host-alias:account>] \
 #       [--code-dir <path>] [--merge-policy direct-merge|pr] \
 #       [--push-policy push-on-land|hold-for-user]
 #
 #   --annexe-dir   Where the annexe lives (e.g. ../foo-Annexe). Required.
 #   --remote       Forge account spec, "<host-alias>:<account>" — the SSH host
 #                  alias and account the code repo uses. The push URL is
-#                  "<remote>/<annexe-name>.git". Required.
+#                  "<remote>/<annexe-name>.git". Optional: omit it for a
+#                  project with no forge remote, and the annexe is created
+#                  locally with nothing pushed (add a remote later with
+#                  `git remote add origin <url>` and `git push -u origin main`).
 #   --code-dir     The code repo whose local annexe pointer to write. If
 #                  omitted, derived as the sibling without the -Annexe suffix; the
 #                  pointer is written only when that directory is a git repo
@@ -70,7 +76,6 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$annexe_dir" ] || die "--annexe-dir is required"
-[ -n "$remote" ]     || die "--remote is required (e.g. <host-alias>:<account>)"
 
 case "$merge_policy" in
   ""|direct-merge|pr) ;;
@@ -88,7 +93,8 @@ parent="$(cd "$(dirname "$annexe_dir")" 2>/dev/null && pwd)" \
   || die "parent of --annexe-dir does not exist: $(dirname "$annexe_dir")"
 name="$(basename "$annexe_dir")"
 annexe_dir="$parent/$name"
-push_url="$remote/$name.git"
+push_url=""
+[ -n "$remote" ] && push_url="$remote/$name.git"
 
 # Project name and code repo. The annexe name is conventionally <project>-Annexe;
 # derive the code repo from it only when that convention holds, so an oddly
@@ -117,6 +123,13 @@ mode=""
 if [ -d "$annexe_dir/.git" ]; then
   mode="repair"
   echo "create-annexe: local annexe present at $annexe_dir — repairing."
+elif [ -z "$push_url" ]; then
+  # Local-only: no remote to probe or clone from, so an absent annexe is a
+  # green field by definition.
+  mode="create"
+  echo "create-annexe: no annexe found and no remote given — initialising $annexe_dir locally."
+  mkdir -p "$annexe_dir" || die "cannot create $annexe_dir — the location is not writable from here (a sandbox may confine writes to the project); have the parent directory or the empty sibling attached read-write, then re-run"
+  git -C "$annexe_dir" init -b main >/dev/null
 else
   if probe_err="$(git ls-remote "$push_url" 2>&1 >/dev/null)"; then
     remote_exists=yes
@@ -147,7 +160,7 @@ else
   else
     mode="create"
     echo "create-annexe: no annexe found — initialising $annexe_dir."
-    mkdir -p "$annexe_dir"
+    mkdir -p "$annexe_dir" || die "cannot create $annexe_dir — the location is not writable from here (a sandbox may confine writes to the project); have the parent directory or the empty sibling attached read-write, then re-run"
     git -C "$annexe_dir" init -b main >/dev/null
   fi
 fi
@@ -318,6 +331,12 @@ else
     git_a commit -q -m "Restore missing annexe scaffolding" -- "${scaffold_paths[@]}"
   fi
   echo "create-annexe: committed scaffolding."
+fi
+
+# Local-only annexes stop here: nothing is pushed, and nothing was probed.
+if [ -z "$push_url" ]; then
+  echo "create-annexe: done ($mode, local-only — no remote configured, nothing pushed). The README/commission is authored separately."
+  exit 0
 fi
 
 # Push-to-create: the instance has push-to-create enabled, so the first push to
