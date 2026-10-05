@@ -1,5 +1,5 @@
 ---
-description: Network binding, the Settings memory view, operator history, the web UI's context inspector, conversation branching, image attachments and reference admission, surfaces, workspace relinking, delivery targets, devices (registration, the dial-in connection, cancellation, and presence), tool-call recording and replay, turn completion states (incomplete, failed, interrupted, cancelled), hosted documentation, voice capabilities, gateway lifecycle (status and start recovery), the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, route handling, the gateway's built-in tool inventory, and workspace tool output
+description: Network binding, the Settings memory view, operator history, the web UI's context inspector, conversation branching, image attachments and reference admission, surfaces, workspace relinking, delivery targets, devices (registration and pairing procedure, the dial-in connection, cancellation, and presence), tool-call recording and replay, turn completion states (incomplete, failed, interrupted, cancelled), hosted documentation, voice capabilities, gateway lifecycle (status and start recovery), the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, route handling, the gateway's built-in tool inventory, and workspace tool output
 ---
 
 # Interfaces and tooling
@@ -16,14 +16,14 @@ Set the address in `config.toml`:
 
 ```toml
 [server]
-host = "192.0.2.30"
+host = "192.0.2.10"
 port = 3000
 ```
 
 Or override per invocation with CLI flags:
 
 ```bash
-swage gateway start --host 192.0.2.30 --port 3000
+swage gateway start --host 192.0.2.10 --port 3000
 ```
 
 CLI flags take precedence over `config.toml`. Both `--host` and `--port` are
@@ -367,14 +367,58 @@ as a device.
 
 ### Registration and pairing
 
-A device can join in two ways. Direct registration
-(`POST /api/devices/register`) takes the device identity, the gateway secret
-its credential resolves against, and the workspace it operates in. Pairing
-is a two-step alternative: the gateway issues a one-time pairing code
-(`POST /api/onboarding/devices/pairing-codes`), and the device redeems it
-(`POST /api/onboarding/devices/redeem`) to register and trust itself in one
-step. Pairing codes expire after a configurable interval (default ten
-minutes).
+A device can join through direct registration or pairing.
+
+**Direct registration** (`POST /api/devices/register`) takes the device
+identity, the gateway secret its credential resolves against, and the
+workspace it operates in.
+
+**Pairing** walks through four steps:
+
+1. **Prepare the shared-token secret.** Create a file-backed secret for the
+   device's credential — the file holds the token value, and the secret
+   reference is what registration and connection resolve against. See
+   [Provider credentials — Registering a file-backed secret](#registering-a-file-backed-secret)
+   for the pattern.
+
+2. **Issue a pairing code.** Send `POST /api/onboarding/devices/pairing-codes`
+   with an optional `expires_in_seconds` (default 600 — ten minutes):
+
+   ```json
+   {
+     "expires_in_seconds": 600
+   }
+   ```
+
+   The response carries the `pairing_code` and `expires_at`.
+
+3. **Redeem the code.** Send `POST /api/onboarding/devices/redeem` to
+   register and trust the device in one step:
+
+   ```json
+   {
+     "pairing_code": "<code from step 2>",
+     "device_id": "workshop",
+     "shared_token_secret_ref": "secret://file/<secret-id>",
+     "workspace_root": "/home/user/projects"
+   }
+   ```
+
+   `label` (optional) and `kind` (defaults to `"attached_device"`) can
+   also be included.
+
+4. **Connect.** Run the device with the CLI:
+
+   ```bash
+   swage device connect \
+     --gateway http://gateway.local:3000 \
+     --device-id workshop \
+     --shared-token-file /path/to/token-file \
+     --workspace /home/user/projects
+   ```
+
+   The process dials the gateway, presents the shared token, advertises the
+   workspace's tools, and serves operations until interrupted.
 
 In both paths the `kind` field defaults to `attached_device` and names the
 device type; registering with kind `local` is refused, since a local device
@@ -616,9 +660,11 @@ combined:
 7. **Test suite** — Rust tests, frontend tests, and the desktop smoke test.
    Individual failures are collected rather than aborting on the first. The
    Rust test runner is selected by the `SWAGE_TEST_RUNNER` environment
-   variable: `nextest` runs tests under `cargo nextest run` with a `ci`
-   profile (which retries flaky tests) plus a separate doctest stage;
-   `cargo` or unset runs `cargo test --workspace --no-fail-fast`.
+   variable, which the Justfile defaults to `nextest`. Under `nextest`
+   (the default), tests run under `cargo nextest run` with a `ci` profile
+   (which retries flaky tests) plus a separate doctest stage; setting
+   `SWAGE_TEST_RUNNER=cargo` runs `cargo test --workspace --no-fail-fast`
+   instead.
 8. **Projection freshness** — a `git diff` that verifies the committed
    TypeScript bindings and JSON Schemas match what the tests just regenerated.
 
