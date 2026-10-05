@@ -206,14 +206,14 @@ and CLI flags. The defaults are `127.0.0.1` (loopback) on port `3000`.
 
 ```toml
 [server]
-host = "192.0.2.30"   # a LAN or tailnet address
+host = "192.0.2.10"   # a LAN or tailnet address
 port = 3000
 ```
 
 **CLI flags** (override the config file for a single invocation):
 
 ```bash
-./target/debug/swage gateway start --host 192.0.2.30 --port 3000
+./target/debug/swage gateway start --host 192.0.2.10 --port 3000
 ```
 
 The `--host` and `--port` flags are accepted by `gateway start`,
