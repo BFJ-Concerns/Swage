@@ -1463,7 +1463,12 @@ impl Agent {
                         role: Role::User,
                         origin: swage_storage::MessageOrigin::Platform,
                         content: format!(
-                            "Response incomplete: output token limit reached ({reason})."
+                            "Response incomplete: {} ({reason}).",
+                            if reason == "content_filter" {
+                                "the provider's content filter stopped the response"
+                            } else {
+                                "output token limit reached"
+                            }
                         ),
                         attachments: Vec::new(),
                         agent_id: self.config.agent_id.clone(),
@@ -1590,9 +1595,13 @@ impl Agent {
                         }
                         None => break,
                         Some(StreamChunk::Done { finish_reason }) => {
-                            if finish_reason == Some(swage_core::FinishReason::Length) {
-                                incomplete_reason = Some("length".to_owned());
-                            }
+                            incomplete_reason = match finish_reason {
+                                Some(swage_core::FinishReason::Length) => Some("length".to_owned()),
+                                Some(swage_core::FinishReason::ContentFilter) => {
+                                    Some("content_filter".to_owned())
+                                }
+                                _ => None,
+                            };
                             break;
                         }
                         Some(StreamChunk::Delta { content }) => {
