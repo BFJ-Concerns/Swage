@@ -19706,6 +19706,14 @@ async fn html_from_a_chat_completions_endpoint_fails_the_turn_naming_provider_an
         errors.iter().any(|error| error.contains(&route)),
         "the failure names provider and endpoint: {errors:?}"
     );
+    // The endpoint answered on its served route without model output; a 404
+    // from a wrong path would fail with an HTTP error instead.
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("returned no") && error.contains("model output")),
+        "the failure is the no-model-output anomaly: {errors:?}"
+    );
 }
 
 #[tokio::test]
@@ -19726,5 +19734,13 @@ async fn chat_completions_stream_at_a_responses_endpoint_fails_the_turn_naming_p
     assert!(
         errors.iter().any(|error| error.contains(&route)),
         "the failure names provider and endpoint: {errors:?}"
+    );
+    // The endpoint answered on its served route without model output; a 404
+    // from a wrong path would fail with an HTTP error instead.
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("returned no") && error.contains("model output")),
+        "the failure is the no-model-output anomaly: {errors:?}"
     );
 }
