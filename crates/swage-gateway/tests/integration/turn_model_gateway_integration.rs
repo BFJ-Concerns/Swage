@@ -7,7 +7,7 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use swage_config::{ModelEndpointConfig, ResolvedConfig};
+use swage_config::{ModelEndpointConfig, Protocol, ProviderEndpointConfig, ResolvedConfig};
 use swage_core::{
     CompletionRequest, CompletionResponse, FinishReason, ProviderError, StreamChunk,
     ToolCompletionRequest, ToolCompletionResponse,
@@ -79,6 +79,18 @@ async fn start_server(
             ..Default::default()
         },
     );
+    // A turn is served only by its model's configured provider, so each
+    // catalogue entry names a provider the injected mock stands in for.
+    for provider_id in ["default-provider", "alternate-provider"] {
+        config.providers.entries.insert(
+            provider_id.into(),
+            ProviderEndpointConfig {
+                protocol: Protocol::OpenAi,
+                base_url: Some("http://mock-provider.invalid/v1".into()),
+                ..Default::default()
+            },
+        );
+    }
     let state = AppState::new(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
