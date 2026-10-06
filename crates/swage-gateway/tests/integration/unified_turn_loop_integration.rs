@@ -905,6 +905,51 @@ async fn output_limit_marks_an_ordinary_reply_incomplete_live_and_on_reload() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn content_filter_stop_without_output_marks_the_turn_incomplete_with_its_cause() {
+    let provider = MockProvider::new(vec![vec![StreamChunk::Done {
+        finish_reason: Some(FinishReason::ContentFilter),
+    }]]);
+    let (gateway, _) = start_test_server_with_config(
+        provider,
+        ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+    )
+    .await;
+    let (_, created) = http(&gateway, "POST", "/api/conversations").await;
+    let id = created["id"].as_str().unwrap();
+    let (mut sink, mut stream) = connect_ws(gateway.address, id).await;
+    ws_send(
+        &mut sink,
+        json!({"type":"send_message", "content":"Describe it"}),
+    )
+    .await;
+    let events = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(10)).await;
+    let terminal = events
+        .iter()
+        .find(|e| e["type"] == "turn_complete")
+        .unwrap();
+    assert_eq!(
+        terminal["incomplete_reason"].as_str(),
+        Some("content_filter")
+    );
+    let (_, detail) = http(&gateway, "GET", &format!("/api/conversations/{id}")).await;
+    let messages = detail["messages"].as_array().unwrap();
+    let reply = messages.iter().find(|m| m["role"] == "assistant").unwrap();
+    assert_eq!(reply["turn_state"], "incomplete");
+    let accounts: Vec<_> = messages
+        .iter()
+        .filter(|m| m["origin"] == "platform")
+        .collect();
+    assert_eq!(accounts.len(), 1);
+    assert!(
+        accounts[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("content filter stopped the response (content_filter)")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn output_limit_marks_a_delegated_reply_and_parent_event_incomplete() {
     use swage_storage::store::{
         AgentDefinitionStore, MessageStore, ThreadStore, ToolCallStore, TurnStore,
