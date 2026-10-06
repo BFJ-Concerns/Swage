@@ -511,8 +511,9 @@ async fn permanent_error_bypasses_retry_and_failover() {
     assert_eq!(secondary.calls(), 0);
 }
 
-// Explicit provider finish causes must survive even when no text preceded them.
-async fn assert_no_output_finish(body: &str, responses: bool, expected: FinishReason) {
+/// Streams one fixture SSE response through the Chat Completions or Responses
+/// adapter and returns every chunk the caller receives.
+async fn fixture_stream_chunks(body: &str, responses: bool) -> Vec<StreamChunk> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -561,7 +562,7 @@ async fn assert_no_output_finish(body: &str, responses: bool, expected: FinishRe
     } else {
         Box::new(swage_provider::openai::OpenAiProvider::from_config(config))
     };
-    let chunks: Vec<_> = tokio::time::timeout(
+    let chunks = tokio::time::timeout(
         Duration::from_secs(5),
         provider
             .stream(CompletionRequest {
@@ -579,6 +580,12 @@ async fn assert_no_output_finish(body: &str, responses: bool, expected: FinishRe
     .await
     .expect("provider stream settles");
     server.await.expect("fixture server completes");
+    chunks
+}
+
+// Explicit provider finish causes must survive even when no text preceded them.
+async fn assert_no_output_finish(body: &str, responses: bool, expected: FinishReason) {
+    let chunks = fixture_stream_chunks(body, responses).await;
     assert!(
         chunks.iter().any(|chunk| matches!(chunk,
             StreamChunk::Done { finish_reason: Some(reason) } if *reason == expected
@@ -622,4 +629,37 @@ async fn no_output_responses_content_filter_preserves_the_finish_cause() {
         "event: response.incomplete\ndata: {\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"content_filter\"}}}\n\n",
         true, FinishReason::ContentFilter,
     ).await;
+}
+
+// An ordinary completion that carried no model output is an endpoint anomaly,
+// never a successful empty reply.
+async fn assert_empty_completion_is_an_anomaly(body: &str, responses: bool) {
+    let chunks = fixture_stream_chunks(body, responses).await;
+    assert!(
+        chunks
+            .iter()
+            .any(|chunk| matches!(chunk, StreamChunk::ProviderAnomaly { .. }))
+            && !chunks
+                .iter()
+                .any(|chunk| matches!(chunk, StreamChunk::Done { .. } | StreamChunk::Delta { .. })),
+        "an empty ordinary completion must settle as an anomaly: {chunks:?}"
+    );
+}
+
+#[tokio::test]
+async fn empty_chat_stop_is_an_anomaly() {
+    assert_empty_completion_is_an_anomaly(
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn empty_responses_completion_is_an_anomaly() {
+    assert_empty_completion_is_an_anomaly(
+        "event: response.completed\ndata: {\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n",
+        true,
+    )
+    .await;
 }
