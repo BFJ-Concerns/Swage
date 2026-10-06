@@ -11,7 +11,15 @@ project guidance, but a conversation can start without any of them.
 
 ## The front door
 
-The web UI opens to the recent-sessions list (`GET /api/sessions`): every
+The web UI opens to the **New session** control at the top of the page; it
+takes a topic (or none) and an agent, then **Start** opens the composer in
+that scope. Nothing is created until the first message: the composer's send
+creates the conversation (`POST /api/topics/{topic_id}/sessions`, or
+`POST /api/conversations` for the general scope) and then sends. A start
+abandoned before the first message leaves no session behind. **+ New
+topic** creates a topic (`POST /api/topics`) without starting a session.
+
+Beneath it is the recent-sessions list (`GET /api/sessions`): every
 scope's sessions ordered by their latest user or assistant message, with
 each entry's preview showing the latest user or assistant message (tool and
 system messages never replace the preview). Automated sessions are grouped
@@ -23,14 +31,6 @@ a turn on an archived session unarchives it). Every session records its
 origin (`direct`, `schedule_run`, `workflow_worker`, `delegation`).
 Selecting an entry resumes it (`/conversations/{id}`, or
 `/conversations/{id}/surfaces/{surface_id}` with a surface open).
-
-Beneath the list, the **New session** control takes a topic (or none) and
-an agent, then **Start** opens the composer in that scope. Nothing is
-created until the first message: the composer's send creates the
-conversation (`POST /api/topics/{topic_id}/sessions`, or
-`POST /api/conversations` for the general scope) and then sends. A start
-abandoned before the first message leaves no session behind. **+ New
-topic** creates a topic (`POST /api/topics`) without starting a session.
 
 ## Topics
 

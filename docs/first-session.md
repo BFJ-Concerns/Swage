@@ -13,10 +13,19 @@ guidance, but a conversation can start without any of them.
 
 ## The front door
 
-Opening the web UI presents the recent-sessions list — every session across
-every topic and the general scope, newest message first. Each entry's
-preview shows the latest user or assistant message; tool and system messages
-never replace the preview. **All sessions** is the default view; the topic
+Opening the web UI presents the **New session** control at the top of the
+page. Choose a topic from its selector, or leave it at **No topic — general
+assistant**; choose the agent the session should run under (the operator's
+default is preselected); then click **Start**. The composer opens in that
+scope, and the first message creates the conversation there. Nothing is
+created until then, so a start you walk away from leaves no empty session
+behind. **+ New topic** beside the selector creates a topic without starting
+anything. The control stays at the top however long the list below grows.
+
+Beneath it is the recent-sessions list — every session across every topic
+and the general scope, newest message first. Each entry's preview shows the
+latest user or assistant message; tool and system messages never replace the
+preview. **All sessions** is the default view; the topic
 buttons narrow the list to one topic without changing anything else, and
 **Archived** (the `archived` boolean query parameter on the sessions route)
 shows the sessions the inactivity sweep has hidden. Automated sessions (a
@@ -24,14 +33,6 @@ schedule's runs, a workflow's workers, delegated children) sit beneath the
 conversation or schedule that caused them, each still its own session.
 Select any entry to resume it with its conversation and surfaces; **All
 sessions** in the top bar returns here.
-
-Beneath the list is the **New session** control. Choose a topic from its
-selector, or leave it at **No topic — general assistant**; choose the agent
-the session should run under (the operator's default is preselected); then
-click **Start**. The composer opens in that scope, and the first message
-creates the conversation there. Nothing is created until then, so a start
-you walk away from leaves no empty session behind. **+ New topic** beside
-the selector creates a topic without starting anything.
 
 Sessions nobody has spoken in for seven days leave the recent list. The
 delay is set under **Settings → Automation → Session archiving**. Only a
