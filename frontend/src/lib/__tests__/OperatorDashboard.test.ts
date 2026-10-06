@@ -9,6 +9,7 @@ import operatorDashboardSource from "../components/OperatorDashboard.svelte?raw"
 import * as operatorApi from "../api/operator";
 import type { OperatorOverview } from "../types";
 import type { ScheduleRun } from "../protocol/ScheduleRun";
+import { UNSETTLED_RUN_REFRESH_MS } from "../one-shot-runs";
 import { makeSchedule } from "./fixtures/schedules";
 
 type MountedComponent = ReturnType<typeof mount>;
@@ -540,5 +541,23 @@ describe("passed one-shot cards", () => {
     expect(cardBadge.style.getPropertyValue("--badge-hue")).toBe("var(--status-not-yet-hue)");
     expect(runBadge.style.getPropertyValue("--badge-hue")).toBe("var(--status-not-yet-hue)");
   });
-
+  it("re-reads a running card's history until the run settles", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValueOnce({ runs: [older, { ...latest, state: "running" }] });
+      component = mount(OperatorDashboard, { target: document.body });
+      await vi.advanceTimersByTimeAsync(0);
+      const badge = () => [...document.querySelectorAll(".control-card")]
+        .find(card => card.textContent?.includes(schedule.message))
+        ?.querySelector(".primary-line .badge")?.textContent?.trim();
+      expect(badge()).toBe("running");
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS);
+      expect(badge()).toBe("failed");
+      const reads = vi.mocked(operatorApi.fetchScheduleRuns).mock.calls.length;
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS * 3);
+      expect(vi.mocked(operatorApi.fetchScheduleRuns).mock.calls.length).toBe(reads);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
