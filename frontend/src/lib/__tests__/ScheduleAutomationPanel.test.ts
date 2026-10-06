@@ -449,4 +449,47 @@ describe("passed one-shot cards", () => {
       vi.useRealTimers();
     }
   });
+  it("shows a manual rerun as running while its trigger is in flight", async () => {
+    vi.useFakeTimers();
+    try {
+      let finish!: () => void;
+      vi.mocked(operatorApi.triggerSchedule).mockReturnValue(new Promise((resolve) => {
+        finish = () => resolve({ run: { ...latest, id: "rerun", state: "completed" } });
+      }));
+      component = mount(ScheduleAutomationPanel, { target: document.body, props: { topicId: null, sessionId: null } });
+      await vi.advanceTimersByTimeAsync(0);
+      const status = () => document.querySelector(".schedule-row .schedule-facts .status")?.textContent?.trim();
+      expect(status()).toBe("failed");
+      [...document.querySelector(".schedule-row")!.querySelectorAll("button")].find(button => button.textContent?.trim() === "Run again")!.click();
+      await vi.advanceTimersByTimeAsync(0);
+      const rerun: ScheduleRun = { ...latest, id: "rerun", state: "running", created_at: "2026-01-01T00:02:00Z" };
+      vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValue({ runs: [older, latest, rerun] });
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS);
+      expect(status()).toBe("running");
+      vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValue({ runs: [older, latest, { ...rerun, state: "completed" }] });
+      finish();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(status()).toBe("completed");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("retries a failed re-read of a running card", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(operatorApi.fetchScheduleRuns)
+        .mockResolvedValueOnce({ runs: [older, { ...latest, state: "running" }] })
+        .mockRejectedValueOnce(new Error("gateway unreachable"));
+      component = mount(ScheduleAutomationPanel, { target: document.body, props: { topicId: null, sessionId: null } });
+      await vi.advanceTimersByTimeAsync(0);
+      const status = () => document.querySelector(".schedule-row .schedule-facts .status")?.textContent?.trim();
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS);
+      expect(document.body.textContent).toContain("gateway unreachable");
+      expect(status()).toBe("running");
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS);
+      expect(status()).toBe("failed");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

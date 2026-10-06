@@ -67,21 +67,29 @@
     }
   }
 
-  // A passed one-shot's card reports its latest run, so a run that has not
-  // settled is re-read until it reaches an outcome.
+  // A passed one-shot's card reports its latest run, so its history is
+  // re-read while that run has no outcome yet or a manual run of it is in
+  // flight. A failed re-read is retried on the same cadence.
+  let runRefreshFailures = $state(0);
   $effect(() => {
-    const unsettled = schedules
-      .filter((schedule) => passedOneShot(schedule) && runUnsettled(runsById[schedule.id]?.at(-1)))
+    void runRefreshFailures;
+    const watched = schedules
+      .filter(
+        (schedule) =>
+          passedOneShot(schedule) &&
+          (runUnsettled(runsById[schedule.id]?.at(-1)) || actionId === schedule.id),
+      )
       .map((schedule) => schedule.id);
-    if (unsettled.length === 0) return;
+    if (watched.length === 0) return;
     const timer = setTimeout(async () => {
       try {
         const histories = await Promise.all(
-          unsettled.map(async (id) => [id, (await fetchScheduleRuns(id)).runs] as const),
+          watched.map(async (id) => [id, (await fetchScheduleRuns(id)).runs] as const),
         );
         runsById = { ...runsById, ...Object.fromEntries(histories) };
       } catch (err) {
         error = err instanceof Error ? err.message : "Failed to refresh schedule runs.";
+        runRefreshFailures += 1;
       }
     }, UNSETTLED_RUN_REFRESH_MS);
     return () => clearTimeout(timer);
