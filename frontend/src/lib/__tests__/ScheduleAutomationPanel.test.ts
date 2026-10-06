@@ -7,6 +7,7 @@ import * as workflowApi from "../api/workflows";
 import * as operatorApi from "../api/operator";
 import type { Schedule } from "../protocol/Schedule";
 import type { ScheduleRun } from "../protocol/ScheduleRun";
+import { UNSETTLED_RUN_REFRESH_MS } from "../one-shot-runs";
 import { makeSchedule } from "./fixtures/schedules";
 
 vi.mock("../api/workflows", () => ({
@@ -431,5 +432,21 @@ describe("passed one-shot cards", () => {
       .filter(label => label !== "Runs" && label !== "Hide runs");
     expect(actions).toEqual(["Run again"]);
   });
-
+  it("re-reads a running card's history until the run settles", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValueOnce({ runs: [older, { ...latest, state: "running" }] });
+      component = mount(ScheduleAutomationPanel, { target: document.body, props: { topicId: null, sessionId: null } });
+      await vi.advanceTimersByTimeAsync(0);
+      const status = () => document.querySelector(".schedule-row .schedule-facts .status")?.textContent?.trim();
+      expect(status()).toBe("running");
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS);
+      expect(status()).toBe("failed");
+      const reads = vi.mocked(operatorApi.fetchScheduleRuns).mock.calls.length;
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS * 3);
+      expect(vi.mocked(operatorApi.fetchScheduleRuns).mock.calls.length).toBe(reads);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

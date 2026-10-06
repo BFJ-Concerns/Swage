@@ -9,6 +9,7 @@
   } from "../api/operator";
   import type { Schedule } from "../protocol/Schedule";
   import type { ScheduleRun } from "../protocol/ScheduleRun";
+  import { passedOneShot, runUnsettled, UNSETTLED_RUN_REFRESH_MS } from "../one-shot-runs";
   import type { ScheduleCreator } from "../protocol/ScheduleCreator";
   import type { ScheduleSpec } from "../protocol/ScheduleSpec";
   import type { SessionPolicy } from "../protocol/SessionPolicy";
@@ -65,6 +66,26 @@
       error = err instanceof Error ? err.message : "Failed to load schedules.";
     }
   }
+
+  // A passed one-shot's card reports its latest run, so a run that has not
+  // settled is re-read until it reaches an outcome.
+  $effect(() => {
+    const unsettled = schedules
+      .filter((schedule) => passedOneShot(schedule) && runUnsettled(runsById[schedule.id]?.at(-1)))
+      .map((schedule) => schedule.id);
+    if (unsettled.length === 0) return;
+    const timer = setTimeout(async () => {
+      try {
+        const histories = await Promise.all(
+          unsettled.map(async (id) => [id, (await fetchScheduleRuns(id)).runs] as const),
+        );
+        runsById = { ...runsById, ...Object.fromEntries(histories) };
+      } catch (err) {
+        error = err instanceof Error ? err.message : "Failed to refresh schedule runs.";
+      }
+    }, UNSETTLED_RUN_REFRESH_MS);
+    return () => clearTimeout(timer);
+  });
 
   function buildScheduleSpec(): ScheduleSpec {
     if (scheduleKind === "interval") {
@@ -216,10 +237,6 @@
   function describeRunOutcome(run: ScheduleRun): string {
     if (run.state === "completed_empty") return "No assistant text produced.";
     return "";
-  }
-
-  function passedOneShot(schedule: Schedule): boolean {
-    return schedule.spec.kind === "one_shot" && Date.parse(schedule.spec.at) <= Date.now();
   }
 
   function cardRun(schedule: Schedule): ScheduleRun | undefined {

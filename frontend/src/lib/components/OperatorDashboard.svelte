@@ -15,6 +15,7 @@
   import OperatorHistoryPane from "./OperatorHistoryPane.svelte";
   import type { Schedule } from "../protocol/Schedule";
   import type { ScheduleRun } from "../protocol/ScheduleRun";
+  import { passedOneShot, runUnsettled, UNSETTLED_RUN_REFRESH_MS } from "../one-shot-runs";
 
   let overview = $state<OperatorOverview | null>(null);
   let isLoading = $state(true);
@@ -65,9 +66,31 @@
     return "not-yet";
   }
 
-  function passedOneShot(schedule: Schedule): boolean {
-    return schedule.spec.kind === "one_shot" && Date.parse(schedule.spec.at) <= Date.now();
+  // Newest run first, keyed by schedule.
+  async function readRuns(scheduleIds: string[]): Promise<Record<string, ScheduleRun[]>> {
+    const histories = await Promise.all(
+      scheduleIds.map(async (id) => [id, (await fetchScheduleRuns(id)).runs.toReversed()] as const),
+    );
+    return Object.fromEntries(histories);
   }
+
+  // A passed one-shot's card reports its latest run, so a run that has not
+  // settled is re-read until it reaches an outcome.
+  $effect(() => {
+    const unsettled = (overview?.schedules.schedules ?? [])
+      .filter((schedule) => passedOneShot(schedule) && runUnsettled(scheduleRuns[schedule.id]?.[0]))
+      .map((schedule) => schedule.id);
+    if (unsettled.length === 0) return;
+    const timer = setTimeout(async () => {
+      try {
+        scheduleRuns = { ...scheduleRuns, ...(await readRuns(unsettled)) };
+      } catch (error) {
+        errorMessage =
+          error instanceof Error ? error.message : "Failed to refresh schedule runs";
+      }
+    }, UNSETTLED_RUN_REFRESH_MS);
+    return () => clearTimeout(timer);
+  });
 
   async function toggleScheduleRuns(scheduleId: string): Promise<void> {
     if (openScheduleId === scheduleId) {
@@ -87,13 +110,8 @@
 
     try {
       overview = await fetchOperatorOverview();
-      const histories = await Promise.all(
-        overview.schedules.schedules.filter(passedOneShot).map(async (schedule) => {
-          const response = await fetchScheduleRuns(schedule.id);
-          return [schedule.id, response.runs.toReversed()] as const;
-        }),
-      );
-      scheduleRuns = { ...scheduleRuns, ...Object.fromEntries(histories) };
+      const passed = overview.schedules.schedules.filter(passedOneShot).map((schedule) => schedule.id);
+      scheduleRuns = { ...scheduleRuns, ...(await readRuns(passed)) };
     } catch (error) {
       errorMessage =
         error instanceof Error ? error.message : "Failed to load operator overview";
