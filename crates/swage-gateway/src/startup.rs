@@ -984,38 +984,59 @@ fn swage_database_path() -> Result<PathBuf, swage_config::ConfigProblem> {
 /// The provider that serves a turn for the configuration's selected model.
 ///
 /// The runtime provider routes a request to the first catalogue entry whose
-/// upstream model id it names. Reuse it only when that entry's provider ID,
-/// resolved base URL and protocol match the turn's configuration. A different
-/// route, or a model absent from the runtime chain, needs a provider built
-/// from the turn's configuration, where the selected entry leads.
+/// upstream model id it names. Reuse it only when that entry's provider ID
+/// and every connection setting of its provider entry, credential included,
+/// match the turn's configuration. A different route, or a model absent from
+/// the runtime chain, needs a provider built from the turn's configuration,
+/// where the selected entry leads.
 pub(crate) async fn selected_model_provider(
     state: &crate::state::AppState,
     config: &swage_config::ResolvedConfig,
 ) -> Arc<dyn swage_provider::LlmProvider> {
     let runtime = state.active_provider();
-    let Some(selected) = config.models.entries.get(&config.models.default) else {
+    if !config.models.entries.contains_key(&config.models.default)
+        || runtime_serves_selected_route(&state.active_config(), config)
+    {
         return runtime;
+    }
+    create_provider(config, &state.secret_manager).await
+}
+
+fn runtime_serves_selected_route(
+    runtime_config: &swage_config::ResolvedConfig,
+    config: &swage_config::ResolvedConfig,
+) -> bool {
+    let Some(selected) = config.models.entries.get(&config.models.default) else {
+        return false;
     };
-    let runtime_config = state.active_config();
-    let first_serving_model = ordered_runtime_model_ids(&runtime_config)
+    let first_serving_model = ordered_runtime_model_ids(runtime_config)
         .into_iter()
         .filter_map(|entry| runtime_config.models.entries.get(&entry))
         .find(|model| model.model_id == selected.model_id);
-    let route_matches = first_serving_model
+    first_serving_model
         .and_then(|model| {
             let runtime_endpoint = runtime_config.providers.entries.get(&model.provider_id)?;
             let selected_endpoint = config.providers.entries.get(&selected.provider_id)?;
             Some(
                 model.provider_id == selected.provider_id
-                    && runtime_endpoint.protocol == selected_endpoint.protocol
-                    && provider_base_url(runtime_endpoint) == provider_base_url(selected_endpoint),
+                    && same_connection(runtime_endpoint, selected_endpoint),
             )
         })
-        .unwrap_or(false);
-    if route_matches {
-        return runtime;
-    }
-    create_provider(config, &state.secret_manager).await
+        .unwrap_or(false)
+}
+
+/// Two provider entries connect identically: every setting agrees once an
+/// omitted base URL is read as the protocol's default.
+fn same_connection(
+    a: &swage_config::ProviderEndpointConfig,
+    b: &swage_config::ProviderEndpointConfig,
+) -> bool {
+    let resolved =
+        |endpoint: &swage_config::ProviderEndpointConfig| swage_config::ProviderEndpointConfig {
+            base_url: Some(provider_base_url(endpoint).to_owned()),
+            ..endpoint.clone()
+        };
+    resolved(a) == resolved(b)
 }
 
 /// Names the configured provider and endpoint serving the selected model,
@@ -2188,6 +2209,48 @@ mod tests {
         let snapshot = provider.provider_request_snapshot(&request, true);
         assert_eq!(snapshot["protocol"], "responses", "snapshot: {snapshot}");
         assert_eq!(chat_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_scoped_credential_override_does_not_reuse_the_runtime_provider() {
+        let endpoint_with = |secret: Option<&str>, env: Option<&str>| ProviderEndpointConfig {
+            api_key_secret_ref: secret.map(str::to_owned),
+            api_key_env: env.map(str::to_owned),
+            ..endpoint(Protocol::OpenAi, "https://proxy.example/v1".to_owned())
+        };
+        let config_with = |provider: ProviderEndpointConfig| swage_config::ResolvedConfig {
+            providers: ProviderCatalogConfig {
+                default: "proxy".to_string(),
+                entries: [("proxy".to_string(), provider)].into_iter().collect(),
+            },
+            models: ModelCatalogConfig {
+                default: "luna".to_string(),
+                entries: [("luna".to_string(), model("proxy", "gpt-6-luna"))]
+                    .into_iter()
+                    .collect(),
+            },
+            ..Default::default()
+        };
+        let runtime = config_with(endpoint_with(Some("operator-key"), None));
+
+        assert!(runtime_serves_selected_route(&runtime, &runtime.clone()));
+        for scoped in [
+            endpoint_with(Some("topic-key"), None),
+            endpoint_with(None, Some("TOPIC_API_KEY")),
+        ] {
+            assert!(
+                !runtime_serves_selected_route(&runtime, &config_with(scoped)),
+                "a changed credential must build the turn's own provider"
+            );
+        }
+        let mut default_url = endpoint_with(Some("operator-key"), None);
+        default_url.base_url = None;
+        let mut explicit_default = default_url.clone();
+        explicit_default.base_url = Some("https://api.openai.com/v1".to_owned());
+        assert!(runtime_serves_selected_route(
+            &config_with(default_url),
+            &config_with(explicit_default)
+        ));
     }
 
     async fn spawn_openai_compatible_server(
