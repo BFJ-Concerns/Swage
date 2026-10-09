@@ -5359,6 +5359,8 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
             .max()
             .map_or(0, |seq| seq + 1);
         let queued = swage_storage::QueuedTurnInput {
+            attended: input.attended,
+            client_id: input.client_id,
             id: Uuid::new_v4(),
             session_id: input.session_id,
             thread_id: input.thread_id,
@@ -5366,6 +5368,8 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
             origin: input.origin,
             content: input.content,
             attachments: input.attachments,
+            schedule_run_id: input.schedule_run_id,
+            channel_message_ids: input.channel_message_ids,
             created_at: chrono::Utc::now(),
         };
         db.turn_queue.push(queued.clone());
@@ -5433,9 +5437,12 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
             .turn_queue
             .retain(|item| item.session_id != session_id);
         Ok(Some(swage_storage::DrainedTurnQueue {
+            attended: queued.iter().any(|input| input.attended),
             turn,
             messages,
             queued_ids,
+            schedule_run_ids: Vec::new(),
+            channel_origins: Vec::new(),
         }))
     }
 

@@ -5,7 +5,11 @@ import type { MessageAttachment } from "./MessageAttachment";
 /**
  * Events sent by the client over the WebSocket connection.
  */
-export type ClientEvent = { "type": "send_message", content: string,
+export type ClientEvent = { "type": "send_message",
+/**
+ * Correlates a queued acknowledgement with this client's send.
+ */
+client_id?: string | null, content: string,
 /**
  * Content parts submitted beside the text, in order; absent means
  * text only. The same contract as `SubmitTurnRequest.attachments`.

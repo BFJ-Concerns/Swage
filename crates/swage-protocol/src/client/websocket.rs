@@ -18,6 +18,9 @@ use super::approval::ApprovalDecisionScope;
 pub enum ClientEvent {
     /// Send a message to the conversation, triggering a provider turn.
     SendMessage {
+        /// Correlates a queued acknowledgement with this client's send.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_id: Option<Uuid>,
         content: String,
         /// Content parts submitted beside the text, in order; absent means
         /// text only. The same contract as `SubmitTurnRequest.attachments`.

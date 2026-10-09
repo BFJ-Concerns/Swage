@@ -573,6 +573,7 @@ mod tests {
     #[test]
     fn send_message_serialises() {
         let event = ClientEvent::SendMessage {
+            client_id: None,
             content: "hello".to_string(),
             attachments: Vec::new(),
             thread_id: None,

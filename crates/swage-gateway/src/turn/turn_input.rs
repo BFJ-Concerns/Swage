@@ -23,6 +23,8 @@ use super::{
 /// [`TurnInput::with_origin`] so the recorded row says a person did not type it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnInput {
+    /// Correlates this send with its client's optimistic row.
+    pub client_id: Option<Uuid>,
     pub text: String,
     pub attachments: Vec<MessageAttachment>,
     pub origin: MessageOrigin,
@@ -37,6 +39,7 @@ impl Default for TurnInput {
 impl TurnInput {
     pub fn text(text: impl Into<String>) -> Self {
         Self {
+            client_id: None,
             text: text.into(),
             attachments: Vec::new(),
             origin: MessageOrigin::User,
@@ -45,10 +48,16 @@ impl TurnInput {
 
     pub fn with_attachments(text: impl Into<String>, attachments: Vec<MessageAttachment>) -> Self {
         Self {
+            client_id: None,
             text: text.into(),
             attachments,
             origin: MessageOrigin::User,
         }
+    }
+
+    pub fn with_client_id(mut self, client_id: Option<Uuid>) -> Self {
+        self.client_id = client_id;
+        self
     }
 
     /// Name the platform path that composed this input — a schedule's brief,

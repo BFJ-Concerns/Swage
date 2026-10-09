@@ -104,6 +104,9 @@ pub struct ConversationDetail {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct QueuedMessageView {
+    /// Identifies the client's optimistic send, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<Uuid>,
     pub id: Uuid,
     pub origin: MessageOrigin,
     pub content: String,

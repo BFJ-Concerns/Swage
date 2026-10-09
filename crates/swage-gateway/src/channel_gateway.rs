@@ -422,19 +422,23 @@ pub async fn drain_channel_queue_checked(state: &AppState) -> Result<(), Gateway
     }
 }
 
-async fn drain_channel_origin(
-    state: &AppState,
-    pending: PendingChannelOrigin,
-) -> Result<(), GatewayError> {
+fn channel_origin(pending: &PendingChannelOrigin) -> Result<ChannelOrigin, GatewayError> {
     let integration = pending
         .integration
         .parse::<ExternalChannelIntegration>()
         .map_err(GatewayError::ValidationError)?;
-    let origin = ChannelOrigin {
+    Ok(ChannelOrigin {
         integration,
         account: pending.account.clone(),
         conversation: pending.conversation.clone(),
-    };
+    })
+}
+
+async fn drain_channel_origin(
+    state: &AppState,
+    pending: PendingChannelOrigin,
+) -> Result<(), GatewayError> {
+    let origin = channel_origin(&pending)?;
     let rows = state.storage.list_pending_by_origin(pending).await?;
     if rows.is_empty() {
         return Ok(());
@@ -461,9 +465,7 @@ async fn drain_channel_origin(
         Err(error) => return Err(error),
     };
 
-    if state.active_turns.lock().await.contains_key(&session_id) {
-        return Ok(());
-    }
+    let busy = state.active_turns.lock().await.contains_key(&session_id);
     let session = state
         .storage
         .get_session(session_id)
@@ -473,6 +475,9 @@ async fn drain_channel_origin(
         })?;
     let thread = resolve_thread_for_session(state.storage.as_ref(), session_id, None).await?;
     let input = compose_channel_messages(&rows);
+    if busy {
+        return queue_channel_rows(state, session_id, thread.id, rows).await;
+    }
 
     let turn = match state
         .storage
@@ -480,7 +485,9 @@ async fn drain_channel_origin(
         .await
     {
         Ok(turn) => turn,
-        Err(swage_core::StorageError::ConstraintViolation(_)) => return Ok(()),
+        Err(swage_core::StorageError::ConstraintViolation(_)) => {
+            return queue_channel_rows(state, session_id, thread.id, rows).await;
+        }
         Err(error) => return Err(GatewayError::Storage(error)),
     };
 
@@ -497,6 +504,66 @@ async fn drain_channel_origin(
         &origin,
         DeliveryRoutingRequest::default(),
         &response,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn queue_channel_rows(
+    state: &AppState,
+    session_id: Uuid,
+    thread_id: Uuid,
+    rows: Vec<ChannelInboundMessage>,
+) -> Result<(), GatewayError> {
+    for row in rows {
+        match crate::turn_queue::queue_input_with_attribution(
+            state,
+            session_id,
+            thread_id,
+            crate::turn::TurnInput::text(&row.content),
+            None,
+            vec![row.id],
+            crate::turn::TurnAttendance::Unattended,
+        )
+        .await
+        {
+            Ok(_) => {}
+            // Another inbox reader already handed this input to the queue.
+            Err(
+                error @ GatewayError::Storage(swage_core::StorageError::ConstraintViolation(_)),
+            ) => {
+                let queued = state.storage.list_queued_turn_inputs(session_id).await?;
+                if !queued
+                    .iter()
+                    .any(|input| input.channel_message_ids.contains(&row.id))
+                {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// Deliver the shared turn's reply to each originating chat represented in it.
+pub(crate) async fn deliver_queued_response(
+    state: &AppState,
+    session_id: Uuid,
+    turn: &swage_storage::Turn,
+    pending: PendingChannelOrigin,
+) -> Result<(), GatewayError> {
+    let origin = channel_origin(&pending)?;
+    deliver_channel_response(
+        state,
+        session_id,
+        DeliveryAttribution {
+            run_id: None,
+            turn_id: Some(turn.id),
+        },
+        &origin,
+        DeliveryRoutingRequest::default(),
+        turn.assistant_response.as_deref().unwrap_or_default(),
     )
     .await?;
     Ok(())

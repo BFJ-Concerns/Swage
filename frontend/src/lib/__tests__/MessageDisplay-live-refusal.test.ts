@@ -69,6 +69,6 @@ it("installs a socket refusal account and renders its usable Retry control witho
   expect(retry, "the live account offers Retry before any reload").toBeDefined();
   expect(retry!.disabled).toBe(false);
   retry!.click();
-  expect(Socket.instance.sent.map((frame) => JSON.parse(frame))).toContainEqual({ type: "send_message", content: "Read a harmless file." });
+  expect(Socket.instance.sent.map((frame) => JSON.parse(frame))).toContainEqual({ type: "send_message", client_id: expect.any(String), content: "Read a harmless file." });
   expect(getConversation).toHaveBeenCalledTimes(1);
 });

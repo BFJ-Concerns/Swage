@@ -154,6 +154,7 @@ pub(crate) async fn dispatch_client_message(
         }
 
         ClientEvent::SendMessage {
+            client_id,
             content,
             attachments,
             thread_id,
@@ -248,7 +249,8 @@ pub(crate) async fn dispatch_client_message(
                             state,
                             session_id,
                             thread_id,
-                            turn::TurnInput::with_attachments(turn_content, attachments),
+                            turn::TurnInput::with_attachments(turn_content, attachments)
+                                .with_client_id(client_id),
                             tx.clone(),
                             Arc::clone(&subscription),
                         );
@@ -258,7 +260,8 @@ pub(crate) async fn dispatch_client_message(
                             state,
                             session_id,
                             thread_id,
-                            turn::TurnInput::with_attachments(content, attachments),
+                            turn::TurnInput::with_attachments(content, attachments)
+                                .with_client_id(client_id),
                             tx.clone(),
                             Arc::clone(&subscription),
                         );
@@ -270,7 +273,8 @@ pub(crate) async fn dispatch_client_message(
                         state,
                         session_id,
                         thread_id,
-                        turn::TurnInput::with_attachments(content, attachments),
+                        turn::TurnInput::with_attachments(content, attachments)
+                            .with_client_id(client_id),
                         tx.clone(),
                         Arc::clone(&subscription),
                     );

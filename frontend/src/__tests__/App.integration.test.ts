@@ -1508,6 +1508,7 @@ describe("App", () => {
 
     expect(websocketHarness.client.send).toHaveBeenCalledWith({
       type: "send_message",
+      client_id: expect.any(String),
       content: "Hello from the app",
     });
     expect(document.querySelector(".message-display")?.textContent).toContain(
@@ -1624,6 +1625,7 @@ describe("App", () => {
     );
     expect(bClient.send).toHaveBeenLastCalledWith({
       type: "send_message",
+      client_id: expect.any(String),
       content: "Message for B",
     });
     expect(document.querySelector(".action.stop")).not.toBeNull();
@@ -2015,6 +2017,7 @@ describe("App", () => {
     expect(settingsApi.fetchSettings).toHaveBeenCalledTimes(3);
     expect(websocketHarness.client.send).toHaveBeenCalledWith({
       type: "send_message",
+      client_id: expect.any(String),
       content: "Send with the newly saved model",
       selected_model_id: "local/new-model",
     });
@@ -2062,6 +2065,7 @@ describe("App", () => {
 
     expect(websocketHarness.client.send).toHaveBeenLastCalledWith({
       type: "send_message",
+      client_id: expect.any(String),
       content: "Send after the failed catalogue refresh",
       selected_model_id: "local/new-model",
     });

@@ -53,6 +53,7 @@ impl SessionEventDelivery {
 pub fn queued_message_view(queued: &QueuedTurnInput) -> Result<QueuedMessageView, GatewayError> {
     Ok(QueuedMessageView {
         id: queued.id,
+        client_id: queued.client_id,
         origin: queued.origin,
         content: queued.content.clone(),
         attachments: message_attachments(&queued.attachments)?,
@@ -69,14 +70,41 @@ pub async fn queue_input(
     thread_id: Uuid,
     input: TurnInput,
 ) -> Result<QueuedMessageView, GatewayError> {
+    queue_input_with_attribution(
+        state,
+        session_id,
+        thread_id,
+        input,
+        None,
+        Vec::new(),
+        TurnAttendance::Attended,
+    )
+    .await
+}
+
+/// Join the shared queue with durable automation or inbox attribution.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn queue_input_with_attribution(
+    state: &AppState,
+    session_id: Uuid,
+    thread_id: Uuid,
+    input: TurnInput,
+    schedule_run_id: Option<Uuid>,
+    channel_message_ids: Vec<Uuid>,
+    attendance: TurnAttendance,
+) -> Result<QueuedMessageView, GatewayError> {
     let queued = state
         .storage
         .enqueue_turn_input(NewQueuedTurnInput {
+            attended: attendance == TurnAttendance::Attended,
+            client_id: input.client_id,
             session_id,
             thread_id,
             origin: input.origin,
             content: input.text,
             attachments: attachment_records(&input.attachments),
+            schedule_run_id,
+            channel_message_ids,
         })
         .await?;
     let view = queued_message_view(&queued)?;
@@ -203,6 +231,7 @@ pub async fn drain_queue(state: &AppState, session_id: Uuid) -> Result<Option<Uu
             .await;
 
         let input = TurnInput {
+            client_id: None,
             text: turn.user_input.clone().unwrap_or_default(),
             // Attachments already sit on the recorded rows; the turn rebuilds
             // its history from them.
@@ -227,7 +256,13 @@ pub async fn drain_queue(state: &AppState, session_id: Uuid) -> Result<Option<Uu
             None,
             Some(cancellation),
             Some(turn.id),
-            TurnAttendance::Attended,
+            // Person-facing inputs make the whole batch attended; a batch of
+            // channel and schedule inputs keeps their unattended execution.
+            if drained.attended {
+                TurnAttendance::Attended
+            } else {
+                TurnAttendance::Unattended
+            },
             Default::default(),
             None,
             None,
@@ -253,7 +288,31 @@ pub async fn drain_queue(state: &AppState, session_id: Uuid) -> Result<Option<Uu
         )
         .await?;
     }
+    let settled = state
+        .storage
+        .get_turn(turn.id)
+        .await?
+        .ok_or_else(|| GatewayError::ValidationError("drained turn no longer exists".into()))?;
+    let mut delivery_error = None;
+    for run_id in drained.schedule_run_ids {
+        if let Err(error) = crate::schedule::settle_queued_run(state, run_id, &settled).await {
+            delivery_error.get_or_insert(error);
+        }
+    }
+    if settled.state == TurnState::Completed {
+        for origin in drained.channel_origins {
+            if let Err(error) =
+                crate::channel_gateway::deliver_queued_response(state, session_id, &settled, origin)
+                    .await
+            {
+                delivery_error.get_or_insert(error);
+            }
+        }
+    }
     result?;
+    if let Some(error) = delivery_error {
+        return Err(error);
+    }
     Ok(Some(turn.id))
 }
 
@@ -287,6 +346,220 @@ mod tests {
                 finish_reason: Some(FinishReason::Stop),
             },
         ]
+    }
+
+    async fn queued_tool_call_prompts(schedule: bool, person: bool) {
+        use crate::turn::tests::make_state_with_approval_gated_echo;
+        use swage_storage::model::NewChannelInboundMessage;
+
+        let (mut state, _) = make_state_with_approval_gated_echo(vec![
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "queued-echo".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::json!({"text": "granted call"}),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            reply("Executed."),
+        ])
+        .await;
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("queue.db");
+        let storage = Arc::new(swage_storage::sqlite::SqliteStorage::open(&database).unwrap());
+        let topic = swage_storage::store::TopicStore::general_scope(storage.as_ref())
+            .await
+            .unwrap();
+        let session_id = swage_storage::store::SessionStore::create_session(
+            storage.as_ref(),
+            swage_storage::fixtures::new_session(topic.id),
+        )
+        .await
+        .unwrap()
+        .id;
+        swage_storage::store::ThreadStore::create(
+            storage.as_ref(),
+            swage_storage::model::NewThread {
+                session_id,
+                agent_id: "gateway".into(),
+            },
+        )
+        .await
+        .unwrap();
+        state.storage = storage.clone();
+        state.topic_store = storage;
+        state.config_root = root.path().to_path_buf();
+        let thread = resolve_thread_for_session(state.storage.as_ref(), session_id, None)
+            .await
+            .unwrap();
+        let busy =
+            crate::automated_turn::create_placeholder_turn(&state, session_id, "gateway", "busy")
+                .await
+                .unwrap();
+        state
+            .active_turns
+            .lock()
+            .await
+            .insert(session_id, CancellationToken::new());
+        if schedule {
+            use swage_protocol::client::schedule::{
+                CreateScheduleRequest, ScheduleCreator, ScheduleSpec, SessionPolicy,
+            };
+            let schedule = crate::schedule::create_schedule(
+                &state,
+                CreateScheduleRequest {
+                    message: "schedule brief".into(),
+                    spec: ScheduleSpec::Interval {
+                        every: "every 5 seconds".into(),
+                    },
+                    session: SessionPolicy::Continuation { session_id },
+                    routing: None,
+                    gate: None,
+                },
+                ScheduleCreator::User,
+            )
+            .await
+            .unwrap();
+            crate::schedule::trigger_schedule(&state, schedule.id)
+                .await
+                .unwrap();
+        } else {
+            state
+                .storage
+                .ingest_channel_inbound(
+                    vec![NewChannelInboundMessage {
+                        integration: "dev_dm".into(),
+                        account: "bot".into(),
+                        conversation: "chat".into(),
+                        external_id: "one".into(),
+                        sender: "person".into(),
+                        content: "channel message".into(),
+                    }],
+                    "dev_dm",
+                    "bot",
+                    "cursor",
+                )
+                .await
+                .unwrap();
+            state
+                .storage
+                .upsert_channel_link(swage_storage::model::NewChannelLink {
+                    integration: "dev_dm".into(),
+                    account: "bot".into(),
+                    conversation: "chat".into(),
+                    topic_id: topic.id,
+                    agent_id: "gateway".into(),
+                    session_id: Some(session_id),
+                    home_target: None,
+                })
+                .await
+                .unwrap();
+            crate::channel_gateway::drain_channel_queue_checked(&state)
+                .await
+                .unwrap();
+        }
+        if person {
+            queue_input(
+                &state,
+                session_id,
+                thread.id,
+                TurnInput::text("person message"),
+            )
+            .await
+            .unwrap();
+        }
+        state
+            .storage
+            .update_turn_state(busy, TurnState::Completed)
+            .await
+            .unwrap();
+        state.active_turns.lock().await.remove(&session_id);
+        // Replace both handles with a reopened store: attendance must survive
+        // storage closure, rather than depending on the enqueue's task.
+        let reopened = Arc::new(swage_storage::sqlite::SqliteStorage::open(&database).unwrap());
+        state.storage = reopened.clone();
+        state.topic_store = reopened;
+        let held_attendance = state
+            .storage
+            .list_queued_turn_inputs(session_id)
+            .await
+            .unwrap()
+            .iter()
+            .map(|input| input.attended)
+            .collect::<Vec<_>>();
+        let drain_state = state.clone();
+        let task = tokio::spawn(async move { drain_queue(&drain_state, session_id).await });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !task.is_finished() && state.approval_channels.lock().unwrap().is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("queued tool turn must reach execution or approval");
+        let approvals = state.storage.list_approvals().await.unwrap();
+        // Let even an unexpected prompt settle, so one assertion checks both
+        // attendance and the actual granted tool execution and reply.
+        for approval in &approvals {
+            state
+                .approval_channels
+                .lock()
+                .unwrap()
+                .remove(&approval.id)
+                .unwrap()
+                .send(swage_agent::approval::ApprovalDecision {
+                    decision: swage_agent::approval::ApprovalDecisionValue::Approved,
+                    scope: swage_agent::approval::ApprovalDecisionScope::Once,
+                    reason: None,
+                })
+                .unwrap();
+        }
+        let turn_id = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let turn = state.storage.get_turn(turn_id).await.unwrap().unwrap();
+        let calls = state
+            .storage
+            .list_tool_calls_by_turn(turn_id)
+            .await
+            .unwrap();
+        let results = calls
+            .iter()
+            .map(|call| {
+                serde_json::from_str::<serde_json::Value>(call.result.as_ref().unwrap()).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            serde_json::json!([
+                held_attendance,
+                approvals.len(),
+                turn.state,
+                turn.assistant_response,
+                results
+            ]),
+            serde_json::json!([if person { vec![false, true] } else { vec![false] }, usize::from(person), "completed", "Executed.", [{"output": "granted call"}]]),
+            "queued source attendance must survive reopening; any attended input makes the batch attended, otherwise granted calls execute without prompting"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn queued_schedule_executes_granted_calls_without_prompting() {
+        queued_tool_call_prompts(true, false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn queued_channel_executes_granted_calls_without_prompting() {
+        queued_tool_call_prompts(false, false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mixed_queue_is_attended_when_any_input_is_a_persons() {
+        queued_tool_call_prompts(true, true).await;
+        queued_tool_call_prompts(false, true).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -899,11 +1172,15 @@ mod tests {
         state
             .storage
             .enqueue_turn_input(NewQueuedTurnInput {
+                attended: true,
+                client_id: None,
                 session_id,
                 thread_id: thread.id,
                 origin: MessageOrigin::User,
                 content: "sent before the restart".into(),
                 attachments: Vec::new(),
+                schedule_run_id: None,
+                channel_message_ids: Vec::new(),
             })
             .await
             .unwrap();

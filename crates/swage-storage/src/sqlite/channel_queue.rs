@@ -154,6 +154,7 @@ impl ChannelQueueStore for SqliteStorage {
                 "SELECT integration, account, conversation
                  FROM channel_inbound_messages
                  WHERE state = 'pending'
+                   AND NOT EXISTS (SELECT 1 FROM turn_queue_channel_messages q WHERE q.message_id = channel_inbound_messages.id)
                  GROUP BY integration, account, conversation
                  ORDER BY MIN(received_at) ASC",
             )?;
@@ -179,6 +180,7 @@ impl ChannelQueueStore for SqliteStorage {
                         state, discard_reason, turn_id, received_at, presented_at
                  FROM channel_inbound_messages
                  WHERE state = 'pending'
+                   AND NOT EXISTS (SELECT 1 FROM turn_queue_channel_messages q WHERE q.message_id = channel_inbound_messages.id)
                    AND integration = ?1
                    AND account = ?2
                    AND conversation = ?3
@@ -237,7 +239,8 @@ impl ChannelQueueStore for SqliteStorage {
                          turn_id = ?2,
                          presented_at = ?3
                      WHERE id = ?1
-                       AND state = 'pending'",
+                       AND state = 'pending'
+                       AND NOT EXISTS (SELECT 1 FROM turn_queue_channel_messages q WHERE q.message_id = channel_inbound_messages.id)",
                     params![id.to_string(), turn_id.to_string(), &now_str],
                 )?;
             }
@@ -291,7 +294,8 @@ impl ChannelQueueStore for SqliteStorage {
                      SET state = 'discarded',
                          discard_reason = ?2
                      WHERE id = ?1
-                       AND state = 'pending'",
+                       AND state = 'pending'
+                       AND NOT EXISTS (SELECT 1 FROM turn_queue_channel_messages q WHERE q.message_id = channel_inbound_messages.id)",
                     params![id.to_string(), &reason],
                 )? as u64;
             }

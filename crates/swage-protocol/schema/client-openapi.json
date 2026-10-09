@@ -318,6 +318,14 @@
                 },
                 "type": "array"
               },
+              "client_id": {
+                "description": "Correlates a queued acknowledgement with this client's send.",
+                "format": "uuid",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "content": {
                 "type": "string"
               },
@@ -3161,6 +3169,14 @@
               "$ref": "#/components/schemas/MessageAttachment"
             },
             "type": "array"
+          },
+          "client_id": {
+            "description": "Identifies the client's optimistic send, when supplied.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "content": {
             "type": "string"

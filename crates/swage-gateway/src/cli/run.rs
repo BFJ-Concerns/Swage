@@ -86,6 +86,7 @@ pub async fn run(args: &RunArgs) -> Result<(), ClientError> {
     let mut ws = GatewayWebSocket::connect(&url, conversation.id).await?;
 
     ws.send(ClientEvent::SendMessage {
+        client_id: None,
         content: message,
         attachments: Vec::new(),
         thread_id: None,

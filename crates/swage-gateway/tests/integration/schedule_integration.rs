@@ -35,8 +35,8 @@ use swage_protocol::client::schedule::{
 use swage_protocol::client::surface::CreateSurfaceRequest;
 use swage_provider::LlmProvider;
 use swage_storage::{
-    NewScheduleRun, NewTurn, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate,
-    SqliteStorage, TurnState,
+    NewScheduleRun, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate, SqliteStorage,
+    TurnState,
 };
 
 /// Provider double serving both halves of the schedule domain: queued
@@ -1421,22 +1421,24 @@ async fn due_run_meeting_an_executing_predecessor_is_skipped_and_recorded() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn busy_continuation_session_skips_the_run_deliberately() {
+async fn busy_continuation_queues_then_settles_the_run_and_enforces_the_cap() {
     let dir = tempfile::tempdir().unwrap();
-    let state = test_state(&dir.path().join("busy.db"), MockProvider::new(vec![]));
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let state = test_state(
+        &dir.path().join("busy.db"),
+        StallProvider::new("queued schedule reply", started_tx, release_rx),
+    );
     let router = build_router(state.clone());
     let session_id = create_conversation(&router).await;
-
-    // A user turn is mid-flight in the target session.
-    swage_gateway::automated_turn::create_placeholder_turn(
+    let active = swage_gateway::automated_turn::create_placeholder_turn(
         &state,
         session_id,
         "gateway",
-        "user is mid-conversation",
+        "person is working",
     )
     .await
     .unwrap();
-
     let created = schedule::create_schedule(
         &state,
         create_request(
@@ -1450,13 +1452,140 @@ async fn busy_continuation_session_skips_the_run_deliberately() {
     )
     .await
     .unwrap();
-
     let run = schedule::trigger_schedule(&state, created.id)
         .await
         .unwrap()
         .run;
-    assert_eq!(run.state.to_string(), "skipped");
-    assert_eq!(run.skip_reason.unwrap().to_string(), "overlap");
+    assert_eq!(
+        run.state,
+        ScheduleRunState::Pending,
+        "a busy session holds the run pending instead of skipping it"
+    );
+    assert!(run.turn_id.is_none());
+    let queued = state
+        .storage
+        .list_queued_turn_inputs(session_id)
+        .await
+        .unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].origin, swage_storage::MessageOrigin::Schedule);
+    let (_, detail) = request_json(
+        &router,
+        "GET",
+        &format!("/api/conversations/{session_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(detail["queued"][0]["origin"], "schedule");
+    let suppressed = schedule::trigger_schedule(&state, created.id)
+        .await
+        .unwrap()
+        .run;
+    assert_eq!(suppressed.state, ScheduleRunState::Skipped);
+    assert_eq!(suppressed.skip_reason, Some(SkipReason::Overlap));
+    assert_eq!(
+        state
+            .storage
+            .list_queued_turn_inputs(session_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        swage_gateway::turn_queue::drain_queue(&state, session_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "a lost claim must retain the queue"
+    );
+    let still_waiting = state
+        .storage
+        .get_schedule_run(run.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(still_waiting.state, ScheduleRunState::Pending);
+    assert!(
+        still_waiting.turn_id.is_none(),
+        "a lost turn claim cannot attach the run"
+    );
+    assert_eq!(
+        state
+            .storage
+            .list_queued_turn_inputs(session_id)
+            .await
+            .unwrap()[0]
+            .id,
+        queued[0].id
+    );
+    state
+        .storage
+        .update_turn_state(active, TurnState::Interrupted)
+        .await
+        .unwrap();
+    assert_eq!(
+        state
+            .storage
+            .list_queued_turn_inputs(session_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    // Restart recovery must distinguish a durable queued brief from an orphan.
+    assert_eq!(
+        state
+            .storage
+            .recover_incomplete_schedule_runs("restart")
+            .await
+            .unwrap(),
+        0
+    );
+    let draining_state = state.clone();
+    let draining = tokio::spawn(async move {
+        swage_gateway::turn_queue::drain_queue(&draining_state, session_id).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), started_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let running = state
+        .storage
+        .get_schedule_run(run.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(running.state, ScheduleRunState::Running);
+    assert!(running.turn_id.is_some());
+    assert!(running.started_at.is_some());
+    release_tx.send(()).unwrap();
+    let drained = draining.await.unwrap().unwrap().unwrap();
+    let run = state
+        .storage
+        .get_schedule_run(run.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.turn_id, Some(drained));
+    assert_eq!(run.state, ScheduleRunState::Completed);
+    assert_eq!(run.output_text.as_deref(), Some("queued schedule reply"));
+    let deliveries = state.storage.list_delivery_records().await.unwrap();
+    let deliveries: Vec<_> = deliveries
+        .into_iter()
+        .filter(|delivery| delivery.run_id == Some(run.id))
+        .collect();
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].turn_id, Some(drained));
+    assert!(run.started_at.is_some(), "the drain stamps the run's start");
+    assert!(
+        state
+            .storage
+            .list_queued_turn_inputs(session_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2402,7 +2531,7 @@ async fn trigger_on_unknown_schedule_is_a_request_error() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_agent_self_wake_rearms_after_the_calling_turn_and_then_fires() {
+async fn an_agent_self_wake_queues_once_without_rearming_the_schedule() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(
         &dir.path().join("self-wake.db"),
@@ -2410,25 +2539,27 @@ async fn an_agent_self_wake_rearms_after_the_calling_turn_and_then_fires() {
     );
     let router = build_router(state.clone());
     let session_id = create_conversation(&router).await;
-    let thread = state.storage.list_by_session(session_id).await.unwrap()[0].clone();
-    let active_turn = state
-        .storage
-        .create_turn(NewTurn {
-            thread_id: thread.id,
-            agent_id: "gateway".into(),
-            state: TurnState::Processing,
-            user_input: Some("wake me when this turn is over".into()),
-            parent_turn_id: None,
-        })
+    let active = swage_gateway::automated_turn::create_placeholder_turn(
+        &state,
+        session_id,
+        "gateway",
+        "wake me after this",
+    )
+    .await
+    .unwrap();
+    // The placeholder stands for a running turn, which holds the session's
+    // guard: queued input waits for that turn's end instead of draining.
+    state
+        .active_turns
+        .lock()
         .await
-        .unwrap();
-    let due_at = Utc::now() - Duration::seconds(1);
+        .insert(session_id, tokio_util::sync::CancellationToken::new());
     let created = schedule::create_schedule(
         &state,
         create_request(
             "resume after the active turn",
             ScheduleSpec::OneShot {
-                at: due_at.to_rfc3339(),
+                at: (Utc::now() - Duration::seconds(1)).to_rfc3339(),
             },
             continuation(session_id),
         ),
@@ -2438,44 +2569,43 @@ async fn an_agent_self_wake_rearms_after_the_calling_turn_and_then_fires() {
     )
     .await
     .unwrap();
-
     assert_eq!(tick_to_completion(&state, Utc::now()).await, 1);
-    let skipped = state.storage.list_schedule_runs(created.id).await.unwrap();
-    assert_eq!(skipped.len(), 1);
-    assert_eq!(skipped[0].state, ScheduleRunState::Skipped);
-    assert_eq!(skipped[0].skip_reason, Some(SkipReason::Overlap));
-    let rearmed = state
+    let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].state,
+        ScheduleRunState::Pending,
+        "self-wake waits in the shared queue"
+    );
+    let stored = state
         .storage
         .get_schedule(created.id)
         .await
         .unwrap()
-        .expect("self-wake schedule");
-    assert_eq!(rearmed.status, ScheduleStatus::Active);
-    let retry_at = rearmed
-        .next_run_at
-        .expect("an overlapping self-wake must be re-armed");
-
+        .unwrap();
+    assert_eq!(stored.status, ScheduleStatus::Completed);
+    assert!(
+        stored.next_run_at.is_none(),
+        "queuing never re-arms a one-shot"
+    );
     state
         .storage
-        .update_turn_state(active_turn.id, TurnState::Completed)
+        .update_turn_state(active, TurnState::Completed)
         .await
         .unwrap();
-    assert_eq!(tick_to_completion(&state, retry_at).await, 1);
-
-    let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
-    assert_eq!(runs.len(), 2);
-    assert_eq!(runs[1].state, ScheduleRunState::Completed);
-    assert_eq!(runs[1].output_text.as_deref(), Some("awake after the turn"));
+    state.active_turns.lock().await.remove(&session_id);
+    swage_gateway::turn_queue::drain_queue(&state, session_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        state
-            .storage
-            .get_schedule(created.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
-        ScheduleStatus::Completed
+        tick_to_completion(&state, Utc::now() + Duration::seconds(5)).await,
+        0
     );
+    let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].state, ScheduleRunState::Completed);
+    assert_eq!(runs[0].output_text.as_deref(), Some("awake after the turn"));
 }
 
 /// A provider whose single stream emits one delta, signals that it has
@@ -2736,6 +2866,101 @@ async fn gate_update_tristate_round_trips_over_the_wire() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(set["gate"]["model"], GATE_MODEL);
     assert_eq!(set["gate"]["criteria"], "revised");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn queued_schedule_failures_settle_the_run_and_preserve_completed_output() {
+    for delivery_fails in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let rounds = if delivery_fails {
+            MockProvider::text_round("retained queued output")
+        } else {
+            vec![StreamChunk::Error {
+                message: "queued provider unavailable".into(),
+            }]
+        };
+        let state = test_state(
+            &dir.path().join("queued-failure.db"),
+            MockProvider::new(vec![rounds]),
+        );
+        let router = build_router(state.clone());
+        let session_id = create_conversation(&router).await;
+        let active = swage_gateway::automated_turn::create_placeholder_turn(
+            &state, session_id, "gateway", "busy",
+        )
+        .await
+        .unwrap();
+        // Model a live turn's in-memory guard as well as its storage claim,
+        // so enqueue leaves draining to the fixture's awaited call.
+        state
+            .active_turns
+            .lock()
+            .await
+            .insert(session_id, tokio_util::sync::CancellationToken::new());
+        let mut request = create_request(
+            "queued work",
+            ScheduleSpec::Interval {
+                every: "every 5 seconds".into(),
+            },
+            continuation(session_id),
+        );
+        if delivery_fails {
+            request.routing = Some(DeliveryRoutingRequest {
+                deliver_to_origin: false,
+                home_target: None,
+                store_local_output: false,
+                explicit_targets: vec![DeliveryTarget::Webhook {
+                    url: "not-a-valid-url".into(),
+                }],
+            });
+        }
+        let created = schedule::create_schedule(&state, request, ScheduleCreator::User)
+            .await
+            .unwrap();
+        let run = schedule::trigger_schedule(&state, created.id)
+            .await
+            .unwrap()
+            .run;
+        assert_eq!(
+            run.state,
+            ScheduleRunState::Pending,
+            "the failure must happen after queueing"
+        );
+        state
+            .storage
+            .update_turn_state(active, TurnState::Interrupted)
+            .await
+            .unwrap();
+        state.active_turns.lock().await.remove(&session_id);
+        let _ = swage_gateway::turn_queue::drain_queue(&state, session_id).await;
+        let settled = state
+            .storage
+            .get_schedule_run(run.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            settled.state,
+            ScheduleRunState::Failed,
+            "queued failures must not leave a running run"
+        );
+        assert!(settled.turn_id.is_some());
+        assert!(settled.completed_at.is_some());
+        if delivery_fails {
+            assert_eq!(
+                settled.output_text.as_deref(),
+                Some("retained queued output")
+            );
+            assert!(settled.error_message.unwrap().contains("delivery failed"));
+        } else {
+            assert!(
+                settled
+                    .error_message
+                    .unwrap()
+                    .contains("queued turn ended failed")
+            );
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

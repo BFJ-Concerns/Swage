@@ -16,7 +16,7 @@ use crate::sqlite::message::encode_attachments;
 use crate::store::TurnQueueStore;
 use swage_core::Role;
 
-const COLUMNS: &str = "id, session_id, thread_id, seq, origin, content, attachments, created_at";
+const COLUMNS: &str = "id, session_id, thread_id, seq, origin, content, attachments, created_at, schedule_run_id, attended, client_id";
 
 fn parse_uuid(value: &str) -> rusqlite::Result<Uuid> {
     value.parse::<Uuid>().map_err(|error| {
@@ -44,6 +44,12 @@ fn row_to_queued(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedTurnInput> {
     let attachments: String = row.get(6)?;
     let created_at: String = row.get(7)?;
     Ok(QueuedTurnInput {
+        attended: row.get(9)?,
+        client_id: row
+            .get::<_, Option<String>>(10)?
+            .as_deref()
+            .map(parse_uuid)
+            .transpose()?,
         id: parse_uuid(&id)?,
         session_id: parse_uuid(&session_id)?,
         thread_id: parse_uuid(&thread_id)?,
@@ -60,7 +66,25 @@ fn row_to_queued(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedTurnInput> {
             )
         })?,
         created_at: parse_dt(&created_at)?,
+        schedule_run_id: row
+            .get::<_, Option<String>>(8)?
+            .as_deref()
+            .map(parse_uuid)
+            .transpose()?,
+        channel_message_ids: Vec::new(),
     })
+}
+
+fn channel_message_ids(
+    conn: &rusqlite::Connection,
+    queued_id: Uuid,
+) -> rusqlite::Result<Vec<Uuid>> {
+    let mut stmt =
+        conn.prepare("SELECT message_id FROM turn_queue_channel_messages WHERE queued_id = ?1")?;
+    let rows = stmt.query_map(params![queued_id.to_string()], |row| {
+        parse_uuid(&row.get::<_, String>(0)?)
+    })?;
+    rows.collect()
 }
 
 #[async_trait]
@@ -70,20 +94,21 @@ impl TurnQueueStore for SqliteStorage {
         input: NewQueuedTurnInput,
     ) -> Result<QueuedTurnInput, StorageError> {
         self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
             let id = Uuid::new_v4();
             let now = Utc::now();
             let attachments = serde_json::to_string(&input.attachments)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             // The sequence is allocated inside the connection's lock, so two
             // arrivals never share a place in the queue.
-            let seq: i64 = conn.query_row(
+            let seq: i64 = tx.query_row(
                 "SELECT COALESCE(MAX(seq) + 1, 0) FROM turn_queue WHERE session_id = ?1",
                 params![input.session_id.to_string()],
                 |row| row.get(0),
             )?;
-            conn.execute(
+            tx.execute(
                 &format!(
-                    "INSERT INTO turn_queue ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+                    "INSERT INTO turn_queue ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
                 ),
                 params![
                     id.to_string(),
@@ -94,9 +119,25 @@ impl TurnQueueStore for SqliteStorage {
                     &input.content,
                     attachments,
                     now.to_rfc3339(),
+                    input.schedule_run_id.map(|id| id.to_string()),
+                    input.attended,
+                    input.client_id.map(|id| id.to_string()),
                 ],
             )?;
+            for message_id in &input.channel_message_ids {
+                let claimed = tx.execute(
+                    "INSERT INTO turn_queue_channel_messages (queued_id, message_id)
+                     SELECT ?1, id FROM channel_inbound_messages WHERE id = ?2 AND state = 'pending'",
+                    params![id.to_string(), message_id.to_string()],
+                )?;
+                if claimed != 1 {
+                    return Err(rusqlite::Error::QueryReturnedNoRows);
+                }
+            }
+            tx.commit()?;
             Ok(QueuedTurnInput {
+                attended: input.attended,
+                client_id: input.client_id,
                 id,
                 session_id: input.session_id,
                 thread_id: input.thread_id,
@@ -105,6 +146,8 @@ impl TurnQueueStore for SqliteStorage {
                 content: input.content,
                 attachments: input.attachments,
                 created_at: now,
+                schedule_run_id: input.schedule_run_id,
+                channel_message_ids: input.channel_message_ids,
             })
         })
         .await
@@ -119,7 +162,11 @@ impl TurnQueueStore for SqliteStorage {
                 "SELECT {COLUMNS} FROM turn_queue WHERE session_id = ?1 ORDER BY seq ASC"
             ))?;
             let rows = stmt.query_map(params![session_id.to_string()], row_to_queued)?;
-            rows.collect()
+            let mut queued = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            for item in &mut queued {
+                item.channel_message_ids = channel_message_ids(conn, item.id)?;
+            }
+            Ok(queued)
         })
         .await
     }
@@ -132,13 +179,16 @@ impl TurnQueueStore for SqliteStorage {
         let agent_id = agent_id.to_owned();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
-            let queued = {
+            let mut queued = {
                 let mut stmt = tx.prepare(&format!(
                     "SELECT {COLUMNS} FROM turn_queue WHERE session_id = ?1 ORDER BY seq ASC"
                 ))?;
                 let rows = stmt.query_map(params![session_id.to_string()], row_to_queued)?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
+            for item in &mut queued {
+                item.channel_message_ids = channel_message_ids(&tx, item.id)?;
+            }
             let Some(first) = queued.first() else {
                 return Ok(None);
             };
@@ -178,7 +228,8 @@ impl TurnQueueStore for SqliteStorage {
             // One recorded message per queued input, in arrival order, each
             // with the origin it arrived with.
             let mut messages = Vec::with_capacity(queued.len());
-            for item in &queued {
+            for (index, item) in queued.iter().enumerate() {
+                let recorded_at = now + chrono::Duration::nanoseconds(index as i64);
                 let position: i32 = tx.query_row(
                     "SELECT COALESCE(MAX(position) + 1, 0) FROM messages WHERE thread_id = ?1",
                     params![thread_id.to_string()],
@@ -197,7 +248,7 @@ impl TurnQueueStore for SqliteStorage {
                         &item.content,
                         position,
                         &agent_id,
-                        &now_str,
+                        recorded_at.to_rfc3339(),
                         encode_attachments(&item.attachments)?,
                         item.origin.as_str(),
                     ],
@@ -214,8 +265,29 @@ impl TurnQueueStore for SqliteStorage {
                     agent_id: agent_id.clone(),
                     tool_call_id: None,
                     tool_name: None,
-                    created_at: now,
+                    created_at: recorded_at,
                 });
+            }
+            let mut schedule_run_ids = Vec::new();
+            let mut channel_origins = Vec::new();
+            for item in &queued {
+                if let Some(run_id) = item.schedule_run_id {
+                    tx.execute("UPDATE schedule_runs SET state = 'running', turn_id = ?2, started_at = ?3 WHERE id = ?1 AND state = 'pending'",
+                        params![run_id.to_string(), turn_id.to_string(), &now_str])?;
+                    schedule_run_ids.push(run_id);
+                }
+                for message_id in &item.channel_message_ids {
+                    let origin = tx.query_row("SELECT integration, account, conversation FROM channel_inbound_messages WHERE id = ?1",
+                        params![message_id.to_string()], |row| Ok(crate::model::PendingChannelOrigin {
+                            integration: row.get(0)?, account: row.get(1)?, conversation: row.get(2)?,
+                        }))?;
+                    if !channel_origins.iter().any(|existing: &crate::model::PendingChannelOrigin|
+                        existing.integration == origin.integration && existing.account == origin.account && existing.conversation == origin.conversation) {
+                        channel_origins.push(origin);
+                    }
+                    tx.execute("UPDATE channel_inbound_messages SET state = 'presented', turn_id = ?2, presented_at = ?3 WHERE id = ?1 AND state = 'pending'",
+                        params![message_id.to_string(), turn_id.to_string(), &now_str])?;
+                }
             }
             tx.execute(
                 "DELETE FROM turn_queue WHERE session_id = ?1",
@@ -224,6 +296,7 @@ impl TurnQueueStore for SqliteStorage {
             tx.commit()?;
             let queued_ids = queued.iter().map(|item| item.id).collect();
             Ok(Some(DrainedTurnQueue {
+                attended: queued.iter().any(|input| input.attended),
                 turn: Turn {
                     id: turn_id,
                     thread_id,
@@ -246,6 +319,8 @@ impl TurnQueueStore for SqliteStorage {
                 },
                 messages,
                 queued_ids,
+                schedule_run_ids,
+                channel_origins,
             }))
         })
         .await
@@ -273,7 +348,10 @@ mod tests {
     use crate::store::{SessionStore, ThreadStore, TopicStore};
 
     async fn session_and_thread() -> (SqliteStorage, Uuid, Uuid) {
-        let storage = SqliteStorage::in_memory().unwrap();
+        session_and_thread_in(SqliteStorage::in_memory().unwrap()).await
+    }
+
+    async fn session_and_thread_in(storage: SqliteStorage) -> (SqliteStorage, Uuid, Uuid) {
         let topic = TopicStore::create(
             &storage,
             NewTopic {
@@ -298,12 +376,154 @@ mod tests {
 
     fn queued(session_id: Uuid, thread_id: Uuid, content: &str) -> NewQueuedTurnInput {
         NewQueuedTurnInput {
+            attended: true,
+            client_id: None,
             session_id,
             thread_id,
             origin: MessageOrigin::User,
             content: content.into(),
             attachments: Vec::new(),
+            schedule_run_id: None,
+            channel_message_ids: Vec::new(),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn queue_attendance_and_client_identity_survive_reopening() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("queue.db");
+        let (storage, session_id, thread_id) =
+            session_and_thread_in(SqliteStorage::open(&database).unwrap()).await;
+        let held = storage
+            .enqueue_turn_input(NewQueuedTurnInput {
+                attended: false,
+                client_id: Some(Uuid::new_v4()),
+                ..queued(session_id, thread_id, "unattended send")
+            })
+            .await
+            .unwrap();
+        drop(storage);
+        let reopened = SqliteStorage::open(&database).unwrap();
+        let listed = reopened.list_queued_turn_inputs(session_id).await.unwrap();
+        let drained = reopened
+            .drain_queued_turn_inputs(session_id, "gateway")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (listed, drained.attended),
+            (vec![held], false),
+            "a reopened queue must retain its client's identity and source attendance through the drain"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deleting_a_schedule_cancels_its_queued_brief_only() {
+        use crate::model::{
+            NewSchedule, NewScheduleRun, ScheduleCreator, ScheduleKind, ScheduleRunTrigger,
+            ScheduleStatus, SessionPolicy,
+        };
+        use crate::store::{ScheduleStore, SessionStore};
+        let (storage, session_id, thread_id) = session_and_thread().await;
+        let topic_id = storage
+            .get_session(session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .topic_id;
+        let schedule = storage
+            .create_schedule(NewSchedule {
+                id: Uuid::new_v4(),
+                message: "scheduled brief".into(),
+                status: ScheduleStatus::Active,
+                kind: ScheduleKind::Interval,
+                expression: "every 5 seconds".into(),
+                session_policy: SessionPolicy::Fresh {
+                    topic_id: Some(topic_id),
+                    agent_id: "gateway".into(),
+                },
+                creator: ScheduleCreator::User,
+                delivery_routing: serde_json::json!({}),
+                gate: None,
+                next_run_at: None,
+                last_run_at: None,
+            })
+            .await
+            .unwrap();
+        let run = storage
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule.id,
+                ScheduleRunTrigger::Tick,
+                None,
+            ))
+            .await
+            .unwrap();
+        storage
+            .enqueue_turn_input(NewQueuedTurnInput {
+                schedule_run_id: Some(run.id),
+                origin: MessageOrigin::Schedule,
+                ..queued(session_id, thread_id, "scheduled brief")
+            })
+            .await
+            .unwrap();
+        storage
+            .enqueue_turn_input(queued(session_id, thread_id, "person message"))
+            .await
+            .unwrap();
+        let deleted = storage.delete_schedule(schedule.id).await;
+        let remaining = storage.list_queued_turn_inputs(session_id).await.unwrap();
+        assert_eq!(
+            (
+                deleted.is_ok(),
+                storage.get_schedule_run(run.id).await.unwrap().is_none(),
+                remaining
+                    .iter()
+                    .map(|input| input.content.as_str())
+                    .collect::<Vec<_>>()
+            ),
+            (true, true, vec!["person message"]),
+            "schedule deletion must succeed, cancelling its run and brief while retaining a person's queued input: {deleted:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drained_rows_have_ordered_instants_in_storage_and_the_announcement() {
+        use crate::store::MessageStore;
+
+        let (storage, session_id, thread_id) = session_and_thread().await;
+        for content in ["first", "second", "third"] {
+            storage
+                .enqueue_turn_input(queued(session_id, thread_id, content))
+                .await
+                .unwrap();
+        }
+        let drained = storage
+            .drain_queued_turn_inputs(session_id, "gateway")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            drained
+                .messages
+                .windows(2)
+                .all(|pair| pair[0].created_at < pair[1].created_at),
+            "each drained input must have its own ordered instant"
+        );
+        let recorded = MessageStore::list_messages_by_thread(&storage, thread_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            recorded
+                .iter()
+                .map(|row| (row.id, row.created_at))
+                .collect::<Vec<_>>(),
+            drained
+                .messages
+                .iter()
+                .map(|row| (row.id, row.created_at))
+                .collect::<Vec<_>>(),
+            "announced instants must be the instants committed in the transaction"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

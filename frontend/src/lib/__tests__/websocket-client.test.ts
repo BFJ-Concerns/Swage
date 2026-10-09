@@ -522,3 +522,43 @@ describe("handshake rejection", () => {
     expect(MockWebSocket.instances).toHaveLength(1);
   });
 });
+
+describe("queued input transport", () => {
+  it("updates queue, recorded rows and stream state from raw WebSocket frames", async () => {
+    const api = await import("../api/conversations");
+    const { createConversationStore } = await import("../stores/conversations");
+    const { createStreamingStore } = await import("../stores/streaming");
+    vi.spyOn(api, "createConversation").mockResolvedValue({
+      id: "conv-1", agent_id: "gateway", topic_id: "topic-1",
+      created_at: "2026-10-04T10:00:00Z", last_activity: "2026-10-04T10:00:00Z",
+    });
+    vi.spyOn(api, "listConversations").mockResolvedValue([]);
+    const conversations = createConversationStore();
+    await conversations.createConversation("topic-1");
+    const streaming = createStreamingStore({ conversationStore: conversations });
+    const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
+    client.onEvent((event) => streaming.handleServerEvent(event, "conv-1"));
+    client.connect("conv-1");
+    latestWs().simulateOpen();
+    const queued = {
+      id: "queued-1", origin: "user", content: "follow up", attachments: [],
+      queued_at: "2026-10-04T10:00:01Z",
+    };
+    latestWs().simulateMessage({ type: "message_queued", session_id: "conv-1", queued });
+    expect(conversations.activeConversation?.queued?.map((item) => item.content)).toEqual(["follow up"]);
+    latestWs().simulateMessage({
+      type: "message_appended", session_id: "conv-1", message: {
+        id: "recorded-1", thread_id: "thread-1", turn_id: "turn-1", role: "user",
+        origin: "user", content: "follow up", timestamp: "2026-10-04T10:00:02Z",
+        turn_state: null, tool_calls: [],
+      },
+    });
+    expect(conversations.activeConversation?.messages.map((item) => item.content)).toEqual(["follow up"]);
+    latestWs().simulateMessage({
+      type: "queue_drained", session_id: "conv-1", turn_id: "turn-1", queued_ids: ["queued-1"],
+    });
+    expect(conversations.activeConversation?.queued).toEqual([]);
+    expect(streaming.isStreaming).toBe(true);
+    client.disconnect();
+  });
+});

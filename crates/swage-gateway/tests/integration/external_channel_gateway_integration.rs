@@ -23,6 +23,7 @@ use swage_storage::{
     NewChannelInboundMessage, NewChannelLink, SqliteStorage,
     store::{
         ChannelLinkStore, ChannelQueueStore, DeliveryStore, SessionStore, ThreadStore, TopicStore,
+        TurnQueueStore,
     },
 };
 
@@ -793,5 +794,301 @@ fn external_channel_integrations_serialise_as_documented_names() {
     assert_eq!(
         serde_json::to_value(ExternalChannelIntegration::DevThread).unwrap(),
         Value::String("dev_thread".into())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn busy_channel_messages_join_the_shared_queue_and_deliver_its_single_reply() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("busy-channel.db");
+    let storage = Arc::new(SqliteStorage::open(&database_path).unwrap());
+    let state = AppState::new(
+        storage.clone(),
+        storage.clone(),
+        Arc::new(MockProvider::new(vec![vec![
+            StreamChunk::Delta {
+                content: "all inputs answered".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]])),
+        swage_config::ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let conversation =
+        swage_gateway::service::ConversationService::new(storage.clone(), storage.clone())
+            .create_conversation()
+            .await
+            .unwrap();
+    let session_id = conversation.id;
+    let topic = storage.general_scope().await.unwrap();
+    storage
+        .upsert_channel_link(NewChannelLink {
+            integration: "dev_dm".into(),
+            account: "queue-account".into(),
+            conversation: "queue-user".into(),
+            topic_id: topic.id,
+            agent_id: "gateway".into(),
+            session_id: Some(session_id),
+            home_target: None,
+        })
+        .await
+        .unwrap();
+    let active = swage_gateway::automated_turn::create_placeholder_turn(
+        &state, session_id, "gateway", "busy",
+    )
+    .await
+    .unwrap();
+    state
+        .active_turns
+        .lock()
+        .await
+        .insert(session_id, tokio_util::sync::CancellationToken::new());
+    storage
+        .ingest_channel_inbound(
+            vec!["first", "second"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, content)| NewChannelInboundMessage {
+                    integration: "dev_dm".into(),
+                    account: "queue-account".into(),
+                    conversation: "queue-user".into(),
+                    external_id: index.to_string(),
+                    sender: "queue-user".into(),
+                    content: content.into(),
+                })
+                .collect(),
+            "dev_dm",
+            "queue-account",
+            "2",
+        )
+        .await
+        .unwrap();
+    swage_gateway::channel_gateway::drain_channel_queue_checked(&state)
+        .await
+        .unwrap();
+    let queued = state
+        .storage
+        .list_queued_turn_inputs(session_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        queued
+            .iter()
+            .map(|item| item.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["first", "second"],
+        "busy channel inputs must enter the session queue"
+    );
+    swage_gateway::channel_gateway::drain_channel_queue_checked(&state)
+        .await
+        .unwrap();
+    assert_eq!(
+        state
+            .storage
+            .list_queued_turn_inputs(session_id)
+            .await
+            .unwrap()
+            .len(),
+        2,
+        "a second inbox poll must not enqueue the same inputs again"
+    );
+    assert!(
+        storage
+            .list_pending_channel_origins()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let connection = Connection::open(&database_path).unwrap();
+    let presented: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM channel_inbound_messages WHERE state = 'presented'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        presented, 0,
+        "inbox rows are presented by the drain, not the enqueue"
+    );
+    let thread = storage.list_by_session(session_id).await.unwrap()[0].id;
+    swage_gateway::turn_queue::queue_input(
+        &state,
+        session_id,
+        thread,
+        swage_gateway::turn::TurnInput::text("third, from HTTP"),
+    )
+    .await
+    .unwrap();
+    let reopened = SqliteStorage::open(&database_path).unwrap();
+    let persisted = reopened.list_queued_turn_inputs(session_id).await.unwrap();
+    assert_eq!(
+        persisted.len(),
+        3,
+        "a new connection sees durable waiting inputs"
+    );
+    assert_eq!(persisted[0].id, queued[0].id);
+    assert_eq!(persisted[1].id, queued[1].id);
+    state.active_turns.lock().await.remove(&session_id);
+    assert!(
+        swage_gateway::turn_queue::drain_queue(&state, session_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let presented: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM channel_inbound_messages WHERE state = 'presented'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        presented, 0,
+        "a failed turn claim leaves inbox ownership waiting"
+    );
+    assert_eq!(
+        state
+            .storage
+            .list_queued_turn_inputs(session_id)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+    state
+        .storage
+        .update_turn_state(active, swage_storage::TurnState::Completed)
+        .await
+        .unwrap();
+    let drained = swage_gateway::turn_queue::drain_queue(&state, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let rows: Vec<(String, String)> = connection
+        .prepare("SELECT state, turn_id FROM channel_inbound_messages ORDER BY rowid")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(rows, vec![("presented".into(), drained.to_string()); 2]);
+    let messages = state.storage.list_messages_by_thread(thread).await.unwrap();
+    let inputs: Vec<_> = messages
+        .iter()
+        .filter(|message| {
+            message.role == swage_core::Role::User && message.turn_id == Some(drained)
+        })
+        .map(|message| message.content.as_str())
+        .collect();
+    assert_eq!(inputs, vec!["first", "second", "third, from HTTP"]);
+    let deliveries = storage
+        .list_delivery_records_by_session(session_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        deliveries.len(),
+        1,
+        "one reply goes to each originating chat"
+    );
+    assert_eq!(deliveries[0].turn_id, Some(drained));
+    assert_eq!(
+        deliveries[0].target,
+        serde_json::to_value(
+            swage_gateway::channel_gateway::ChannelOrigin {
+                integration: ExternalChannelIntegration::DevDm,
+                account: "queue-account".into(),
+                conversation: "queue-user".into()
+            }
+            .home_target()
+        )
+        .unwrap()
+    );
+    assert_eq!(deliveries[0].content, "all inputs answered");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn competing_channel_turn_claim_queues_inputs_without_an_in_memory_guard() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("competing-channel.db");
+    let storage = Arc::new(SqliteStorage::open(&database_path).unwrap());
+    let state = AppState::new(
+        storage.clone(),
+        storage.clone(),
+        Arc::new(MockProvider::new(vec![vec![
+            StreamChunk::Delta {
+                content: "all inputs answered".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]])),
+        swage_config::ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let conversation =
+        swage_gateway::service::ConversationService::new(storage.clone(), storage.clone())
+            .create_conversation()
+            .await
+            .unwrap();
+    let session_id = conversation.id;
+    let topic = storage.general_scope().await.unwrap();
+    storage
+        .upsert_channel_link(NewChannelLink {
+            integration: "dev_dm".into(),
+            account: "queue-account".into(),
+            conversation: "queue-user".into(),
+            topic_id: topic.id,
+            agent_id: "gateway".into(),
+            session_id: Some(session_id),
+            home_target: None,
+        })
+        .await
+        .unwrap();
+    let _active = swage_gateway::automated_turn::create_placeholder_turn(
+        &state, session_id, "gateway", "busy",
+    )
+    .await
+    .unwrap();
+    assert!(state.active_turns.lock().await.is_empty());
+    storage
+        .ingest_channel_inbound(
+            vec![NewChannelInboundMessage {
+                integration: "dev_dm".into(),
+                account: "queue-account".into(),
+                conversation: "queue-user".into(),
+                external_id: "race-1".into(),
+                sender: "queue-user".into(),
+                content: "racing input".into(),
+            }],
+            "dev_dm",
+            "queue-account",
+            "1",
+        )
+        .await
+        .unwrap();
+    swage_gateway::channel_gateway::drain_channel_queue_checked(&state)
+        .await
+        .unwrap();
+    let queued = storage.list_queued_turn_inputs(session_id).await.unwrap();
+    assert_eq!(
+        queued
+            .iter()
+            .map(|item| item.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["racing input"],
+        "a lost database turn claim must queue the channel input"
+    );
+    assert!(
+        storage
+            .list_pending_channel_origins()
+            .await
+            .unwrap()
+            .is_empty(),
+        "the inbox must not retain a second waiting queue"
     );
 }

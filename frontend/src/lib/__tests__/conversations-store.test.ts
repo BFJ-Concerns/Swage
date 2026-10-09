@@ -443,6 +443,21 @@ describe("durable local updates", () => {
     expect(store.conversations[0].message_preview).toBe("Summarise the inbox.");
   });
 
+  it("keeps the first optimistic ping when an identical second send queues", async () => {
+    const store = createConversationStore();
+    vi.mocked(api.getConversation).mockResolvedValueOnce(makeDetail("conv-1"));
+    await store.selectConversation("conv-1");
+    store.appendOptimisticUserMessage({ client_id: "first-send", content: "ping", timestamp: "2026-01-01T00:00:01Z" });
+    store.appendOptimisticUserMessage({ client_id: "second-send", content: "ping", timestamp: "2026-01-01T00:00:02Z" });
+    const queued = { id: "q-second", client_id: "second-send", origin: "user" as const, content: "ping", queued_at: "2026-01-01T00:00:03Z" };
+    store.appendQueuedMessage(queued, "conv-1");
+    store.appendQueuedMessage(queued, "conv-1");
+    expect({
+      messages: store.activeConversation!.messages.map(message => ({ client_id: message.client_id, timestamp: message.timestamp })),
+      queued: store.activeConversation!.queued,
+    }).toEqual({ messages: [{ client_id: "first-send", timestamp: "2026-01-01T00:00:01Z" }], queued: [queued] });
+  });
+
   it("shows a message the gateway holds for the next turn, once, until the queue drains", async () => {
     const store = createConversationStore();
     vi.mocked(api.listConversations).mockResolvedValueOnce([
