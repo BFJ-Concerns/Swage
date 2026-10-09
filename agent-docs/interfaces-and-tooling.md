@@ -758,6 +758,12 @@ tests), followed by a separate `cargo test --workspace --doc` stage for
 doctests (nextest cannot run doctests). When set to `cargo`, Rust tests run
 under `cargo test --workspace --no-fail-fast`.
 
+Gateway integration tests (`scratch_tempdir` in
+`crates/swage-gateway/tests/integration/support.rs`) and the browser E2E
+launchers (`frontend/e2e/scratch-root.mjs`) create their disposable roots
+under `SWAGE_TEST_SCRATCH_DIR` when it is set, otherwise under the system
+temporary directory.
+
 When both tests and projections fail, both errors surface in one message.
 The test suite aggregates Rust, frontend, and desktop-smoke failures rather
 than aborting on the first.

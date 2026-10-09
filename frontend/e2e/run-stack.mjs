@@ -1,15 +1,14 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import { makeScratchDir } from "./scratch-root.mjs";
 
 const frontendDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoDir = resolve(frontendDir, "..");
-const scratchParent = "/tmp/scratch";
-await mkdir(scratchParent, { recursive: true });
 const invocationDir = process.env.SWAGE_E2E_INVOCATION_DIR
-  ?? await mkdtemp(join(scratchParent, "swage-browser-e2e-"));
+  ?? await makeScratchDir("swage-browser-e2e-");
 const ownsInvocationDir = process.env.SWAGE_E2E_INVOCATION_DIR === undefined;
 const resultsDir = process.env.SWAGE_E2E_RESULTS_DIR ?? join(invocationDir, "playwright-results");
 const gatewayPort = Number(process.env.SWAGE_E2E_GATEWAY_PORT ?? "33100");

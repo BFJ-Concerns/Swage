@@ -20,6 +20,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- Gateway integration tests and browser end-to-end runs create their disposable state under the system temporary directory, or under `SWAGE_TEST_SCRATCH_DIR` when it is set.
 - CI runs the full verification gate (`just verify`) on GitHub Actions hosted runners and names any test that passed only on retry.
 - The operator history names each changed configuration field with its prior and new value — nested settings by their path, such as Context › Assembly — and keeps the whole prior and new objects collapsed one click away, so variant selections and assembly decisions sit close below.
 - Per-turn sandboxing is off by default; a topic enables it with `[sandbox] enabled = true`. Local gateway turns with sandboxing disabled record a degraded execution boundary unless the install declares its own boundary.
