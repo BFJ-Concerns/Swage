@@ -1111,7 +1111,7 @@ mod tests {
         );
     }
 
-    /// The C24 shape: the knowledge base holds the bytes the platform fetched
+    /// The knowledge base holds the bytes the platform fetched
     /// and text the platform derived from them; what the model types in is
     /// searchable at most, and a quote lands only in platform-derived text.
     #[tokio::test(flavor = "multi_thread")]

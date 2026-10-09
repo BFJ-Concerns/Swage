@@ -4710,8 +4710,8 @@ mod tests {
     // GET /api/operator/history
     // -----------------------------------------------------------------------
 
-    /// C15's reading of the record: by session, entity and kind, through
-    /// the product, in pages — never by querying storage.
+    /// The audit record is read by session, entity and kind, through the
+    /// API, in pages — never by querying storage.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_audit_surface_lists_events_by_session_entity_and_kind_in_pages() {
         use swage_storage::model::{NewAuditEvent, NewSession};

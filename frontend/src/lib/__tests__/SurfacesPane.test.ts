@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 /**
- * The surfaces pane's module controls: the person's side of C3's joint work.
+ * The surfaces pane's module controls: the person's side of editing a
+ * surface together with the agent.
  * Every module offers edit, move and delete; a save names the revision the
  * editor opened at, and a save refused as stale shows the newer version and
  * leaves replacing it as a deliberate second act.
