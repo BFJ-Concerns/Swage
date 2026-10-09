@@ -272,6 +272,23 @@ describe("startTurn", () => {
     ]).toEqual(["string", true, "string", true]);
   });
 
+  it("sends with a client id where crypto.randomUUID is unavailable", () => {
+    // An HTTP page opened by LAN address is not a secure context.
+    vi.stubGlobal("crypto", { getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto) });
+    try {
+      const conv = createMockConversationStore();
+      const conn = createMockConnectionStore();
+      const store = createStreamingStore({ connectionStore: conn, conversationStore: conv });
+      store.startTurn("ping");
+      expect(conn.sendMessage).toHaveBeenCalledOnce();
+      expect(conn.sendMessage.mock.calls[0][5]).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("pushes the user message to the conversation store", () => {
     const conv = createMockConversationStore();
     const store = createStreamingStore({ conversationStore: conv });
