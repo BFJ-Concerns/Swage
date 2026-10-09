@@ -122,9 +122,7 @@ assembly and the successor in pass order, even when their names match.
 
 The "context" link appears as soon as a streamed message finishes — the
 streaming store exposes the turn ID when the turn completes, so there is
-no need to reload the surface for the link to appear. The terminal UI has a
-comparable inspector toggled by a keybinding, showing a proportional fill bar
-per element.
+no need to reload the surface for the link to appear.
 
 ## Conversation branching
 

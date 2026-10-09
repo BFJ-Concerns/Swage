@@ -960,9 +960,6 @@ This data is stored in the report JSON but is not yet rendered by the
 web UI's inspector panel; it is available through the
 `GET /api/turns/{id}/context` endpoint.
 
-`swage-tui` has a terminal-UI equivalent (`ui/inspector.rs:64`), toggled by
-keybinding. It shows per-element fill bars and a budget percentage.
-
 ## Turn identity in streamed messages
 
 The `turn_complete` WebSocket event carries the turn's `turn_id`

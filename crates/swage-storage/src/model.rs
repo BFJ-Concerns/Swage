@@ -273,7 +273,7 @@ pub struct WorkspaceAttachment {
 /// conversation or schedule that caused it rather than beside it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionOrigin {
-    /// A person opened it: the web UI, the TUI, the CLI, or an external
+    /// A person opened it: the web UI, the CLI, or an external
     /// channel conversation.
     Direct,
     /// A schedule's run opened it (the run itself links back through

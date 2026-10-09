@@ -232,8 +232,8 @@ new process to record its address and answer the health endpoint there.
 Per-call restart overrides are refused; configure the service instead. A failed restart reports an error and does not restore
 the previous executable or data automatically.
 
-The terminal client is `swage chat`. Generate an installation script for
-shell completion with `swage generate-completion bash` (or `zsh`/`fish`).
+Generate an installation script for shell completion with
+`swage generate-completion bash` (or `zsh`/`fish`).
 
 **Security boundary.** The gateway has no authentication. Binding to a
 private-network address is an explicit operator choice that trusts every host

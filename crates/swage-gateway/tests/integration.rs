@@ -74,8 +74,6 @@ mod skills_integration;
 mod tool_approval_integration;
 #[path = "integration/topic_integration.rs"]
 mod topic_integration;
-#[path = "integration/tui_cli_integration.rs"]
-mod tui_cli_integration;
 #[path = "integration/turn_model_gateway_integration.rs"]
 mod turn_model_gateway_integration;
 #[path = "integration/unified_turn_loop_integration.rs"]

@@ -1,7 +1,7 @@
 //! Typed gateway client library for the Swage platform.
 //!
-//! Provides HTTP and WebSocket access to a running Swage gateway, shared by
-//! the CLI (gateway lifecycle management) and TUI (conversation interface).
+//! Provides HTTP and WebSocket access to a running Swage gateway for the
+//! CLI's gateway lifecycle management and prompt runs.
 //!
 //! # Modules
 //!

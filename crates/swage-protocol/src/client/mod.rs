@@ -1,5 +1,5 @@
 //! Client surface: types spoken between the gateway and its own clients
-//! (web frontend, TUI, desktop shell) over HTTP and WebSocket.
+//! (web frontend, CLI, desktop shell) over HTTP and WebSocket.
 
 pub mod approval;
 pub mod channel;
