@@ -1329,6 +1329,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configuration_changes_emit_one_environment_credential_warning() {
+        use swage_agent::fixtures::MessageRecorder;
+        use tracing_subscriber::{Registry, layer::SubscriberExt};
+
+        let home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::new_with_config_root(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        unsafe { std::env::set_var("SWAGE_SETTINGS_WARNING_TEST_KEY", "test-key") };
+        let events = MessageRecorder::default();
+        let captured = std::sync::Arc::clone(&events.0);
+        let _subscriber = tracing::subscriber::set_default(Registry::default().with(events));
+
+        for context_window in [Some(128_000), Some(256_000)] {
+            let mut request = succession_settings_request(None);
+            request.providers.get_mut("local").unwrap().api_key_env =
+                Some("SWAGE_SETTINGS_WARNING_TEST_KEY".into());
+            request.models.get_mut("kept").unwrap().context_window = context_window;
+            captured.lock().unwrap().clear();
+            save_settings(&state, request).await.expect("settings save");
+            assert_eq!(
+                state.active_config().models.entries["kept"].context_window,
+                context_window
+            );
+            let events = captured.lock().unwrap();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event
+                        .message
+                        .contains("legacy api_key_env credential resolution"))
+                    .count(),
+                1,
+                "each configuration change must emit one provider credential warning: {events:?}"
+            );
+        }
+        unsafe { std::env::remove_var("SWAGE_SETTINGS_WARNING_TEST_KEY") };
+    }
+
+    #[tokio::test]
     async fn provider_url_updates_refuse_invalid_endpoints_without_writing_and_allow_clearing() {
         let home = SwageHomeGuard::new();
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());

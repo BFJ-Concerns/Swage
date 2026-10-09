@@ -489,12 +489,6 @@ async fn resolve_provider_config(
     }
 
     if let Some(api_key_env) = provider.api_key_env.as_deref() {
-        tracing::warn!(
-            "Provider '{}' is using legacy api_key_env credential resolution. \
-             Store the credential in Settings > Providers to create a governed provider_key secret \
-             and set api_key_secret_ref.",
-            model.provider_id
-        );
         let api_key = std::env::var(api_key_env).map_err(|_| swage_core::ProviderError::Auth {
             provider: format!("environment variable '{api_key_env}' is not set"),
         })?;
@@ -1085,6 +1079,7 @@ async fn create_provider_with_retry(
     }
 
     let mut providers = Vec::new();
+    let mut warned_providers = BTreeSet::new();
     for model_id in ordered_runtime_model_ids(config) {
         let Some(model_endpoint) = config.models.entries.get(&model_id) else {
             continue;
@@ -1103,6 +1098,20 @@ async fn create_provider_with_retry(
         // selection surface. It must never enter the completion failover chain.
         if provider_endpoint.protocol == swage_config::Protocol::Codex {
             continue;
+        }
+
+        // Configuration construction owns the advisory; credential resolution
+        // is also used by voice and must not repeat it.
+        if provider_endpoint.api_key_secret_ref.is_none()
+            && provider_endpoint.api_key_env.is_some()
+            && warned_providers.insert(&model_endpoint.provider_id)
+        {
+            tracing::warn!(
+                "Provider '{}' is using legacy api_key_env credential resolution. \
+                 Store the credential in Settings > Providers to create a governed provider_key secret \
+                 and set api_key_secret_ref.",
+                model_endpoint.provider_id
+            );
         }
 
         let provider_config = match resolve_provider_config(
@@ -1911,7 +1920,6 @@ mod tests {
         }
         let events = MessageRecorder::default();
         let captured = Arc::clone(&events.0);
-        let _subscriber = tracing::subscriber::set_default(Registry::default().with(events));
         let provider = ProviderEndpointConfig {
             worker_staleness_threshold_ms: None,
             protocol: Protocol::OpenAi,
@@ -1930,6 +1938,20 @@ mod tests {
         let provider_config = resolve_provider_config(&provider, &model, &secret_manager)
             .await
             .expect("legacy provider environment credential should still resolve");
+        let config = swage_config::ResolvedConfig {
+            providers: ProviderCatalogConfig {
+                default: "provider".into(),
+                entries: [("provider".into(), provider)].into_iter().collect(),
+            },
+            models: ModelCatalogConfig {
+                default: "test".into(),
+                entries: [("test".into(), model)].into_iter().collect(),
+            },
+            ..Default::default()
+        };
+        let _subscriber = tracing::subscriber::set_default(Registry::default().with(events));
+        create_provider(&config, &secret_manager).await;
+        create_voice_provider(&config, &secret_manager).await;
         let telegram_token = resolve_telegram_token(&telegram, &secret_manager)
             .await
             .expect("legacy Telegram environment credential should still resolve");
@@ -1937,6 +1959,16 @@ mod tests {
         assert_eq!(provider_config.api_key.as_deref(), Some("provider-key"));
         assert_eq!(telegram_token, "telegram-token");
         let events = captured.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event
+                    .message
+                    .contains("legacy api_key_env credential resolution"))
+                .count(),
+            1,
+            "LLM and voice startup must share one provider credential warning: {events:?}"
+        );
         assert!(
             events
                 .iter()
