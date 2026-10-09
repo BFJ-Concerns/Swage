@@ -732,6 +732,11 @@ When both the test suite and the projection check fail, the gate reports both
 sets of errors in a single message. CI runs the same `just verify` recipe, so
 a green local run means CI will pass.
 
+The gateway integration tests and the browser end-to-end runs create their
+disposable state under the system temporary directory. Set
+`SWAGE_TEST_SCRATCH_DIR` to another directory when the temporary filesystem
+is too small for that state.
+
 Other useful recipes:
 
 - `just check-gate` — the first six static stages above, before any tests.

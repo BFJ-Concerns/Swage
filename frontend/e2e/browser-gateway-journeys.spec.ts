@@ -1,14 +1,14 @@
 // The provider is controlled; Chromium, the rendered Svelte app, HTTP/WebSocket
 // transport, gateway turn loop, storage, cancellation and approvals are live.
 import { createServer } from "node:net";
-import { access, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, readFile, rm } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "@playwright/test";
+import { makeScratchDir } from "./scratch-root.mjs";
 
 const frontendDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const scratchParent = "/tmp/scratch";
 
 async function unusedPort(): Promise<number> {
   const server = createServer();
@@ -29,8 +29,7 @@ async function waitForHealth(baseUrl: string): Promise<void> {
 }
 
 async function startIsolatedStack(): Promise<{ baseUrl: string; child: ChildProcess; root: string }> {
-  await mkdir(scratchParent, { recursive: true });
-  const root = await mkdtemp(join(scratchParent, "swage-browser-e2e-isolation-"));
+  const root = await makeScratchDir("swage-browser-e2e-isolation-");
   let child: ChildProcess | undefined;
   try {
     const gatewayPort = await unusedPort();

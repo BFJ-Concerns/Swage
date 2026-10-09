@@ -23,20 +23,26 @@ pub type WsStream = futures::stream::SplitStream<
 
 static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
-/// Create a disposable test root off the nearly-full system volume.
+/// Names the parent directory for disposable test roots, for a machine whose
+/// system temporary directory is too small for test state.
+const TEST_SCRATCH_DIR_ENV: &str = "SWAGE_TEST_SCRATCH_DIR";
+
+/// Create a disposable test root under `SWAGE_TEST_SCRATCH_DIR`, or under the
+/// system temporary directory when it is unset.
 pub fn scratch_tempdir() -> tempfile::TempDir {
-    match tempfile::Builder::new()
-        .prefix("swage-gateway-test-")
-        .tempdir_in("/tmp/scratch")
-    {
-        Ok(tempdir) => tempdir,
-        Err(error) => {
-            eprintln!(
-                "could not create gateway test root in /tmp/scratch ({error}); falling back to the system temporary directory"
-            );
-            tempfile::tempdir().expect("create gateway test root")
-        }
-    }
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("swage-gateway-test-");
+    let Some(parent) = std::env::var_os(TEST_SCRATCH_DIR_ENV) else {
+        return builder.tempdir().expect("create gateway test root");
+    };
+    std::fs::create_dir_all(&parent)
+        .and_then(|()| builder.tempdir_in(&parent))
+        .unwrap_or_else(|error| {
+            panic!(
+                "create gateway test root under {TEST_SCRATCH_DIR_ENV}={}: {error}",
+                std::path::Path::new(&parent).display()
+            )
+        })
 }
 
 /// A streaming provider that records every request and serves scripted rounds.

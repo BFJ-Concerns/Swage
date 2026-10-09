@@ -1,8 +1,10 @@
+import { join } from "node:path";
 import { defineConfig } from "@playwright/test";
+import { scratchParent } from "./e2e/scratch-root.mjs";
 
 const gatewayPort = Number(process.env.SWAGE_E2E_GATEWAY_PORT ?? "33100");
 const resultsDir = process.env.SWAGE_E2E_RESULTS_DIR
-  ?? "/tmp/scratch/swage-browser-e2e-results";
+  ?? join(scratchParent, "swage-browser-e2e-results");
 
 export default defineConfig({
   testDir: "./e2e",
