@@ -1,9 +1,8 @@
-//! Cross-task integration tests for the hierarchical configuration system.
+//! Integration tests for the hierarchical configuration system.
 //!
 //! These tests exercise the full resolution pipeline: directory discovery →
 //! TOML loading → schema validation → cascade merging → instruction assembly.
-//! Each test proves a capability from the Delivery Closure table that spans
-//! multiple internal modules.
+//! Each test proves a capability that spans multiple internal modules.
 
 use std::fs;
 use swage_config::{RESERVED_WORKFLOW_AGENT_ID, discover, load_resolved_config_from};

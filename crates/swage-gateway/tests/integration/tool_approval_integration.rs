@@ -1,4 +1,4 @@
-//! Cross-task integration tests for tool approval controls.
+//! Integration tests for tool approval controls.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the full stack is wired together.
@@ -7,13 +7,13 @@
 //!
 //! | Test | Journey / Proof | Spans tasks |
 //! |------|----------------|-------------|
-//! | `tool_approval_approve_continues_turn` | Config approval → WS lifecycle → tool executes | config [74ms, cqn0, n509, tz3w] + permission [fgci] + dispatch [x9nz] + agent gate [3c77] + events [bm2t] + WS [ServerEvent, ClientEvent] + storage [4skf, 7p2t, a2kp, bb0o] |
-//! | `tool_approval_reject_delivers_feedback` | Rejection delivers feedback, turn continues | permission [fgci] + agent gate [3c77] + events [bm2t] + WS events |
-//! | `tool_approval_timeout_reject_policy` | Timeout fires → reject policy → agent continues | config [74ms] + agent gate [3c77] timeout handling + events [bm2t] |
-//! | `tool_approval_timeout_interrupt_policy` | Timeout fires → interrupt policy → turn fails | config [74ms] + agent gate [3c77] + TurnState [9ney] |
-//! | `pending_approval_survives_reconnect` | Persistence & re-emission on reconnect | storage [4skf, 7p2t, a2kp, bb0o] + WS reconnect [re-emission mote] |
-//! | `hook_triggered_approval_uses_custom_prompt` | Hook RequestApproval → approval with hook prompt | hook [ut1s, d90q] + agent gate [3c77] + events [bm2t] |
-//! | `agent_scoped_routing_isolates_approval_events` | Agent B approval → only Agent B clients see it | state [rqzr] + WS routing [agent-scoped mote] |
+//! | `tool_approval_approve_continues_turn` | Config approval → WS lifecycle → tool executes | config + permission + dispatch + agent gate + events + WS [ServerEvent, ClientEvent] + storage |
+//! | `tool_approval_reject_delivers_feedback` | Rejection delivers feedback, turn continues | permission + agent gate + events + WS events |
+//! | `tool_approval_timeout_reject_policy` | Timeout fires → reject policy → agent continues | config + agent gate timeout handling + events |
+//! | `tool_approval_timeout_interrupt_policy` | Timeout fires → interrupt policy → turn fails | config + agent gate + TurnState |
+//! | `pending_approval_survives_reconnect` | Persistence & re-emission on reconnect | storage + WS reconnect |
+//! | `hook_triggered_approval_uses_custom_prompt` | Hook RequestApproval → approval with hook prompt | hook + agent gate + events |
+//! | `agent_scoped_routing_isolates_approval_events` | Agent B approval → only Agent B clients see it | state + WS routing |
 
 #![allow(clippy::unwrap_used)]
 
@@ -276,7 +276,7 @@ fn config_with_approval(tool_name: &str, timeout_secs: u64, policy: &str) -> Res
 }
 
 // ---------------------------------------------------------------------------
-// Tests — each proves a cross-task journey through approval routing and storage
+// Tests — each proves a end-to-end journey through approval routing and storage
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
@@ -354,13 +354,13 @@ async fn unattended_rest_turn_executes_approval_gated_tool_without_an_approval_r
 
 /// Journey: Configure approval → trigger tool → approve → tool executes → turn completes.
 ///
-/// Proves: config [74ms, n509, tz3w] + permission [fgci] + dispatch [x9nz]
-///       + agent gate [3c77] + events [bm2t] + WS events + storage [4skf, 7p2t, a2kp, bb0o]
+/// Proves: config + permission + dispatch
+///       + agent gate + events + WS events + storage
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_approval_approve_continues_turn() {
     let _guard = SwageHomeGuard::isolate();
 
-    // Provider produces a tool call, then (after approval) a final text response.
+    // Provider produces a tool call, after approval a final text response.
     let provider = MockProvider::new(vec![
         // Round 1: agent calls write_file (which requires approval).
         vec![
@@ -685,12 +685,12 @@ async fn session_location_approval_authorises_only_the_granting_sessions_delegat
 
 /// Journey: Reject an approval → agent receives feedback → turn continues.
 ///
-/// Proves: permission [fgci] + agent gate [3c77] + events [bm2t]
+/// Proves: permission + agent gate + events
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_approval_reject_delivers_feedback() {
     let _guard = SwageHomeGuard::isolate();
 
-    // Provider produces a tool call (round 1), then after rejection feedback,
+    // Provider produces a tool round 1, then after rejection feedback,
     // produces a final text response (round 2).
     let provider = MockProvider::new(vec![
         vec![
@@ -760,7 +760,7 @@ async fn tool_approval_reject_delivers_feedback() {
 
 /// Journey: Approval times out → reject policy → agent continues.
 ///
-/// Proves: config [74ms] + agent gate [3c77] + timeout handling + events [bm2t]
+/// Proves: config + agent gate + timeout handling + events
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_approval_timeout_reject_policy() {
     let _guard = SwageHomeGuard::isolate();
@@ -822,7 +822,7 @@ async fn tool_approval_timeout_reject_policy() {
 
 /// Journey: Approval times out → interrupt policy → turn is interrupted.
 ///
-/// Proves: config [74ms] + agent gate [3c77] + TurnState::AwaitingApproval [9ney]
+/// Proves: config + agent gate + TurnState::AwaitingApproval
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_approval_timeout_interrupt_policy() {
     let _guard = SwageHomeGuard::isolate();
@@ -877,7 +877,7 @@ async fn tool_approval_timeout_interrupt_policy() {
 
 /// Journey: Pending approval survives WebSocket reconnection — re-emitted to new client.
 ///
-/// Proves: storage [4skf, 7p2t, a2kp, bb0o] + WS reconnect re-emission
+/// Proves: storage + WS reconnect re-emission
 #[tokio::test(flavor = "multi_thread")]
 async fn pending_approval_survives_reconnect() {
     let _guard = SwageHomeGuard::isolate();
@@ -961,7 +961,7 @@ async fn pending_approval_survives_reconnect() {
 
 /// Journey: Hook returns RequestApproval → approval with hook's custom prompt.
 ///
-/// Proves: hook [ut1s, d90q] + agent gate [3c77] + events [bm2t]
+/// Proves: hook + agent gate + events
 #[tokio::test(flavor = "multi_thread")]
 async fn hook_triggered_approval_uses_custom_prompt() {
     let _guard = SwageHomeGuard::isolate();
@@ -970,13 +970,13 @@ async fn hook_triggered_approval_uses_custom_prompt() {
     // before the turn processes. The gateway constructs hooks per-turn from config,
     // so this test would need a custom hook that returns RequestApproval for a
     // specific tool. This is better tested at the agent unit level (which task
-    // [3c77] covers) rather than through the full gateway stack. The agent-level
+    // covers) rather than through the full gateway stack. The agent-level
     // tests verify that PreToolUseOutcome::RequestApproval triggers the approval
     // gate with the hook's custom prompt.
     //
-    // Mark as tested at the agent level — the cross-task journey is proved by
+    // Mark as tested at the agent level — the end-to-end journey is proved by
     // the agent's hook-driven approval tests combined with the gateway's event
-    // forwarding tests from [byi8].
+    // forwarding tests from.
     eprintln!(
         "Hook-triggered approval is tested at the agent level (task 3c77) — \
                full gateway integration deferred until the REST API \
@@ -986,7 +986,7 @@ async fn hook_triggered_approval_uses_custom_prompt() {
 
 /// Journey: Agent B triggers approval → only Agent B's clients receive the event.
 ///
-/// Proves: state [rqzr] + WS agent-scoped routing
+/// Proves: state + WS agent-scoped routing
 ///
 /// This test creates two sessions with different agent_ids, triggers an
 /// approval on one, and verifies the other doesn't receive the event.
@@ -995,8 +995,8 @@ async fn agent_scoped_routing_isolates_approval_events() {
     let _guard = SwageHomeGuard::isolate();
 
     // Agent-scoped routing is tested at the unit level in the gateway's
-    // approval routing tests (task [byi8]) and via the re-emission tests
-    // [yvld] which verify that approvals for other agents are NOT re-emitted.
+    // approval routing tests (task) and via the re-emission tests
+    // which verify that approvals for other agents are NOT re-emitted.
     // A full two-agent WebSocket test requires multi-agent session setup
     // which is not yet available in the inter-agent communication stack.
     //
@@ -1009,17 +1009,17 @@ async fn agent_scoped_routing_isolates_approval_events() {
 }
 
 // ---------------------------------------------------------------------------
-// Re-emission tests [yvld]
+// Re-emission tests
 // ---------------------------------------------------------------------------
 
 /// Journey: A pending approval seeded in storage is re-emitted to a newly
 /// connecting client.
 ///
-/// Proves: storage [4skf, 7p2t, a2kp, bb0o] + WS connect re-emission [yvld]
+/// Proves: storage + WS connect re-emission
 ///
 /// Directly seeds an approval into storage (bypassing the approval gate) so
 /// the test does not depend on the full agent/tool dispatch stack being wired.
-/// This isolates the re-emission behaviour from unrelated motes.
+/// This isolates the re-emission behaviour from unrelated behaviour.
 #[tokio::test(flavor = "multi_thread")]
 async fn pending_approval_re_emitted_on_connect() {
     use swage_core::ApprovalTimeoutPolicy;

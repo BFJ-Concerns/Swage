@@ -1,4 +1,4 @@
-//! Cross-task integration tests for output schema validation.
+//! Integration tests for output schema validation.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the full stack is wired together.
@@ -7,11 +7,11 @@
 //!
 //! | Test | Journey / Proof | Spans tasks |
 //! |------|----------------|-------------|
-//! | `valid_output_delivers_structured_output_on_turn_complete` | Typed Agent Output — valid first attempt | config [0oq4, 8xkg] + extraction [6gak] + validation [xya3] + events [6y28] + storage [7qwi] + gateway [z4ov, i59a] |
-//! | `invalid_output_retries_with_visible_event_then_succeeds` | Typed Agent Output — retry succeeds | extraction [6gak] + validation [xya3] + events [vd37, 6y28] + gateway [z4ov, i59a] |
-//! | `zero_retries_causes_immediate_failure` | Zero-retry failure proof | config [0oq4, 8xkg] + validation [xya3] + events [vd37] + gateway [z4ov, i59a] |
-//! | `no_schema_preserves_existing_behaviour` | No-schema preserved behaviour | config absence + gateway [i59a, z4ov] |
-//! | `tokens_stream_during_both_initial_and_retry_attempts` | Streaming during validation proof | validation [xya3] + gateway [i59a] |
+//! | `valid_output_delivers_structured_output_on_turn_complete` | Typed Agent Output — valid first attempt | config + extraction + validation + events + storage + gateway |
+//! | `invalid_output_retries_with_visible_event_then_succeeds` | Typed Agent Output — retry succeeds | extraction + validation + events + gateway |
+//! | `zero_retries_causes_immediate_failure` | Zero-retry failure proof | config + validation + events + gateway |
+//! | `no_schema_preserves_existing_behaviour` | No-schema preserved behaviour | config absence + gateway |
+//! | `tokens_stream_during_both_initial_and_retry_attempts` | Streaming during validation proof | validation + gateway |
 
 #![allow(clippy::unwrap_used)]
 
@@ -187,7 +187,7 @@ fn config_with_schema(schema: Value, max_retries: u32) -> ResolvedConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-task integration tests
+// Integration tests
 // ---------------------------------------------------------------------------
 
 /// Configure a JSON Schema, send a message producing valid JSON, and verify

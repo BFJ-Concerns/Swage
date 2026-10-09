@@ -1,8 +1,8 @@
-//! Cross-task integration tests for persistence.
+//! Integration tests for persistence.
 //!
-//! These tests verify interactions between multiple tasks' outputs — behaviour
-//! that emerges only when the full stack is wired together. Each test documents
-//! which motes it spans and which Delivery Closure item it proves.
+//! These tests verify behaviour that emerges only when several components are
+//! wired together. Each test names the components it spans and the behaviour
+//! it proves.
 
 use uuid::Uuid;
 
@@ -122,8 +122,8 @@ async fn create_full_hierarchy(
 // ---------------------------------------------------------------------------
 // Test 1: Full hierarchy round-trip through file-backed SQLite
 //
-// Spans: ikjg (migrations), 8cwg (session SQL), 6ay8 (thread SQL),
-//        la60 (turn SQL), xf78 (message SQL), 1byf (tool_call SQL)
+// Spans: migrations, session SQL, thread SQL,
+//        turn SQL, message SQL, tool_call SQL
 //
 // Proves: "Storage trait hierarchy" — create full entity hierarchy through
 //         traits, retrieve through fresh connection.
@@ -186,8 +186,8 @@ async fn full_hierarchy_survives_reconnection() {
 // ---------------------------------------------------------------------------
 // Test 2: Agent_id isolation across all entity types
 //
-// Spans: brbf (session agent_id), p30a (thread model), 8157 (turn model),
-//        xlrb (message model), 0znc (tool_call model), plus all SQL impls
+// Spans: session agent_id, thread model, turn model,
+//        message model, tool_call model, plus all SQL impls
 //
 // Proves: "Data model with agent_id" — querying by agent_id returns only
 //         that agent's records across all conversation entity types.
@@ -244,7 +244,7 @@ async fn agent_id_isolation_across_entity_types() {
 // ---------------------------------------------------------------------------
 // Test 3: Cascade deletion from topic level
 //
-// Spans: ikjg (migrations with FK cascades), all store impls
+// Spans: migrations with FK cascades, all store impls
 //
 // Proves: "Data model" — deleting a topic cascades through
 //         sessions → threads → turns → messages and tool calls.
@@ -303,7 +303,7 @@ async fn cascade_deletion_from_topic() {
 // ---------------------------------------------------------------------------
 // Test 4: Thread state machine enforced through SQLite
 //
-// Spans: p30a (ThreadState), r8b1 (ThreadStore trait), 6ay8 (ThreadStore SQL)
+// Spans: ThreadState, ThreadStore trait, ThreadStore SQL
 //
 // Proves: "Thread state machine" — walk through Idle → Processing → Idle →
 //         Processing → Completed, then verify Completed → Processing rejected.
@@ -396,7 +396,7 @@ async fn thread_state_machine_enforced() {
 // ---------------------------------------------------------------------------
 // Test 5: Turn recovery finds both Pending and Processing turns
 //
-// Spans: h6xf (TurnState update), ztv4 (TurnStore trait), la60 (TurnStore SQL)
+// Spans: TurnState update, TurnStore trait, TurnStore SQL
 //
 // Proves: "Turn lifecycle states" — find_in_progress returns turns in both
 //         Pending and Processing states.
@@ -499,7 +499,7 @@ async fn turn_recovery_finds_pending_and_processing() {
 // ---------------------------------------------------------------------------
 // Test 6: Default topic cannot be deleted
 //
-// Spans: ikjg (migrations/seeding), topic SQL impl
+// Spans: migrations/seeding, topic SQL impl
 //
 // Proves: "Data model" — deleting the default topic is rejected.
 // ---------------------------------------------------------------------------
@@ -519,7 +519,7 @@ async fn default_topic_cannot_be_deleted() {
 // ---------------------------------------------------------------------------
 // Test 7: Messages ordered within thread, not within turns
 //
-// Spans: xlrb (message model), 19ie (MessageStore trait), xf78 (message SQL)
+// Spans: message model, MessageStore trait, message SQL
 //
 // Proves: "Gateway adaptation" — messages are ordered within the thread as
 //         a flat sequence. Position is thread-level, not turn-level.

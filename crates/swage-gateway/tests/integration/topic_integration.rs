@@ -1,4 +1,4 @@
-//! Cross-task integration tests for topic workspace and agent memory.
+//! Integration tests for topic workspace and agent memory.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the full stack is wired together:
@@ -15,7 +15,7 @@
 //!    config (model, instructions) when processing turns (spans: turn executor
 //!    topic context, config resolution, storage CRUD).
 //!
-//! Core Journey proved: #3 (Topic Workspace) — topics are genuinely isolated.
+//! Journey proved: topic workspace — topics are genuinely isolated.
 
 #![allow(clippy::unwrap_used)]
 // The env-serialisation guard intentionally spans awaits: it locks out other
@@ -379,10 +379,10 @@ async fn each_session_list_uses_one_activity_statement_for_multiple_sessions() {
 // ---------------------------------------------------------------------------
 // Test 1: Topic session isolation
 // ---------------------------------------------------------------------------
-// Spans: [m780] slug migration, [gsos] slug model, [n548] full CRUD,
-//        [k2zw] topic CRUD routes, [3ans] topic-scoped session routes
+// Spans: slug migration, slug model, full CRUD,
+// topic CRUD routes, topic-scoped session routes
 //
-// Proves: Core Journey #3 — conversations created in one topic are absent
+// Proves: conversations created in one topic are absent
 // when listing another topic's conversations.
 
 #[tokio::test(flavor = "multi_thread")]
@@ -793,10 +793,10 @@ async fn a_conversation_without_a_topic_runs_in_the_general_scope() {
 // ---------------------------------------------------------------------------
 // Test 2: Memory scoping between topics
 // ---------------------------------------------------------------------------
-// Spans: [3wjo] memory tools, [cg5i] topic context, [k2zw] topic CRUD,
-//        [ybvv] memory registration
+// Spans: memory tools, topic context, topic CRUD,
+// memory registration
 //
-// Proves: Delivery Closure — memory written in Topic A is not accessible
+// Proves: memory written in Topic A is not accessible
 // from Topic B. Memory tool uses per-topic filesystem scoping.
 
 #[tokio::test(flavor = "multi_thread")]
@@ -872,9 +872,9 @@ async fn memory_is_isolated_between_topics() {
 // ---------------------------------------------------------------------------
 // Test 3: Default topic cannot be deleted
 // ---------------------------------------------------------------------------
-// Spans: [k2zw] topic CRUD handlers, [n548] storage CRUD
+// Spans: topic CRUD handlers, storage CRUD
 //
-// Proves: Delivery Closure — the general scope is neither listed nor deletable.
+// Proves: the general scope is neither listed nor deletable.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_general_scope_is_not_a_topic_the_api_can_reach() {
@@ -907,9 +907,9 @@ async fn the_general_scope_is_not_a_topic_the_api_can_reach() {
 // ---------------------------------------------------------------------------
 // Test 4: Topic deletion preserves other topics' sessions
 // ---------------------------------------------------------------------------
-// Spans: [k2zw] topic CRUD, [3ans] session routes, [n548] storage CRUD
+// Spans: topic CRUD, session routes, storage CRUD
 //
-// Proves: Delivery Closure — deleting a topic removes its conversations
+// Proves: deleting a topic removes its conversations
 // but does not affect other topics.
 
 #[tokio::test(flavor = "multi_thread")]

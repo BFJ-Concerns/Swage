@@ -868,7 +868,7 @@ mod tests {
         );
     }
 
-    // -- RequiresApproval [a4p4] -----------------------------------------------
+    // -- RequiresApproval -----------------------------------------------
 
     #[test]
     fn requires_approval_constructible() {

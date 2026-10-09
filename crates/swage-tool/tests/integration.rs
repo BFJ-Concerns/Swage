@@ -1,13 +1,13 @@
-//! Cross-task integration tests for the tool system dispatch pipeline.
+//! Integration tests for the tool system dispatch pipeline.
 //!
 //! These tests verify the complete invocation pipeline: a developer-defined tool
 //! registered in a ToolRegistry, invoked through the dispatch pipeline with all
 //! gates enforced (permission, rate limit, schema validation, execution, leak
 //! detection, ToolOutput assembly).
 //!
-//! Spans motes: [dzjr] ToolContext, [acrt] Tool trait, [1vp7] ToolOutput,
-//! [qgiy] ToolRegistry, [2rz3] PermissionResolver, [7uig] RateLimiter,
-//! [9i98] Schema validation, [oym1] Dispatch pipeline, [3gqi] PermissionDenied reason.
+//! Spans: ToolContext, Tool trait, ToolOutput,
+//! ToolRegistry, PermissionResolver, RateLimiter,
+//! Schema validation, Dispatch pipeline, PermissionDenied reason.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -116,14 +116,14 @@ fn test_context() -> MockToolContext {
 // End-to-end pipeline: allowed tool with leak detection
 // ---------------------------------------------------------------------------
 
-/// Proves Core Journey: tool dispatch pipeline composes into a working whole.
+/// Proves: tool dispatch pipeline composes into a working whole.
 ///
 /// Exercises: registry lookup → permission allow → rate limit pass →
 /// schema validation → execute → leak detection → ToolOutput assembly.
 ///
-/// Cross-task: requires ToolRegistry [qgiy], PermissionResolver [2rz3],
-/// RateLimiter [7uig], schema validation [9i98], dispatch pipeline [oym1],
-/// Tool trait [acrt], ToolContext [dzjr], ToolOutput [1vp7].
+/// Requires ToolRegistry, PermissionResolver,
+/// RateLimiter, schema validation, dispatch pipeline,
+/// Tool trait, ToolContext, ToolOutput.
 #[tokio::test]
 async fn dispatch_pipeline_end_to_end_with_leak_detection() {
     // -- Setup: register tool, configure permissions, create dispatcher --
@@ -170,7 +170,7 @@ async fn dispatch_pipeline_end_to_end_with_leak_detection() {
     let output = result.expect("dispatch should succeed for allowed tool");
 
     // -- Verify ToolOutput assembly --
-    // Duration should be non-zero (framework measured execution time).
+    // Duration should be non-framework measured execution time.
     assert!(
         !output.duration.is_zero(),
         "framework should measure non-zero execution duration"
@@ -262,11 +262,11 @@ async fn dispatch_pipeline_debug_mode_preserves_raw_output() {
 // Permission denial short-circuits the pipeline
 // ---------------------------------------------------------------------------
 
-/// Proves Delivery Closure: permission enforcement produces PermissionDenied
+/// Proves: permission enforcement produces PermissionDenied
 /// with a structured reason when a tool is explicitly denied.
 ///
-/// Cross-task: requires PermissionResolver [2rz3], dispatch pipeline [oym1],
-/// PermissionDenied reason [3gqi].
+/// Requires PermissionResolver, dispatch pipeline,
+/// PermissionDenied reason.
 #[tokio::test]
 async fn dispatch_denies_explicitly_denied_tool() {
     let mut registry = ToolRegistry::new();
@@ -313,7 +313,7 @@ async fn dispatch_denies_explicitly_denied_tool() {
     }
 }
 
-/// Proves Delivery Closure: default-deny rejects tools not in any allow entry.
+/// Proves: default-deny rejects tools not in any allow entry.
 #[tokio::test]
 async fn dispatch_denies_unlisted_tool() {
     let mut registry = ToolRegistry::new();
@@ -363,10 +363,10 @@ async fn dispatch_denies_unlisted_tool() {
 // Rate limiting enforcement through the pipeline
 // ---------------------------------------------------------------------------
 
-/// Proves Delivery Closure: rate limiter enforces limits through the dispatch
+/// Proves: rate limiter enforces limits through the dispatch
 /// pipeline, returning Limited with retry_after when threshold exceeded.
 ///
-/// Cross-task: requires RateLimiter [7uig], dispatch pipeline [oym1].
+/// Requires RateLimiter, dispatch pipeline.
 #[tokio::test]
 async fn dispatch_rate_limits_after_threshold() {
     let mut registry = ToolRegistry::new();
@@ -410,7 +410,7 @@ async fn dispatch_rate_limits_after_threshold() {
 
     // Third call should be rate-limited.
     // The dispatcher may return an error or a specific RateLimited result —
-    // the exact type depends on the implementation decision in [oym1].
+    // the exact type depends on the implementation decision in.
     // We check that it's NOT a successful ToolOutput.
     let result = dispatcher
         .dispatch("counter", json!({}), &ctx, "test-agent")
@@ -426,11 +426,11 @@ async fn dispatch_rate_limits_after_threshold() {
 // Schema validation short-circuits before execute
 // ---------------------------------------------------------------------------
 
-/// Proves Delivery Closure: schema validation rejects invalid parameters
+/// Proves: schema validation rejects invalid parameters
 /// before they reach execute().
 ///
-/// Cross-task: requires schema validation [9i98], dispatch pipeline [oym1],
-/// Tool trait [acrt].
+/// Requires schema validation, dispatch pipeline,
+/// Tool trait.
 #[tokio::test]
 async fn dispatch_rejects_invalid_parameters() {
     let mut registry = ToolRegistry::new();

@@ -1,10 +1,3 @@
-// TODO Audit turn-processing storage fallbacks
-// Review fallback paths in this module that substitute default values when
-// stored turn, replay, or context data is degraded. Each path should either
-// propagate failure, log explicit degraded-state behaviour, or keep the fallback
-// with a test explaining why defaulting is safe.
-// ---
-
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use swage_core::ScopeLocation;
@@ -884,7 +877,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
     release_active_turn(state, session_id, prepared_turn_id).await?;
 
     // A turn that ended on its own hands the session to whatever queued
-    // behind it; a stopped turn leaves the queue standing (C60).
+    // behind it; a stopped turn leaves the queue standing.
     let final_state = state
         .storage
         .get_turn(turn_id.unwrap_or(prepared_turn_id))

@@ -1,8 +1,8 @@
-//! Cross-task integration tests for Phases 02 and 04.
+//! Integration tests for the gateway runtime stack.
 //!
-//! These tests verify interactions between multiple tasks' outputs — behaviour
-//! that emerges only when the full stack is wired together. Each test identifies
-//! which tasks it spans and which Core Journey or Delivery Closure item it proves.
+//! These tests verify behaviour that emerges only when several components are
+//! wired together. Each test names the components it spans and the behaviour
+//! it proves.
 
 #![allow(clippy::unwrap_used)]
 
@@ -284,7 +284,7 @@ async fn ws_recv_until(stream: &mut WsStream, predicate: impl Fn(&Value) -> bool
 
 /// Full conversation lifecycle through HTTP and WebSocket.
 ///
-/// Journey: Core Journey 1 (Conversational Assistance)
+/// Journey: Conversational Assistance
 /// Spans: gateway-server, gateway-handlers, gateway-service,
 ///   gateway-websocket, gateway-turn, storage-sqlite-impl, provider
 ///
@@ -374,7 +374,7 @@ async fn conversation_lifecycle_with_streaming() {
 
 /// Cancel a streaming turn and verify partial response is preserved.
 ///
-/// Journey: Core Journey 1 (failure/recovery path)
+/// Journey: failure/recovery path
 /// Spans: gateway-websocket, gateway-turn, storage-sqlite-impl, provider-trait
 ///
 /// Proves: a turn the provider failed keeps its explanation in the
@@ -645,7 +645,7 @@ async fn stream_cancellation_preserves_partial_response() {
 
 /// Startup recovery marks orphaned in-progress turns as interrupted.
 ///
-/// Delivery Closure: Crash recovery
+/// Proves: Crash recovery
 /// Spans: gateway-shutdown, storage-sqlite, storage-sqlite-impl
 ///
 /// Proves: the recovery sweep transitions orphaned turns to interrupted without
@@ -660,7 +660,7 @@ async fn startup_recovery_marks_orphaned_turns() {
     // Get the default topic (seeded by migration).
     let topic = storage.general_scope().await.unwrap();
 
-    // Session 1: an orphaned Processing turn (simulates a crash mid-turn).
+    // Session 1: an orphaned Processing simulates a crash mid-turn.
     let session_orphan = storage
         .create_session(swage_storage::fixtures::new_session(topic.id))
         .await
@@ -685,7 +685,7 @@ async fn startup_recovery_marks_orphaned_turns() {
         .await
         .unwrap();
 
-    // Session 2: a completed turn (control case — should not be touched).
+    // Session 2: a completed control case — should not be touched.
     let session_ok = storage
         .create_session(swage_storage::fixtures::new_session(topic.id))
         .await
@@ -735,7 +735,7 @@ async fn startup_recovery_marks_orphaned_turns() {
 /// view is told so, and it runs as the next turn the moment the active one
 /// ends — the drained turn's events reaching the same socket.
 ///
-/// Delivery Closure: Token streaming — mid-turn arrival (C60)
+/// Proves: Token streaming — mid-turn arrival
 /// Spans: gateway-websocket, gateway-turn, gateway-turn-queue, storage-sqlite-impl
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_sent_during_an_active_turn_queues_and_runs_as_the_next_turn() {
@@ -920,15 +920,15 @@ async fn queued_messages_reach_real_sockets_in_turn_order_and_stay_in_their_sess
 }
 
 // ===========================================================================
-// Built-in tools and task execution — cross-task integration tests
+// Built-in tools and task execution — integration tests
 // ===========================================================================
 
 /// Conversation history includes tool_calls on assistant messages.
 ///
-/// Journey: Core Journey 2 (Task Execution) — activity display persistence
-/// Spans: tool-call-storage-model [u9c0], tool-call-store-trait [nnpz],
-///   tool-calls-migration [uxdk], sqlite-tool-call-store [r93r],
-///   api-tool-calls [7sh7]
+/// Journey: Task Execution — activity display persistence
+/// Spans: tool-call-storage-model, tool-call-store-trait,
+///   tool-calls-migration, sqlite-tool-call-store,
+///   api-tool-calls
 ///
 /// Proves: the HTTP API response for conversation detail includes a tool_calls
 /// field on assistant messages. This is the persistence half of the activity
@@ -986,17 +986,17 @@ async fn conversation_history_includes_tool_calls_field() {
 /// Tool execution emits tool_start and tool_end events on the WebSocket,
 /// and the completed tool calls persist in conversation history.
 ///
-/// Journey: Core Journey 2 (Task Execution) — full pipeline
-/// Spans: tool-types [jo39], provider-tool-types [ice8],
-///   anthropic-tool-parsing [95rd], tool-registry [ymlp],
-///   tool-execution-loop [0je2], websocket-tool-events [u3jo],
-///   tool-call-storage-model [u9c0], api-tool-calls [7sh7]
+/// Journey: Task Execution — full pipeline
+/// Spans: tool-types, provider-tool-types,
+///   anthropic-tool-parsing, tool-registry,
+///   tool-execution-loop, websocket-tool-events,
+///   tool-call-storage-model, api-tool-calls
 ///
 /// Proves: the full tool execution pipeline — the model requests tool use,
 /// the turn processor executes the tool via the registry, tool_start and
 /// tool_end events appear on the WebSocket (for live activity display),
 /// tool calls are stored in the database, and the HTTP conversation detail
-/// returns them (for surface-refresh persistence).
+/// returns for surface-refresh persistence.
 ///
 /// This test uses a ChannelProvider to simulate a tool-using conversation:
 /// Round 1: model emits text + tool_use → tool executes → tool results sent back

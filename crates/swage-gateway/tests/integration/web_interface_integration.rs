@@ -1,4 +1,4 @@
-//! Cross-task integration tests for the web interface.
+//! Integration tests for the web interface.
 //!
 //! These tests verify interactions between gateway asset serving and the
 //! existing API surface — behaviour that emerges only when both are wired
@@ -120,8 +120,8 @@ fn skip_without_frontend_assets(test_name: &str) -> bool {
 
 /// The gateway root serves the SPA's index.html.
 ///
-/// Delivery Closure: Gateway asset serving
-/// Spans: [fi3q] asset serving + router wiring
+/// Proves: Gateway asset serving
+/// Spans: asset serving + router wiring
 ///
 /// Proves: navigating to the gateway address loads the web application,
 /// not a 404 or empty response.
@@ -150,8 +150,8 @@ async fn root_serves_index_html() {
 
 /// Direct navigation to a conversation URL returns the SPA (not 404).
 ///
-/// Delivery Closure: Gateway asset serving — SPA fallback
-/// Spans: [fi3q] asset serving + [uydk] URL router (frontend-side)
+/// Proves: Gateway asset serving — SPA fallback
+/// Spans: asset serving + URL router (frontend-side)
 ///
 /// Proves: bookmarked or refreshed conversation URLs load the application.
 /// The frontend router then parses the URL and loads the correct conversation.
@@ -202,8 +202,8 @@ async fn missing_file_like_path_returns_not_found_not_spa_html() {
 
 /// API routes still work alongside asset serving.
 ///
-/// Delivery Closure: Gateway asset serving — API coexistence
-/// Spans: [fi3q] asset serving + existing HTTP handlers
+/// Proves: Gateway asset serving — API coexistence
+/// Spans: asset serving + existing HTTP handlers
 ///
 /// Proves: adding asset serving to the router doesn't break or shadow
 /// the API endpoints. API routes take priority over the SPA fallback.
@@ -232,8 +232,8 @@ async fn api_routes_coexist_with_asset_serving() {
 
 /// Static assets (CSS, JS) are served with correct content types.
 ///
-/// Delivery Closure: Gateway asset serving — static file serving
-/// Spans: [fi3q] asset serving
+/// Proves: Gateway asset serving — static file serving
+/// Spans: asset serving
 ///
 /// Proves: Vite-built assets are served with correct MIME types so the
 /// browser can load them. The test checks for any asset path that would
@@ -251,7 +251,7 @@ async fn static_assets_served_with_content_type() {
     // served directly. If it doesn't, the fallback serves index.html.
     //
     // We can test this by requesting a known non-existent asset — it should
-    // either 404 or serve index.html (depending on implementation choice).
+    // either 404 or serve index.depending on implementation choice.
     // The key invariant is that /api/* paths are never SPA-fallbacked.
     let (status, _) = request(&router, "GET", "/api/nonexistent").await;
     assert_ne!(

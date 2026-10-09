@@ -1403,7 +1403,7 @@ pub async fn submit_turn(
     )
     .map_err(ApiError::from)?;
     // A message that arrives while a turn is running is held for the next
-    // turn, never refused (C60). The persisted check comes first: REST
+    // turn, never refused. The persisted check comes first: REST
     // submit creates a durable pending placeholder before the background
     // worker registers `active_turns`, so every non-terminal persisted state
     // counts as in-flight here.

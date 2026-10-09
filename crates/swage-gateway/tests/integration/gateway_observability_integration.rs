@@ -1,4 +1,4 @@
-//! Cross-task integration tests for gateway integration and observability.
+//! Integration tests for gateway integration and observability.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the assembly wiring, subscription protocol, token
@@ -133,7 +133,7 @@ impl LlmProvider for ToolCallingProvider {
         &self,
         _request: CompletionRequest,
     ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
-        // First call: emit a tool use. Second call (after tool result): emit text.
+        // First call: emit a tool use. Second after tool result: emit text.
         let was_called = self.called.swap(true, std::sync::atomic::Ordering::SeqCst);
 
         if was_called {
@@ -284,12 +284,12 @@ async fn ws_recv(stream: &mut WsStream) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-task integration tests
+// Integration tests
 // ---------------------------------------------------------------------------
 
-/// Journey: Execution Visibility (Core Journey 4)
-/// Spans: [ogpt] event types + [6qgr] subscription + [81oq] WS handling +
-///        [x05a] assembly wiring + [bxdp] report delivery
+/// Journey: Execution Visibility
+/// Spans: event types + subscription + WS handling +
+/// assembly wiring + report delivery
 ///
 /// Proves: A subscribed client receives a ContextAssembled event before the
 /// first streaming token, with populated elements and non-zero token counts.
@@ -351,8 +351,8 @@ async fn subscribed_client_receives_assembly_report_before_tokens() {
     );
 }
 
-/// Journey: Execution Visibility (Core Journey 4) — negative case
-/// Spans: [6qgr] subscription + [0bzx] tool gating + [81oq] WS handling
+/// Journey: Execution Visibility — negative case
+/// Spans: subscription + tool gating + WS handling
 ///
 /// Proves: An unsubscribed client receives no observability events (no
 /// ContextAssembled, no ToolStart, no ToolEnd). Only token, turn_complete,
@@ -401,8 +401,8 @@ async fn unsubscribed_client_receives_no_observability_events() {
     assert!(has_turn_complete, "should still receive turn_complete");
 }
 
-/// Journey: Execution Visibility (Core Journey 4) — context persistence
-/// Spans: [bxdp] report delivery + [e84f] snapshot storage + [yts4] context endpoint
+/// Journey: Execution Visibility — context persistence
+/// Spans: report delivery + snapshot storage + context endpoint
 ///
 /// Proves: The assembly report delivered via WebSocket is also stored and
 /// retrievable via GET /api/turns/:id/context with matching content.
@@ -481,9 +481,9 @@ async fn past_turn_report_matches_live_websocket_report() {
     );
 }
 
-/// Journey: Execution Visibility (Core Journey 4) — token tracking
-/// Spans: [95z3] token persistence + [1qwx] TurnComplete extension +
-///        [9di0] pricing config
+/// Journey: Execution Visibility — token tracking
+/// Spans: token persistence + TurnComplete extension +
+/// pricing config
 ///
 /// Proves: After a turn, token counts from the provider are persisted to
 /// storage and included in the extended TurnComplete event for subscribed
@@ -558,8 +558,8 @@ async fn token_usage_persisted_and_in_turn_complete() {
     );
 }
 
-/// Journey: Terminal Workflow (Core Journey 2) — clean shutdown
-/// Spans: [tddj] shutdown endpoint + [lync] broadcast + [ogpt] event types
+/// Journey: Terminal Workflow — clean shutdown
+/// Spans: shutdown endpoint + broadcast + event types
 ///
 /// Proves: POST /api/shutdown returns 200 from localhost, notifies connected
 /// WebSocket clients with a Shutdown event, and the gateway terminates.

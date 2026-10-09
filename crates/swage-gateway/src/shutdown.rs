@@ -109,13 +109,9 @@ pub async fn recover_orphaned_turns(
         for session in storage.list_by_topic(topic.id).await? {
             for thread in storage.list_by_session(session.id).await? {
                 for turn in storage.list_turns_by_thread(thread.id).await? {
-                    // TODO Preserve delegated parent turns across restart
-                    // Delegated parent turns should suspend/resume durably;
-                    // this startup recovery path currently
-                    // interrupts Delegating turns. Persist enough delegation
-                    // correlation state to resume the parent turn or expose a
-                    // recoverable suspended state after a gateway restart.
-                    // ---
+                    // A Delegating parent turn is interrupted here like any
+                    // other in-flight turn: no delegation correlation state
+                    // survives a restart, so the parent cannot resume.
                     if !seen_turn_ids.insert(turn.id) {
                         continue;
                     }
@@ -682,7 +678,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Approval startup recovery tests [sfb5]
+    // Approval startup recovery tests
     //
     // These tests use SqliteStorage::in_memory() because MockStorage does not
     // implement ApprovalStore (it panics on unimplemented!()).

@@ -1,4 +1,4 @@
-//! Cross-task integration tests for sandboxing, observability, and lifecycle management.
+//! Integration tests for sandboxing, observability, and lifecycle management.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the gateway's sandbox routing, structured logging,
@@ -136,8 +136,8 @@ async fn http_response(router: &Router, method: &str, uri: &str) -> axum::http::
 
 /// Health endpoint returns 200 with a status body.
 ///
-/// Delivery Closure: Startup time verification surface
-/// Spans: [seyr] activity tracker + health handler, [dxct] route wiring
+/// Proves: Startup time verification surface
+/// Spans: activity tracker + health handler, route wiring
 ///
 /// Proves: the health check endpoint is reachable and returns a well-formed
 /// response. External process managers (systemd, wrapper scripts) use this to
@@ -161,7 +161,7 @@ async fn health_endpoint_returns_ok() {
 
 /// Every HTTP response carries an X-Request-Id header containing a UUID.
 ///
-/// Spans: [dxct] request ID correlation middleware
+/// Spans: request ID correlation middleware
 ///
 /// Proves: the middleware generates a unique UUID per request and returns it
 /// in the X-Request-Id response header for client-side correlation.
@@ -188,7 +188,7 @@ async fn request_id_header_present_on_health_response() {
 
 /// Two concurrent requests receive distinct request IDs.
 ///
-/// Spans: [dxct] request ID correlation middleware
+/// Spans: request ID correlation middleware
 ///
 /// Proves: the middleware generates a fresh UUID for each request, not a
 /// shared global value. If both requests share the same ID, log entries

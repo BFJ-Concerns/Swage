@@ -446,13 +446,6 @@ pub use swage_protocol::client::settings::PricingConfig;
 /// single-user deployments.
 pub use swage_protocol::client::settings::ObservabilityConfig;
 
-// TODO Add runtime variant registries beyond the built-in alternatives
-// Context assembly and working norms already select variants, honour the kill
-// switch and forced pins, and audit every decision. The remaining gap is a
-// registry through which other runtime locations can declare alternatives
-// without hard-coding each candidate set at its choice point. Bandit
-// allocation and shadow runs remain later work over that registry.
-// ---
 /// Experiment switches for hidden runtime variants.
 ///
 /// Variant ids are an operator/runtime concern. User-facing and model-facing
@@ -1215,7 +1208,7 @@ mod tests {
         assert!(restored.force_on);
     }
 
-    // --- RequireApprovalEntry tests [cqn0] ---
+    // --- RequireApprovalEntry tests ---
 
     #[test]
     fn require_approval_entry_from_plain_string() {

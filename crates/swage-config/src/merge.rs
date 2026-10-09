@@ -1659,7 +1659,7 @@ mod tests {
 
         let merged = merge_chain(vec![global, agent]);
         let resolved = resolve(merged);
-        // The mote success criterion.
+        // The behaviour under test: the agent level wins.
         assert_eq!(resolved.output.max_retries, 1);
     }
 
@@ -1739,7 +1739,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // HITL config merge tests [tz3w]
+    // HITL config merge tests
     // -----------------------------------------------------------------------
 
     #[test]

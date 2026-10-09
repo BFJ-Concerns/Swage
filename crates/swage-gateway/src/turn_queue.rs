@@ -1,6 +1,6 @@
 //! Messages that arrive while a session's turn is running.
 //!
-//! A person's message is never refused for arriving mid-turn (C60): it is
+//! A person's message is never refused for arriving mid-C60: it is
 //! accepted, held durably in arrival order, shown as queued to every open
 //! view, and becomes the next turn's input the moment the running turn ends
 //! — one turn, every queued message in it, each recorded as its own message

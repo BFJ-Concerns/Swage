@@ -524,7 +524,7 @@ mod tests {
         assert!(!state.should_deliver(&event));
     }
 
-    // OutputSchemaRetry / OutputSchemaFailed gating [z4ov]
+    // OutputSchemaRetry / OutputSchemaFailed gating
 
     #[test]
     fn output_schema_retry_gated_without_context_subscription() {
