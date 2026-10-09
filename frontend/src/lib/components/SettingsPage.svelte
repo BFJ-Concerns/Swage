@@ -367,44 +367,19 @@
       <MemoryPanel {topics} page={memoryPage} />
     {:else if tab === "plugins"}
       <!--
-        Debt marker: this visible settings page is intentionally a shell until
-        Swage has a platform plugin model.
-
-        Wire the Plugins page to a real plugin/extension catalogue. Today the
-        there is no platform-level plugin registry. Surface installed plugins,
-        their tools, and an enable/disable toggle.
-        Why: users cannot see or manage anything plugin-shaped from settings.
-        How to apply: when the gateway gains a plugin registry endpoint,
-        replace this shell with a real list bound to that endpoint.
-        ---
+        Swage has no plugin registry yet, so this page only describes the capability.
       -->
       <InformationalSettingsPanel {tab} />
     {:else if tab === "channels"}
       <!--
-        Debt marker: this visible settings page is intentionally a shell until
-        Swage has channel management semantics.
-
-        Render the channel list returned by /api/operator/overview.channels
-        and add per-channel route/credential editing. Today the page is a
-        shell because the operator endpoint is read-only and there is no
-        management API.
-        Why: the operator deck reads channels but there is no way to
-        add/configure them.
-        How to apply: extend swage-gateway with channel CRUD, then bind here.
-        ---
+        The operator overview lists channels read-only; there is no channel
+        management API for this page to edit yet.
       -->
       <InformationalSettingsPanel {tab} />
     {:else if tab === "devices"}
       <!--
-        Debt marker: this visible settings page is intentionally a shell until
-        Swage has device registration and disconnect semantics.
-
-        Show registered devices (operator overview already returns
-        devices). Add register/disconnect flows once the gateway exposes them.
-        Why: there is no settings-level view of attached devices.
-        How to apply: bind to /api/operator/overview.devices for a read-only
-        view first; design a registration flow before building the form.
-        ---
+        Devices register and pair through the API; this page has no view of them
+        yet.
       -->
       <InformationalSettingsPanel {tab} />
     {:else if tab === "voice"}
@@ -417,15 +392,8 @@
       <DisplayPreferencesSettingsPanel />
     {:else if tab === "account"}
       <!--
-        Debt marker: this visible settings page is intentionally a shell until
-        Swage has a local-vs-remote identity model.
-
-        Account is unscoped. Swage runs locally with no notion of identity;
-        a remote identity provider would precede any meaningful account
-        page. Until then this stays a shell so the settings route resolves.
-        Why: the application has no account model yet.
-        How to apply: revisit when remote identity / multi-host work begins.
-        ---
+        Swage is single-operator and has no identity model, so there is no
+        account to manage; the page keeps the settings route resolving.
       -->
       <InformationalSettingsPanel {tab} />
     {/if}

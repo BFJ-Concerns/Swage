@@ -483,7 +483,9 @@ pub async fn discover_models(
         None => (provider_for_discovery(state, &provider_id).await?, None),
     };
 
-    // Last-resort catalogues current for this fixes batch as of 2026-08-21.
+    // OpenRouter and OpenAI-compatible endpoints with a base URL are queried
+    // live; the other protocols fall back to a built-in list, current as of
+    // 2026-08-21.
     let mut models = match provider.protocol {
         swage_config::Protocol::OpenRouter => discover_openrouter_models().await?,
         swage_config::Protocol::OpenAi | swage_config::Protocol::OpenAiResponses => {

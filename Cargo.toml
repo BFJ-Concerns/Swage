@@ -27,9 +27,9 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.98"
 
-# Clippy lints, curated: keep what catches real
-# bugs, needless allocations, or genuine redundancy; drop what is purely
-# stylistic or fires falsely on provably-correct code.
+# Clippy lints, curated: keep what catches real bugs, needless allocations, or
+# genuine redundancy; drop what is purely stylistic or fires falsely on code
+# that is correct by construction.
 #
 # `pedantic` runs as a group (with an allow-list below). `nursery` stays off
 # entirely - its lints are still under development and ship with false positives,
@@ -103,9 +103,9 @@ format_push_string = "allow"
 # These are on by default (clippy's `suspicious`/`complexity` groups warn out of
 # the box), and they fire on provably-correct code: a guard deliberately held
 # across an await, a future intentionally returned rather than awaited. Left at
-# their default warn level they force a per-site `#[allow]` with a justification
-# at every legitimate occurrence. Set to allow so correct code needs no override;
-# the abandoned-future hazard they guarded is covered by tests, not these lints.
+# their default warn level they force a per-site `#[allow]` at every legitimate
+# occurrence. They are allowed workspace-wide instead; the abandoned-future
+# hazard they guard against is covered by tests rather than these lints.
 await_holding_lock = "allow"        # lock guard held across .await - often intentional
 await_holding_refcell_ref = "allow" # same hazard via a RefCell borrow across .await
 async_yields_async = "allow"        # returning a future from an async block can be deliberate
