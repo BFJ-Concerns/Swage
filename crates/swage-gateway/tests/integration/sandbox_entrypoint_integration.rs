@@ -87,7 +87,10 @@ async fn bubblewrap_sandbox_real_binary_runs_git_and_standard_device_io_through_
     assert_eq!(result.output["exit_code"], 0, "shell result: {result:?}");
 
     let full = sandbox
-        .execute_tool("shell", json!({ "command": "printf device-io >/dev/full" }))
+        .execute_tool(
+            "shell",
+            json!({ "command": "dd if=/dev/zero of=/dev/full bs=1 count=1 status=none" }),
+        )
         .await
         .unwrap();
     assert!(full.error.is_none(), "shell dispatch failed: {full:?}");
