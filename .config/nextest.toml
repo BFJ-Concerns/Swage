@@ -1,7 +1,7 @@
-# nextest configuration. The ci profile is what .forgejo/workflows/ci.yml
-# runs: retries make flaky tests visible (fail → pass on retry is reported
-# as FLAKY and recorded in the junit report, which the workflow turns into
-# a "Flaky Tests" PR label) instead of failing the run on bad luck.
+# nextest configuration. The ci profile is what `just verify` runs: retries
+# make flaky tests visible (fail → pass on retry is reported as FLAKY and
+# recorded in the junit report, which the CI workflow names as a warning on
+# the run) instead of failing the run on bad luck.
 # Genuinely broken tests still fail after all retries.
 
 [profile.ci]
