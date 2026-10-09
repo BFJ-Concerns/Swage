@@ -1,0 +1,105 @@
+# CI runs the repository's full verification gate, `just verify`, on a
+# GitHub-hosted Ubuntu runner. What the gate checks is defined in xtask, not
+# here, so a local run and CI cannot drift apart: adding a check means editing
+# xtask. This file installs the tools the gate needs and changes only when the
+# gate needs a new one.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-24.04
+    # Well above a cold build plus the full suite; a hang fails here instead
+    # of holding the runner for the platform's six-hour default.
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The workspace's debug build and test binaries outgrow the runner's free
+      # disk. The gate uses none of these preinstalled SDKs.
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+
+      # The tool sandbox runs under bubblewrap, and Electron's Chromium sandbox
+      # needs the same thing bubblewrap does: unprivileged user namespaces,
+      # which Ubuntu 24.04 restricts through AppArmor by default.
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap xvfb
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      # Installs the toolchain rust-toolchain.toml pins.
+      - name: Install Rust
+        run: |
+          rustup toolchain install --profile minimal
+          rustup component add rustfmt clippy
+
+      - name: Install just and cargo-nextest
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: just@1.58.0,cargo-nextest@0.9.146
+
+      - name: Install Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            desktop/package-lock.json
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
+
+      # The desktop smoke and the browser-tool integration tests drive the
+      # Chromium build matching the Playwright version the desktop package
+      # pins. Pointing the gateway at it and requiring the browser tests stops
+      # them skipping silently for want of a browser.
+      - name: Install Chromium
+        run: |
+          npm --prefix desktop ci
+          npm --prefix desktop exec -- playwright install --with-deps chromium
+          browser=$(cd desktop && node -e "console.log(require('playwright').chromium.executablePath())")
+          echo "SWAGE_BROWSER_BIN=$browser" >> "$GITHUB_ENV"
+          echo "SWAGE_BROWSER_TESTS=required" >> "$GITHUB_ENV"
+
+      # Under xvfb-run so the desktop smoke has a display.
+      - name: Verify
+        run: xvfb-run -a just verify
+
+      # Nextest's ci profile retries a failing test, so one that fails and then
+      # passes leaves the run green. Name each such test so a flake is seen
+      # rather than hidden behind a lucky retry.
+      - name: Report flaky tests
+        if: always()
+        run: |
+          junit=target/nextest/ci/junit.xml
+          [ -f "$junit" ] || exit 0
+          python3 - "$junit" <<'EOF'
+          import sys
+          import xml.etree.ElementTree as ElementTree
+
+          for case in ElementTree.parse(sys.argv[1]).iter("testcase"):
+              if case.find("flakyFailure") is not None:
+                  print(f"::warning title=Flaky test::{case.get('classname')} {case.get('name')}")
+          EOF
