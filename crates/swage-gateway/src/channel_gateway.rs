@@ -475,7 +475,7 @@ async fn drain_channel_origin(
         })?;
     let thread = resolve_thread_for_session(state.storage.as_ref(), session_id, None).await?;
     let input = compose_channel_messages(&rows);
-    if busy {
+    if busy || crate::turn_queue::has_queued_input(state, session_id).await? {
         return queue_channel_rows(state, session_id, thread.id, rows).await;
     }
 

@@ -1421,7 +1421,8 @@ pub async fn submit_turn(
         .lock()
         .await
         .contains_key(&req.conversation_id);
-    if running_turn.is_some() || guard_held {
+    let queue_standing = crate::turn_queue::has_queued_input(&state, req.conversation_id).await?;
+    if running_turn.is_some() || guard_held || queue_standing {
         let queued = crate::turn_queue::queue_input(
             &state,
             req.conversation_id,

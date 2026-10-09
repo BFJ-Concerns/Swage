@@ -80,17 +80,25 @@ fn spawn_person_turn(
     let state = state.clone();
     tokio::spawn(async move {
         let queued_copy = input.clone();
-        match turn::process_turn(
-            &state,
-            session_id,
-            thread_id,
-            input,
-            tx.clone(),
-            subscription,
-            None,
-        )
-        .await
-        {
+        // A session with queued input takes the message behind it, as a busy
+        // one does.
+        let result = match crate::turn_queue::has_queued_input(&state, session_id).await {
+            Ok(true) => Err(GatewayError::TurnInProgress { session_id }),
+            Ok(false) => {
+                turn::process_turn(
+                    &state,
+                    session_id,
+                    thread_id,
+                    input,
+                    tx.clone(),
+                    subscription,
+                    None,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
+        match result {
             Ok(()) => {}
             Err(GatewayError::TurnInProgress { .. }) => {
                 let thread = match crate::thread_selection::resolve_thread_for_session(
