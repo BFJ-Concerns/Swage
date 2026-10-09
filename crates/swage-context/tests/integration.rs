@@ -1,4 +1,4 @@
-//! Cross-task integration tests for the context assembly engine.
+//! Integration tests for the context assembly engine.
 //!
 //! These tests verify interactions between multiple tasks' outputs:
 //! prompt rule loading → prompts element → default assembly → report,
@@ -16,9 +16,9 @@ use tempfile::TempDir;
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // Journey: Sustained Conversation Quality — baseline behaviour.
-// Cross-task: prompt rules [xswh/ivea] → PromptsElement [064z] →
-//             HistoryElement [50k7] → DefaultAssembly [3iw7] →
-//             Report types [wnyz]
+// Spans: prompt rules → PromptsElement →
+//             HistoryElement → DefaultAssembly →
+//             Report types
 //
 // This test verifies the core equivalence guarantee: given the same
 // instructions and history, the default assembly produces messages
@@ -150,8 +150,8 @@ fn default_assembly_preserves_legacy_prompt_shape() {
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // Journey: Sustained Conversation Quality — long session compaction.
-// Cross-task: Tokeniser [xeeo] → TruncationCompactor [dc5n] →
-//             DefaultAssembly [3iw7] → Report types [wnyz]
+// Spans: Tokeniser → TruncationCompactor →
+//             DefaultAssembly → Report types
 //
 // Verifies that when history exceeds the configured token budget, the
 // assembly truncates oldest messages while preserving recent exchanges.
@@ -272,8 +272,8 @@ fn public_entry_point_assembles_and_reports() {
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // Journey: Sustained Conversation Quality — configuration-driven context.
-// Cross-task: PromptRule parsing [xswh] → discovery [ivea] →
-//             PromptsElement [064z] → DefaultAssembly [3iw7]
+// Spans: PromptRule parsing → discovery →
+//             PromptsElement → DefaultAssembly
 //
 // Verifies the full pipeline from .md files on disk through to assembled
 // context, with correct priority ordering and per-rule attribution in
@@ -365,8 +365,8 @@ fn prompt_rules_merge_across_hierarchy_with_priority_ordering() {
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // Journey: Configuration-driven assembly behaviour.
-// Cross-task: ContextConfig model [e2er] → PartialContextConfig merge [wme0] →
-//             assembly uses config [faup]
+// Spans: ContextConfig model → PartialContextConfig merge →
+//             assembly uses config
 //
 // Verifies that context config at two hierarchy levels merges correctly
 // and the assembly respects the merged budget.
@@ -429,7 +429,7 @@ budget = 20000
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // Journey: Configuration correctness.
-// Cross-task: Validation fix [ths2] + ContextConfig [e2er]
+// Spans: Validation fix + ContextConfig
 //
 // Verifies the tools validation bug fix: a config with [tools] and [context]
 // sections should validate cleanly with no unknown-section warnings.

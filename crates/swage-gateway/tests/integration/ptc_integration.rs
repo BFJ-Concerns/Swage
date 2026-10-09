@@ -1,4 +1,4 @@
-//! Cross-task integration tests for programmatic tool calling.
+//! Integration tests for programmatic tool calling.
 //!
 //! These tests exercise the child-worker `python_execute` path end to end:
 //! worker execution, nested tool dispatch, nested-tool event delivery, and
@@ -312,7 +312,7 @@ async fn collect_events_until_complete(stream: &mut WsStream) -> Vec<Value> {
 
 /// Python code calling multiple tool functions, chaining results.
 ///
-/// Journey: Core Journey 2 (Task Execution) — PTC proof of delivery
+/// Journey: Task Execution — PTC proof of delivery
 /// Spans: Python worker runtime, nested tool runtime, ToolDispatcher,
 ///   PythonExecuteTool
 ///
@@ -414,7 +414,7 @@ print(f"{result1.strip()} {result2.strip()}")
 
 /// Sub-tool calls from Python emit events with parent_call_id for nesting.
 ///
-/// Journey: Core Journey 2 (Task Execution) — activity display nesting
+/// Journey: Task Execution — activity display nesting
 /// Spans: nested tool runtime, sub-tool events, PythonExecuteTool,
 ///   frontend nesting
 ///
@@ -519,7 +519,7 @@ async fn ptc_sub_tool_events_include_parent_call_id() {
 
 /// Python errors surface as tool result with traceback.
 ///
-/// Journey: Core Journey 2 (Task Execution) — error surfacing
+/// Journey: Task Execution — error surfacing
 /// Spans: Python worker runtime, PythonExecuteTool, sub-tool events
 ///
 /// Proves: when Python code raises an error, the tool call fails and the
@@ -610,7 +610,7 @@ x = 1 / 0  # ZeroDivisionError
 
 /// Sub-tool calls from Python persist in conversation history with nesting.
 ///
-/// Journey: Core Journey 2 (Task Execution) — activity display persistence
+/// Journey: Task Execution — activity display persistence
 /// Spans: nested tool runtime, sub-tool events, PythonExecuteTool,
 ///   tool-call storage, API tool-call views
 ///

@@ -782,14 +782,14 @@ impl AnthropicProvider {
 }
 
 // ---------------------------------------------------------------------------
-// Legacy trait impl (preserved for task [8uce] to adapt)
+// Legacy trait impl (preserved for task to adapt)
 // ---------------------------------------------------------------------------
 
 // The old send_message/stream_message implementations are preserved below as
-// private methods. Task [8uce] will adapt them to the new four-method API.
+// private methods. Task will adapt them to the new four-method API.
 
 impl AnthropicProvider {
-    /// Legacy send_message logic — kept for task [8uce] to adapt into `complete`.
+    /// Legacy send_message logic — kept for task to adapt into `complete`.
     #[allow(dead_code)]
     async fn legacy_send_message(
         &self,
@@ -820,7 +820,7 @@ impl AnthropicProvider {
         })
     }
 
-    /// Legacy stream_message logic — kept for task [8uce] to adapt into `stream`.
+    /// Legacy stream_message logic — kept for task to adapt into `stream`.
     #[allow(dead_code)]
     fn legacy_stream_message(
         &self,
@@ -1118,7 +1118,7 @@ impl AnthropicProvider {
 }
 
 // ---------------------------------------------------------------------------
-// New LlmProvider trait impl (stubs for task [8uce] to flesh out)
+// New LlmProvider trait impl (stubs for task to flesh out)
 // ---------------------------------------------------------------------------
 
 #[async_trait]

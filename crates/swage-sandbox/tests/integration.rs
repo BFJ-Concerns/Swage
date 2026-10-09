@@ -1,4 +1,4 @@
-//! Cross-task integration tests for the swage-sandbox crate.
+//! Integration tests for the swage-sandbox crate.
 //!
 //! These tests exercise interactions between multiple sandbox subsystems:
 //! IPC protocol + transport + connections + process management + LLM proxying +
@@ -16,7 +16,7 @@ use swage_sandbox::{IpcCompletionProvider, SandboxConfig};
 
 // ---------------------------------------------------------------------------
 // Test 1: IPC protocol roundtrip over actual Unix domain socket
-// Cross-task: message types [0k1z] + transport [yfh2] + host conn [zo0l] + agent conn [f6u5]
+// Spans: message types + transport + host conn + agent conn
 // Journey: host dispatches tool call to agent, agent returns result;
 //          agent sends LLM request to host, host returns response.
 // ---------------------------------------------------------------------------
@@ -70,8 +70,8 @@ async fn ipc_roundtrip_tool_call_and_llm_request() {
 
 // ---------------------------------------------------------------------------
 // Test 2: LLM proxy end-to-end through IPC
-// Cross-task: IPC provider [q1lq] + LLM handler [cv6y] + transport [yfh2]
-//           + connections [zo0l, f6u5] + messages [0k1z]
+// Spans: IPC provider + LLM handler + transport
+//           + connections + messages
 // Journey: sandboxed agent requests LLM completion → IPC → host handler
 //          dispatches to mock provider → response flows back with usage.
 // ---------------------------------------------------------------------------

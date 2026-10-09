@@ -17778,7 +17778,7 @@ async fn turn_complete_omits_usage_when_not_subscribed() {
 }
 
 // -----------------------------------------------------------------------
-// Approval event routing tests [byi8]
+// Approval event routing tests
 // -----------------------------------------------------------------------
 
 #[tokio::test]

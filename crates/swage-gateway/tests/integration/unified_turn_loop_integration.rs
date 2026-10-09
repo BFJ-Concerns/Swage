@@ -1,4 +1,4 @@
-//! Cross-task integration tests for unified turn-loop behaviour.
+//! Integration tests for unified turn-loop behaviour.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the full stack is wired together.
@@ -293,7 +293,7 @@ async fn ws_send(sink: &mut WsSink, payload: Value) {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-task integration tests
+// Integration tests
 // ---------------------------------------------------------------------------
 
 /// Config deny list blocks tool dispatch through the unified turn loop.
@@ -521,7 +521,7 @@ async fn hook_events_fire_for_gateway_initiated_turns() {
         //
         // This assertion will be refined once the event shape is finalised.
         // For now, we verify the turn completes at all — and the permission
-        // denial test above provides the stronger cross-task proof.
+        // denial test above provides the stronger end-to-end proof.
         let complete = turn_complete.unwrap();
         assert!(
             complete.get("turn_id").is_some(),

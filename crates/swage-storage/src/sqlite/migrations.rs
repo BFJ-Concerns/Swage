@@ -114,7 +114,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
 /// order until the next turn takes them as its input. A row carries the
 /// origin it arrived with, so the message it becomes is labelled truthfully.
 /// The execution boundary a turn ran inside, recorded when its dispatcher
-/// settled: the kind (isolated, degraded, declared) and its detail (the
+/// settled: the isolated, degraded, declared and its detail (the
 /// degradation reason or the declared boundary).
 const ADD_TURN_EXECUTION_ISOLATION: &str = "
     ALTER TABLE turns ADD COLUMN isolation_kind TEXT;
@@ -153,10 +153,10 @@ const CREATE_TURN_QUEUE: &str = "
 /// topic-local templates. A surface row names the session it opens with;
 /// `library_entry_id` / `seeded_at` record the library entry it was seeded
 /// from and when; `seeded_from_name` keeps its name after the entry is removed.
-/// Library entries carry a name, a description written at save time (what the
-/// surface does and when to use it), catalogue tags, the
-/// scope they were saved from (`origin_topic_id`, retained after a topic is
-/// deleted so it remains distinct from the general scope), and their module
+/// Library entries carry a name, a description written at save what the
+/// surface does and when to use it, catalogue tags, the
+/// scope they were saved `origin_topic_id`, retained after a topic is
+/// deleted so it remains distinct from the general scope, and their module
 /// rows. `topic_default_surfaces` names the
 /// entries a topic opens in each new session; `topics.tags` are the labels
 /// that narrow the catalogue for a topic's sessions. The alpha posture applies:
@@ -346,8 +346,8 @@ const CREATE_WORKER_CALL_RECORD: &str = "
 
 /// Delegated-child usage aggregated onto the delegating turn: a billing
 /// figure separate from the turn's own token columns, so which-child-spent-
-/// what stays reconstructable from child turn rows (parent_turn_id + their
-/// own tokens) while the parent's context measure keeps reading only its
+/// what stays reconstructable from child turn parent_turn_id + their
+/// own tokens while the parent's context measure keeps reading only its
 /// own fields.
 const ADD_TURN_DELEGATED_TOKENS: &str = "
 ALTER TABLE turns ADD COLUMN delegated_input_tokens INTEGER;
@@ -509,7 +509,7 @@ const CREATE_WORKFLOW_RUN_EVENTS: &str = "
 /// hold — an external attempt must not take a journal entry, which would put
 /// the script's own sequence at the mercy of who tried what. The journal's
 /// kind CHECK also retains the worker lifecycle kind while widening for the
-/// new host-call kind (hold); SQLite cannot widen a CHECK in place, so the
+/// new host-call hold; SQLite cannot widen a CHECK in place, so the
 /// table is rebuilt, existing rows carrying over unchanged.
 const CREATE_WORKFLOW_RUN_HOLDS: &str = "
     CREATE TABLE IF NOT EXISTS workflow_run_holds (
@@ -1749,8 +1749,8 @@ const CREATE_KNOWLEDGE_ORIENTATION_CARDS: &str = "
 ///
 /// `id` is the stable agent id sessions already carry; `topic_id` NULL means
 /// a global definition, and a topic-scoped row with the same id shadows it.
-/// `tool_permissions_json` is a permission overlay that intersects with (and
-/// never expands) the resolved config's grants.
+/// `tool_permissions_json` is a permission overlay that intersects and
+/// never expands the resolved config's grants.
 const CREATE_AGENT_DEFINITION_TABLE: &str = "
     CREATE TABLE IF NOT EXISTS agent_definitions (
         id                    TEXT NOT NULL,
@@ -2908,7 +2908,7 @@ mod tests {
     #[test]
     fn approval_requests_table_created() {
         let conn = open_migrated();
-        // SELECT COUNT(*) is the mote's stated success criterion.
+        // The table exists and is queryable.
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM approval_requests", [], |r| r.get(0))
             .expect("approval_requests table should exist after migration");

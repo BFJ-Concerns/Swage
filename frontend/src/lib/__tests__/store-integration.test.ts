@@ -1,15 +1,15 @@
 /**
- * Cross-task integration tests for store coordination.
+ * Integration tests for store coordination.
  *
  * These tests verify behaviour that only emerges when multiple stores interact:
  *
- * - Streaming store [cl9v] → Conversation store [xfkw]:
+ * - Streaming store → Conversation store:
  *   When a turn completes, the streaming store must push the finalised assistant
  *   message into the conversation store's active conversation. Neither store can
  *   prove this alone — the streaming store accumulates tokens, the conversation
  *   store owns messages.
  *
- * - Connection store [ycn1] → Conversation store [xfkw]:
+ * - Connection store → Conversation store:
  *   On WebSocket reconnect, the connection store must trigger the conversation
  *   store to re-fetch from HTTP, reconciling any state changes that happened
  *   while disconnected.

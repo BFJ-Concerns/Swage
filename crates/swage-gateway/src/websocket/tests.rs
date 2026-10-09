@@ -328,7 +328,7 @@ fn server_event_shutdown_round_trips() {
 }
 
 // -----------------------------------------------------------------------
-// Skill event serialisation / deserialisation [e65s]
+// Skill event serialisation / deserialisation
 // -----------------------------------------------------------------------
 
 #[test]
@@ -382,7 +382,7 @@ fn server_event_skill_deactivated_serialises() {
 }
 
 // -----------------------------------------------------------------------
-// Skill dispatch tests [5cpd]
+// Skill dispatch tests
 // -----------------------------------------------------------------------
 
 #[tokio::test]
@@ -653,7 +653,7 @@ async fn preconditions_pass_for_valid_unconnected_session() {
 }
 
 // -----------------------------------------------------------------------
-// Schema validation events [z4ov]
+// Schema validation events
 // -----------------------------------------------------------------------
 
 #[test]
@@ -847,7 +847,7 @@ fn output_schema_retry_empty_errors_serialises() {
 }
 
 // -----------------------------------------------------------------------
-// ApprovalDecision client event deserialisation [viuf]
+// ApprovalDecision client event deserialisation
 // -----------------------------------------------------------------------
 
 #[test]
@@ -897,7 +897,7 @@ fn client_event_approval_decision_rejected_with_reason_deserialises() {
 }
 
 // -----------------------------------------------------------------------
-// Approval event serialisation [c79w]
+// Approval event serialisation
 // -----------------------------------------------------------------------
 
 #[test]

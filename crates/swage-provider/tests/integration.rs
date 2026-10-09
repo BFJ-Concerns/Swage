@@ -1,4 +1,4 @@
-//! Cross-task integration tests for the LLM provider stack.
+//! Integration tests for the LLM provider stack.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when the full stack is wired together. Each test documents
@@ -16,17 +16,17 @@ use swage_core::{
     ToolCompletionRequest, ToolCompletionResponse,
 };
 
-// Reliability decorators (tasks: retry [rrak], circuit_breaker [97s4],
-// failover [p7fr], builder [jd4i])
+// Reliability decorators (tasks: retry, circuit_breaker,
+// failover, builder)
 use swage_provider::builder::ProviderChainBuilder;
 use swage_provider::circuit_breaker::CircuitBreakerConfig;
 use swage_provider::failover::FailoverConfig;
 use swage_provider::retry::RetryConfig;
 
-// Model registry (task: registry [uicc])
+// Model registry (task: registry)
 use swage_provider::registry::Registry;
 
-// Trait (task: trait [qwes])
+// Trait (task: trait)
 use swage_provider::LlmProvider;
 
 // ---------------------------------------------------------------------------
@@ -149,7 +149,7 @@ impl LlmProvider for CountingMockProvider {
 
 // ---------------------------------------------------------------------------
 // Test 1: Full reliability stack composition
-// Spans: retry [rrak] + circuit_breaker [97s4] + failover [p7fr] + builder [jd4i]
+// Spans: retry + circuit_breaker + failover + builder
 //
 // Proves: ProviderChainBuilder produces a correctly-ordered composition where
 // retry wraps circuit breaker per provider, and failover operates across stacks.
@@ -239,7 +239,7 @@ async fn reliability_stack_retries_then_fails_over_to_secondary() {
 
 // ---------------------------------------------------------------------------
 // Test 2: Registry resolves model and provider completes request
-// Spans: registry [uicc] + trait [qwes] + concrete providers
+// Spans: registry + trait + concrete providers
 //
 // Proves: the registry resolves model aliases to the correct provider config,
 // and the Protocol field enables dispatch to the right provider implementation.
@@ -287,7 +287,7 @@ async fn registry_resolves_alias_and_completes_through_provider() {
 
 // ---------------------------------------------------------------------------
 // Test 3: Duplicate alias rejection
-// Spans: registry [uicc]
+// Spans: registry
 //
 // Proves: the registry enforces unique aliases across all registered models.
 // ---------------------------------------------------------------------------
@@ -333,7 +333,7 @@ async fn registry_rejects_duplicate_aliases() {
 
 // ---------------------------------------------------------------------------
 // Test 4: Circuit-open error triggers failover
-// Spans: circuit_breaker [97s4] + failover [p7fr] + builder [jd4i]
+// Spans: circuit_breaker + failover + builder
 //
 // Proves: when a circuit breaker opens (after repeated transient failures),
 // the circuit-open error is classified as retriable, allowing the failover
@@ -405,7 +405,7 @@ async fn circuit_open_triggers_failover_to_secondary() {
 
 // ---------------------------------------------------------------------------
 // Test 5: Streaming through reliability stack
-// Spans: retry [rrak] + failover [p7fr] + builder [jd4i] + trait [qwes]
+// Spans: retry + failover + builder + trait
 //
 // Proves: streaming works end-to-end through the decorator stack. The stream
 // carries chunks from the provider that ultimately handles the request, with
@@ -453,7 +453,7 @@ async fn streaming_through_reliability_stack_delivers_chunks() {
 
 // ---------------------------------------------------------------------------
 // Test 6: Permanent error passes through entire stack without retry or failover
-// Spans: retry [rrak] + failover [p7fr] + builder [jd4i]
+// Spans: retry + failover + builder
 //
 // Proves: a non-retriable error (e.g., Auth) from the primary provider is
 // returned immediately — retry doesn't attempt, failover doesn't engage.

@@ -1,4 +1,4 @@
-//! Cross-task integration tests for the skills system.
+//! Integration tests for the skills system.
 //!
 //! These tests verify interactions between multiple tasks' outputs — behaviour
 //! that emerges only when skill discovery (swage-config), the SkillsElement
@@ -298,7 +298,7 @@ async fn ws_recv_lenient(stream: &mut WsStream) -> Option<Value> {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-task integration tests
+// Integration tests
 // ---------------------------------------------------------------------------
 
 /// Proof scenario 1: Slash command → assembly report.
@@ -308,7 +308,7 @@ async fn ws_recv_lenient(stream: &mut WsStream) -> Option<Value> {
 /// includes the skill's content as a skills element with a token count
 /// and the skill's name in provenance.
 ///
-/// Cross-task: skill discovery (config) + activation persistence (storage) +
+/// Spans: skill discovery (config) + activation persistence (storage) +
 /// SkillsElement (context) + slash command parsing (gateway) + turn
 /// assembly wiring (gateway) + assembly report delivery (gateway).
 #[tokio::test(flavor = "multi_thread")]
@@ -415,7 +415,7 @@ async fn slash_command_activates_skill_and_appears_in_assembly_report() {
 /// invocation, and verifies the skill's content appears in the assembly
 /// report on the first turn.
 ///
-/// Cross-task: skill discovery (config) + auto-activation on session
+/// Spans: skill discovery (config) + auto-activation on session
 /// creation (storage/manager) + SkillsElement (context) + turn assembly
 /// wiring (gateway) + assembly report delivery (gateway).
 #[tokio::test(flavor = "multi_thread")]
@@ -501,7 +501,7 @@ async fn agent_level_skill_appears_in_assembly_without_invocation() {
 /// Verifies the skill appears in all three assembly reports with consistent
 /// content and token count.
 ///
-/// Cross-task: activation persistence (storage survives across turns) +
+/// Spans: activation persistence (storage survives across turns) +
 /// SkillsElement (context, consistent across assemblies) + turn assembly
 /// wiring (gateway reads storage on each turn).
 #[tokio::test(flavor = "multi_thread")]
@@ -626,7 +626,7 @@ async fn activated_skill_persists_across_multiple_turns() {
 
 /// Deactivation of agent-level skills is rejected.
 ///
-/// Cross-task: skill discovery (config, agent-level detection) + activation
+/// Spans: skill discovery (config, agent-level detection) + activation
 /// state (storage) + WebSocket dispatch (gateway error handling).
 #[tokio::test(flavor = "multi_thread")]
 async fn deactivating_agent_level_skill_returns_error() {
@@ -679,7 +679,7 @@ async fn deactivating_agent_level_skill_returns_error() {
 
 /// Skills listing endpoint returns available skills with hierarchy resolution.
 ///
-/// Cross-task: skill discovery (config, multi-level resolution) + skills
+/// Spans: skill discovery (config, multi-level resolution) + skills
 /// endpoint (gateway handler) + hierarchy override (same-name shadowing).
 #[tokio::test(flavor = "multi_thread")]
 async fn skills_listing_shows_resolved_skills_with_override() {
@@ -732,7 +732,7 @@ async fn skills_listing_shows_resolved_skills_with_override() {
         .as_array()
         .expect("response should have skills array");
 
-    // code-review should appear once (topic shadows global).
+    // code-review should appear topic shadows global.
     let code_reviews: Vec<&Value> = skills
         .iter()
         .filter(|s| s["name"] == "code-review")

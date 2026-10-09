@@ -68,7 +68,7 @@ fn skill_root_for_session(_session_id: Uuid) -> Option<std::path::PathBuf> {
 /// ActivateSkill and DeactivateSkill delegate to [`crate::skill::SkillManager`].
 /// Run a person's message as a turn on its own task. A message that finds a
 /// turn already running is not an error to the person: it is queued for the
-/// next turn and announced as queued (C60).
+/// next turn and announced as queued.
 fn spawn_person_turn(
     state: &AppState,
     session_id: Uuid,
