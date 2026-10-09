@@ -134,7 +134,7 @@ For trigger and instruction-following problems after discovery is confirmed, see
 
 ## Compose With Other Skills
 
-Skills are folded into context alongside the agent's base instructions, the project rules, and any other active skills. Write each skill as if other skills may be active. Do not restate base-instruction guidance, and do not contradict other skills the agent might activate at the same time. For Swage-internal conventions, defer to the project rules in `CLAUDE.md` rather than restating them inside a skill.
+Skills are folded into context alongside the agent's base instructions, the project rules, and any other active skills. Write each skill as if other skills may be active. Do not restate base-instruction guidance, and do not contradict other skills the agent might activate at the same time. For Swage-internal conventions, defer to the project rules in `AGENTS.md` rather than restating them inside a skill.
 
 ## Checklist
 
