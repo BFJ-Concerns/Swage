@@ -13,9 +13,9 @@ SWAGE_RUN="${SWAGE_RUN:-/tmp/swage-telegram-live-smoke}"
 PORT="${SWAGE_TELEGRAM_SMOKE_PORT:-3942}"
 
 rm -rf "$SWAGE_RUN"
-mkdir -p "$SWAGE_RUN/.swage" "$SWAGE_RUN/run"
+mkdir -p "$SWAGE_RUN/home"
 
-cat > "$SWAGE_RUN/.swage/default.toml" <<'TOML'
+cat > "$SWAGE_RUN/home/config.toml" <<'TOML'
 dangerously_skip_permissions = true
 
 [channels.telegram]
@@ -24,13 +24,13 @@ poll_timeout_secs = 5
 TOML
 
 echo "Starting isolated gateway on http://127.0.0.1:${PORT}"
-HOME="$SWAGE_RUN" XDG_RUNTIME_DIR="$SWAGE_RUN/run" \
+SWAGE_HOME="$SWAGE_RUN/home" \
   cargo run -- gateway start --foreground --host 127.0.0.1 --port "$PORT" \
   > "$SWAGE_RUN/gateway.out" 2>&1 &
 GATEWAY_PID=$!
 
 cleanup() {
-  HOME="$SWAGE_RUN" XDG_RUNTIME_DIR="$SWAGE_RUN/run" \
+  SWAGE_HOME="$SWAGE_RUN/home" \
     cargo run -- gateway stop >/dev/null 2>&1 || true
   wait "$GATEWAY_PID" >/dev/null 2>&1 || true
 }
