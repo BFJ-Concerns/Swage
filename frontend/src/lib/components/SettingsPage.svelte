@@ -338,8 +338,8 @@
       <div class="shell-banner" role="note">
         <span class="shell-flag">Non-functional</span>
         <span class="shell-body">
-          This page is a placeholder. No values here are saved or applied —
-          the underlying backend hasn't been built yet.
+          This page is a placeholder: nothing here can be set from the web UI
+          yet.
         </span>
       </div>
     {/if}
