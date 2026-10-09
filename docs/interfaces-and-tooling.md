@@ -584,9 +584,10 @@ reports the gateway as already running rather than starting a duplicate.
 
 ## API error contract
 
-Every failed HTTP response on the client surface carries the same shape: a
-JSON object with `code` (a machine-readable identifier) and `message` (a
-human-readable explanation). The code is the contract a client branches on;
+Every failed HTTP response from a client-surface route carries the same
+shape: a JSON object with `code` (a machine-readable identifier) and
+`message` (a human-readable explanation). A path under `/api/` that matches
+no route is the exception: it returns a bare `404 Not Found` with no body. The code is the contract a client branches on;
 the HTTP status is a mechanical projection of the code, never an independent
 decision.
 

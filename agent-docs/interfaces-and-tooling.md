@@ -619,9 +619,11 @@ found, writes recovery metadata and reports it as already running.
 
 ## Wire error contract
 
-Every failed HTTP response on the client surface carries
+Every failed HTTP response from a client-surface route carries
 `{"code":"<snake_case>","message":"…"}` — the `ApiErrorBody` type
-(`swage-protocol::client::error`).
+(`swage-protocol::client::error`). An `/api/` path that matches no route
+returns a bare `404` with no body (the frontend fallback in
+`swage-gateway/src/assets.rs`).
 
 ### ErrorCode enum
 

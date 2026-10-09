@@ -538,8 +538,16 @@ model ids). A save applies without restarting the gateway.
 
 Swage can run alternative implementations behind a stable surface — a
 different context assembly, a different working-norms text — selecting one
-per turn and recording every decision in the audit trail. The
+per session and recording every decision in the audit trail. The
 `[experimentation]` section of `config.toml` governs this.
+
+### Selection lifetime
+
+A session draws its variant the first time it reaches a location, records
+that decision, and keeps it for the rest of its life. Configuration changes
+— the global switch, a location's `enabled` flag, a `forced_variant` — bind
+only for sessions that reach the location after the change; a session that
+already recorded a selection keeps serving it.
 
 ### When changes take effect
 
@@ -564,8 +572,8 @@ A global switch turns all variant selection off:
 enabled = false
 ```
 
-When disabled, every location uses its default variant and the decision is
-recorded as such. Experimentation is on by default. Restart the gateway
+When disabled, every location uses its default variant for sessions that
+have not already recorded a selection, and the decision is recorded as such. Experimentation is on by default. Restart the gateway
 after changing this setting.
 
 ### Per-location controls
@@ -583,7 +591,7 @@ forced_variant = "family-fallback"
 - **`enabled`** — defaults to `true`. Set to `false` to disable variant
   selection for this location only; the default variant serves.
 - **`forced_variant`** — pins the location to a specific named variant for
-  every turn. The variant must be registered at the location's choice point;
+  every session that reaches it after the change. The variant must be registered at the location's choice point;
   an unrecognised name is refused. Remove the key to return to random
   selection.
 
