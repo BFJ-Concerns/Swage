@@ -10,19 +10,19 @@
   const CONTENT: Record<InformationalTab, { title: string; body: string }> = {
     plugins: {
       title: "Installed plugins",
-      body: "No platform plugin registry yet.",
+      body: "Swage has no plugin system yet. Tools are built in, and skills are added under Skills.",
     },
     channels: {
       title: "Delivery channels",
-      body: "Channel management is read-only via the operator API; this surface will configure them once a CRUD endpoint exists.",
+      body: "Channels are configured in config.toml — the Telegram channel under [channels.telegram] — and cannot be managed from here yet.",
     },
     devices: {
       title: "Attached devices",
-      body: "Device listing will mirror /api/operator/overview.devices once this surface is wired.",
+      body: "Devices register and pair through the API, as the documentation describes. They are not listed here yet.",
     },
     account: {
       title: "Account",
-      body: "Swage runs locally — there is no account concept yet.",
+      body: "Swage runs for a single operator on their own machine, so there is no account to manage.",
     },
   };
 
