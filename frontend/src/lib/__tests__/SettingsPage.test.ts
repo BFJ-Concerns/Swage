@@ -279,6 +279,144 @@ describe("SettingsPage", () => {
     expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].providers["openai-compatible"].base_url).toBe("HTTPS://proxy.example.org/v1");
   }, 10_000);
 
+  it("clears Tool bundles save status until the next successful save", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", topicId: null },
+    });
+    await flushUi();
+    const field = Array.from(document.querySelectorAll(".field")).find(
+      (candidate) => candidate.querySelector(".key")?.textContent?.startsWith("Tool bundles"),
+    )!;
+    const editor = field.querySelector<HTMLTextAreaElement>("textarea")!;
+    editor.value = '{"reading":["file_read"]}';
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    await flushUi();
+    expect(document.body.textContent).toContain("Saved automatically");
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].tool_permissions?.bundles).toEqual({ reading: ["file_read"] });
+    vi.mocked(settingsApi.saveSettings).mockClear();
+
+    editor.value = "{";
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
+    expect(document.body.textContent).not.toContain("Saved automatically");
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    expect(settingsApi.saveSettings).not.toHaveBeenCalled();
+
+    editor.value = '{"reading":["file_read"]}';
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
+    expect(document.body.textContent).not.toContain("Saved automatically");
+    expect(field.querySelector('[role="alert"]')).toBeNull();
+    editor.value = '{"reading":["file_read","file_search"]}';
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    await flushUi();
+    expect(document.body.textContent).toContain("Saved automatically");
+  });
+
+  it("distinguishes Tool bundles parse errors from shape errors beside the editor", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", topicId: null },
+    });
+    await flushUi();
+    const field = Array.from(document.querySelectorAll(".field")).find(
+      (candidate) => candidate.querySelector(".key")?.textContent?.startsWith("Tool bundles"),
+    )!;
+    const editor = field.querySelector<HTMLTextAreaElement>("textarea")!;
+    editor.value = '{"reading":["file_read"]}';
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    await flushUi();
+    vi.mocked(settingsApi.saveSettings).mockClear();
+
+    editor.value = "{";
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
+    expect(field.querySelector('[role="alert"]')?.textContent ?? "").toContain("Tool bundles: invalid JSON at line 1, column 2");
+    expect(editor.getAttribute("aria-invalid")).toBe("true");
+    expect(editor.getAttribute("aria-describedby")).toBe(field.querySelector('[role="alert"]')?.id);
+    for (const invalidShape of ['{"a":1}', "null"]) {
+      editor.value = invalidShape;
+      editor.dispatchEvent(new Event("input", { bubbles: true }));
+      await flushUi();
+      expect(field.querySelector('[role="alert"]')?.textContent ?? "").toBe("Tool bundles: Tool bundles must be a JSON object of string arrays.");
+      expect(editor.getAttribute("aria-invalid")).toBe("true");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    expect(settingsApi.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("remounts Tool bundles with the last valid object after invalid input", async () => {
+    let stored = emptySettings();
+    const save = vi.mocked(settingsApi.saveSettings).getMockImplementation()!;
+    vi.mocked(settingsApi.fetchSettings).mockImplementation(async () => structuredClone(stored));
+    vi.mocked(settingsApi.saveSettings).mockImplementation(async (payload) => {
+      stored = JSON.parse(JSON.stringify(await save(payload)));
+      return structuredClone(stored);
+    });
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", topicId: null },
+    });
+    await flushUi();
+    const editor = document.querySelector<HTMLTextAreaElement>('[aria-label="Tool bundles"]')!;
+    editor.value = '{"reading":["file_read"]}';
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    await flushUi();
+    editor.value = "{";
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    await flushUi();
+    expect(settingsApi.saveSettings).toHaveBeenCalledTimes(1);
+
+    unmount(component);
+    component = undefined;
+    document.body.innerHTML = "";
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", topicId: null },
+    });
+    await flushUi();
+    expect(settingsApi.fetchSettings).toHaveBeenCalledTimes(2);
+    const restored = document.querySelector<HTMLTextAreaElement>('[aria-label="Tool bundles"]')!;
+    expect(JSON.parse(restored.value)).toEqual({ reading: ["file_read"] });
+    expect(restored.getAttribute("aria-invalid")).toBeNull();
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("keeps Tool bundles status clear when an earlier save finishes during invalid input", async () => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", topicId: null },
+    });
+    await flushUi();
+    let finishSave!: () => void;
+    const save = vi.mocked(settingsApi.saveSettings).getMockImplementation()!;
+    vi.mocked(settingsApi.saveSettings).mockImplementationOnce(async (payload) => {
+      await new Promise<void>((resolve) => { finishSave = resolve; });
+      return save(payload);
+    });
+    const field = Array.from(document.querySelectorAll(".field")).find(
+      (candidate) => candidate.querySelector(".key")?.textContent?.startsWith("Tool bundles"),
+    )!;
+    const editor = field.querySelector<HTMLTextAreaElement>("textarea")!;
+    editor.value = '{"reading":["file_read"]}';
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    editor.value = "{";
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
+    finishSave();
+    await flushUi();
+    expect(document.body.textContent).not.toContain("Saved automatically");
+    expect(field.querySelector('[role="alert"]')?.textContent ?? "").toContain("Tool bundles: invalid JSON");
+    expect(editor.value).toBe("{");
+  });
+
   it("waits for the required search fields before autosaving", async () => {
     component = mount(SettingsPage, {
       target: document.body,

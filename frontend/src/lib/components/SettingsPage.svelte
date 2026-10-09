@@ -195,9 +195,11 @@
       lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
       if (holdSearchDraft) settings.tool_runtime.search = searchDraft;
       await onSettingsSaved?.();
-      status = archiveDelayChanged
-        ? `Archive delay saved as ${saved.sessions.archive_after_days} ${saved.sessions.archive_after_days === 1 ? "day" : "days"}.`
-        : options.message ?? "Saved. New turns will use the updated runtime.";
+      status = hasInvalidBundlesJson
+        ? ""
+        : archiveDelayChanged
+          ? `Archive delay saved as ${saved.sessions.archive_after_days} ${saved.sessions.archive_after_days === 1 ? "day" : "days"}.`
+          : options.message ?? "Saved. New turns will use the updated runtime.";
       return true;
     } catch (err) {
       error = err instanceof Error ? err.message : "Failed to save settings.";
@@ -496,6 +498,7 @@
           {archiveDelayError}
           onValidation={(bundlesInvalid, approvalsInvalid, message) => {
             hasInvalidBundlesJson = bundlesInvalid;
+            if (bundlesInvalid) status = "";
             hasInvalidApprovalJson = approvalsInvalid;
             error = message;
           }}

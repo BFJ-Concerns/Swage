@@ -68,6 +68,7 @@ All notable changes to Swage are documented in this file.
 
 - Concurrent decisions on an approval release its operation once; a losing decision no longer expires the request or interrupts its turn.
 - Answering a native file-tool approval with Allow runs the pending operation, including paths relative to a sibling folder; timed-out calls report an expired result.
+- Invalid Tool bundles JSON clears the saved status and shows an error beside the field, while preserving the last valid saved configuration.
 - File search, read and edit recognise a binary file from its first 8 KiB and read no further, and file search reads text line by line. A search reaching multi-gigabyte model weights no longer holds each file whole in memory, which had grown the gateway past 20 GB.
 - Provider rejections that cannot succeed on retry, such as an unknown model or failed authentication, end the turn immediately without a retry countdown.
 
