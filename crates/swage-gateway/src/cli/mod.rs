@@ -15,7 +15,6 @@ pub mod start;
 pub mod status;
 pub mod stop;
 mod supervisor;
-pub mod tui;
 
 use clap::Parser;
 
@@ -28,7 +27,7 @@ use clap::Parser;
 // handler when it re-spawns the binary as a background daemon.
 /// Swage AI assistant platform.
 ///
-/// Run prompts, chat in your terminal, and manage the gateway or connected devices.
+/// Run prompts and manage the gateway or connected devices.
 #[derive(Debug, Parser)]
 #[command(name = "swage", version, about = "Swage AI assistant platform")]
 pub struct Cli {
@@ -62,8 +61,6 @@ pub enum Command {
     Run(RunArgs),
     /// Manage the Swage gateway process.
     Gateway(GatewayArgs),
-    /// Chat with the gateway in your terminal.
-    Chat(TuiArgs),
     /// Run this machine as a device: dial a gateway and serve its operations.
     Device(device::DeviceArgs),
     /// Generate a shell completion script.
@@ -218,21 +215,6 @@ pub struct RestartArgs {
 /// Arguments for `swage gateway clear-defaults`.
 #[derive(Debug, clap::Args, Default)]
 pub struct UninstallArgs {}
-
-// ---------------------------------------------------------------------------
-// TUI argument struct
-// ---------------------------------------------------------------------------
-
-/// Arguments for `swage chat`.
-#[derive(Debug, clap::Args)]
-pub struct TuiArgs {
-    /// Gateway URL to connect to (overrides runtime metadata discovery).
-    ///
-    /// Defaults to the running gateway's address found via runtime metadata,
-    /// or `http://127.0.0.1:3000` if no gateway metadata is available.
-    #[arg(long)]
-    pub url: Option<String>,
-}
 
 // ---------------------------------------------------------------------------
 // Completions argument struct
@@ -447,7 +429,7 @@ mod tests {
                 );
             }
             assert!(help.contains("Swage AI assistant platform"));
-            for user_command in ["run", "gateway", "chat", "device", "generate-completion"] {
+            for user_command in ["run", "gateway", "device", "generate-completion"] {
                 assert!(
                     help.contains(user_command),
                     "help omits user command {user_command:?}:\n{help}"

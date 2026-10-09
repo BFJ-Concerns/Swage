@@ -20,7 +20,6 @@ members = [
     "crates/swage-workflow",
     "crates/swage-client",
     "crates/swage-device",
-    "crates/swage-tui",
 ]
 
 [workspace.package]

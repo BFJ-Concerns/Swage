@@ -169,10 +169,10 @@
   <text class="small" x="480" y="294">conversation and operator views.</text>
 
   <rect class="section ui" x="840" y="185" width="330" height="122"/>
-  <text class="box-title" x="865" y="222">CLI and TUI</text>
-  <text class="box-subtitle" x="865" y="249">swage-gateway binary + swage-tui</text>
+  <text class="box-title" x="865" y="222">CLI</text>
+  <text class="box-subtitle" x="865" y="249">swage-gateway binary</text>
   <text class="small" x="865" y="276">Starts, stops and discovers the gateway;</text>
-  <text class="small" x="865" y="294">TUI uses swage-client HTTP/WS APIs.</text>
+  <text class="small" x="865" y="294">runs prompts over swage-client APIs.</text>
 
   <rect class="section external" x="1225" y="185" width="330" height="122"/>
   <text class="box-title" x="1250" y="222">External channels</text>

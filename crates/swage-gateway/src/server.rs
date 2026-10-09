@@ -411,7 +411,7 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::transcribe_audio),
         )
         .route("/api/voice/speech", post(handlers::synthesise_speech))
-        // Approval decisions via REST (same path for TUI, web UI, external scripts).
+        // Approval decisions via REST (same path for the web UI, CLI and external scripts).
         .route("/api/approvals", get(handlers::list_approvals))
         .route("/api/approvals/{id}", post(handlers::decide_approval))
         // Graceful shutdown endpoint — localhost only, broadcasts Shutdown event.

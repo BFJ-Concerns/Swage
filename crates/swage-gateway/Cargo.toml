@@ -25,7 +25,6 @@ swage-safety = { path = "../swage-safety" }
 swage-context = { path = "../swage-context" }
 swage-client = { path = "../swage-client" }
 swage-device = { path = "../swage-device" }
-swage-tui = { path = "../swage-tui" }
 swage-workflow = { path = "../swage-workflow" }
 swage-hook = { path = "../swage-hook" }
 swage-codex = { path = "../swage-codex" }
