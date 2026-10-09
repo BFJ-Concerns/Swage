@@ -296,7 +296,7 @@
     </div>
   {:else}
     <!-- ---- Committed messages from conversation history ---- -->
-    {#each messages as message (message.timestamp)}
+    {#each messages as message (message.id ?? message.timestamp)}
       <div
         class="message"
         class:user={isPersonsMessage(message)}

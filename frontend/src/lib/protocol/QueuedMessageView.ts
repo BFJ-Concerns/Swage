@@ -6,4 +6,8 @@ import type { MessageOrigin } from "./MessageOrigin";
  * A message held behind a running turn: not yet a message of the
  * conversation, but shown to every open view until the next turn takes it.
  */
-export type QueuedMessageView = { id: string, origin: MessageOrigin, content: string, attachments?: Array<MessageAttachment>, queued_at: string, };
+export type QueuedMessageView = {
+/**
+ * Identifies the client's optimistic send, when supplied.
+ */
+client_id?: string | null, id: string, origin: MessageOrigin, content: string, attachments?: Array<MessageAttachment>, queued_at: string, };

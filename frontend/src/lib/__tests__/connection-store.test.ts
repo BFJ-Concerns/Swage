@@ -155,6 +155,16 @@ describe("disconnect", () => {
 });
 
 describe("sendMessage", () => {
+  it("carries the client send id in the WebSocket frame", () => {
+    const client = createMockWsClient();
+    const store = createConnectionStore({ wsClientFactory: () => client });
+    store.connectTo("conv-abc");
+    store.sendMessage("conv-abc", "ping", null, undefined, null, "send-id");
+    expect(client.sentEvents().map(event => JSON.parse(event))).toEqual([
+      { type: "send_message", content: "ping", client_id: "send-id" },
+    ]);
+  });
+
   it("keeps one client's stream connected while sending through another conversation", () => {
     const first = createMockWsClient();
     const second = createMockWsClient();

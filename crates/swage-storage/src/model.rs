@@ -2285,6 +2285,10 @@ pub struct NewMessage {
 /// arrival order to be the next turn's input.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueuedTurnInput {
+    /// Identifies the originating client's optimistic send, when supplied.
+    pub client_id: Option<Uuid>,
+    /// Whether the source expects a person to review tool approvals.
+    pub attended: bool,
     pub id: Uuid,
     pub session_id: Uuid,
     pub thread_id: Uuid,
@@ -2295,22 +2299,36 @@ pub struct QueuedTurnInput {
     /// Content parts beside the text, opaque as the wire carried them.
     pub attachments: Vec<serde_json::Value>,
     pub created_at: DateTime<Utc>,
+    /// Schedule run waiting for this input's turn.
+    pub schedule_run_id: Option<Uuid>,
+    /// Inbox rows owned by this input, presented only when the drain claims it.
+    pub channel_message_ids: Vec<Uuid>,
 }
 
 /// Input for queueing a message behind a running turn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NewQueuedTurnInput {
+    pub client_id: Option<Uuid>,
+    pub attended: bool,
     pub session_id: Uuid,
     pub thread_id: Uuid,
     pub origin: MessageOrigin,
     pub content: String,
     pub attachments: Vec<serde_json::Value>,
+    /// Schedule run waiting for this input's turn.
+    pub schedule_run_id: Option<Uuid>,
+    /// Inbox rows owned by this input, presented only when the drain claims it.
+    pub channel_message_ids: Vec<Uuid>,
 }
 
 /// A session's queue run as one turn: the turn row, and one recorded message
 /// per queued input in arrival order.
 #[derive(Debug, Clone)]
 pub struct DrainedTurnQueue {
+    /// A batch is attended if any of its inputs was attended at its source.
+    pub attended: bool,
+    pub schedule_run_ids: Vec<Uuid>,
+    pub channel_origins: Vec<PendingChannelOrigin>,
     pub turn: Turn,
     pub messages: Vec<Message>,
     /// The queue rows this drain took, by id — what a view clears.

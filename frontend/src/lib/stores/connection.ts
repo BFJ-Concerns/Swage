@@ -30,6 +30,7 @@ export interface ConnectionStore {
     selectedModelId?: string | null,
     attachments?: MessageAttachment[],
     threadId?: string | null,
+    clientId?: string,
   ): void;
   cancelTurn(conversationId: string): void;
   onServerEvent(handler: (event: ServerEvent, conversationId: string) => void): void;
@@ -158,10 +159,12 @@ export function createConnectionStore(
       selectedModelId?: string | null,
       attachments?: MessageAttachment[],
       threadId?: string | null,
+      clientId?: string,
     ): void {
       clientFor(conversationId).send({
         type: "send_message",
         content,
+        ...(clientId ? { client_id: clientId } : {}),
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
         ...(threadId ? { thread_id: threadId } : {}),
         ...(selectedModelId ? { selected_model_id: selectedModelId } : {}),

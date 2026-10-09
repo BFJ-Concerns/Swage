@@ -54,8 +54,8 @@ function makeToolCall(overrides: Partial<ToolCallView> = {}): ToolCallView {
   };
 }
 
-// Counter ensures each message gets a unique timestamp so Svelte's keyed
-// each block doesn't complain about duplicates within a single test.
+// Locally settled messages have no recorded id, so their display identity
+// uses the timestamp until the next conversation read.
 let _msgSeq = 0;
 
 function makeAssistantMessage(

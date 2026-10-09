@@ -138,7 +138,14 @@ const CREATE_TURN_QUEUE: &str = "
         content     TEXT    NOT NULL,
         attachments TEXT    NOT NULL DEFAULT '[]',
         created_at  TEXT    NOT NULL,
+        schedule_run_id TEXT REFERENCES schedule_runs(id) ON DELETE CASCADE,
+        attended    INTEGER NOT NULL CHECK (attended IN (0, 1)),
+        client_id   TEXT,
         UNIQUE (session_id, seq)
+    );
+    CREATE TABLE turn_queue_channel_messages (
+        queued_id TEXT NOT NULL REFERENCES turn_queue(id) ON DELETE CASCADE,
+        message_id TEXT NOT NULL UNIQUE REFERENCES channel_inbound_messages(id) ON DELETE CASCADE
     );
 ";
 

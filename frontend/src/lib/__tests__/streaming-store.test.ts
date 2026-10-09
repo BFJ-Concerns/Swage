@@ -257,6 +257,21 @@ describe("startTurn", () => {
     expect(store.isStreaming).toBe(false);
   });
 
+  it("correlates optimistic sends and outgoing frames by distinct client ids", () => {
+    const conv = createMockConversationStore();
+    const conn = createMockConnectionStore();
+    const store = createStreamingStore({ connectionStore: conn, conversationStore: conv });
+    store.startTurn("ping");
+    const first = conv.appendOptimisticUserMessage.mock.calls[0][0];
+    store.startTurn("ping");
+    expect([
+      typeof first.client_id,
+      conn.sendMessage.mock.calls[0][5] === first.client_id,
+      typeof conn.sendMessage.mock.calls[1][5],
+      conn.sendMessage.mock.calls[1][5] !== first.client_id,
+    ]).toEqual(["string", true, "string", true]);
+  });
+
   it("pushes the user message to the conversation store", () => {
     const conv = createMockConversationStore();
     const store = createStreamingStore({ conversationStore: conv });
@@ -282,6 +297,7 @@ describe("startTurn", () => {
       undefined,
       undefined,
       null,
+      expect.any(String),
     );
   });
 
@@ -318,6 +334,7 @@ describe("startTurn", () => {
       undefined,
       undefined,
       "branch-1",
+      expect.any(String),
     );
   });
 
@@ -445,6 +462,7 @@ describe("turn_complete", () => {
       undefined,
       undefined,
       null,
+      expect.any(String),
     );
   });
 
@@ -1311,6 +1329,7 @@ describe("withConversationAutoCreate", () => {
       "model-a",
       undefined,
       null,
+      expect.any(String),
     );
   });
 
@@ -1332,6 +1351,7 @@ describe("withConversationAutoCreate", () => {
         "model-a",
         undefined,
         null,
+        expect.any(String),
       ),
     );
     expect(base.streamFor?.("conv-9").isStreaming).toBe(true);

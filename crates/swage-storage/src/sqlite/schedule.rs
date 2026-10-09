@@ -692,7 +692,8 @@ impl ScheduleStore for SqliteStorage {
             let tx = conn.unchecked_transaction()?;
             let now = Utc::now().to_rfc3339();
             // Recovery owns both the settlement and its delivery account.
-            // Keep any account already written before the process stopped.
+            // Keep any account already written before the process stopped, and
+            // leave a run whose brief still waits in the turn queue to its drain.
             let unaccounted_runs = {
                 let mut statement = tx.prepare(
                     "SELECT id FROM schedule_runs
@@ -700,6 +701,10 @@ impl ScheduleStore for SqliteStorage {
                        AND NOT EXISTS (
                            SELECT 1 FROM delivery_records
                            WHERE run_id = schedule_runs.id
+                       )
+                       AND NOT EXISTS (
+                           SELECT 1 FROM turn_queue q
+                           WHERE q.schedule_run_id = schedule_runs.id
                        )",
                 )?;
                 statement
@@ -725,7 +730,8 @@ impl ScheduleStore for SqliteStorage {
                  SET state = 'failed',
                      error_message = ?1,
                      completed_at = ?2
-                 WHERE state IN ('pending', 'running')",
+                 WHERE state IN ('pending', 'running')
+                   AND NOT EXISTS (SELECT 1 FROM turn_queue q WHERE q.schedule_run_id = schedule_runs.id)",
                 params![&error_message, now],
             )?;
             tx.commit()?;

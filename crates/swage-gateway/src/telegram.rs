@@ -598,7 +598,7 @@ mod tests {
     use serde::Deserialize;
     use serde_json::json;
     use tokio::net::TcpListener;
-    use tokio::sync::oneshot;
+    use tokio::sync::{Notify, oneshot};
     use tokio_util::sync::CancellationToken;
 
     use super::*;
@@ -824,11 +824,32 @@ mod tests {
     struct MockTelegramState {
         updates: Arc<Mutex<Vec<TelegramUpdate>>>,
         sent: Arc<Mutex<Vec<SentTelegramMessage>>>,
+        sent_changed: Arc<Notify>,
         offsets: Arc<Mutex<Vec<Option<i64>>>>,
         fail_send: Arc<AtomicBool>,
     }
 
     impl MockTelegramState {
+        async fn wait_for_reply(&self, chat_id: &str, text: &str) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let changed = self.sent_changed.notified();
+                    if self
+                        .sent
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|message| message.chat_id == chat_id && message.text == text)
+                    {
+                        return;
+                    }
+                    changed.await;
+                }
+            })
+            .await
+            .expect("mock Telegram should receive the completed turn's reply");
+        }
+
         fn push_update(&self, update_id: i64, chat_id: i64, text: &str) {
             self.updates.lock().unwrap().push(TelegramUpdate {
                 update_id,
@@ -906,6 +927,7 @@ mod tests {
                     .into_response();
             }
             state.sent.lock().unwrap().push(body);
+            state.sent_changed.notify_one();
             Json(json!({
                 "ok": true,
                 "result": { "message_id": 1 }
@@ -1027,13 +1049,50 @@ mod tests {
         Box::pin(poll_once(state, client)).await.unwrap();
     }
 
-    async fn startup_recover_channel_queue(state: &AppState) {
+    async fn assert_queued_telegram_messages(storage: &SqliteStorage, session_id: uuid::Uuid) {
+        // Inbox readers exclude inputs already owned by the turn queue.
+        // Read that queue and its inbox attribution in one snapshot.
+        let pending = storage
+            .with_conn(move |conn| {
+                let mut statement = conn.prepare(
+                    "SELECT q.content, m.state, m.turn_id
+                     FROM turn_queue q
+                     JOIN turn_queue_channel_messages a ON a.queued_id = q.id
+                     JOIN channel_inbound_messages m ON m.id = a.message_id
+                     WHERE q.session_id = ?1
+                     ORDER BY q.seq",
+                )?;
+                let rows = statement.query_map([session_id.to_string()], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })?;
+                rows.collect::<Result<Vec<_>, _>>()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            pending,
+            vec![
+                ("B".into(), "pending".into(), None),
+                ("C".into(), "pending".into(), None)
+            ],
+            "follow-ups must wait in arrival order with pending inbox attribution"
+        );
+    }
+
+    async fn recover_and_drain_queues_at_startup(state: &AppState) {
         state
             .storage
             .requeue_presented_for_inflight_turns()
             .await
             .unwrap();
         crate::shutdown::recover_orphaned_turns(state.storage.as_ref(), state.topic_store.as_ref())
+            .await
+            .unwrap();
+        crate::turn_queue::drain_queues_at_startup(state)
             .await
             .unwrap();
     }
@@ -1265,30 +1324,30 @@ mod tests {
         telegram.push_update(3, 777, "B");
         telegram.push_update(4, 777, "C");
         Box::pin(poll_once(&state, &client)).await.unwrap();
-        assert_eq!(
-            storage.list_pending_channel_origins().await.unwrap().len(),
-            1
-        );
+        let session_id = storage
+            .find_session_by_channel_origin("telegram", client.bot_id().unwrap(), "777")
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        assert_queued_telegram_messages(&storage, session_id).await;
 
         first_release_tx.send(()).unwrap();
         first_poll.await.unwrap();
 
-        let drain_state = state.clone();
-        let drain = tokio::spawn(async move {
-            crate::channel_gateway::drain_channel_queue(drain_state).await;
-        });
         second_started_rx.await.unwrap();
         second_release_tx.send(()).unwrap();
-        drain.await.unwrap();
+        telegram.wait_for_reply("777", "batched reply").await;
 
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
+        // Queued inputs are separate message rows in the same request.
         let second_prompt = requests[1]
             .messages
             .iter()
             .map(|message| message.text_content())
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n\n");
         assert!(
             second_prompt.contains("B\n\nC"),
             "second turn should present queued Telegram messages together; prompt was {second_prompt:?}"
@@ -1324,24 +1383,15 @@ mod tests {
         telegram.push_update(2, 777, "B");
         telegram.push_update(3, 777, "C");
         Box::pin(poll_once(&state, &client)).await.unwrap();
-        assert!(
-            !storage
-                .list_pending_channel_origins()
-                .await
-                .unwrap()
-                .is_empty(),
-            "messages received while A is in flight should be pending before restart"
-        );
+        assert_queued_telegram_messages(&storage, session.id).await;
 
         let (restarted, restarted_storage) = file_state(
             &db_path,
             MockProvider::new(vec![MockProvider::text_round("after crash")]),
             client.clone(),
         );
-        startup_recover_channel_queue(&restarted).await;
-        crate::channel_gateway::drain_channel_queue_checked(&restarted)
-            .await
-            .unwrap();
+        recover_and_drain_queues_at_startup(&restarted).await;
+        telegram.wait_for_reply("777", "after crash").await;
 
         assert!(
             telegram.offsets.lock().unwrap().contains(&Some(2)),

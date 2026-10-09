@@ -1301,3 +1301,47 @@ async fn connecting_to_an_archived_conversation_returns_it_to_the_recent_list() 
         "resuming unarchives before the first turn"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn queued_websocket_send_preserves_its_client_id() {
+    let (state, session_id) = crate::turn::tests::make_state_with_session(vec![]).await;
+    crate::automated_turn::create_placeholder_turn(&state, session_id, "gateway", "busy")
+        .await
+        .unwrap();
+    state
+        .active_turns
+        .lock()
+        .await
+        .insert(session_id, tokio_util::sync::CancellationToken::new());
+    let (listener, mut session_events) = tokio::sync::mpsc::unbounded_channel();
+    state.listen_to_session(session_id, listener).await;
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let client_id = Uuid::new_v4();
+    dispatch_client_message(
+        &serde_json::json!({"type": "send_message", "content": "ping", "client_id": client_id})
+            .to_string(),
+        &state,
+        session_id,
+        tx,
+        Arc::new(tokio::sync::Mutex::new(
+            crate::subscription::SubscriptionState::new(false),
+        )),
+    )
+    .await;
+    let event = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let event = session_events.recv().await.unwrap();
+            if matches!(event, ServerEvent::MessageQueued { .. }) {
+                break event;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let json = serde_json::to_value(event).unwrap();
+    assert_eq!(
+        json["queued"]["client_id"],
+        client_id.to_string(),
+        "a queued acknowledgement must identify its client send"
+    );
+}

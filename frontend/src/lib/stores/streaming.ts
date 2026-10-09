@@ -95,6 +95,7 @@ export interface StreamingStoreOptions {
     /** The thread the composer sends on; null or absent is the root thread. */
     readonly activeThreadId?: string | null;
     appendOptimisticUserMessage(message: {
+      client_id?: string;
       content: string;
       timestamp: string;
     }): void;
@@ -141,6 +142,7 @@ export interface StreamingStoreOptions {
       selectedModelId?: string | null,
       attachments?: MessageAttachment[],
       threadId?: string | null,
+      clientId?: string,
     ): void;
     cancelTurn(conversationId: string): void;
     setStreamActive?(conversationId: string, active: boolean): void;
@@ -643,13 +645,14 @@ export function createStreamingStore(
     startTurn(content: string, selectedModelId?: string | null): void {
       const conversationId = currentConversationId();
       const stream = streamStateFor(conversationId);
+      const clientId = crypto.randomUUID();
       if (stream.isStreamingState.current) {
         // A turn is running: the message is sent and the gateway holds it
         // for the next turn, announcing it as queued. The live stream and
         // the message list are left as they are.
         const threadId = options?.conversationStore?.activeThreadId ?? null;
         if (conversationId) {
-          options?.connectionStore?.sendMessage(conversationId, content, selectedModelId, undefined, threadId);
+          options?.connectionStore?.sendMessage(conversationId, content, selectedModelId, undefined, threadId, clientId);
         }
         return;
       }
@@ -665,6 +668,7 @@ export function createStreamingStore(
       // Immediately record the user's message so the conversation history
       // updates before the first token arrives.
       options?.conversationStore?.appendOptimisticUserMessage({
+        client_id: clientId,
         content,
         timestamp: new Date().toISOString(),
       });
@@ -674,7 +678,7 @@ export function createStreamingStore(
       const threadId = options?.conversationStore?.activeThreadId ?? null;
       stream.threadId = threadId;
       if (conversationId) {
-        options?.connectionStore?.sendMessage(conversationId, content, selectedModelId, undefined, threadId);
+        options?.connectionStore?.sendMessage(conversationId, content, selectedModelId, undefined, threadId, clientId);
       }
     },
 

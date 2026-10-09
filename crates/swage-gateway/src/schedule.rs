@@ -1025,13 +1025,13 @@ pub fn spawn_schedule_loop_until_cancelled(
 // Run execution
 // ---------------------------------------------------------------------------
 
-/// The terminal shape a run's body reaches: either it executed and
-/// produced output, or it deliberately did not run.
+/// A run body executes, deliberately skips, or waits in the shared queue.
 enum RunOutcome {
+    Queued,
     Completed {
         output: String,
     },
-    /// Gated out, or the target session was busy. `message` records a clean,
+    /// Gated out. `message` records a clean,
     /// human-readable cause on the run row (gate skips leave it to the
     /// recorded gate decision instead).
     Skipped {
@@ -1070,14 +1070,14 @@ impl From<swage_core::StorageError> for RunFailure {
     }
 }
 
-/// Drive one run of a schedule from creation to a terminal state.
+/// Drive a schedule run to execution, refusal, or durable queueing.
 ///
 /// The pending-run insert is the overlap check (a partial unique index
 /// admits one non-terminal run per schedule); losing that race records a
 /// terminal overlap skip. Past that point a run row exists, and a single
-/// catch guarantees it reaches a terminal state on every exit — completed,
-/// skipped, or failed with any output it managed to produce. The returned
-/// run *is* the outcome: a failure lives on the row, not in an `Err`, so a
+/// catch settles every executed or refused run — completed, skipped, or
+/// failed with any output it managed to produce. A queued run stays pending
+/// until the drain claims and settles it. The returned run is the outcome: a failure lives on the row, not in an `Err`, so a
 /// manual trigger returns the failed run and the tick loop simply moves on.
 async fn execute_schedule(
     state: &AppState,
@@ -1102,6 +1102,7 @@ async fn execute_schedule(
     };
 
     match run_body(state, schedule, &run).await {
+        Ok(RunOutcome::Queued) => fetch_run(state, run.id).await,
         Ok(RunOutcome::Completed { output }) => complete_run(state, run.id, output).await,
         Ok(RunOutcome::Skipped {
             reason,
@@ -1120,7 +1121,7 @@ async fn execute_schedule(
 /// check, session resolution, turn creation, turn execution, delivery. Every
 /// fallible step propagates its error as a [`RunFailure`] to the single
 /// catch in [`execute_schedule`]; the one non-failure exit is a busy
-/// session, which is a deliberate overlap skip.
+/// session, which hands its brief to the shared turn queue.
 async fn run_body(
     state: &AppState,
     schedule: &Schedule,
@@ -1212,35 +1213,27 @@ async fn run_body(
         {
             Ok(turn_id) => turn_id,
             // The target session is busy with another turn — a user's, or
-            // another automation that won the atomic turn guard on a shared
-            // continuation session. Overlap in fact if not in name: skip
-            // deliberately instead of stumbling into a failure.
+            // another automation that won the atomic turn guard. Its brief
+            // waits durably for the next turn, without a retry or re-arm.
             Err(GatewayError::TurnInProgress { .. }) => {
-                // A one-shot continuation created by wake_me_later is the
-                // active turn asking to wake itself. The scheduler completed
-                // the one-shot before this run; re-arm this narrow case so
-                // the wake can fire after the active turn finishes.
-                if schedule.kind == ScheduleKind::OneShot
-                    && matches!(schedule.session_policy, SessionPolicy::Continuation { .. })
-                    && matches!(schedule.creator, ScheduleCreator::Agent { .. })
-                {
-                    state
-                        .storage
-                        .update_schedule(
-                            schedule.id,
-                            UpdateSchedule {
-                                status: Some(ScheduleStatus::Active),
-                                next_run_at: Some(Some(Utc::now() + Duration::seconds(1))),
-                                ..Default::default()
-                            },
-                        )
-                        .await?;
-                }
-                return Ok(RunOutcome::Skipped {
-                    reason: SkipReason::Overlap,
-                    gate: None,
-                    message: Some("the target session was busy with another turn".into()),
-                });
+                let thread = crate::thread_selection::resolve_thread_for_session(
+                    state.storage.as_ref(),
+                    session_id,
+                    None,
+                )
+                .await?;
+                crate::turn_queue::queue_input_with_attribution(
+                    state,
+                    session_id,
+                    thread.id,
+                    crate::turn::TurnInput::text(&input)
+                        .with_origin(swage_storage::MessageOrigin::Schedule),
+                    Some(run.id),
+                    Vec::new(),
+                    crate::turn::TurnAttendance::Unattended,
+                )
+                .await?;
+                return Ok(RunOutcome::Queued);
             }
             Err(error) => return Err(error.into()),
         };
@@ -1329,6 +1322,60 @@ async fn record_overlap_skip(
         "schedule run skipped"
     );
     fetch_run(state, run.id).await
+}
+
+/// Settle a schedule run against the shared turn that consumed its brief.
+pub(crate) async fn settle_queued_run(
+    state: &AppState,
+    run_id: Uuid,
+    turn: &swage_storage::Turn,
+) -> Result<(), GatewayError> {
+    let run = fetch_run(state, run_id).await?;
+    let schedule = state
+        .storage
+        .get_schedule(run.schedule_id)
+        .await?
+        .ok_or_else(|| GatewayError::ValidationError("queued schedule no longer exists".into()))?;
+    let output = turn.assistant_response.clone().unwrap_or_default();
+    if turn.state != swage_storage::TurnState::Completed {
+        fail_run(
+            state,
+            &schedule,
+            run_id,
+            format!("queued turn ended {}", turn.state),
+            turn.assistant_response.clone(),
+            false,
+        )
+        .await?;
+    } else {
+        match deliver_run_output(
+            state,
+            &schedule,
+            run_id,
+            run.session_id
+                .ok_or_else(|| GatewayError::ValidationError("queued run has no session".into()))?,
+            turn.id,
+            &output,
+        )
+        .await
+        {
+            Ok(()) => {
+                complete_run(state, run_id, output).await?;
+            }
+            Err(error) => {
+                fail_run(
+                    state,
+                    &schedule,
+                    run_id,
+                    format!("delivery failed: {error}"),
+                    Some(output),
+                    true,
+                )
+                .await?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Mark a completed run and return the recorded row.

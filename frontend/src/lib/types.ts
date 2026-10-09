@@ -154,6 +154,8 @@ export type MessageView = Omit<
   // Absent on a message appended locally before the gateway has recorded
   // it; only a recorded message can be branched from.
   id?: string;
+  /** Identifies an optimistic send until the gateway records it. */
+  client_id?: string;
   thread_id?: string;
   turn_id?: string | null;
   role: "user" | "assistant";
@@ -214,8 +216,8 @@ export type ClientEvent = WireClientEvent;
 export type KnownServerEvent = Exclude<WireServerEvent, { type: "unknown" }>;
 export type KnownServerEventType = KnownServerEvent["type"];
 
-// Runtime validation still needs values. The type assertion makes additions to
-// the generated union fail the frontend check until this parser list follows.
+// Runtime validation needs event names as values; entries must belong to the
+// generated wire union.
 export const KNOWN_SERVER_EVENT_TYPES = [
   "token", "tool_start", "tool_end", "surface_updated", "library_updated", "context_assembled", "turn_complete",
   "output_schema_retry", "provider_retry_started", "provider_retry_settled",
@@ -224,7 +226,7 @@ export const KNOWN_SERVER_EVENT_TYPES = [
   "workflow_entry_completed", "workflow_run_completed", "error", "cancelled",
   "shutdown", "skill_activated", "skill_already_active", "skill_deactivated",
   "approval_required", "approval_confirmed", "approval_expired",
-  "approval_decision_error", "message_appended",
+  "approval_decision_error", "message_queued", "queue_drained", "message_appended",
 ] as const satisfies readonly KnownServerEventType[];
 
 export type UnknownServerEvent = Extract<WireServerEvent, { type: "unknown" }>;

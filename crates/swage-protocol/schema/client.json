@@ -690,6 +690,14 @@
                 "$ref": "#/$defs/MessageAttachment"
               }
             },
+            "client_id": {
+              "description": "Correlates a queued acknowledgement with this client's send.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            },
             "content": {
               "type": "string"
             },
@@ -3533,6 +3541,14 @@
           "items": {
             "$ref": "#/$defs/MessageAttachment"
           }
+        },
+        "client_id": {
+          "description": "Identifies the client's optimistic send, when supplied.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
         },
         "content": {
           "type": "string"

@@ -169,6 +169,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
         text: content,
         attachments,
         origin,
+        ..
     } = input;
 
     // Step 1: Resolve the topic and target thread for this session.

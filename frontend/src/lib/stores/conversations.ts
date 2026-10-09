@@ -40,6 +40,7 @@ export interface ConversationStore {
   // as the target of the composer.
   clearActiveConversation(): void;
   appendOptimisticUserMessage(message: {
+    client_id?: string;
     content: string;
     timestamp: string;
   }): void;
@@ -195,6 +196,7 @@ export function createConversationStore(): ConversationStore {
   function appendMessage(
     message: {
       id?: string;
+      client_id?: string;
       role: MessageView["role"];
       origin?: MessageView["origin"];
       content: string;
@@ -224,6 +226,7 @@ export function createConversationStore(): ConversationStore {
       timestamp: message.timestamp,
       turn_state: message.turn_state,
       ...(message.id === undefined ? {} : { id: message.id }),
+      ...(message.client_id === undefined ? {} : { client_id: message.client_id }),
       ...(message.origin === undefined ? {} : { origin: message.origin }),
       ...(threadId === undefined ? {} : { thread_id: threadId }),
       ...(message.turn_id === undefined ? {} : { turn_id: message.turn_id }),
@@ -362,6 +365,7 @@ export function createConversationStore(): ConversationStore {
 
     appendOptimisticUserMessage(message) {
       appendMessage({
+        client_id: message.client_id,
         role: "user",
         content: message.content,
         timestamp: message.timestamp,
@@ -404,7 +408,17 @@ export function createConversationStore(): ConversationStore {
       if (activeConversation?.id !== conversationId) return;
       const held = activeConversation.queued ?? [];
       if (held.some((item) => item.id === queued.id)) return;
-      activeConversationStore.set({ ...activeConversation, queued: [...held, queued] });
+      // The acknowledgement identifies this send even when another pending
+      // message has identical text. Other clients have no matching local row.
+      const optimisticIndex = queued.client_id
+        ? activeConversation.messages.findIndex((message) =>
+          message.id === undefined && message.client_id === queued.client_id)
+        : -1;
+      activeConversationStore.set({
+        ...activeConversation,
+        messages: activeConversation.messages.filter((_, index) => index !== optimisticIndex),
+        queued: [...held, queued],
+      });
     },
 
     clearQueuedMessages(conversationId, queuedIds) {
