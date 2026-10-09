@@ -1,0 +1,8 @@
+# Test fixtures that exist to exercise secret detection and redaction: the
+# leak detector's own tests and two integration tests that assert a
+# fabricated key is redacted. None is a real credential.
+47ec721ce4f0d751fa036b3c2ea5adcd64ca41a0:crates/swage-agent/tests/integration.rs:generic-api-key:298
+5e9a63fc8b45109638b00419d766497233d0197f:crates/swage-tool/tests/integration.rs:generic-api-key:65
+d138eada019c96d98f5daba671295109501a9d4c:crates/swage-safety/tests/leak_detector.rs:generic-api-key:156
+d138eada019c96d98f5daba671295109501a9d4c:crates/swage-safety/tests/leak_detector.rs:jwt:130
+d138eada019c96d98f5daba671295109501a9d4c:crates/swage-safety/tests/leak_detector.rs:private-key:112
