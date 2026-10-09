@@ -39,13 +39,16 @@ things those tend to leave out:
   Assemblies are swappable, and can be scripted in JavaScript.
 - **Everything is reconstructable.** Turns, tool calls, approvals, assembly
   decisions, configuration changes and workflow journals all land in one
-  local SQLite store. Nothing leaves the machine except the requests you send
-  to model providers.
-- **Built for experiments.** Prompts, tool implementations and settings can be
-  expressed as variants selected per session behind a stable surface, so two
-  ways of doing something can be compared on real work. Neither the user nor
+  local SQLite store, and the record never leaves the machine. Network
+  traffic is what you enable: model providers, plus tools and channels such
+  as URL fetch, web search and Telegram.
+- **Built for experiments.** Behaviour can be expressed as variants selected
+  per session behind a stable surface — today, context assembly and the
+  working norms a model is given — so two ways of doing something can be
+  compared on real work. Neither the user nor
   the model sees which variant is running, every selection is recorded, and
-  experimentation can be switched off globally or for a single task.
+  experimentation can be switched off globally or per location for new
+  sessions.
 
 <p align="center">
   <img src="docs/images/turn-context.png" alt="The turn context inspector: which assembly built the turn, each context element, where it came from, and its estimated token cost" width="85%">
@@ -74,17 +77,12 @@ Swage targets Linux. You need the Rust toolchain (pinned by
 
 ```bash
 git clone https://github.com/BFJ-Concerns/Swage.git && cd Swage
-
-# Build the gateway and start it on 127.0.0.1:3000
 cargo build --bin swage
-./target/debug/swage gateway start --port 3000
-
-# In another terminal: the web UI on http://localhost:5173
-cd frontend && npm install && npm run dev
 ```
 
-A fresh install starts, but no turn can complete until a model provider is
-configured. Add one to `~/.swage/config.toml`:
+No turn can complete until a model provider is configured, and the gateway
+reads its configuration when it starts, so write `~/.swage/config.toml`
+first:
 
 ```toml
 [providers]
@@ -103,6 +101,19 @@ provider_id = "anthropic"
 model_id = "claude-sonnet-5"
 default_effort = "high"               # optional: off|minimal|low|medium|high|xhigh|max
 ```
+
+Then start the gateway with the key in its environment, and the web UI
+beside it:
+
+```bash
+export ANTHROPIC_API_KEY=...
+./target/debug/swage gateway start          # listens on 127.0.0.1:3000
+
+# In another terminal: the web UI on http://localhost:5173
+cd frontend && npm install && npm run dev
+```
+
+If you edit `config.toml` by hand later, stop and start the gateway again.
 
 Providers and models can also be managed from the web UI under
 **Settings → Providers**. Then open the UI, start a session, and see
@@ -324,8 +335,8 @@ the TypeScript types under `frontend/src/lib/protocol/`, the JSON Schemas and
 the OpenAPI document are generated from it. [AGENTS.md](AGENTS.md) holds the
 repository's working conventions, for human and AI contributors alike.
 
-Every failed API response carries a `{"code","message"}` body whose codes are
-defined in the protocol crate, and the client routes are described by an
+API handlers fail with a `{"code","message"}` body whose codes are defined in
+the protocol crate, and the client routes are described by an
 OpenAPI 3.1 document at `crates/swage-protocol/schema/client-openapi.json`.
 
 ## Licence
