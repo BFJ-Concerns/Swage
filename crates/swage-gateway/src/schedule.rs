@@ -1207,36 +1207,40 @@ async fn run_body(
         )
         .await?;
 
-    let turn_id =
-        match crate::automated_turn::create_placeholder_turn(state, session_id, &agent_id, &input)
-            .await
-        {
-            Ok(turn_id) => turn_id,
-            // The target session is busy with another turn — a user's, or
-            // another automation that won the atomic turn guard. Its brief
-            // waits durably for the next turn, without a retry or re-arm.
-            Err(GatewayError::TurnInProgress { .. }) => {
-                let thread = crate::thread_selection::resolve_thread_for_session(
-                    state.storage.as_ref(),
-                    session_id,
-                    None,
-                )
-                .await?;
-                crate::turn_queue::queue_input_with_attribution(
-                    state,
-                    session_id,
-                    thread.id,
-                    crate::turn::TurnInput::text(&input)
-                        .with_origin(swage_storage::MessageOrigin::Schedule),
-                    Some(run.id),
-                    Vec::new(),
-                    crate::turn::TurnAttendance::Unattended,
-                )
-                .await?;
-                return Ok(RunOutcome::Queued);
-            }
-            Err(error) => return Err(error.into()),
-        };
+    // A session with queued input takes the brief behind it, as a busy one does.
+    let claim = if crate::turn_queue::has_queued_input(state, session_id).await? {
+        Err(GatewayError::TurnInProgress { session_id })
+    } else {
+        crate::automated_turn::create_placeholder_turn(state, session_id, &agent_id, &input).await
+    };
+    let turn_id = match claim {
+        Ok(turn_id) => turn_id,
+        // The target session is busy with another turn — a user's, or
+        // another automation that won the atomic turn guard — or holds
+        // queued input. Its brief waits durably for the next turn, without
+        // a retry or re-arm.
+        Err(GatewayError::TurnInProgress { .. }) => {
+            let thread = crate::thread_selection::resolve_thread_for_session(
+                state.storage.as_ref(),
+                session_id,
+                None,
+            )
+            .await?;
+            crate::turn_queue::queue_input_with_attribution(
+                state,
+                session_id,
+                thread.id,
+                crate::turn::TurnInput::text(&input)
+                    .with_origin(swage_storage::MessageOrigin::Schedule),
+                Some(run.id),
+                Vec::new(),
+                crate::turn::TurnAttendance::Unattended,
+            )
+            .await?;
+            return Ok(RunOutcome::Queued);
+        }
+        Err(error) => return Err(error.into()),
+    };
     state
         .storage
         .update_schedule_run(

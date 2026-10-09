@@ -126,6 +126,19 @@ pub(crate) async fn queue_input_with_attribution(
     Ok(view)
 }
 
+/// Whether new input for the session must join its queue rather than start a
+/// turn of its own. Queued messages reach the session's next turn in arrival
+/// order, so while any stand — left by a Stop, or not yet drained — input that
+/// finds the session idle queues behind them, and the drain that queueing
+/// starts runs them all as one turn.
+pub async fn has_queued_input(state: &AppState, session_id: Uuid) -> Result<bool, GatewayError> {
+    Ok(!state
+        .storage
+        .list_queued_turn_inputs(session_id)
+        .await?
+        .is_empty())
+}
+
 /// Whether a turn's ending hands the session to its queue. A completed or
 /// failed turn does; a cancelled one does not — stopping a turn leaves the
 /// queue standing for the person to look at.

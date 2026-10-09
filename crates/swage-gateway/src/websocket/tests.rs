@@ -1303,6 +1303,84 @@ async fn connecting_to_an_archived_conversation_returns_it_to_the_recent_list() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_send_to_an_idle_session_runs_behind_input_a_stop_left_queued() {
+    let (state, session_id) = crate::turn::tests::make_state_with_session(vec![
+        swage_core::StreamChunk::Delta {
+            content: "Both answered.".into(),
+        },
+        swage_core::StreamChunk::Done {
+            finish_reason: Some(swage_core::FinishReason::Stop),
+        },
+    ])
+    .await;
+    let thread = crate::thread_selection::resolve_thread_for_session(
+        state.storage.as_ref(),
+        session_id,
+        None,
+    )
+    .await
+    .unwrap();
+    // Input queued behind a turn that was then stopped: the queue stands and
+    // the session is idle.
+    state
+        .active_turns
+        .lock()
+        .await
+        .insert(session_id, tokio_util::sync::CancellationToken::new());
+    crate::turn_queue::queue_input(
+        &state,
+        session_id,
+        thread.id,
+        crate::turn::TurnInput::text("left standing"),
+    )
+    .await
+    .unwrap();
+    state.active_turns.lock().await.remove(&session_id);
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    dispatch_client_message(
+        &serde_json::json!({"type": "send_message", "content": "sent after"}).to_string(),
+        &state,
+        session_id,
+        tx,
+        Arc::new(tokio::sync::Mutex::new(
+            crate::subscription::SubscriptionState::new(false),
+        )),
+    )
+    .await;
+
+    let messages = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let messages = state
+                .storage
+                .list_messages_by_thread(thread.id)
+                .await
+                .unwrap();
+            if messages.len() == 3 {
+                break messages;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the queue and the new send run as one turn");
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>(),
+        vec!["left standing", "sent after", "Both answered."],
+        "the standing input runs first, in arrival order"
+    );
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.turn_id == messages[0].turn_id),
+        "one turn takes the standing input and the new send"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn queued_websocket_send_preserves_its_client_id() {
     let (state, session_id) = crate::turn::tests::make_state_with_session(vec![]).await;
     crate::automated_turn::create_placeholder_turn(&state, session_id, "gateway", "busy")
