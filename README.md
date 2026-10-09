@@ -43,9 +43,9 @@ things those tend to leave out:
   traffic is what you enable: model providers, plus tools and channels such
   as URL fetch, web search and Telegram.
 - **Built for experiments.** Behaviour can be expressed as variants selected
-  per session behind a stable surface — today, context assembly and the
-  working norms a model is given — so two ways of doing something can be
-  compared on real work. Neither the user nor
+  per session behind a stable surface — today, context assembly, the working
+  norms a model is given, task prompts and the memory curator's prompt — so
+  two ways of doing something can be compared on real work. Neither the user nor
   the model sees which variant is running, every selection is recorded, and
   experimentation can be switched off globally or per location for new
   sessions.
@@ -207,9 +207,10 @@ another destination, or `--foreground` to keep it attached:
 ./target/debug/swage gateway stop
 ```
 
-The CLI finds the running gateway through a metadata file in
-`$XDG_RUNTIME_DIR/swage/` (falling back to the data root's `run/`
-directory), so run `stop` with the same environment you started with. When
+The CLI finds the running gateway through a metadata file: under
+`$SWAGE_HOME/run/` when `SWAGE_HOME` is set, otherwise under
+`$XDG_RUNTIME_DIR/swage/`, falling back to `~/.swage/run/`. Run `stop` with
+the same environment you started with. When
 the gateway is the main process of a systemd service, `gateway restart`
 restarts that service and waits for the new process to answer its health
 endpoint. `swage generate-completion bash` (or `zsh`/`fish`) prints a shell
@@ -308,12 +309,12 @@ host firewall must also allow the port before LAN clients can connect.
 
 ### A second, isolated instance
 
-Give a development gateway its own data root, runtime directory and port, so
-it never opens your real store or collides with the running instance:
+Give a development gateway its own data root and port, so it never opens
+your real store or collides with the running instance; `SWAGE_HOME` also
+gives it its own metadata file:
 
 ```bash
-SWAGE_HOME=/tmp/swage-dev XDG_RUNTIME_DIR=/tmp/swage-dev-run \
-  ./target/debug/swage gateway start --port 3100
+SWAGE_HOME=/tmp/swage-dev ./target/debug/swage gateway start --port 3100
 
 # Point the dev web UI at it
 SWAGE_GATEWAY_URL=http://127.0.0.1:3100 npm run dev

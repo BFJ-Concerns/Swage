@@ -574,8 +574,16 @@ applies without a gateway restart.
 ## Experimentation controls
 
 The `[experimentation]` section governs hidden runtime variant selection —
-alternative implementations behind stable surfaces, selected per turn and
+alternative implementations behind stable surfaces, selected per session and
 recorded in the audit trail.
+
+### Selection lifetime
+
+A session draws its variant the first time it reaches a location, records
+that decision, and keeps it for the rest of its life. Configuration changes
+— the global switch, a location's `enabled` flag, a `forced_variant` — bind
+only for sessions that reach the location after the change; a session that
+already recorded a selection keeps serving it.
 
 ### When changes take effect
 
@@ -597,8 +605,9 @@ reach those sessions without a restart.
 enabled = true   # default; set to false to disable all variant selection
 ```
 
-When `enabled` is `false`, every location returns its default variant and
-records the decision as `disabled`. No alternative is ever drawn or forced.
+When `enabled` is `false`, every location returns its default variant to
+sessions that have not already recorded a selection, and records the
+decision as `disabled`. No new alternative is drawn or forced.
 Restart the gateway after changing this key.
 
 ### Per-location controls
@@ -615,7 +624,8 @@ forced_variant = "family-fallback"
 - `enabled` — defaults to `true`. Setting it to `false` disables variant
   selection for this location only; the default variant serves and the
   decision records as `disabled`.
-- `forced_variant` — pins this location to the named variant for every turn.
+- `forced_variant` — pins this location to the named variant for every
+  session that reaches it after the change.
   The variant must be registered at the location's choice point; an
   unrecognised name is refused. The decision records as `forced`. Omit or
   remove the key to return to random selection.
