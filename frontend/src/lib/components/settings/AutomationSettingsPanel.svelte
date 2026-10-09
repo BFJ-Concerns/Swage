@@ -2,17 +2,40 @@
   import type { RequireApprovalEntry, SettingsResponse } from "../../types";
   interface Props { archiveDelayError?: string | null; settings: SettingsResponse; onValidation?: (bundlesInvalid: boolean, approvalsInvalid: boolean, message: string | null) => void; }
   let { archiveDelayError = null, settings = $bindable(), onValidation }: Props = $props();
+  const BUNDLES_SHAPE_MESSAGE = "Tool bundles must be a JSON object of string arrays.";
   let bundlesInvalid = false;
+  let bundlesError = $state<string | null>(null);
+  let invalidBundlesDraft = $state<string | null>(null);
   let approvalsInvalid = false;
   function changed(): void { settings = { ...settings }; }
   function lines(values: string[]): string { return values.join("\n"); }
   function parseLines(value: string): string[] { return value.split("\n").map((line) => line.trim()).filter(Boolean); }
   function updateBundles(value: string): void {
     try {
-      const parsed = JSON.parse(value) as Record<string, unknown>; const bundles: Record<string, string[]> = {};
-      for (const [name, tools] of Object.entries(parsed)) { if (!Array.isArray(tools) || tools.some((tool) => typeof tool !== "string")) throw new Error("Tool bundles must be a JSON object of string arrays."); bundles[name] = tools; }
-      settings.tool_permissions.bundles = bundles; bundlesInvalid = false; changed(); onValidation?.(false, approvalsInvalid, null);
-    } catch (error) { bundlesInvalid = true; onValidation?.(true, approvalsInvalid, error instanceof Error ? error.message : "Tool bundles must be valid JSON."); }
+      const parsed = JSON.parse(value) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(BUNDLES_SHAPE_MESSAGE);
+      const bundles: Record<string, string[]> = {};
+      for (const [name, tools] of Object.entries(parsed)) { if (!Array.isArray(tools) || tools.some((tool) => typeof tool !== "string")) throw new Error(BUNDLES_SHAPE_MESSAGE); bundles[name] = tools; }
+      settings.tool_permissions.bundles = bundles; bundlesInvalid = false; bundlesError = null; invalidBundlesDraft = null; changed(); onValidation?.(false, approvalsInvalid, null);
+    } catch (error) {
+      bundlesInvalid = true;
+      invalidBundlesDraft = value;
+      const message = error instanceof Error ? error.message : "";
+      const location = message.match(/line (\d+) column (\d+)/);
+      const position = message.match(/position (\d+)/);
+      let suffix = "";
+      if (location) {
+        suffix = ` at line ${location[1]}, column ${location[2]}`;
+      } else if (position) {
+        const prefix = value.slice(0, Number(position[1]));
+        const lines = prefix.split("\n");
+        suffix = ` at line ${lines.length}, column ${lines.at(-1)!.length + 1}`;
+      }
+      bundlesError = error instanceof SyntaxError
+        ? `Tool bundles: invalid JSON${suffix}. Use an object mapping bundle names to arrays of tool names.`
+        : `Tool bundles: ${message || "Use an object mapping bundle names to arrays of tool names."}`;
+      onValidation?.(true, approvalsInvalid, null);
+    }
   }
   function updateApprovals(value: string): void {
     try {
@@ -41,7 +64,7 @@
 <div class="field"><div class="key">Context assembly<small>Assembly strategy, assembly timeout, and optional token budget.</small></div><div class="val val-stack"><div class="search-row"><input type="text" class="text" bind:value={settings.context.assembly} oninput={changed} placeholder="default" autocomplete="off"/><input type="number" class="text small" bind:value={settings.context.timeout} oninput={changed} min="1" max="60" placeholder="5"/><input type="number" class="text small" value={settings.context.budget ?? ""} min="1" placeholder="model limit" oninput={(event)=>{settings.context.budget=event.currentTarget.value?Number(event.currentTarget.value):null;changed();}}/></div></div></div>
 <div class="field"><div class="key">Tool allow rules<small>One rule per line. Use * for broad availability.</small></div><div class="val"><textarea class="text" rows="4" value={lines(settings.tool_permissions.allow)} oninput={(event)=>{settings.tool_permissions.allow=parseLines(event.currentTarget.value);changed();}}></textarea></div></div>
 <div class="field"><div class="key">Tool deny rules<small>One denied tool name or pattern per line.</small></div><div class="val"><textarea class="text" rows="4" value={lines(settings.tool_permissions.deny)} oninput={(event)=>{settings.tool_permissions.deny=parseLines(event.currentTarget.value);changed();}}></textarea></div></div>
-<div class="field"><div class="key">Tool bundles<small>JSON object mapping bundle names to tool arrays.</small></div><div class="val"><textarea class="text code" rows="7" value={JSON.stringify(settings.tool_permissions.bundles,null,2)} spellcheck="false" oninput={(event)=>updateBundles(event.currentTarget.value)}></textarea></div></div>
+<div class="field"><div class="key">Tool bundles<small>JSON object mapping bundle names to tool arrays.</small></div><div class="val val-stack"><textarea class="text code" rows="7" value={invalidBundlesDraft ?? JSON.stringify(settings.tool_permissions.bundles,null,2)} spellcheck="false" aria-label="Tool bundles" aria-invalid={bundlesError ? "true" : undefined} aria-describedby={bundlesError ? "tool-bundles-error" : undefined} oninput={(event)=>updateBundles(event.currentTarget.value)}></textarea>{#if bundlesError}<small id="tool-bundles-error" role="alert">{bundlesError}</small>{/if}</div></div>
 <div class="field"><div class="key">Approval-gated tools<small>JSON array of tool names or objects with timeout overrides.</small></div><div class="val"><textarea class="text code" rows="7" value={JSON.stringify(settings.tool_permissions.require_approval,null,2)} spellcheck="false" oninput={(event)=>updateApprovals(event.currentTarget.value)}></textarea></div></div>
 
 <style>
