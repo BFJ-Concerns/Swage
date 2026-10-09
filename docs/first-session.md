@@ -138,6 +138,6 @@ global ones.
 With a conversation open, start a turn. If a trusted workspace is
 attached, the agent will have access to the workspace's files and will
 follow whatever guidance its `AGENTS.md` provides.
-The [README's sandbox section](../README.md#sandbox-configuration)
+The [README's sandbox section](../README.md#sandboxing)
 explains how to enable isolation for a topic and what happens if sandbox
 setup fails.
