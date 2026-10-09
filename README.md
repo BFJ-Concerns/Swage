@@ -15,12 +15,16 @@ a Svelte 5 web UI and an Electron desktop shell.
 ![A Swage conversation: the agent writes and runs a Monte Carlo script with its shell tool, then reports the results as a table](docs/images/conversation.png)
 
 > [!WARNING]
-> **Swage is very early alpha.** It is developed in the open and used daily by
-> its author, but it is not ready for anyone else to depend on. Storage
-> formats and APIs change without migrations or deprecation periods, features
-> appear and disappear, and the gateway has **no authentication** — run it on
-> loopback or a network you fully trust. Expect rough edges; issues and
-> questions are welcome.
+> **Swage is very early alpha.** It is used daily by its author, but it is not
+> ready for anyone else to depend on:
+>
+> - **No compatibility promises.** Storage formats, configuration and APIs
+>   change without migrations or deprecation periods; an upgrade may mean
+>   starting from a fresh data directory.
+> - **Single operator, Linux only.** One person's gateway on their own
+>   machine, by design. Sandboxing relies on Linux (bubblewrap, Landlock).
+> - **No authentication.** Run it on loopback or a network you fully trust.
+> - **No licence chosen yet.** See [Licence](#licence) below.
 
 ## Why Swage
 
@@ -52,13 +56,15 @@ things those tend to leave out:
 
 | Area | What's there |
 |---|---|
-| **Providers** | Anthropic, OpenAI Chat Completions and Responses, Google, OpenRouter, and the Codex app server; retries, circuit breaking and failover between routes; per-model reasoning effort |
-| **Tools** | File read/write/edit/search, shell, web search and URL fetch, a Chromium browser, Python execution, memory, a knowledge base with citations, schedules, workflows, and agent-built *surfaces* |
+| **Providers** | Anthropic, OpenAI Chat Completions and Responses, Google, OpenRouter, and Codex¹; retries, circuit breaking and failover between routes; per-model reasoning effort |
+| **Tools** | File read/write/edit/search, shell, URL fetch, web search¹, a Chromium browser¹, Python execution¹, memory, a knowledge base with citations, schedules, workflows, and agent-built *surfaces* |
 | **Safety** | Per-tool permissions with interactive approvals, grants that narrow as work is delegated, per-turn bubblewrap + Landlock sandboxing, and credential leak detection with redaction |
 | **Workflows** | A JavaScript workflow engine (QuickJS) whose runs are journalled: a run interrupted by a crash or restart replays and carries on. Token budgets per provider route, durable parking on long timers, and runs that pause for a human decision |
-| **Automation** | Schedules that start or continue sessions, external channels (Telegram), delivery targets, and remote *devices* that dial in and execute tools on other machines |
+| **Automation** | Schedules that start or continue sessions, external channels (Telegram¹), delivery targets, and remote *devices* that dial in and execute tools on other machines |
 | **Context** | Scriptable context assembly, compaction, and recovery for sessions that keep failing: separate readers diagnose what went wrong and the session continues from their notes |
 | **Interfaces** | Web UI, desktop shell and CLI; a wire contract defined once in Rust and projected to TypeScript, JSON Schema and OpenAPI |
+
+¹ Needs something outside Swage; see [Optional capabilities](#optional-capabilities).
 
 ## Quick start
 
@@ -228,6 +234,20 @@ quotes the cause. `sandbox.allow_degraded_execution = true` skips that
 approval. [Agents and permissions](docs/agents-and-permissions.md#sandbox-isolation)
 covers what the sandbox confines.
 
+### Optional capabilities
+
+These register or work only when their prerequisite is present:
+
+| Capability | Prerequisite |
+|---|---|
+| Web search | A self-hosted [SearxNG](https://github.com/searxng/searxng) instance, configured under `[tools.search]` with `provider_type = "searxng"` and its `base_url` ([details](docs/agents-and-permissions.md#search-configuration)) |
+| Browser tool | Chromium or Chrome on `PATH`, or its path in `SWAGE_BROWSER_BIN` |
+| Python execution | `python3` on `PATH` |
+| Telegram channel | A bot token from BotFather, named under `[channels.telegram]` as `bot_token_env = "<VARIABLE>"` |
+| Codex provider | The Codex CLI, signed in with ChatGPT; Swage reads its tokens from the CLI's own auth store ([details](docs/interfaces-and-tooling.md#codex-auth-store)) |
+| Sandboxing | [bubblewrap](https://github.com/containers/bubblewrap) |
+| Voice | An OpenAI-protocol provider that serves the audio APIs (below) |
+
 ### Voice
 
 Speech transcription and synthesis are optional. They need an
@@ -307,3 +327,10 @@ repository's working conventions, for human and AI contributors alike.
 Every failed API response carries a `{"code","message"}` body whose codes are
 defined in the protocol crate, and the client routes are described by an
 OpenAPI 3.1 document at `crates/swage-protocol/schema/client-openapi.json`.
+
+## Licence
+
+No licence has been chosen yet. The source is published so it can be read,
+and built and run for your own use; it grants no further rights. A licence
+will follow. Until then, bug reports and questions are welcome as issues, but
+pull requests can't be accepted.
