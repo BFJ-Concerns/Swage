@@ -215,6 +215,14 @@ A provider entry in `config.toml` has two credential fields
 first; if absent, falls back to `api_key_env`. The resolved secret must have
 `material_kind` `"provider_key"`.
 
+`validate_resolved_catalog_references` (`swage-config/src/validation.rs`)
+refuses any provider entry with `protocol = "codex"`, at configuration load
+and at settings save: the Codex adapter accepts Codex's command and
+file-change approval requests only for tools granted without approval, so
+under the default `require_approval` list a Codex session could neither run
+commands nor edit files. The adapter (`swage-gateway/src/codex/`) and its
+tests remain; settings no longer offer Codex as a provider kind.
+
 ### Secret manager and backends
 
 The `SecretManager` (`secret.rs`) resolves secrets by their `secret://`
