@@ -328,12 +328,22 @@ pub struct HitlConfig {
     pub timeout: u64,
     pub timeout_policy: ApprovalTimeoutPolicy,
 }
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
 #[ts(optional_fields = nullable)]
 pub struct SandboxConfig {
     pub enabled: bool,
     pub allow_degraded_execution: bool,
+}
+/// Every turn is sandboxed unless configuration turns it off, and running
+/// without isolation after a failed sandbox setup needs its own opt-in.
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allow_degraded_execution: false,
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]

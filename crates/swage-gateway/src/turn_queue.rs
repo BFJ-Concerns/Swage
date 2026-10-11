@@ -942,6 +942,9 @@ mod tests {
             },
         )));
         state.hook_registry = Some(Arc::new(hooks));
+        // With the sandbox on, an attended setup failure would pause for a
+        // degradation approval instead of failing the turn.
+        state.runtime_config.write().unwrap().sandbox.enabled = false;
         state.fail_next_dispatcher_builds(1);
         let thread = resolve_thread_for_session(state.storage.as_ref(), session_id, None)
             .await

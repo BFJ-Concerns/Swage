@@ -800,6 +800,11 @@ pub(crate) fn apply_dispatch_bound(
             }
         })
         .collect();
+    // Carried demands follow the worker's resulting allow set, not just this
+    // bound's: an allow-all bound leaves an earlier bound's narrowing in
+    // place, and a demand for a tool the worker cannot call is inert noise in
+    // its recorded permissions.
+    let resulting_allow = expanded_allow(&config.tools.permissions);
     let mut carried = std::collections::BTreeSet::new();
     for entry in &bound.tools.permissions.require_approval {
         // Bound entries expand through the BOUND's own bundles, for the
@@ -809,7 +814,7 @@ pub(crate) fn apply_dispatch_bound(
             [entry.tool_name().to_string()],
             &bound.tools.permissions.bundles,
         ) {
-            if effective_allow
+            if resulting_allow
                 .as_ref()
                 .is_none_or(|allowed| allowed.contains(&concrete))
                 && !worker_approval_names.contains(&concrete)
@@ -1468,6 +1473,20 @@ mod tests {
             confined.tools.permissions.require_approval,
             worker_approvals
         );
+    }
+
+    #[test]
+    fn a_wildcard_dispatcher_carries_no_demand_for_a_tool_the_worker_cannot_call() {
+        let mut worker = swage_config::ResolvedConfig::default();
+        worker.tools.permissions.allow = vec!["knowledge_search".into()];
+        worker.tools.permissions.require_approval = vec![];
+
+        // The default bound allows everything and demands approval for the
+        // high-risk tools; none of them is in the worker's allow set.
+        let bound = swage_config::ResolvedConfig::default();
+        let confined = apply_dispatch_bound(worker, &bound);
+
+        assert!(confined.tools.permissions.require_approval.is_empty());
     }
 
     #[test]
