@@ -72,8 +72,9 @@ things those tend to leave out:
 ## Quick start
 
 Swage targets Linux. You need the Rust toolchain (pinned by
-`rust-toolchain.toml`), Node 24, and, for sandboxing,
-[bubblewrap](https://github.com/containers/bubblewrap).
+`rust-toolchain.toml`), Node 24, and
+[bubblewrap](https://github.com/containers/bubblewrap), which the per-turn
+sandbox runs on.
 
 ```bash
 git clone https://github.com/BFJ-Concerns/Swage.git && cd Swage
@@ -226,25 +227,33 @@ or `file` (re-read on every access, optionally narrowed into a JSON document
 by pointer, so externally refreshed tokens stay current). See
 [Provider credentials](docs/interfaces-and-tooling.md#provider-credentials).
 
-### Sandboxing
+### Sandboxing and approvals
 
-Per-turn sandboxing is off by default; turns then record a degraded execution
-boundary so the audit trail says they ran unconfined. Enable it for a topic in
-its `config.toml`:
+Per-turn sandboxing is on by default: sandbox-eligible tool calls run under
+bubblewrap and Landlock. Tools that need live gateway state run in the gateway
+process, and sessions targeting a remote device use that device's execution
+path. If sandbox setup fails — most often because bubblewrap is not
+installed — a turn you started yourself pauses to ask whether to continue
+unsandboxed; a scheduled or delegated turn, with nobody to ask, fails. The
+failure reason quotes the cause. `sandbox.allow_degraded_execution = true`
+skips that approval.
+
+To run a topic without the sandbox, set this in its `config.toml`; its turns
+then record a degraded execution boundary so the audit trail says they ran
+unconfined:
 
 ```toml
 [sandbox]
-enabled = true
+enabled = false
 ```
 
-Sandbox-eligible tool calls then run under bubblewrap and Landlock. Tools that
-need live gateway state run in the gateway process, and sessions targeting a
-remote device use that device's execution path. If sandbox setup fails, a turn
-you started yourself pauses to ask whether to continue unsandboxed; a
-scheduled or delegated turn, with nobody to ask, fails. The failure reason
-quotes the cause. `sandbox.allow_degraded_execution = true` skips that
-approval. [Agents and permissions](docs/agents-and-permissions.md#sandbox-isolation)
-covers what the sandbox confines.
+Tools that act outside the conversation — `shell`, `file_edit`, `file_write`,
+`python_execute` and the browser's click, type, select and scroll actions —
+ask for your approval before each call in a session you are attending.
+Scheduled, channel and delegated work runs on its grants alone.
+[Agents and permissions](docs/agents-and-permissions.md#sandbox-isolation)
+covers what the sandbox confines, how approvals work and how to change which
+tools ask.
 
 ### Optional capabilities
 
@@ -257,7 +266,6 @@ These register or work only when their prerequisite is present:
 | Python execution | `python3` on `PATH` |
 | Telegram channel | A bot token from BotFather, named under `[channels.telegram]` as `bot_token_env = "<VARIABLE>"` |
 | Codex provider | The Codex CLI, signed in with ChatGPT; Swage reads its tokens from the CLI's own auth store ([details](docs/interfaces-and-tooling.md#codex-auth-store)) |
-| Sandboxing | [bubblewrap](https://github.com/containers/bubblewrap) |
 | Voice | An OpenAI-protocol provider that serves the audio APIs (below) |
 
 ### Voice

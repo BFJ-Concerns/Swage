@@ -287,7 +287,11 @@ order:
    `"*"` wildcard, or bundle expansion. No match → `PermissionDenied(NotAllowed)`.
 3. **Approval check.** If the tool matches a `require_approval` entry
    (direct or bundle-expanded), return `RequiresApproval` with optional
-   per-entry `timeout_secs` and `timeout_policy` overrides.
+   per-entry `timeout_secs` and `timeout_policy` overrides. An attended turn
+   pauses for the operator's decision. Unattended turns (scheduled, channel,
+   workflow-worker, delegated) run with `approval_prompts_enabled = false`
+   (`swage-agent/src/config.rs`), which pre-approves every gate, so they
+   proceed on grants alone.
 4. **Allow.** Return `Allowed`.
 
 `require_approval` entries never grant access — they only gate tools already
@@ -302,7 +306,9 @@ The file-config default (`ToolPermissionConfig::default()` in
 - `deny: []`
 - Eight high-risk tools gated behind `require_approval`:
   `shell`, `file_edit`, `file_write`, `python_execute`, `browser_click`,
-  `browser_type`, `browser_select`, `browser_scroll`
+  `browser_type`, `browser_select`, `browser_scroll`. A `require_approval`
+  list at any configuration level replaces this list (`merge.rs`), so
+  `require_approval = []` removes the prompts.
 - Default bundles: `browsing`, `browser_actions`, `scheduling`,
   `knowledge-read`, `knowledge-write`, `knowledge-curation`,
   `knowledge-citation`, `knowledge-orientation-curation`
@@ -394,7 +400,7 @@ not found.
 
 ### Sandbox isolation
 
-When sandboxing is enabled, eligible local tool calls run inside a two-layer
+Sandboxing is on by default: eligible local tool calls run inside a two-layer
 sandbox (`swage-sandbox`):
 
 1. **Bubblewrap (bwrap)** — Linux namespace isolation (PID, network, mount,
@@ -427,27 +433,28 @@ completion requests.
 
 | Option | Type | Default |
 |---|---|---|
-| `sandbox.enabled` | bool | `false` |
+| `sandbox.enabled` | bool | `true` |
 | `sandbox.allow_degraded_execution` | bool | `false` |
 
-With no sandbox setting in the configuration cascade, per-turn sandboxing
-defaults off. A topic inherits sandbox settings from the global configuration;
-an agent can override them. When `sandbox.enabled` resolves to `false`, local
-gateway turns run unsandboxed without requiring `allow_degraded_execution`.
-The persisted turn boundary is `Degraded` with reason
-`sandbox_disabled_by_configuration`. A declared install boundary, such as a
-container image, takes precedence over sandbox settings and remains the
-recorded boundary.
+With no sandbox setting in the configuration cascade, per-turn sandboxing is
+on (`SandboxConfig::default()` in `swage-protocol/src/client/settings.rs`). A
+topic inherits sandbox settings from the global configuration; an agent can
+override them. When `sandbox.enabled` resolves to `false`, local gateway turns
+run unsandboxed without requiring `allow_degraded_execution`. The persisted
+turn boundary is `Degraded` with reason `sandbox_disabled_by_configuration`.
+A declared install boundary, such as a container image, takes precedence over
+sandbox settings and remains the recorded boundary.
 
-To enable sandboxing for a topic, add this to its `config.toml`:
+To turn sandboxing off for a topic, add this to its `config.toml`:
 
 ```toml
 [sandbox]
-enabled = true
+enabled = false
 ```
 
-When `enabled` is true and sandbox setup fails at runtime, the recovery
-path depends on the turn's attendance:
+When `enabled` is true and sandbox setup fails at runtime — most often
+because `bwrap` is not installed — the recovery path depends on the turn's
+attendance:
 
 - **Attended turns** (interactive client connected) — the turn pauses with an
   approval prompt asking whether to proceed unsandboxed. The client may
