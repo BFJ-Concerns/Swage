@@ -514,22 +514,22 @@ level = "info"
 }
 
 #[test]
-fn sandbox_defaults_off_and_topic_can_enable_it() {
+fn sandbox_defaults_on_and_topic_can_disable_it() {
     let tmp = build_skeleton(None, "mytopic", None, "assistant", None);
     let scope = ScopeLocation::topic("mytopic");
     let config = load_resolved_config_from(tmp.path(), &scope, "assistant")
         .expect("configuration without a sandbox table should load");
-    assert!(!config.sandbox.enabled);
+    assert!(config.sandbox.enabled);
     assert!(!config.sandbox.allow_degraded_execution);
 
     fs::write(
         tmp.path().join("topics/mytopic/config.toml"),
-        "[sandbox]\nenabled = true\n",
+        "[sandbox]\nenabled = false\n",
     )
-    .expect("write topic sandbox opt-in");
+    .expect("write topic sandbox opt-out");
     let config = load_resolved_config_from(tmp.path(), &scope, "assistant")
-        .expect("topic sandbox opt-in should load");
-    assert!(config.sandbox.enabled);
+        .expect("topic sandbox opt-out should load");
+    assert!(!config.sandbox.enabled);
     assert!(!config.sandbox.allow_degraded_execution);
 }
 

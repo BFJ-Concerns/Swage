@@ -249,10 +249,15 @@ this setting is false in both configurations.
 
 ### Default grants
 
-A fresh configuration allows all tools (`allow: ["*"]`), denies none, and has
-an empty `require_approval` list. This default is defined in
-`ToolPermissionConfig::default()` and applies unless a config file or agent
-definition narrows it or adds approval requirements.
+A fresh configuration allows all tools (`allow: ["*"]`), denies none, and
+requires approval for the eight tools that act outside the conversation:
+`shell`, `file_edit`, `file_write`, `python_execute`, `browser_click`,
+`browser_type`, `browser_select` and `browser_scroll`. In an attended session
+each call to one of these pauses until you approve or reject it. This default
+is defined in `ToolPermissionConfig::default()` and applies unless a config
+file or agent definition narrows it or replaces the approval list — a
+`require_approval` list at any level replaces the default list rather than
+adding to it, so `require_approval = []` turns the prompts off.
 
 ### Resolution order
 
@@ -393,11 +398,13 @@ within the process.
 
 ### Configuration
 
-Sandboxing is off by default. Two config options govern sandbox behaviour:
+Sandboxing is on by default, so the gateway host needs
+[bubblewrap](https://github.com/containers/bubblewrap) installed. Two config
+options govern sandbox behaviour:
 
 | Option | Default | Effect |
 |---|---|---|
-| `sandbox.enabled` | `false` | Whether to set up sandbox isolation for each turn |
+| `sandbox.enabled` | `true` | Whether to set up sandbox isolation for each turn |
 | `sandbox.allow_degraded_execution` | `false` | Whether to allow unsandboxed execution after sandbox setup fails |
 
 With sandboxing disabled, local gateway turns run without sandbox isolation
@@ -407,15 +414,16 @@ required for this configuration choice. Installs with a declared boundary,
 such as a container image, retain that boundary instead; their sandbox
 settings do not change it.
 
-To enable sandboxing for a topic, add this to its `config.toml`:
+To turn sandboxing off for a topic, add this to its `config.toml`:
 
 ```toml
 [sandbox]
-enabled = true
+enabled = false
 ```
 
-When sandboxing is enabled and sandbox setup fails at runtime, the recovery
-path depends on whether the turn is attended:
+When sandboxing is enabled and sandbox setup fails at runtime — most often
+because `bwrap` is not installed — the recovery path depends on whether the
+turn is attended:
 
 - **Attended turns** (interactive client connected) receive an approval
   prompt asking whether to proceed without sandbox isolation. The client can

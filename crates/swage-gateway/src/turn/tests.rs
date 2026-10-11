@@ -6337,7 +6337,7 @@ async fn fresh_codex_turn_completes_without_degraded_execution_opt_in_or_audit()
             "send":[{"jsonrpc":"2.0","id":"$request_id","result":{"thread":{"id":"fake-thread"}}}]
         },
         {
-            "receive":{"method":"turn/start","params":{"sandboxPolicy":{"type":"workspaceWrite","networkAccess":false,"excludeSlashTmp":true,"excludeTmpdirEnvVar":true}}},
+            "receive":{"method":"turn/start","params":{"sandboxPolicy":{"type":"readOnly","networkAccess":false}}},
             "send":[
                 {"jsonrpc":"2.0","id":"$request_id","result":{"turn":{"id":"fake-turn"}}},
                 {"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"delta":"done"}},
@@ -6498,14 +6498,14 @@ async fn failed_ordinary_attempt_recording_releases_the_prepared_turn() {
 }
 
 #[tokio::test]
-async fn default_turn_persists_configuration_disabled_boundary() {
+async fn default_turn_persists_sandboxed_boundary() {
     let _home = SwageHomeGuard::isolate();
     let (state, session_id) = make_state_with_session(vec![StreamChunk::Done {
         finish_reason: None,
     }])
     .await;
-    // If the default enables sandboxing, exercise the existing sandbox path
-    // without depending on bubblewrap being available on the test machine.
+    // Exercise the sandbox path the default selects without depending on
+    // bubblewrap being available on the test machine.
     let state = state.with_test_sandbox();
 
     Box::pin(process_turn(
@@ -6534,9 +6534,7 @@ async fn default_turn_persists_configuration_disabled_boundary() {
         .remove(0);
     assert_eq!(
         turn.execution_isolation,
-        Some(swage_storage::TurnIsolation::Degraded {
-            reason: "sandbox_disabled_by_configuration".into(),
-        }),
+        Some(swage_storage::TurnIsolation::Isolated),
         "the turn must persist the boundary selected from default configuration"
     );
     assert_eq!(turn.state, TurnState::Completed);
@@ -19172,11 +19170,15 @@ async fn operation_outcome_turn(
             },
         ],
     ]);
+    // Record operation outcomes without pausing the attended turn on the
+    // default shell approval.
+    let mut config = swage_config::ResolvedConfig::default();
+    config.tools.permissions.require_approval.clear();
     let mut state = AppState::new_with_config_root(
         storage.clone(),
         storage.clone(),
         Arc::new(provider),
-        swage_config::ResolvedConfig::default(),
+        config,
         crate::tool::ToolDispatcher::allow_all(vec![
             Arc::new(crate::tool::shell::ShellTool {
                 timeout: Duration::from_secs(5),

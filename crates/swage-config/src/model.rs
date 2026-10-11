@@ -215,7 +215,7 @@ pub struct SearchProviderConfig {
 ///
 /// Follows the same allow/deny/bundle model as `swage_tool::PermissionConfig`.
 /// When no permissions are configured at any level, tools remain broadly
-/// available without interactive approval prompts.
+/// available, but high-risk tools are gated by human approval.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolPermissionConfig {
     pub allow: Vec<String>,
@@ -224,8 +224,8 @@ pub struct ToolPermissionConfig {
     /// Tools that require explicit human approval before execution.
     ///
     /// Each entry is either a plain tool name (uses global HITL defaults) or
-    /// an object with per-tool timeout and policy overrides. Defaults to empty
-    /// — prompting is enabled only through explicit operator configuration.
+    /// an object with per-tool timeout and policy overrides. Defaults to the
+    /// high-risk tools; an operator removes an entry to stop prompting for it.
     #[serde(default)]
     pub require_approval: Vec<RequireApprovalEntry>,
 }
@@ -301,9 +301,28 @@ impl Default for ToolPermissionConfig {
             allow: vec!["*".into()],
             deny: vec![],
             bundles,
-            require_approval: vec![],
+            require_approval: default_high_risk_tool_approvals(),
         }
     }
+}
+
+/// Tools that act outside the conversation — running commands or code,
+/// writing files, operating a page — and so prompt before each call in an
+/// attended session. Unattended sessions run on their grants alone.
+fn default_high_risk_tool_approvals() -> Vec<RequireApprovalEntry> {
+    [
+        "shell",
+        "file_edit",
+        "file_write",
+        "python_execute",
+        "browser_click",
+        "browser_type",
+        "browser_select",
+        "browser_scroll",
+    ]
+    .into_iter()
+    .map(|tool| RequireApprovalEntry::Simple(tool.to_string()))
+    .collect()
 }
 
 /// Settings for the gateway-hosted browser tools.
@@ -1031,7 +1050,7 @@ mod tests {
     #[test]
     fn sandbox_config_defaults() {
         let cfg = SandboxConfig::default();
-        assert!(!cfg.enabled);
+        assert!(cfg.enabled);
         assert!(!cfg.allow_degraded_execution);
     }
 
@@ -1051,7 +1070,7 @@ mod tests {
         assert_eq!(cfg.models.default, "");
         assert!(cfg.models.entries.is_empty());
         assert_eq!(cfg.default_model_id(), "");
-        assert!(!cfg.sandbox.enabled);
+        assert!(cfg.sandbox.enabled);
         assert!(!cfg.sandbox.allow_degraded_execution);
         assert_eq!(cfg.logging.level, LogLevel::Info);
         assert_eq!(cfg.instructions, "");
@@ -1343,7 +1362,7 @@ timeout_policy = "reject"
     // --- ToolPermissionConfig tests ---
 
     #[test]
-    fn tool_permission_config_default_has_no_approval_prompts() {
+    fn tool_permission_config_default_gates_high_risk_tools() {
         let cfg = ToolPermissionConfig::default();
         assert_eq!(cfg.allow, vec!["*".to_string()]);
         assert!(cfg.deny.is_empty());
@@ -1397,7 +1416,22 @@ timeout_policy = "reject"
                 .expect("knowledge orientation curation bundle"),
             &vec!["knowledge_curate_orientation".to_string()]
         );
-        assert!(cfg.require_approval.is_empty());
+        assert_eq!(
+            cfg.require_approval
+                .iter()
+                .map(RequireApprovalEntry::tool_name)
+                .collect::<Vec<_>>(),
+            vec![
+                "shell",
+                "file_edit",
+                "file_write",
+                "python_execute",
+                "browser_click",
+                "browser_type",
+                "browser_select",
+                "browser_scroll"
+            ]
+        );
     }
 
     #[test]
@@ -1559,9 +1593,14 @@ timeout_policy = "reject"
     // --- require_approval field in ToolPermissionConfig tests ---
 
     #[test]
-    fn tool_permission_config_require_approval_defaults_empty() {
+    fn tool_permission_config_require_approval_defaults_to_simple_entries() {
         let cfg = ToolPermissionConfig::default();
-        assert!(cfg.require_approval.is_empty());
+        assert!(!cfg.require_approval.is_empty());
+        assert!(
+            cfg.require_approval
+                .iter()
+                .all(|entry| matches!(entry, RequireApprovalEntry::Simple(_)))
+        );
     }
 
     #[test]

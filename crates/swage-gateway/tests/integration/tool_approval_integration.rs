@@ -1340,6 +1340,8 @@ async fn native_approval_scope_with_workspace(scope: &str, read: bool, symlink: 
     let mut config = ResolvedConfig::default();
     config.sandbox.enabled = false;
     config.sandbox.allow_degraded_execution = true;
+    // Only the out-of-workspace location gate is under test here.
+    config.tools.permissions.require_approval.clear();
     let (router, addr, storage) =
         start_test_server_with_tools(provider, config.clone(), native_file_tools()).await;
     let (_, conversation) = http(&router, "POST", "/api/conversations").await;
