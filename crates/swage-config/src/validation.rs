@@ -1128,6 +1128,31 @@ pub fn validate_resolved_catalog_references(
         ));
     }
 
+    // The Codex adapter cannot yet put Codex's command and file-change
+    // approval requests to the operator, so under the default approval list
+    // a Codex session could neither run commands nor edit files.
+    let mut codex_provider_ids = config
+        .providers
+        .entries
+        .iter()
+        .filter(|(_, provider)| provider.protocol == crate::Protocol::Codex)
+        .map(|(provider_id, _)| provider_id)
+        .collect::<Vec<_>>();
+    codex_provider_ids.sort();
+    for provider_id in codex_provider_ids {
+        problems.push(make_problem(
+            file_path,
+            Some(format!("providers.entries.{provider_id}.protocol")),
+            ConfigProblemKind::SemanticError {
+                message: format!(
+                    "provider '{provider_id}' uses the codex protocol, which is unavailable: \
+                     Swage cannot yet ask the operator to approve Codex's commands and file \
+                     changes; use another provider protocol"
+                ),
+            },
+        ));
+    }
+
     for (model_id, model) in &config.models.entries {
         if let Some(effort) = model.capabilities.effort.as_ref()
             && let Err(message) = effort.validate()
@@ -2479,6 +2504,28 @@ message_ttl_secs = 86400
             ["context.diagnosis_synthesis_model"],
             "an alias resolves; an unknown name does not: {problems:?}"
         );
+    }
+
+    #[test]
+    fn a_codex_provider_is_refused() {
+        let mut config = ResolvedConfig::default();
+        config.providers.entries.insert(
+            "codex".into(),
+            crate::ProviderEndpointConfig {
+                protocol: crate::Protocol::Codex,
+                ..Default::default()
+            },
+        );
+        config
+            .providers
+            .entries
+            .insert("p".into(), crate::ProviderEndpointConfig::default());
+        let problems = validate_resolved_catalog_references(&config, Path::new("config.toml"));
+        let fields: Vec<_> = problems
+            .iter()
+            .filter_map(|problem| problem.field_path.as_deref())
+            .collect();
+        assert_eq!(fields, ["providers.entries.codex.protocol"], "{problems:?}");
     }
 
     #[test]

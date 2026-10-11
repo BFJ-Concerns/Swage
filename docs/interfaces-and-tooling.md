@@ -193,6 +193,10 @@ A provider entry has two credential fields, checked in order:
 
 When both are set, `api_key_secret_ref` wins.
 
+Configuration refuses a provider with `protocol = "codex"`: Swage cannot
+yet ask the operator to approve the commands and file changes Codex makes,
+so a Codex session could do neither.
+
 ### Secret manager and backends
 
 The secret manager resolves `secret://` references with an audit event on

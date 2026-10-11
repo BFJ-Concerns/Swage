@@ -59,7 +59,7 @@ things those tend to leave out:
 
 | Area | What's there |
 |---|---|
-| **Providers** | Anthropic, OpenAI Chat Completions and Responses, Google, OpenRouter, and Codex¹; retries, circuit breaking and failover between routes; per-model reasoning effort |
+| **Providers** | Anthropic, OpenAI Chat Completions and Responses, Google, and OpenRouter; retries, circuit breaking and failover between routes; per-model reasoning effort |
 | **Tools** | File read/write/edit/search, shell, URL fetch, web search¹, a Chromium browser¹, Python execution¹, memory, a knowledge base with citations, schedules, workflows, and agent-built *surfaces* |
 | **Safety** | Per-tool permissions with interactive approvals, grants that narrow as work is delegated, per-turn bubblewrap + Landlock sandboxing, and credential leak detection with redaction |
 | **Workflows** | A JavaScript workflow engine (QuickJS) whose runs are journalled: a run interrupted by a crash or restart replays and carries on. Token budgets per provider route, durable parking on long timers, and runs that pause for a human decision |
@@ -265,7 +265,6 @@ These register or work only when their prerequisite is present:
 | Browser tool | Chromium or Chrome on `PATH`, or its path in `SWAGE_BROWSER_BIN` |
 | Python execution | `python3` on `PATH` |
 | Telegram channel | A bot token from BotFather, named under `[channels.telegram]` as `bot_token_env = "<VARIABLE>"` |
-| Codex provider | The Codex CLI, signed in with ChatGPT; Swage reads its tokens from the CLI's own auth store ([details](docs/interfaces-and-tooling.md#codex-auth-store)) |
 | Voice | An OpenAI-protocol provider that serves the audio APIs (below) |
 
 ### Voice

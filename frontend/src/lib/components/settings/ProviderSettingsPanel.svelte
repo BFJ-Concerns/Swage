@@ -35,7 +35,6 @@
     { id: "Google", label: "Google", protocol: "google" },
     { id: "OpenRouter", label: "OpenRouter", protocol: "openrouter" },
     { id: "OpenAiCompatible", label: "OpenAI compatible", protocol: "openai" },
-    { id: "Codex", label: "Codex", protocol: "codex" },
   ] as const satisfies readonly ProviderKindDefinition[];
   const providerIds = $derived(Object.keys(settings.providers));
   const modelIds = $derived(Object.keys(settings.models));
