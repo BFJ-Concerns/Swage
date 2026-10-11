@@ -193,9 +193,10 @@ A provider entry has two credential fields, checked in order:
 
 When both are set, `api_key_secret_ref` wins.
 
-Configuration refuses a provider with `protocol = "codex"`: Swage cannot
-yet ask the operator to approve the commands and file changes Codex makes,
-so a Codex session could do neither.
+The built-in Codex app server (`protocol = "codex"`) is temporarily
+disabled: a configuration naming it does not load, until Swage can ask you
+to approve the commands and file changes it makes. Codex models stay
+reachable through any OpenAI-protocol provider.
 
 ### Secret manager and backends
 

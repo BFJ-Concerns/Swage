@@ -1128,9 +1128,10 @@ pub fn validate_resolved_catalog_references(
         ));
     }
 
-    // The Codex adapter cannot yet put Codex's command and file-change
-    // approval requests to the operator, so under the default approval list
-    // a Codex session could neither run commands nor edit files.
+    // The built-in Codex app server is temporarily disabled: its adapter
+    // cannot yet put Codex's command and file-change approval requests to
+    // the operator, so under the default approval list a Codex session could
+    // neither run commands nor edit files.
     let mut codex_provider_ids = config
         .providers
         .entries
@@ -1145,9 +1146,10 @@ pub fn validate_resolved_catalog_references(
             Some(format!("providers.entries.{provider_id}.protocol")),
             ConfigProblemKind::SemanticError {
                 message: format!(
-                    "provider '{provider_id}' uses the codex protocol, which is unavailable: \
-                     Swage cannot yet ask the operator to approve Codex's commands and file \
-                     changes; use another provider protocol"
+                    "provider '{provider_id}' uses the built-in Codex app server, which is \
+                     temporarily disabled while Swage cannot ask the operator to approve its \
+                     commands and file changes; reach Codex models through an OpenAI-protocol \
+                     provider instead"
                 ),
             },
         ));
