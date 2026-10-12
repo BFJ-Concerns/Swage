@@ -3,6 +3,7 @@ name = "swage-protocol"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 description = "Swage wire contract: plain serde types defined once, projected to TypeScript (ts-rs) and JSON Schema (schemars)"
 
 [lints]

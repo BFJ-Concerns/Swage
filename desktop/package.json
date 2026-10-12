@@ -2,6 +2,7 @@
   "name": "swage-desktop",
   "private": true,
   "version": "0.2.0",
+  "license": "AGPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "dev": "electron ./src/main.mjs",

@@ -20,6 +20,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- Swage is licensed under the GNU Affero General Public License, version 3 or any later version (`AGPL-3.0-or-later`), with the full text in `LICENSE` and the licence recorded in every crate and npm package manifest. Pull requests are welcome, contributed under the same licence.
 - A continuation schedule firing during a running turn queues its brief for the next turn, and channel messages for a busy session wait in the same durable queue. The web UI shows queued inputs once, labels them queued, and displays recorded inputs and the drained reply live.
 - A message, channel message or continuation brief reaching an idle session that still has queued messages, as a Stop leaves them, joins the queue and runs after them in the same turn.
 - Gateway integration tests and browser end-to-end runs create their disposable state under the system temporary directory, or under `SWAGE_TEST_SCRATCH_DIR` when it is set.

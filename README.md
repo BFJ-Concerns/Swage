@@ -24,7 +24,6 @@ a Svelte 5 web UI and an Electron desktop shell.
 > - **Single operator, Linux only.** One person's gateway on their own
 >   machine, by design. Sandboxing relies on Linux (bubblewrap, Landlock).
 > - **No authentication.** Run it on loopback or a network you fully trust.
-> - **No licence chosen yet.** See [Licence](#licence) below.
 
 ## Why Swage
 
@@ -349,7 +348,14 @@ OpenAPI 3.1 document at `crates/swage-protocol/schema/client-openapi.json`.
 
 ## Licence
 
-No licence has been chosen yet. The source is published so it can be read,
-and built and run for your own use; it grants no further rights. A licence
-will follow. Until then, bug reports and questions are welcome as issues, but
-pull requests can't be accepted.
+Swage is free software: you can redistribute it and/or modify it under the
+terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. See [LICENSE](LICENSE) for the full text.
+
+The AGPL extends the GPL's source obligation to network use: if you run a
+modified Swage as a service that others interact with, you must offer them
+the source of your modified version.
+
+Bug reports, questions and pull requests are welcome. Contributions are
+accepted under the same licence.

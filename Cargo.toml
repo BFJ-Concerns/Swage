@@ -26,6 +26,7 @@ members = [
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.98"
+license = "AGPL-3.0-or-later"
 
 # Clippy lints, curated: keep what catches real bugs, needless allocations, or
 # genuine redundancy; drop what is purely stylistic or fires falsely on code
