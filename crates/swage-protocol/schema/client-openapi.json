@@ -2078,6 +2078,20 @@
         ],
         "type": "object"
       },
+      "JudgeConfig": {
+        "additionalProperties": false,
+        "description": "The judging model: who answers for a request a session's grants do\nnot cover when no person is watching (an unattended turn reaching a\nlocation outside its granted locations).",
+        "properties": {
+          "model": {
+            "description": "The model catalogue key, or an alias, of the model that judges\nsuch requests. Empty means no judge, and an unattended request\nbeyond the session's grants then fails closed.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "type": "object"
+      },
       "KnowledgeSearchResponse": {
         "properties": {
           "guidance": {
@@ -3641,6 +3655,17 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/HitlConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "judge": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JudgeConfig"
               },
               {
                 "type": "null"
@@ -5313,6 +5338,9 @@
           "hitl": {
             "$ref": "#/components/schemas/HitlConfig"
           },
+          "judge": {
+            "$ref": "#/components/schemas/JudgeConfig"
+          },
           "memory": {
             "$ref": "#/components/schemas/MemoryConfig"
           },
@@ -5369,6 +5397,7 @@
           "communication",
           "sessions",
           "memory",
+          "judge",
           "voice",
           "restart_required",
           "can_restart"

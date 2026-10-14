@@ -16,6 +16,7 @@ pub mod error;
 pub mod event;
 pub mod expiry;
 pub mod extraction;
+pub mod judge;
 pub mod mailbox;
 pub mod message;
 pub mod router;
@@ -38,6 +39,10 @@ pub use delegation::{
 pub use error::AgentError;
 pub use event::{AgentEvent, ProviderRoundOutcome};
 pub use expiry::{DEFAULT_EXPIRY_INTERVAL, DEFAULT_MESSAGE_TTL};
+pub use judge::{
+    JUSTIFICATION_PARAMETER, JudgeRequest, JudgeVerdict, Judgement, RequestJudge, RequestedReach,
+    SharedRequestJudge,
+};
 pub use mailbox::{MailboxContents, check_mailbox};
 pub use message::{ErrorResponse, OutboundMessage, TurnRequest};
 pub use router::MessageRouter;

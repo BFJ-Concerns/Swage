@@ -254,6 +254,7 @@ function makeSettings(
     },
     sessions: { archive_after_days: 7 },
     memory: { curator_idle_minutes: 10 },
+    judge: { model: "" },
     voice: {},
     restart_required: false,
     can_restart: false,

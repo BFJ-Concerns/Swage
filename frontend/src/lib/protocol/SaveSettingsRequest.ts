@@ -3,6 +3,7 @@ import type { CommunicationConfig } from "./CommunicationConfig";
 import type { ContextConfig } from "./ContextConfig";
 import type { GenerationPresetConfig } from "./GenerationPresetConfig";
 import type { HitlConfig } from "./HitlConfig";
+import type { JudgeConfig } from "./JudgeConfig";
 import type { MemoryConfig } from "./MemoryConfig";
 import type { ModelSettings } from "./ModelSettings";
 import type { ObservabilityConfig } from "./ObservabilityConfig";
@@ -14,4 +15,4 @@ import type { ToolPermissionConfig } from "./ToolPermissionConfig";
 import type { ToolRuntimeSettings } from "./ToolRuntimeSettings";
 import type { VoiceConfig } from "./VoiceConfig";
 
-export type SaveSettingsRequest = { default_provider: string, providers: { [key in string]: SaveProviderSettings }, default_model: string, models: { [key in string]: ModelSettings }, generation_presets?: { [key in string]: GenerationPresetConfig }, tool_runtime?: ToolRuntimeSettings | null, tool_permissions?: ToolPermissionConfig | null, hitl?: HitlConfig | null, sandbox?: SandboxConfig | null, context?: ContextConfig | null, pricing?: PricingConfig | null, observability?: ObservabilityConfig | null, communication?: CommunicationConfig | null, sessions?: SessionsConfig | null, memory?: MemoryConfig | null, voice?: VoiceConfig | null, };
+export type SaveSettingsRequest = { default_provider: string, providers: { [key in string]: SaveProviderSettings }, default_model: string, models: { [key in string]: ModelSettings }, generation_presets?: { [key in string]: GenerationPresetConfig }, tool_runtime?: ToolRuntimeSettings | null, tool_permissions?: ToolPermissionConfig | null, hitl?: HitlConfig | null, sandbox?: SandboxConfig | null, context?: ContextConfig | null, pricing?: PricingConfig | null, observability?: ObservabilityConfig | null, communication?: CommunicationConfig | null, sessions?: SessionsConfig | null, memory?: MemoryConfig | null, judge?: JudgeConfig | null, voice?: VoiceConfig | null, };

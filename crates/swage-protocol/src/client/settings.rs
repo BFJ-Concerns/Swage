@@ -526,6 +526,21 @@ settings_section! {
     }
 }
 
+settings_section! {
+    /// The judging model: who answers for a request a session's grants do
+    /// not cover when no person is watching (an unattended turn reaching a
+    /// location outside its granted locations).
+    section "judge" as JudgeConfig / PartialJudgeConfig {
+        /// The model catalogue key, or an alias, of the model that judges
+        /// such requests. Empty means no judge, and an unattended request
+        /// beyond the session's grants then fails closed.
+        model: String = String::new(),
+    }
+    problems(_section) {
+        Vec::new()
+    }
+}
+
 /// Model routes for voice, served by the default provider's endpoint. An
 /// unset id leaves that capability unavailable.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, TS)]
@@ -560,6 +575,7 @@ pub struct SettingsResponse {
     pub communication: CommunicationConfig,
     pub sessions: SessionsConfig,
     pub memory: MemoryConfig,
+    pub judge: JudgeConfig,
     pub voice: VoiceConfig,
     pub restart_required: bool,
     pub can_restart: bool,
@@ -605,6 +621,9 @@ pub struct SaveSettingsRequest {
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub memory: Option<MemoryConfig>,
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub judge: Option<JudgeConfig>,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub voice: Option<VoiceConfig>,

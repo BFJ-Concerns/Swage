@@ -69,6 +69,7 @@ pub mod operator;
 pub mod presence;
 pub mod recent_sessions;
 pub mod record_durability;
+pub mod request_judge;
 pub mod schedule;
 pub mod secret;
 pub mod server;

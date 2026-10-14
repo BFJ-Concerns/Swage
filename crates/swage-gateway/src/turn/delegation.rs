@@ -858,6 +858,9 @@ impl DelegationHandler for GatewayDelegationHandler {
             approval_registrar: Some(build_approval_registrar(
                 self.state.approval_channels.clone(),
             )),
+            request_judge: Some(Arc::new(crate::request_judge::GatewayRequestJudge::new(
+                self.state.clone(),
+            ))),
             delegation_handler: Some(Arc::new(self.clone())),
             router: router.clone(),
             active_delegations: self.active_delegations.clone(),

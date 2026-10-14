@@ -27,13 +27,13 @@ pub use masked_string::MaskedString;
 pub use model::{
     BrowserScreenshotPolicy, BrowserToolConfig, ChannelsConfig, CommunicationConfig, ContextConfig,
     ContextTransferConfig, ContextTransferField, ContextTransferMode, ContextTransferTargetConfig,
-    GenerationConfig, GenerationPresetConfig, HierarchyLevel, HitlConfig, LogLevel, LoggingConfig,
-    MemoryConfig, ModelCapabilitiesConfig, ModelCatalogConfig, ModelEndpointConfig, ModelPricing,
-    ObservabilityConfig, OutputConfig, PricingConfig, Protocol, ProviderCatalogConfig,
-    ProviderEndpointConfig, ProviderRoute, PythonExecuteToolConfig, PythonRuntimePolicy,
-    RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig, ServerConfig,
-    SessionsConfig, TelegramChannelConfig, ToolConfig, ToolPermissionConfig, VoiceConfig,
-    resolve_provider_route,
+    GenerationConfig, GenerationPresetConfig, HierarchyLevel, HitlConfig, JudgeConfig, LogLevel,
+    LoggingConfig, MemoryConfig, ModelCapabilitiesConfig, ModelCatalogConfig, ModelEndpointConfig,
+    ModelPricing, ObservabilityConfig, OutputConfig, PricingConfig, Protocol,
+    ProviderCatalogConfig, ProviderEndpointConfig, ProviderRoute, PythonExecuteToolConfig,
+    PythonRuntimePolicy, RequireApprovalEntry, ResolvedConfig, SandboxConfig, SearchProviderConfig,
+    ServerConfig, SessionsConfig, TelegramChannelConfig, ToolConfig, ToolPermissionConfig,
+    VoiceConfig, resolve_provider_route,
 };
 
 // Error types

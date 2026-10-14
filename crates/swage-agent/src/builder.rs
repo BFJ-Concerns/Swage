@@ -22,6 +22,7 @@ pub struct AgentBuilder {
     hook_registry: Option<Arc<HookRegistry>>,
     leak_detector: Option<Arc<LeakDetector>>,
     approval_registrar: Option<ApprovalChannelRegistrar>,
+    request_judge: Option<crate::judge::SharedRequestJudge>,
     delegation_handler: Option<Arc<dyn crate::delegation::DelegationHandler>>,
     context_transfer_config: Option<swage_config::ContextTransferConfig>,
 }
@@ -36,6 +37,7 @@ impl AgentBuilder {
             hook_registry: None,
             leak_detector: None,
             approval_registrar: None,
+            request_judge: None,
             delegation_handler: None,
             context_transfer_config: None,
         }
@@ -73,6 +75,14 @@ impl AgentBuilder {
 
     pub fn approval_registrar(mut self, registrar: ApprovalChannelRegistrar) -> Self {
         self.approval_registrar = Some(registrar);
+        self
+    }
+
+    /// Who answers for a request beyond the session's grants when no person
+    /// is watching (crate::judge). Without one, such a request in an
+    /// unattended turn fails closed.
+    pub fn request_judge(mut self, judge: crate::judge::SharedRequestJudge) -> Self {
+        self.request_judge = Some(judge);
         self
     }
 
@@ -115,6 +125,7 @@ impl AgentBuilder {
             hook_registry: self.hook_registry,
             leak_detector: self.leak_detector,
             approval_registrar: self.approval_registrar,
+            request_judge: self.request_judge,
             delegation_handler: self.delegation_handler,
             context_transfer_config: self.context_transfer_config.unwrap_or_default(),
         })

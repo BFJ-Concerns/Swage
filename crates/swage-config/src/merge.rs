@@ -12,7 +12,9 @@ use crate::model::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use swage_core::ApprovalTimeoutPolicy;
-pub use swage_protocol::client::settings::{PartialMemoryConfig, PartialSessionsConfig};
+pub use swage_protocol::client::settings::{
+    PartialJudgeConfig, PartialMemoryConfig, PartialSessionsConfig,
+};
 
 // ---------------------------------------------------------------------------
 // Partial section types — mirror of model types, all fields Option<T>
@@ -260,6 +262,7 @@ pub struct PartialConfig {
     pub scheduling: Option<PartialSchedulingConfig>,
     pub sessions: Option<PartialSessionsConfig>,
     pub memory: Option<PartialMemoryConfig>,
+    pub judge: Option<PartialJudgeConfig>,
     pub voice: Option<PartialVoiceConfig>,
     pub generation: Option<PartialGenerationConfig>,
     pub channels: Option<PartialChannelsConfig>,
@@ -422,6 +425,7 @@ impl From<ResolvedConfig> for PartialConfig {
             }),
             sessions: Some(r.sessions.clone().into()),
             memory: Some(r.memory.clone().into()),
+            judge: Some(r.judge.clone().into()),
             voice: Some(PartialVoiceConfig {
                 transcription_model: r.voice.transcription_model.clone(),
                 speech_model: r.voice.speech_model.clone(),
@@ -700,6 +704,7 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
             PartialSessionsConfig::overlay,
         ),
         memory: merge_section(base.memory, overlay.memory, PartialMemoryConfig::overlay),
+        judge: merge_section(base.judge, overlay.judge, PartialJudgeConfig::overlay),
         voice: merge_overlay_section(base.voice, overlay.voice),
         generation: merge_section(base.generation, overlay.generation, |b, o| {
             let mut presets = b.presets.unwrap_or_default();
@@ -985,6 +990,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
         },
         sessions: partial.sessions.unwrap_or_default().resolve(),
         memory: partial.memory.unwrap_or_default().resolve(),
+        judge: partial.judge.unwrap_or_default().resolve(),
         voice: {
             let v = partial.voice.unwrap_or_default();
             VoiceConfig {

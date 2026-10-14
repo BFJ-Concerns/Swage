@@ -41,7 +41,7 @@ use swage_provider::LlmProvider;
 use swage_storage::{
     SqliteStorage,
     store::{
-        ApprovalStore, SessionStore, ThreadStore, ToolCallStore, TopicStore, TurnStore,
+        ApprovalStore, AuditStore, SessionStore, ThreadStore, ToolCallStore, TopicStore, TurnStore,
         WorkspaceAttachmentStore,
     },
 };
@@ -102,18 +102,78 @@ impl swage_tool::tool::Tool for WriteFileTool {
     }
 }
 
+/// Reads a path only once the context grants it; otherwise asks for the
+/// location, as the native file tools do.
+struct OutsideReadTool;
+
+#[async_trait]
+impl swage_tool::tool::Tool for OutsideReadTool {
+    fn name(&self) -> &str {
+        "outside_read"
+    }
+
+    fn description(&self) -> &str {
+        "Reads a file outside the workspace (mock for judge testing)."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" },
+                "justification": { "type": "string" }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: Value,
+        ctx: &dyn swage_tool::context::ToolContext,
+    ) -> Result<Value, swage_core::ToolError> {
+        let path = params["path"].as_str().unwrap_or_default().to_owned();
+        if ctx
+            .allowed_paths()
+            .iter()
+            .any(|granted| granted.to_str() == Some(path.as_str()))
+        {
+            Ok(json!({ "read": path }))
+        } else {
+            Err(swage_core::ToolError::RequiresLocationApproval {
+                name: "outside_read".into(),
+                path,
+                access: "read".into(),
+                timeout_secs: None,
+                timeout_policy: None,
+            })
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Mock provider — streams tool calls and text responses
 // ---------------------------------------------------------------------------
 
 struct MockProvider {
     rounds: std::sync::Mutex<Vec<Vec<StreamChunk>>>,
+    /// What a plain completion answers — the judge's verdict in the tests
+    /// that configure a judge; the streaming turns never use it.
+    completion_reply: Option<&'static str>,
 }
 
 impl MockProvider {
     fn new(rounds: Vec<Vec<StreamChunk>>) -> Self {
         Self {
             rounds: std::sync::Mutex::new(rounds),
+            completion_reply: None,
+        }
+    }
+
+    fn with_completion_reply(rounds: Vec<Vec<StreamChunk>>, reply: &'static str) -> Self {
+        Self {
+            rounds: std::sync::Mutex::new(rounds),
+            completion_reply: Some(reply),
         }
     }
 }
@@ -128,7 +188,16 @@ impl LlmProvider for MockProvider {
         &self,
         _request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
-        unimplemented!("not used in streaming tests")
+        let Some(reply) = self.completion_reply else {
+            unimplemented!("not used in streaming tests")
+        };
+        Ok(CompletionResponse {
+            content: reply.to_owned(),
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            cost: None,
+        })
     }
 
     async fn complete_with_tools(
@@ -273,6 +342,156 @@ fn config_with_approval(tool_name: &str, timeout_secs: u64, policy: &str) -> Res
         .parse::<ApprovalTimeoutPolicy>()
         .expect("invalid timeout policy");
     config
+}
+
+/// A config whose `[judge]` names a catalogue entry served by the mock
+/// provider, or no judge when `judge_model` is empty.
+fn config_with_judge(judge_model: &str) -> ResolvedConfig {
+    let mut config = ResolvedConfig::default();
+    config.models.entries.insert(
+        "judge-model".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: config.providers.default.clone(),
+            model_id: "small-judge".into(),
+            ..Default::default()
+        },
+    );
+    config.judge.model = judge_model.to_owned();
+    config
+}
+
+/// Two rounds: the model reads a file outside its grants (with a reason),
+/// then replies with whatever it was told.
+fn outside_read_rounds() -> Vec<Vec<StreamChunk>> {
+    vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "rest-outside".into(),
+                name: "outside_read".into(),
+                arguments: json!({
+                    "path": "/srv/notes/plan.md",
+                    "justification": "the plan the task is about"
+                }),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::ToolUse),
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "Done".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ],
+    ]
+}
+
+/// Drive an unattended REST turn through the outside read and return the
+/// settled tool-call status and the recorded judgement.
+async fn unattended_outside_read(
+    provider: MockProvider,
+    config: ResolvedConfig,
+) -> (Option<String>, Value) {
+    let (_router, address, storage) = start_test_server_with_tools(
+        provider,
+        config,
+        vec![Arc::new(OutsideReadTool) as Arc<dyn swage_tool::tool::Tool>],
+    )
+    .await;
+    let (status, conversation) =
+        live_http_json(address, reqwest::Method::POST, "/api/conversations", None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, submitted) = live_http_json(
+        address,
+        reqwest::Method::POST,
+        "/api/turns",
+        Some(json!({
+            "conversation_id": conversation["id"],
+            "thread_id": null,
+            "message": "Read the plan",
+            "output_schema": null
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let turn_id = submitted["turn_id"].as_str().expect("turn id").to_owned();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let (_, turn) = live_http_json(
+                address,
+                reqwest::Method::GET,
+                &format!("/api/turns/{turn_id}"),
+                None,
+            )
+            .await;
+            if turn["state"] == "completed" {
+                break;
+            }
+            assert_ne!(turn["state"], "failed", "turn failed: {turn:?}");
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("unattended REST turn completes");
+    assert!(storage.list_approvals().await.unwrap().is_empty());
+    let calls = storage
+        .list_tool_calls_by_turn(turn_id.parse().expect("turn UUID"))
+        .await
+        .unwrap();
+    assert_eq!(calls.len(), 1);
+    let session_id: uuid::Uuid = conversation["id"].as_str().unwrap().parse().unwrap();
+    let judgements = storage
+        .list_audit_events_filtered(swage_storage::AuditEventFilter {
+            session_id: Some(session_id),
+            event_kind: Some("request_judged".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        judgements.len(),
+        1,
+        "one judgement recorded: {judgements:?}"
+    );
+    (calls[0].status.clone(), judgements[0].metadata.clone())
+}
+
+/// Journey: an unattended REST turn reaches outside its grants with no judge
+/// configured → the call is refused, not waved through, and the refusal is
+/// in the record.
+#[tokio::test(flavor = "multi_thread")]
+async fn unattended_rest_turn_fails_an_out_of_grant_location_closed_without_a_judge() {
+    let _guard = SwageHomeGuard::isolate();
+    let (status, judgement) = unattended_outside_read(
+        MockProvider::new(outside_read_rounds()),
+        config_with_judge(""),
+    )
+    .await;
+    assert_eq!(status.as_deref(), Some("refused"));
+    assert_eq!(judgement["verdict"], "unavailable");
+    assert_eq!(judgement["reach"]["path"], "/srv/notes/plan.md");
+    assert_eq!(judgement["justification"], "the plan the task is about");
+}
+
+/// Journey: the same turn with a judge configured whose verdict is a yes →
+/// the call runs once, and the judgement names the judge and its reason.
+#[tokio::test(flavor = "multi_thread")]
+async fn unattended_rest_turn_runs_an_out_of_grant_location_the_judge_allowed() {
+    let _guard = SwageHomeGuard::isolate();
+    let (status, judgement) = unattended_outside_read(
+        MockProvider::with_completion_reply(
+            outside_read_rounds(),
+            r#"{"decision": "allow", "reason": "the task names this plan"}"#,
+        ),
+        config_with_judge("judge-model"),
+    )
+    .await;
+    assert_eq!(status.as_deref(), Some("success"));
+    assert_eq!(judgement["verdict"], "allowed");
+    assert_eq!(judgement["judge"], "judge-model");
+    assert_eq!(judgement["reason"], "the task names this plan");
 }
 
 // ---------------------------------------------------------------------------

@@ -162,6 +162,7 @@ mod approval_tests {
             hook_registry: None,
             leak_detector: None,
             approval_registrar: Some(registrar),
+            request_judge: None,
             delegation_handler: None,
             context_transfer_config: swage_config::ContextTransferConfig::default(),
         };
@@ -810,6 +811,7 @@ mod compaction_caller_tests {
             hook_registry: None,
             leak_detector: None,
             approval_registrar: None,
+            request_judge: None,
             delegation_handler: None,
             context_transfer_config: swage_config::ContextTransferConfig::default(),
         };
@@ -852,9 +854,17 @@ mod compaction_caller_tests {
 // Agent struct
 // ---------------------------------------------------------------------------
 
+/// How this turn answers the gates its tool calls raise.
+///
+/// A person's broad decision (allow for the session or for good) or the
+/// gateway's permission bypass approves every later gate outright. An
+/// unattended turn is different: its granted calls run unreviewed (C12), but
+/// a request beyond its grants has no person to ask, so it goes to the judge
+/// (crate::judge) and fails closed without a yes.
 #[derive(Debug, Default)]
 pub(crate) struct TurnApprovalScope {
     approves_remaining_gates: bool,
+    unattended: bool,
 }
 
 impl TurnApprovalScope {
@@ -862,8 +872,27 @@ impl TurnApprovalScope {
         self.approves_remaining_gates = true;
     }
 
+    fn mark_unattended(&mut self) {
+        self.unattended = true;
+    }
+
+    /// Every gate is pre-approved: a person said so broadly, or the gateway
+    /// bypasses permissions.
     fn should_skip_gate(&self) -> bool {
         self.approves_remaining_gates
+    }
+
+    /// A review gate on a call the session is already granted (an approval
+    /// requirement, a hook's request) is passed without a prompt: nobody is
+    /// watching an unattended turn, and a granted call runs unreviewed there.
+    fn runs_granted_calls_unreviewed(&self) -> bool {
+        self.approves_remaining_gates || self.unattended
+    }
+
+    /// A request beyond the session's grants in an unattended turn has no
+    /// person to ask: the judge decides it.
+    fn routes_reach_to_judge(&self) -> bool {
+        self.unattended && !self.approves_remaining_gates
     }
 }
 
@@ -879,6 +908,11 @@ pub struct Agent {
     /// Callback to register a oneshot channel for HITL approval decisions.
     /// When set, the agent can pause tool execution and wait for human review.
     pub(crate) approval_registrar: Option<ApprovalChannelRegistrar>,
+
+    /// Who answers for a request beyond the session's grants when no person
+    /// is watching (crate::judge). Without one, an unattended turn's
+    /// out-of-grant request fails closed.
+    pub(crate) request_judge: Option<crate::judge::SharedRequestJudge>,
 
     /// Handler for tool-as-delegation — called when the LLM invokes the
     /// "delegate" tool. When `None`, delegation tool calls return an error.
@@ -983,12 +1017,16 @@ impl Agent {
             .await?;
 
         let mut approval_scope = TurnApprovalScope::default();
-        // Permissions disabled at the gateway, or an unattended caller:
-        // pre-approve every gate this turn. Each gate (tool, location, hook)
-        // consults `should_skip_gate` and falls through to `dispatch_approved`,
-        // so this quiets prompts without changing dispatcher grant decisions.
-        if self.config.skip_permissions || !self.config.approval_prompts_enabled {
+        // Permissions disabled at the gateway pre-approve every gate this
+        // turn. An unattended caller is narrower: review gates on granted
+        // calls (tool, hook) pass without a prompt, while a request beyond
+        // the grants (a location) goes to the judge instead of being waved
+        // through — see TurnApprovalScope. Neither changes dispatcher grant
+        // decisions.
+        if self.config.skip_permissions {
             approval_scope.approve_remaining_gates();
+        } else if !self.config.approval_prompts_enabled {
+            approval_scope.mark_unattended();
         }
 
         let threshold_evaluation = crate::compaction::exceeds_threshold_with_model(
@@ -1206,9 +1244,11 @@ impl Agent {
                             context,
                             timeout,
                         }) => {
-                            if approval_scope.should_skip_gate() {
+                            if approval_scope.runs_granted_calls_unreviewed() {
                                 // A broader approval decision covers later gates
-                                // within this still-running turn.
+                                // within this still-running turn, and an
+                                // unattended turn runs its granted calls
+                                // without review.
                                 self.dispatch_tool_call(
                                     call,
                                     &execution,
@@ -2183,38 +2223,53 @@ impl Agent {
             .push(std::path::PathBuf::from(&path));
 
         if approval_scope.should_skip_gate() {
-            let result = if skip_tool_permission_gate {
-                self.race_tool_dispatch(
-                    dispatcher.dispatch_approved(
-                        &call.name,
-                        call.arguments.clone(),
-                        &approved_ctx,
-                        &self.config.agent_id,
-                    ),
+            let result = self
+                .dispatch_into_location(
+                    dispatcher,
                     call,
                     execution,
                     event_tx,
                     cancel_token,
+                    &approved_ctx,
+                    skip_tool_permission_gate,
                     dispatch_started_at,
                 )
-                .await?
-            } else {
-                self.race_tool_dispatch(
-                    dispatcher.dispatch(
-                        &call.name,
-                        call.arguments.clone(),
-                        &approved_ctx,
-                        &self.config.agent_id,
-                    ),
-                    call,
-                    execution,
-                    event_tx,
-                    cancel_token,
-                    dispatch_started_at,
-                )
-                .await?
-            };
+                .await?;
             return tool_dispatch_result(result);
+        }
+
+        if approval_scope.routes_reach_to_judge() {
+            let reach = crate::judge::RequestedReach::Location {
+                path: path.clone(),
+                access: access.clone(),
+            };
+            let judgement = self.judge_reach(call, execution, &reach).await?;
+            if judgement.verdict != crate::judge::JudgeVerdict::Allowed {
+                let mut result: ToolDispatchResult = (
+                    crate::judge::refused_feedback(&call.name, &reach, &judgement),
+                    true,
+                    "refused".to_string(),
+                )
+                    .into();
+                result.execution_prevented = true;
+                return Ok(result);
+            }
+            let result = self
+                .dispatch_into_location(
+                    dispatcher,
+                    call,
+                    execution,
+                    event_tx,
+                    cancel_token,
+                    &approved_ctx,
+                    skip_tool_permission_gate,
+                    dispatch_started_at,
+                )
+                .await?;
+            return tool_dispatch_result(result).map(|mut result| {
+                result.approval_note = Some(crate::judge::allowed_note(&reach, &judgement));
+                result
+            });
         }
 
         match self
@@ -2277,6 +2332,121 @@ impl Agent {
             }
             ApprovalGateOutcome::Interrupted => Err(AgentError::Cancelled),
         }
+    }
+
+    /// Run the call with the requested location added to its context —
+    /// through the approved path when the tool gate was already passed,
+    /// through ordinary dispatch otherwise.
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch_into_location(
+        &self,
+        dispatcher: &ToolDispatcher,
+        call: &ToolCall,
+        execution: &TurnExecutionContext,
+        event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+        cancel_token: &tokio_util::sync::CancellationToken,
+        approved_ctx: &AgentToolContext,
+        skip_tool_permission_gate: bool,
+        dispatch_started_at: std::time::Instant,
+    ) -> Result<Result<ToolOutput, swage_core::ToolError>, AgentError> {
+        if skip_tool_permission_gate {
+            self.race_tool_dispatch(
+                dispatcher.dispatch_approved(
+                    &call.name,
+                    call.arguments.clone(),
+                    approved_ctx,
+                    &self.config.agent_id,
+                ),
+                call,
+                execution,
+                event_tx,
+                cancel_token,
+                dispatch_started_at,
+            )
+            .await
+        } else {
+            self.race_tool_dispatch(
+                dispatcher.dispatch(
+                    &call.name,
+                    call.arguments.clone(),
+                    approved_ctx,
+                    &self.config.agent_id,
+                ),
+                call,
+                execution,
+                event_tx,
+                cancel_token,
+                dispatch_started_at,
+            )
+            .await
+        }
+    }
+
+    /// Put a request beyond the session's grants to the judge and record the
+    /// judgement. No judge, or a judgement that cannot be recorded, reads as
+    /// a refusal: a request nobody answered for never runs, and a judgement
+    /// that leaves no record is one the operator cannot see.
+    async fn judge_reach(
+        &self,
+        call: &ToolCall,
+        execution: &TurnExecutionContext,
+        reach: &crate::judge::RequestedReach,
+    ) -> Result<crate::judge::Judgement, AgentError> {
+        use crate::judge::{JudgeRequest, Judgement};
+
+        let justification = crate::judge::justification_from_arguments(&call.arguments);
+        let mut judgement = match &self.request_judge {
+            Some(judge) => {
+                judge
+                    .judge(JudgeRequest {
+                        session_id: execution.session_id,
+                        turn_id: execution.turn_id,
+                        agent_id: self.config.agent_id.clone(),
+                        tool_name: call.name.clone(),
+                        arguments: call.arguments.clone(),
+                        justification: justification.clone(),
+                        reach: reach.clone(),
+                    })
+                    .await
+            }
+            None => Judgement::unavailable("no judge is configured for this session"),
+        };
+        let crate::judge::RequestedReach::Location { path, access } = reach;
+        // The judgement is part of the local record (C15, C68): it is written
+        // before the request can run, and a failed write refuses the request.
+        let recorded = self
+            .storage
+            .create_audit_event(swage_storage::NewAuditEvent {
+                id: Uuid::new_v4().to_string(),
+                session_id: Some(execution.session_id),
+                entity_kind: "turn".into(),
+                entity_id: execution.turn_id.to_string(),
+                event_kind: "request_judged".into(),
+                summary: format!(
+                    "{} {} {path} for {}: {}",
+                    judgement.verdict.as_str(),
+                    access,
+                    call.name,
+                    judgement.reason
+                ),
+                metadata: serde_json::json!({
+                    "tool": call.name,
+                    "call_id": call.call_id,
+                    "arguments": call.arguments,
+                    "reach": { "kind": "location", "path": path, "access": access },
+                    "justification": justification,
+                    "verdict": judgement.verdict.as_str(),
+                    "reason": judgement.reason,
+                    "judge": judgement.judge,
+                }),
+            })
+            .await;
+        if let Err(error) = recorded {
+            tracing::error!(%error, tool = %call.name, "request judgement could not be recorded; refusing the request");
+            judgement =
+                Judgement::unavailable(format!("the judgement could not be recorded ({error})"));
+        }
+        Ok(judgement)
     }
 
     /// Dispatch a single tool call through the dispatcher, handling the
@@ -2367,7 +2537,7 @@ impl Agent {
                 let policy = timeout_policy.unwrap_or_default();
                 let prompt = format!("Approval required to execute tool: {}", call.name);
 
-                if approval_scope.should_skip_gate() {
+                if approval_scope.runs_granted_calls_unreviewed() {
                     match self
                         .race_tool_dispatch(
                             dispatcher.dispatch_approved(
@@ -3121,3 +3291,345 @@ impl Agent {
 }
 
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod judge_seam_tests {
+    //! An unattended turn's request beyond its grants goes to the judge and
+    //! fails closed without a yes; a granted call still runs unreviewed.
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use serde_json::{Value, json};
+    use swage_core::ToolError;
+    use swage_safety::LeakDetector;
+    use swage_storage::model::{NewSession, NewThread, NewTurn};
+    use swage_storage::store::{AuditStore, SessionStore, ThreadStore, TopicStore, TurnStore};
+    use swage_storage::{SqliteStorage, Storage, TurnState};
+    use swage_tool::context::ToolContext;
+    use swage_tool::tool::Tool;
+
+    use super::*;
+    use crate::judge::{
+        JudgeRequest, JudgeVerdict, Judgement, RequestJudge, RequestedReach, SharedRequestJudge,
+    };
+
+    const OUTSIDE: &str = "/srv/notes/plan.md";
+
+    /// Reads a path only once the context grants it; otherwise asks for the
+    /// location, as the native file tools do.
+    struct OutsideReadTool;
+
+    #[async_trait]
+    impl Tool for OutsideReadTool {
+        fn name(&self) -> &str {
+            "outside_read"
+        }
+        fn description(&self) -> &str {
+            "reads a file (test double)"
+        }
+        fn parameters(&self) -> Value {
+            json!({ "type": "object", "properties": { "path": { "type": "string" }, "justification": { "type": "string" } }, "required": ["path"] })
+        }
+        async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+            let path = params["path"].as_str().unwrap_or_default().to_owned();
+            if ctx
+                .allowed_paths()
+                .iter()
+                .any(|granted| granted.to_str() == Some(path.as_str()))
+            {
+                Ok(json!({ "read": path }))
+            } else {
+                Err(ToolError::RequiresLocationApproval {
+                    name: "outside_read".into(),
+                    path,
+                    access: "read".into(),
+                    timeout_secs: None,
+                    timeout_policy: None,
+                })
+            }
+        }
+    }
+
+    /// Answers every request with the scripted judgement and keeps what it
+    /// was asked.
+    struct ScriptedJudge {
+        judgement: Judgement,
+        asked: Mutex<Vec<JudgeRequest>>,
+    }
+
+    #[async_trait]
+    impl RequestJudge for ScriptedJudge {
+        async fn judge(&self, request: JudgeRequest) -> Judgement {
+            self.asked.lock().expect("asked").push(request);
+            self.judgement.clone()
+        }
+    }
+
+    fn scripted(verdict: JudgeVerdict, reason: &str) -> Arc<ScriptedJudge> {
+        Arc::new(ScriptedJudge {
+            judgement: Judgement {
+                verdict,
+                reason: reason.into(),
+                judge: Some("judge".into()),
+            },
+            asked: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn outside_read_dispatcher() -> ToolDispatcher {
+        let mut registry = swage_tool::registry::ToolRegistry::new();
+        registry
+            .register(Arc::new(OutsideReadTool))
+            .expect("registration should succeed");
+        ToolDispatcher::new(
+            Arc::new(registry),
+            swage_tool::permission::PermissionConfig {
+                allow: vec!["*".into()],
+                deny: vec![],
+                bundles: std::collections::HashMap::new(),
+                require_approval: vec![],
+            },
+            Arc::new(swage_tool::rate_limit::RateLimiter::new()),
+            swage_tool::rate_limit::RateLimitConfig::default(),
+            Arc::new(LeakDetector::default()),
+            false,
+        )
+    }
+
+    /// An unattended agent (prompts disabled, permissions not bypassed) over
+    /// in-memory storage, judged by `judge` when one is given.
+    async fn unattended_fixture(
+        judge: Option<SharedRequestJudge>,
+    ) -> (Agent, TurnExecutionContext, Arc<SqliteStorage>) {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("in-memory storage"));
+        let topic = storage.general_scope().await.expect("default topic");
+        let session = storage
+            .create_session(NewSession {
+                agent_id: "agent".into(),
+                ..swage_storage::fixtures::new_session(topic.id)
+            })
+            .await
+            .expect("session");
+        let thread = ThreadStore::create(
+            storage.as_ref(),
+            NewThread {
+                session_id: session.id,
+                agent_id: "agent".into(),
+            },
+        )
+        .await
+        .expect("thread");
+        let turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "agent".into(),
+                state: TurnState::Pending,
+                user_input: Some("read the plan".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .expect("turn");
+        let mut config = AgentConfig::new("agent").with_workspace("/work", vec!["/work".into()]);
+        config.approval_prompts_enabled = false;
+        let agent = Agent {
+            config,
+            provider: Arc::new(swage_provider::UnsupportedLlmProvider::new("not called")),
+            storage: Arc::clone(&storage) as Arc<dyn Storage>,
+            tool_dispatcher: Some(outside_read_dispatcher()),
+            hook_registry: None,
+            leak_detector: None,
+            approval_registrar: None,
+            request_judge: judge,
+            delegation_handler: None,
+            context_transfer_config: swage_config::ContextTransferConfig::default(),
+        };
+        let execution = TurnExecutionContext {
+            session_id: session.id,
+            thread_id: thread.id,
+            turn_id: turn.id,
+            topic_id: Some(topic.id),
+        };
+        (agent, execution, storage)
+    }
+
+    async fn dispatch_outside_read(
+        agent: &Agent,
+        execution: &TurnExecutionContext,
+    ) -> ToolDispatchResult {
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut scope = TurnApprovalScope::default();
+        scope.mark_unattended();
+        agent
+            .dispatch_tool_call(
+                &ToolCall {
+                    call_id: "call-1".into(),
+                    name: "outside_read".into(),
+                    arguments: json!({ "path": OUTSIDE, "justification": "the plan the task is about" }),
+                },
+                execution,
+                &[],
+                &event_tx,
+                &tokio_util::sync::CancellationToken::new(),
+                &mut scope,
+            )
+            .await
+            .expect("dispatch settles")
+    }
+
+    async fn recorded_judgement(
+        storage: &SqliteStorage,
+        execution: &TurnExecutionContext,
+    ) -> Value {
+        let events = storage
+            .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                session_id: Some(execution.session_id),
+                event_kind: Some("request_judged".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("audit read");
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one judgement is recorded: {events:?}"
+        );
+        assert_eq!(events[0].entity_kind, "turn");
+        assert_eq!(events[0].entity_id, execution.turn_id.to_string());
+        events[0].metadata.clone()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_allowed_request_runs_once_with_the_location_and_says_so() {
+        let judge = scripted(JudgeVerdict::Allowed, "the task names this plan");
+        let (agent, execution, storage) = unattended_fixture(Some(judge.clone())).await;
+
+        let result = dispatch_outside_read(&agent, &execution).await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(result.status, "success");
+        assert_eq!(
+            serde_json::from_str::<Value>(&result.content).expect("tool payload"),
+            json!({ "read": OUTSIDE })
+        );
+        let note = result
+            .approval_note
+            .as_deref()
+            .expect("the judge's note leads the result");
+        assert!(
+            note.contains("The judge allowed this call to read `/srv/notes/plan.md`"),
+            "{note}"
+        );
+        assert!(note.contains("granted locations are unchanged"));
+        // The grant itself did not widen: the agent's configured paths are as they were.
+        assert_eq!(
+            agent.config.allowed_paths,
+            vec![std::path::PathBuf::from("/work")]
+        );
+
+        let asked = judge.asked.lock().expect("asked");
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].tool_name, "outside_read");
+        assert_eq!(
+            asked[0].justification.as_deref(),
+            Some("the plan the task is about")
+        );
+        assert_eq!(
+            asked[0].reach,
+            RequestedReach::Location {
+                path: OUTSIDE.into(),
+                access: "read".into()
+            }
+        );
+
+        let recorded = recorded_judgement(&storage, &execution).await;
+        assert_eq!(recorded["verdict"], "allowed");
+        assert_eq!(recorded["reason"], "the task names this plan");
+        assert_eq!(recorded["judge"], "judge");
+        assert_eq!(recorded["justification"], "the plan the task is about");
+        assert_eq!(recorded["reach"]["path"], OUTSIDE);
+        assert_eq!(recorded["arguments"]["path"], OUTSIDE);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_request_does_not_run_and_the_model_reads_the_reason() {
+        let judge = scripted(JudgeVerdict::Refused, "the task never named this path");
+        let (agent, execution, storage) = unattended_fixture(Some(judge)).await;
+
+        let result = dispatch_outside_read(&agent, &execution).await;
+
+        assert!(result.is_error);
+        assert_eq!(result.status, "refused");
+        assert!(result.execution_prevented);
+        assert!(result.approval_note.is_none());
+        assert!(
+            result
+                .content
+                .contains("`outside_read` may not read `/srv/notes/plan.md`")
+                && result
+                    .content
+                    .contains("the judge refused it (the task never named this path)"),
+            "{}",
+            result.content
+        );
+        let recorded = recorded_judgement(&storage, &execution).await;
+        assert_eq!(recorded["verdict"], "refused");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn with_no_judge_the_request_fails_closed_and_is_still_recorded() {
+        let (agent, execution, storage) = unattended_fixture(None).await;
+
+        let result = dispatch_outside_read(&agent, &execution).await;
+
+        assert!(result.is_error);
+        assert_eq!(result.status, "refused");
+        assert!(result.execution_prevented);
+        assert!(
+            result
+                .content
+                .contains("no judge could allow it (no judge is configured for this session)"),
+            "{}",
+            result.content
+        );
+        let recorded = recorded_judgement(&storage, &execution).await;
+        assert_eq!(recorded["verdict"], "unavailable");
+        assert_eq!(recorded["judge"], Value::Null);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_person_or_bypass_that_approved_every_gate_is_not_second_guessed() {
+        // skip_permissions pre-approves every gate: the judge is never asked.
+        let judge = scripted(JudgeVerdict::Refused, "would refuse");
+        let (mut agent, execution, storage) = unattended_fixture(Some(judge.clone())).await;
+        agent.config.skip_permissions = true;
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut scope = TurnApprovalScope::default();
+        scope.approve_remaining_gates();
+        let result = agent
+            .dispatch_tool_call(
+                &ToolCall {
+                    call_id: "call-1".into(),
+                    name: "outside_read".into(),
+                    arguments: json!({ "path": OUTSIDE }),
+                },
+                &execution,
+                &[],
+                &event_tx,
+                &tokio_util::sync::CancellationToken::new(),
+                &mut scope,
+            )
+            .await
+            .expect("dispatch settles");
+        assert_eq!(result.status, "success");
+        assert!(judge.asked.lock().expect("asked").is_empty());
+        let events = storage
+            .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                session_id: Some(execution.session_id),
+                event_kind: Some("request_judged".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("audit read");
+        assert!(events.is_empty());
+    }
+}

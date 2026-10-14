@@ -39,6 +39,11 @@ pub const LOCATION_TASK_PROMPT: &str = "task.prompt";
 /// under. The authored default is the first variant.
 pub const LOCATION_MEMORY_CURATOR_PROMPT: &str = "prompts.memory_curator";
 
+/// The request judge's instruction: what the judging model is told before it
+/// decides a request beyond a session's grants. The authored default is the
+/// first variant; a candidate decision model's instruction registers here.
+pub const LOCATION_REQUEST_JUDGE_PROMPT: &str = "prompts.request_judge";
+
 /// Why the selected variant was selected. Recorded verbatim; the reasons are
 /// the audit trail's vocabulary, so they name situations, not code paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

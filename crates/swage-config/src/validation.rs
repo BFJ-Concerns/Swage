@@ -2,7 +2,7 @@ use crate::error::{ConfigProblem, ConfigProblemKind};
 use crate::merge::PartialConfig;
 use crate::model::ResolvedConfig;
 use std::path::Path;
-use swage_protocol::client::settings::{MemoryConfig, SessionsConfig};
+use swage_protocol::client::settings::{JudgeConfig, MemoryConfig, SessionsConfig};
 use swage_protocol::client::settings_section::{
     SettingsProblem, SettingsSection, SettingsSectionSchema,
 };
@@ -51,6 +51,7 @@ where
 const DECLARED_SECTIONS: &[&dyn DeclaredSection] = &[
     &Declared::<SessionsConfig>(std::marker::PhantomData),
     &Declared::<MemoryConfig>(std::marker::PhantomData),
+    &Declared::<JudgeConfig>(std::marker::PhantomData),
 ];
 
 fn declared_section(name: &str) -> Option<&'static dyn DeclaredSection> {

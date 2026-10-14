@@ -753,7 +753,7 @@ impl Default for SchedulingConfig {
 
 // Declared once in swage-protocol: the wire type and the resolved config
 // type are one definition, with the partial, schema and semantics beside it.
-pub use swage_protocol::client::settings::{MemoryConfig, SessionsConfig};
+pub use swage_protocol::client::settings::{JudgeConfig, MemoryConfig, SessionsConfig};
 
 /// Model routes for voice. Voice speaks only to the default provider's
 /// endpoint; each id is the model that endpoint serves for that audio API.
@@ -868,6 +868,8 @@ pub struct ResolvedConfig {
     pub sessions: SessionsConfig,
     /// `[memory]` — when the curator passes over an attended conversation.
     pub memory: MemoryConfig,
+    /// `[judge]` — the model that decides a request beyond a session's grants.
+    pub judge: JudgeConfig,
     /// Model routes for transcription and speech synthesis.
     pub voice: VoiceConfig,
     /// Named generation parameter presets available to model entries.

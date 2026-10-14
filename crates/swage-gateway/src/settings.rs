@@ -132,6 +132,7 @@ pub async fn load_settings(state: &AppState) -> Result<SettingsResponse, ApiErro
         communication: try_wire_from_config(config.communication)?,
         sessions: config.sessions,
         memory: config.memory,
+        judge: config.judge,
         voice: try_wire_from_config(config.voice)?,
         restart_required: state.restart_required(),
         can_restart: state.managed_gateway,
@@ -160,6 +161,7 @@ pub async fn save_settings(
         communication,
         sessions,
         memory,
+        judge,
         voice,
     } = request;
 
@@ -234,6 +236,7 @@ pub async fn save_settings(
             communication: communication.clone(),
             sessions: sessions.clone(),
             memory: memory.clone(),
+            judge: judge.clone(),
             voice: voice.clone(),
         },
     )?;
@@ -314,6 +317,7 @@ pub async fn save_settings(
         communication.unwrap_or_else(|| runtime_config.communication.clone());
     runtime_config.sessions = sessions.unwrap_or_else(|| runtime_config.sessions.clone());
     runtime_config.memory = memory.unwrap_or_else(|| runtime_config.memory.clone());
+    runtime_config.judge = judge.unwrap_or_else(|| runtime_config.judge.clone());
     runtime_config.voice = voice.unwrap_or_else(|| runtime_config.voice.clone());
 
     let provider = crate::startup::create_provider(&runtime_config, &state.secret_manager).await;
@@ -625,6 +629,7 @@ fn settings_response_from_saved_config(
         communication: wire_from_config(active_config.communication),
         sessions: active_config.sessions,
         memory: active_config.memory,
+        judge: active_config.judge,
         voice: wire_from_config(active_config.voice),
         restart_required: true,
         can_restart: state.managed_gateway,
@@ -803,6 +808,7 @@ fn validate_settings_request(request: &SaveSettingsRequest) -> Result<(), ApiErr
     // refuse.
     refuse_declared_section_problems(request.sessions.as_ref())?;
     refuse_declared_section_problems(request.memory.as_ref())?;
+    refuse_declared_section_problems(request.judge.as_ref())?;
     if let Some(voice) = &request.voice
         && [&voice.transcription_model, &voice.speech_model]
             .into_iter()
@@ -853,6 +859,7 @@ struct RuntimeSectionUpdates {
     communication: Option<swage_config::CommunicationConfig>,
     sessions: Option<swage_config::SessionsConfig>,
     memory: Option<swage_config::MemoryConfig>,
+    judge: Option<swage_config::JudgeConfig>,
     voice: Option<swage_config::VoiceConfig>,
 }
 
@@ -871,6 +878,7 @@ fn apply_runtime_settings_to_partial(
         communication,
         sessions,
         memory,
+        judge,
         voice,
     } = updates;
     // A declared section's partial is its own `From`: no field is restated.
@@ -879,6 +887,9 @@ fn apply_runtime_settings_to_partial(
     }
     if let Some(memory) = memory {
         partial.memory = Some(memory.into());
+    }
+    if let Some(judge) = judge {
+        partial.judge = Some(judge.into());
     }
     if let Some(voice) = voice {
         partial.voice = Some(swage_config::merge::PartialVoiceConfig {
@@ -1939,6 +1950,7 @@ mod tests {
             communication: None,
             sessions: None,
             memory: None,
+            judge: None,
             voice: None,
         };
 
@@ -2042,6 +2054,7 @@ mod tests {
             communication: None,
             sessions: None,
             memory: None,
+            judge: None,
             voice,
         }
     }
@@ -2241,6 +2254,7 @@ mod tests {
             communication: None,
             sessions: None,
             memory: None,
+            judge: None,
             voice: None,
         };
         save_settings(&state, request)
@@ -2398,6 +2412,7 @@ mod tests {
             communication: None,
             sessions: None,
             memory: None,
+            judge: None,
             voice: None,
         };
 
@@ -2570,6 +2585,7 @@ mod tests {
             communication: Some(wire_from_config(communication.clone())),
             sessions: None,
             memory: None,
+            judge: None,
             voice: None,
         };
 
@@ -2617,6 +2633,7 @@ mod tests {
             communication: None,
             sessions: None,
             memory: None,
+            judge: None,
             voice: None,
         };
 

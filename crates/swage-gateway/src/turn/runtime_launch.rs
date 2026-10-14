@@ -196,6 +196,9 @@ pub(super) async fn launch_turn_runtime(
             .storage(state.storage.clone())
             .tool_dispatcher(dispatcher)
             .approval_registrar(build_approval_registrar(state.approval_channels.clone()))
+            .request_judge(Arc::new(crate::request_judge::GatewayRequestJudge::new(
+                state.clone(),
+            )))
             .delegation_handler(Arc::new(GatewayDelegationHandler::new(state.clone())))
             .context_transfer_config(config.communication.context_transfer.clone());
         if let Some(hook_registry) = state.hook_registry.clone() {
