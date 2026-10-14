@@ -10,6 +10,44 @@ Land Direct* below) and
 follows the annexe `config.toml` knobs (`merge_policy`, `push_policy`).
 Everything after the pipeline's landing stage is yours:
 
+## The Forge Route
+
+Every PR act below — opening, reading back, de-WIPing, re-blocking,
+closing, wiring dependencies — runs against the forge the project's
+primary repository lives on, and the route is read, never assumed. The
+annexe's `config.toml` names it as `forge.primary = "<forge>:<owner>/<repo>"`;
+where that key is absent, read `git remote get-url origin` in the code repo:
+a `github.com` remote is forge `github`, and any other host is a Forgejo
+instance whose alias is that host (the alias keys a section of
+`~/.config/forgejo/instances.toml` carrying `url` and `token`). The
+`reviewers` list in the same file names the automated reviewers a head must
+pass; how each reports is that reviewer's own contract.
+
+- **github** — act through `gh`, always with `--repo <owner>/<repo>`:
+  open with `gh pr create --base <base> --head <branch> --title "WIP: …"
+  --body-file <pr.md>`; read back with `gh pr view <n> --json
+  number,title,body,headRefName,baseRefName,state,mergedAt,mergeCommit,url`;
+  de-WIP and re-block with `gh pr edit <n> --title …`; close unmerged
+  with `gh pr close <n> --comment "<reason>"`; switch on
+  delete-branch-on-merge with `gh repo edit --delete-branch-on-merge`.
+  GitHub has no PR-dependency field: an ordering that targeting cannot
+  express is stated in the PR body (`Depends on #n`) and checked by
+  reading the dependency's state before landing. Authentication is `gh`'s
+  own; a failure is reported as `forge auth`, never worked around.
+- **a Forgejo alias** — act through the instance's API at `<url>/api/v1`:
+  `POST /repos/<owner>/<repo>/pulls` to open, `GET /repos/<owner>/<repo>/pulls/<n>`
+  to read back, `PATCH` the same path to retitle or close, and the
+  repository settings endpoint for delete-branch-on-merge. The token is
+  read into the request at execution — `-H "Authorization: token $(cat …)"`
+  or a variable loaded the same way — never printed into a transcript or
+  pasted as a literal. Forgejo carries PR dependencies natively; wire and
+  read them back there.
+
+On either forge the branch is pushed as a tracked branch (`git push -u
+origin <branch>`) before the PR is opened; `refs/for/*` (the AGit flow) is
+forbidden everywhere — it leaves no tracked branch and cannot carry a
+multiline body.
+
 ## PR-Mode Topology
 
 Under PR mode, the handover ref is the structural branch, and it is the

@@ -154,7 +154,7 @@ and do nothing — no investigation, no dispatch — until the user answers.
 
 - **No annexe repo** → greenfield full capture. Before concluding greenfield,
   confirm none exists remotely either: the scaffolder (The Annexe, below)
-  probes the Forgejo instance and clones an annexe that exists there but isn't
+  probes the project's forge and clones an annexe that exists there but isn't
   checked out locally — that case is an update conversation missing its clone,
   not a green field. Capture-time is when
   anchors set hardest — when the user arrives with a load-bearing *how* where a
@@ -299,13 +299,13 @@ is written into the log itself. Annotating an
   proportionate sign-off. Small, but never a side door.
 ## The Annexe
 
-Each code repo `foo` pairs with a working repo `foo-Annexe` on the Forgejo
-instance, checked out as a sibling directory. Root = contract; the build
+Each code repo `foo` pairs with a working repo `foo-Annexe` on the same forge
+account as the code repo, checked out as a sibling directory. Root = contract; the build
 subdirectory (`build/`, or a legacy `maestro/`) = scratch.
 
 | File | Role |
 |------|------|
-| `README.md` | The commission — this skill's artifact. Forgejo renders it on the repo front surface; agents read READMEs by instinct. |
+| `README.md` | The commission — this skill's artifact. The forge renders it on the repo front surface; agents read READMEs by instinct. |
 | `IDEAS.md` | The user's zero-ceremony inbox: anything they want to bring to a commission pass — feature ideas, open questions, things to look into with an agent later. Written by the user alone; processed only by a commission conversation. Agents route idea-shaped findings through their own reports for the user to triage in. |
 | `ISSUES.md` | The shared find-ingest log: bugs and tangential finds written down in passing, appended by agents and user alike, with no judgement of scope or fix — each entry a reporter's unverified claim until triage checks it against the code. This skill is its triage owner and works the whole log — destination finds into the README, decided work into `TASKS.md` kind-tagged, idea-shaped finds surfaced to the user, friction-shaped entries (no defect, just a change that fought back) moved to `FRICTION.md`, stale entries struck. The orchestrator takes the unambiguous, clearly-journey finds itself between commission passes to keep them moving — its habit, not a disposition a triage may choose; every find that needs a scope or intent call waits for this triage, and a commission pass never leaves a find behind for the orchestrator. A disposed entry is deleted from the log, the commit message carrying its disposition. |
 | `FRICTION.md` | The friction ledger: dated observations of a codebase area resisting change — area, symptom, expected-versus-actual — appended by agents whenever a change fought back harder than the work warranted. Reviewed by commission updates for recurrence, which is assessed against the repo's history and answered with a scoped refactor proposal to the user; entries persist as the recurrence evidence — pruned only when a commission pass promotes a case into decided work (deleted with the promotion) or finds an entry's area gone (deleted as stale) — with assessment conclusions recorded beneath the entries they judged. |
@@ -350,11 +350,13 @@ Once the name is settled, run the bundled scaffolder rather than hand-typing
 the ritual:
 
 ```bash
-scripts/create-annexe.sh --annexe-dir ../foo-Annexe [--remote <host-alias>:<account>]
+scripts/create-annexe.sh --annexe-dir ../foo-Annexe [--remote github:<owner> | <host-alias>:<account>]
 ```
 
 `--remote` is optional. A project whose code repo has a forge remote passes
-the same account; a local project with no remote omits it, and the
+the same account in the forge's own form — `github:<owner>` for a GitHub
+account or organisation, `<host-alias>:<account>` for a Forgejo instance
+reached through that SSH host alias; a local project with no remote omits it, and the
 scaffolder then creates a local-only annexe — no probe, no clone, no push —
 which gains a remote later with an ordinary `git remote add` and push.
 Never hand-build a substitute annexe because the project has no remote.
@@ -385,14 +387,16 @@ tools that read that file) plus a `config.toml` stub and
 empty `IDEAS.md`, `ISSUES.md`, `TASKS.md`, `FRICTION.md`, `held/`, and
 `shed/`, writes the code repo's uncommitted
 `ANNEXE.local.md` pointer when a code repo exists, commits, and — when a
-remote was given — pushes; the forge has push-to-create enabled, so that first
-push makes the private repo.
+remote was given — creates the private remote repo and pushes: on GitHub
+through `gh repo create --private`, on a Forgejo instance through its
+push-to-create, so the first push makes the repo.
 Pass `--merge-policy` and `--push-policy` once they are settled, or write
 `merge_policy` / `push_policy` into `config.toml` when the conversation lands
 them.
 
-Pick `--remote` as the same forge account the code repo uses (its SSH host
-alias and account). Greenfield with no code repo: ask the operator which
+Pick `--remote` as the same forge account the code repo uses — read it from
+`git remote get-url origin`: a github.com remote gives `github:<owner>`, any
+other host gives `<host-alias>:<account>`. Greenfield with no code repo: ask the operator which
 account the project belongs to, or whether the annexe stays local for now.
 
 **The repo exists from setup; the commission lands signed.** That first push

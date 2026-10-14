@@ -36,12 +36,18 @@
 #       [--push-policy push-on-land|hold-for-user]
 #
 #   --annexe-dir   Where the annexe lives (e.g. ../foo-Annexe). Required.
-#   --remote       Forge account spec, "<host-alias>:<account>" — the SSH host
-#                  alias and account the code repo uses. The push URL is
-#                  "<remote>/<annexe-name>.git". Optional: omit it for a
-#                  project with no forge remote, and the annexe is created
-#                  locally with nothing pushed (add a remote later with
-#                  `git remote add origin <url>` and `git push -u origin main`).
+#   --remote       Forge account spec, in the forge's own form:
+#                    "github:<owner>"          — a GitHub account or organisation;
+#                                               the repo is created with `gh` and
+#                                               pushed over SSH
+#                                               (git@github.com:<owner>/<name>.git)
+#                    "<host-alias>:<account>"  — a Forgejo instance reached through
+#                                               that SSH host alias; the first push
+#                                               creates the repo (push-to-create).
+#                  Optional: omit it for a project with no forge remote, and the
+#                  annexe is created locally with nothing pushed (add a remote
+#                  later with `git remote add origin <url>` and
+#                  `git push -u origin main`).
 #   --code-dir     The code repo whose local annexe pointer to write. If
 #                  omitted, derived as the sibling without the -Annexe suffix; the
 #                  pointer is written only when that directory is a git repo
@@ -93,8 +99,28 @@ parent="$(cd "$(dirname "$annexe_dir")" 2>/dev/null && pwd)" \
   || die "parent of --annexe-dir does not exist: $(dirname "$annexe_dir")"
 name="$(basename "$annexe_dir")"
 annexe_dir="$parent/$name"
+# The forge decides how the remote repo is probed and created. "github:<owner>"
+# routes through gh and an SSH push URL; any other spec is a Forgejo SSH host
+# alias and account, where git itself probes and push-to-create makes the repo.
+forge=""
 push_url=""
-[ -n "$remote" ] && push_url="$remote/$name.git"
+gh_repo=""
+if [ -n "$remote" ]; then
+  case "$remote" in
+    github:*)
+      forge=github
+      owner="${remote#github:}"
+      [ -n "$owner" ] || die "--remote github: needs an owner, e.g. github:my-org"
+      gh_repo="$owner/$name"
+      push_url="git@github.com:$gh_repo.git"
+      command -v gh >/dev/null 2>&1 || die "--remote github:<owner> needs the gh CLI on PATH, authenticated (gh auth status)"
+      ;;
+    *)
+      forge=forgejo
+      push_url="$remote/$name.git"
+      ;;
+  esac
+fi
 
 # Project name and code repo. The annexe name is conventionally <project>-Annexe;
 # derive the code repo from it only when that convention holds, so an oddly
@@ -130,6 +156,32 @@ elif [ -z "$push_url" ]; then
   echo "create-annexe: no annexe found and no remote given — initialising $annexe_dir locally."
   mkdir -p "$annexe_dir" || die "cannot create $annexe_dir — the location is not writable from here (a sandbox may confine writes to the project); have the parent directory or the empty sibling attached read-write, then re-run"
   git -C "$annexe_dir" init -b main >/dev/null
+elif [ "$forge" = github ]; then
+  # gh answers existence directly: exit 0 with the repo's name, or the GraphQL
+  # "Could not resolve to a Repository" error for an absent one. Any other
+  # failure (network, auth) is refused rather than read as absence.
+  if probe_err="$(gh repo view "$gh_repo" --json name 2>&1 >/dev/null)"; then
+    remote_exists=yes
+  else
+    case "$probe_err" in
+      *"Could not resolve to a Repository"*) remote_exists=no ;;
+      *) die "cannot tell whether $gh_repo exists on GitHub: ${probe_err}. Refusing to scaffold blindly — check gh auth status and connectivity, then re-run." ;;
+    esac
+  fi
+
+  if [ "$remote_exists" = yes ]; then
+    mode="repair"
+    if [ -e "$annexe_dir" ] && [ -n "$(ls -A "$annexe_dir" 2>/dev/null)" ]; then
+      die "an annexe exists on the remote, but $annexe_dir already holds files and is not a git repo. Move or remove that directory, then re-run to clone the real annexe — refusing to clone over it."
+    fi
+    echo "create-annexe: remote annexe exists — cloning $push_url."
+    git clone "$push_url" "$annexe_dir"
+  else
+    mode="create"
+    echo "create-annexe: no annexe found — initialising $annexe_dir."
+    mkdir -p "$annexe_dir" || die "cannot create $annexe_dir — the location is not writable from here (a sandbox may confine writes to the project); have the parent directory or the empty sibling attached read-write, then re-run"
+    git -C "$annexe_dir" init -b main >/dev/null
+  fi
 else
   if probe_err="$(git ls-remote "$push_url" 2>&1 >/dev/null)"; then
     remote_exists=yes
@@ -147,7 +199,7 @@ else
   fi
 
   if [ "$remote_exists" = yes ]; then
-    # The annexe exists on Forgejo but isn't checked out here: an update
+    # The annexe exists on the forge but isn't checked out here: an update
     # conversation missing its clone, not a green field. Clone rather than init.
     mode="repair"
     # git clone fatals into a non-empty directory. A stray half-built dir with
@@ -339,10 +391,16 @@ if [ -z "$push_url" ]; then
   exit 0
 fi
 
-# Push-to-create: the instance has push-to-create enabled, so the first push to
-# a not-yet-existent Forgejo repo creates it, private by default. A failure here
-# leaves the work safely committed locally — re-running just retries the push.
-#
+# Making the remote repo. On GitHub the repo is created explicitly, private,
+# before the push (gh refuses an existing name, so this runs only on the create
+# path). On a Forgejo instance the first push creates it (push-to-create,
+# private by default). A failure here leaves the work safely committed
+# locally — re-running just retries.
+if [ "$forge" = github ] && [ "$mode" = create ]; then
+  echo "create-annexe: creating private repository $gh_repo on GitHub."
+  gh repo create "$gh_repo" --private --description "Planning annexe for $project: intent, ideas, issues and build state" >/dev/null
+fi
+
 # Push to the intended URL explicitly, never to whatever 'origin' happens to be
 # (a pre-existing local repo could carry an origin pointing elsewhere). Keep an
 # 'origin' remote for convenience when it is absent or already correct.
