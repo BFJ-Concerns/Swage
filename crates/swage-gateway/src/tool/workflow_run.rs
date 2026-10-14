@@ -22,7 +22,7 @@ impl Tool for WorkflowRunTool {
         "workflow_run"
     }
     fn description(&self) -> &str {
-        "Start either an available workflow by name or a newly authored workflow from JavaScript source. A request that an available workflow already serves — an unattended research sweep, say — is started here, by name, in the same turn it is asked for, rather than carried out conversationally first. Provide exactly one of name or source. Inline source inherits this session's dispatch bounds and cannot deliver outside the run; use wait=true only when this turn needs the final result. Before authoring source, activate the Workflow Authoring skill: it documents the whole script surface — agent, agentStart, wait, parallel, pipeline, workflow, gate, postEvent, awaitEvent, budget, the meta/defaults headers, and the determinism rules."
+        "Start either an available workflow by name or a newly authored workflow from JavaScript source. When a request is one an available workflow already serves — a research sweep, a gathering of sources on a subject, any unattended job a listed workflow does — this call is the first action of the turn: start it by name with the request's own words as its arguments, and reply with the run reference. Do not search, fetch, read, outline or ask about scope first; the workflow does the work with its own workers, and gathering in conversation before dispatching is the mistake to avoid. Provide exactly one of name or source. Inline source inherits this session's dispatch bounds and cannot deliver outside the run; use wait=true only when this turn needs the final result. Before authoring source, activate the Workflow Authoring skill: it documents the whole script surface — agent, agentStart, wait, parallel, pipeline, workflow, gate, postEvent, awaitEvent, budget, the meta/defaults headers, and the determinism rules."
     }
     fn parameters(&self) -> Value {
         json!({
@@ -153,6 +153,18 @@ mod tests {
         NewSession, SessionStore, SqliteStorage, Storage, TopicStore, WorkflowStore,
     };
     use swage_tool::context::MockToolContext;
+
+    #[test]
+    fn the_description_makes_a_served_request_the_turns_first_action() {
+        let description = WorkflowRunTool.description();
+        assert!(description.contains("this call is the first action of the turn"));
+        assert!(
+            description.contains("Do not search, fetch, read, outline or ask about scope first")
+        );
+        assert!(
+            description.contains("start it by name with the request's own words as its arguments")
+        );
+    }
 
     #[tokio::test]
     async fn dispatcher_returns_actionable_error_for_ambiguous_workflow_input() {

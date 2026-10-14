@@ -248,6 +248,43 @@ mod tests {
     /// waits on a decision: it must name the hold primitive, its verdict
     /// rule, and how a granted agent answers.
     #[test]
+    fn the_research_skill_makes_a_sweep_request_a_first_action_dispatch() {
+        let skill = include_str!("../../../shipped/skills/research/SKILL.md");
+        assert!(
+            skill.contains(
+                "your first and\nonly action is `workflow_run` with `name: \"research-sweep\"`"
+            ),
+            "a research request dispatches the sweep as the turn's first action"
+        );
+        assert!(
+            skill.contains("no\n`web_search`, no `url_fetch`"),
+            "and names the inline gathering it forbids"
+        );
+        assert!(
+            skill.contains("`workflow_run_status` with the\nrun reference as `run_id` returns the ended run with its `final_output`"),
+            "a finished sweep is delivered from the run record"
+        );
+        assert!(
+            skill.contains("The findings are never rebuilt from the knowledge base"),
+            "and never rebuilt another way"
+        );
+        assert!(
+            skill.contains(
+                "Your reply\nto a request for the findings is that text, whole and unaltered"
+            ),
+            "a request for the findings is answered with the record's own report, not a synthesis"
+        );
+        assert!(
+            skill.contains("Copy the `quote` character for character into a Markdown block quote"),
+            "delivered findings reproduce the validated quote exactly"
+        );
+        assert!(
+            skill.contains("You have no tool that reads a\ncitation by its id"),
+            "and say how a citation's context is reached"
+        );
+    }
+
+    #[test]
     fn the_authoring_skill_teaches_the_decision_hold() {
         let skill = include_str!("../../../shipped/skills/workflow-authoring/SKILL.md");
         assert!(

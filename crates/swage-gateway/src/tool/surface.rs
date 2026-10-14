@@ -478,7 +478,7 @@ impl Tool for SurfaceLibraryTool {
     }
 
     fn description(&self) -> &str {
-        "Find a reusable surface in the shared library, or add one to this session. Without arguments, returns the catalogue narrowed to this session's topic tags — each entry's name, its description of what it does and when to use it, and its tags; no module content is loaded. A session without a topic sees the whole library. Pass all: true to see the whole library regardless of topic tags, or tag to narrow to entries carrying that tag. Choose by reading the descriptions; a tag match is a hint, not a choice. Pass add with an entry id (and optionally title) to add that surface to this session as a new surface of its own — saved content comes with it only when the entry was saved from this session's own scope (its topic, or the general scope for a topicless session); from any other scope the shape comes over and the content starts empty for this session's own data."
+        "Find a reusable surface in the shared library, or add one to this session. These are two separate steps, and the second follows the person's word. Looking: without arguments, returns the catalogue narrowed to this session's topic tags — each entry's name, its description of what it does and when to use it, and its tags; no module content is loaded. A session without a topic sees the whole library. Pass all: true to see the whole library regardless of topic tags, or tag to narrow to entries carrying that tag. Choose by reading the descriptions; a tag match is a hint, not a choice. Adding: pass add with an entry id (and optionally title) to add that surface to this session as a new surface of its own. Call add only when the person has named the entry they want or has agreed to the one you proposed; when they asked you to look, or to describe your choice first, reply with the entry you would add and why, and leave add for the turn after they answer. A fitting entry in the catalogue is never by itself a reason to add it. Saved content comes with an added surface only when the entry was saved from this session's own scope (its topic, or the general scope for a topicless session); from any other scope the shape comes over and the content starts empty for this session's own data."
     }
 
     fn parameters(&self) -> Value {
@@ -600,6 +600,22 @@ mod tests {
     use crate::turn::tests::MockProvider;
 
     use super::*;
+
+    #[test]
+    fn the_library_description_presents_adding_as_a_step_after_the_persons_word() {
+        let description = SurfaceLibraryTool.description();
+        assert!(
+            description.contains(
+                "These are two separate steps, and the second follows the person's word."
+            )
+        );
+        assert!(description.contains("Call add only when the person has named the entry they want or has agreed to the one you proposed"));
+        assert!(
+            description.contains(
+                "A fitting entry in the catalogue is never by itself a reason to add it."
+            )
+        );
+    }
 
     /// A session of its own in a fresh topic, with a tool context speaking
     /// for an agent in it.

@@ -348,15 +348,51 @@ const findings = await agent(
 if (findings === null) {
   throw new Error("research-sweep could not validate its findings");
 }
+
+// The findings as the person reads them. The record renders its own report
+// so that delivery is reproduction, not composition: the findings are
+// numbered in record order, so "finding 3" names one entry for everyone;
+// every quote is block-quoted line for line as the citation validated it;
+// every trail is printed as recorded; and the source accounting and the
+// withheld claims follow the list, so a sweep never reads as more complete
+// than it was. A session answering "show the findings" presents this text
+// as it stands.
+function renderReport(gatheredSources, failedSources, organisedNote, validated) {
+  const lines = [`## Findings: ${subject}`, "", `Purpose: ${purpose}`, ""];
+  validated.findings.forEach((finding, index) => {
+    lines.push(`### ${index + 1}. ${finding.claim}`, "");
+    for (const quoteLine of finding.quote.split("\n")) lines.push(`> ${quoteLine}`);
+    lines.push(
+      "",
+      `Source: ${finding.source ?? "not recorded"}  `,
+      `Observation: ${finding.observation_id}  `,
+      `Citation: ${finding.citation_id}`,
+      "",
+    );
+  });
+  lines.push(`## Sources gathered (${gatheredSources.length})`, "");
+  for (const entry of gatheredSources) lines.push(`- ${entry.url} — observation ${entry.observation_id}`);
+  lines.push("", `## Sources that failed (${failedSources.length})`, "");
+  if (failedSources.length === 0) lines.push("None.");
+  for (const entry of failedSources) lines.push(`- ${entry.url}: ${entry.reason}`);
+  lines.push("", `## Claims withheld for want of support (${validated.withheld.length})`, "");
+  if (validated.withheld.length === 0) lines.push("None.");
+  for (const entry of validated.withheld) lines.push(`- ${entry.claim} — ${entry.reason}`);
+  lines.push("", "## Organising pass", "", organisedNote.note ?? JSON.stringify(organisedNote));
+  return lines.join("\n");
+}
+
+const gatheredSources = landed.map((entry) => ({
+  url: entry.url,
+  observation_id: entry.observation_id,
+}));
 return {
   subject,
   purpose,
-  gathered: landed.map((entry) => ({
-    url: entry.url,
-    observation_id: entry.observation_id,
-  })),
+  gathered: gatheredSources,
   failed_sources: failed,
   organised,
   findings: findings.findings,
   withheld_claims: findings.withheld,
+  rendered: renderReport(gatheredSources, failed, organised, findings),
 };

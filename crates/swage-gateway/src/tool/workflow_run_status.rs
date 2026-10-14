@@ -5,7 +5,9 @@
 //! pipelines are parked on a decision. This tool answers that from the record:
 //! every run in the caller's topic that has not ended, with the events it has
 //! posted that nobody has yet acted on — a pipeline's hold is such an event,
-//! carrying the hold's content and the verdicts it accepts.
+//! carrying the hold's content and the verdicts it accepts. A run named by id
+//! reads in any state, and once it has ended it carries what it returned, so
+//! a later turn delivers a finished run's result from the record.
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -43,18 +45,27 @@ async fn run_value(state: &AppState, run: &WorkflowRunRecord) -> Result<Value, S
         .list_pending_workflow_run_events(run.id)
         .await
         .map_err(|error| error.to_string())?;
-    Ok(json!({
+    let ended = is_terminal_run_state(&run.state);
+    let mut value = json!({
         "run_id": run.id,
         "script_name": run.script_name,
         "carrying_skill": run.carrying_skill,
         "task": run.task,
         "state": run.state,
-        "ended": is_terminal_run_state(&run.state),
+        "ended": ended,
         "wake_at": run.wake_at.map(|at| at.to_rfc3339()),
         "created_at": run.created_at.to_rfc3339(),
         "error_message": run.error_message,
         "pending_events": pending.iter().map(event_value).collect::<Vec<_>>(),
-    }))
+    });
+    // What the run returned is the result a later turn delivers — a research
+    // sweep's findings, a survey's digest. It exists only once the run has
+    // ended, and the open-run listing never carries ended runs, so it adds
+    // nothing to that listing's size.
+    if ended {
+        value["final_output"] = run.final_output.clone().unwrap_or(Value::Null);
+    }
+    Ok(value)
 }
 
 /// The open runs of the caller's topic, or one named run in any state.
@@ -114,9 +125,12 @@ impl Tool for WorkflowRunStatusTool {
          Without a run_id, lists every run that has not ended — running, parked, or \
          interrupted — with its undelivered events: a pipeline holding for a decision shows \
          the hold's content and the verdicts it accepts, and you answer it with \
-         run_event_post. With a run_id, reads that one run in any state. Use this at the \
-         start of a wake to find the decisions waiting for you, and after acting to confirm \
-         a run moved on."
+         run_event_post. With a run_id, reads that one run in any state; an ended run \
+         carries what it returned as final_output — a research sweep's findings, say — so a \
+         later request for a finished run's result is answered from here, never rebuilt from \
+         other sources. Use this at the start of a wake to find the decisions waiting for \
+         you, after acting to confirm a run moved on, and to deliver a finished run's \
+         result."
     }
 
     fn parameters(&self) -> Value {
@@ -125,7 +139,7 @@ impl Tool for WorkflowRunStatusTool {
             "properties": {
                 "run_id": {
                     "type": "string",
-                    "description": "Optional. Omit it (or leave it empty) to list every open run in the topic. Give a run's UUID to read that one run in any state.",
+                    "description": "Optional. Omit it (or leave it empty) to list every open run in the topic. Give a run's UUID to read that one run in any state, with what it returned once it has ended.",
                 },
             },
             "additionalProperties": false,
@@ -250,8 +264,9 @@ mod tests {
         )
         .await;
         let ended = run_in(&storage, topic.id, "docs-update").await;
+        let returned = json!({"findings": [{"claim": "the docs moved", "quote": "moved"}]});
         storage
-            .update_workflow_run_state(ended, "completed", None, None, None)
+            .update_workflow_run_state(ended, "completed", Some(returned.clone()), None, None)
             .await
             .expect("end the run");
         let session = session_in(&storage, topic.id).await;
@@ -270,6 +285,10 @@ mod tests {
         assert_eq!(runs[0]["run_id"], json!(holding));
         assert_eq!(runs[0]["state"], "running");
         assert_eq!(runs[0]["ended"], false);
+        assert!(
+            runs[0].get("final_output").is_none(),
+            "an open run has returned nothing yet: {result}"
+        );
         assert_eq!(runs[0]["pending_events"][0]["kind"], "decision.needed");
         assert_eq!(
             runs[0]["pending_events"][0]["payload"]["nonce"],
@@ -282,6 +301,10 @@ mod tests {
             .expect("named run");
         assert_eq!(one["runs"][0]["ended"], true);
         assert_eq!(one["runs"][0]["state"], "completed");
+        assert_eq!(
+            one["runs"][0]["final_output"], returned,
+            "an ended run named by id carries what it returned"
+        );
 
         // A model that sends the optional field as "" gets the listing, not
         // a parameter error it will retry forever.

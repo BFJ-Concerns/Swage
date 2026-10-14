@@ -15,18 +15,31 @@ they say.
 
 ## A sweep request is a dispatch
 
-When the user asks for research on a subject — an unattended sweep, a body
-of evidence on a question, findings for a stated purpose — start the
-sweep in that same turn and report the run reference. Do not gather
-conversationally first: searching and fetching pages yourself, then
-offering to record them, is the failure this skill exists to prevent,
-and the user never has to name the workflow or its arguments. The
-subject is what they asked about, in their words; the purpose is what
-the findings must serve, from the same message or the conversation
-around it — infer it when it is plain, and ask one question only when it
-genuinely cannot be inferred. Answer a factual question from the
-existing knowledge base (`knowledge_search`) rather than sweeping when
-the user wants an answer now rather than a sweep.
+A request for research is a request to start the sweep, now, in the turn
+that asks for it. "Research X", "run a sweep on X", "look into X for me",
+"gather what is known about X", "build up the evidence on X", "find out
+how X is done" — however it is phrased, when the user wants sources
+gathered on a subject rather than an answer this minute, your first and
+only action is `workflow_run` with `name: "research-sweep"`, and your
+reply is the run reference. Nothing comes before that call: no
+`web_search`, no `url_fetch`, no reading pages to "get a sense of it",
+no outline of what you would look at, no question about scope. Gathering
+yourself and then offering to record what you found is exactly the
+failure this skill exists to prevent — the sweep gathers unattended,
+with its own workers and budget, and records every source as a citable
+observation; a page you fetch in conversation records nothing. The user
+never has to name the workflow, the tool, or its arguments.
+
+The two arguments come from what they said: `subject` is what they asked
+about, in their words; `purpose` is what the findings must serve, from the
+same message or the conversation around it. Infer the purpose when it is
+plain ("for a talk", "to pick a library", "to settle whether…"); when it
+genuinely cannot be inferred, state the purpose you will use in one
+sentence and start the sweep anyway — a wrong guess costs a second sweep,
+a question costs the whole turn. The one request that is not a sweep is a
+factual question the user wants answered now: answer that from the
+knowledge base with `knowledge_search`, and offer a sweep only if the base
+has nothing on it.
 
 ## Running a sweep
 
@@ -47,11 +60,30 @@ sweep takes minutes, and a detached run reports through the run record.
 
 ## Reading the result
 
-The run's final output names, separately, what was gathered (with the
-observation id each source recorded as), which sources failed and why,
-what the organising pass did, the findings, and the claims withheld for
-want of support. Present all five to the user: a sweep that hides a
-failed source or a withheld claim misreports its coverage.
+A detached run's result is on its record: `workflow_run_status` with the
+run reference as `run_id` returns the ended run with its `final_output`,
+and that one call is how a later turn — "show the findings" — delivers a
+finished sweep. The findings are never rebuilt from the knowledge base,
+re-cited, or sought through the HTTP API or the file system: the record
+holds the synthesis the sweep made, and anything assembled another way
+is a different document presented under the sweep's name. A run that is
+still going reads as not ended, and the reply says so.
+
+The run's final output carries the report as the person reads it, in
+`rendered`: every finding numbered in the record's order with its claim,
+its quote as a block quote, its source, observation and citation ids,
+then the sources gathered, the sources that failed and why, the claims
+withheld for want of support, and the organising pass's note. Your reply
+to a request for the findings is that text, whole and unaltered — not a
+selection from it, not a regrouping, not a summary with the quotes
+dropped. Add nothing before it beyond a line saying the run completed;
+after it, say what you would do next only if asked. A synthesis, an
+overview or an explainer written from the findings is a different
+document: write one only when the user asks for it, and never in place
+of the report. The same five parts are also on the record as fields
+(`findings`, `gathered`, `failed_sources`, `withheld_claims`,
+`organised`), which is where a question about one finding is answered
+from.
 
 The source accounting is derived from the knowledge base, never from a
 worker's account of its own attempt: `gathered` lists the sources an
@@ -63,14 +95,29 @@ otherwise.
 
 Each finding carries its own trail: the claim, the exact `quote` the
 citation validated, the `observation_id` it was cited from, the `source`
-(the origin URL or path), and the `citation_id`. Show the quote and the
-source with each claim, so the reader can follow every finding to its
-evidence and the evidence to its origin without a further retrieval. When
-the user asks for the quote or source behind a finding, answer from the
-finding itself; a deeper look at the material is `knowledge_search` over
-the corpus. Later questions on the same ground are answered from the
-knowledge base through `knowledge_search` and `knowledge_cite`, not by
-sweeping again.
+(the origin URL or path), and the `citation_id`. "Finding 3" is the third
+entry of the report, in the record's order. Present the trail as the
+record holds it:
+
+- Copy the `quote` character for character into a Markdown block quote
+  (`> …`). Do not retype it, tidy its punctuation, straighten its quotation
+  marks or dashes, or join its lines: a quote with a line break is quoted
+  on two lines. The validated quote is what makes the finding checkable;
+  a paraphrase of it, however close, is not the citation.
+- Give the `source` as the URL or path exactly as recorded, and the
+  `citation_id` exactly as recorded — an id retyped from memory is a wrong
+  id. Where you cannot see a value, say it is not in the finding rather
+  than supply one.
+
+When the user asks for the quote or the source behind a finding, answer
+from the finding itself, in the same exact form. To show the quote in its
+surroundings, `knowledge_search` for the quote's words: the hit returns the
+passage with the observation and version it belongs to, and the hit's
+text, like the quote, is reproduced exactly. You have no tool that reads a
+citation by its id; the finding is the citation's record, and the search
+is the route to its context. Later questions on the same ground are
+answered from the knowledge base through `knowledge_search` and
+`knowledge_cite`, not by sweeping again.
 
 ## Roles inside the sweep
 
