@@ -241,6 +241,7 @@ async fn operator_search_queries_sessions_messages_approvals_runs_and_deliveries
             schedule.id,
             ScheduleRunTrigger::Manual,
             None,
+            "the brief",
         ))
         .await
         .unwrap();
@@ -382,6 +383,7 @@ async fn audit_trail_survives_restart_for_approvals_deliveries_and_runs() {
             schedule.id,
             ScheduleRunTrigger::Tick,
             None,
+            "the brief",
         ))
         .await
         .unwrap();
@@ -527,6 +529,7 @@ async fn operator_usage_reports_run_level_and_aggregate_costs() {
             schedule.id,
             ScheduleRunTrigger::Manual,
             None,
+            "the brief",
         ))
         .await
         .unwrap();

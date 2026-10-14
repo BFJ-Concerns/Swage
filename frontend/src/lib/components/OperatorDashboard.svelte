@@ -402,6 +402,9 @@
                             {new Date(run.created_at).toLocaleString()}
                           </span>
                         </div>
+                        {#if run.executed_message !== schedule.message}
+                          <p class="detail-copy">Ran an earlier brief: {run.executed_message}</p>
+                        {/if}
                         {#if run.gate}
                           <p class="detail-copy">
                             gate ({run.gate.model}): {run.gate.verdict} — {run.gate.reasoning}

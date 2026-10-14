@@ -1075,6 +1075,9 @@ const COMPLETE_SCHEMA: &str = "
         gate_reasoning TEXT,
         output_text    TEXT,
         error_message  TEXT,
+        -- The brief this run executed: the schedule's message as it stood
+        -- when the run was created, kept through later edits of the schedule.
+        executed_message TEXT NOT NULL,
         created_at     TEXT NOT NULL,
         started_at     TEXT,
         completed_at   TEXT

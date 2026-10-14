@@ -431,6 +431,7 @@
                 {#if run.skip_reason}<span>skipped: {run.skip_reason}</span>{/if}
                 {#if run.gate}<span>gate {run.gate.verdict}</span>{/if}
               </div>
+              {#if run.executed_message !== schedule.message}<p class="run-detail executed-brief">Ran an earlier brief: {run.executed_message}</p>{/if}
               {#if describeRunOutcome(run)}<p class="run-detail">{describeRunOutcome(run)}</p>{/if}
               {#if run.output_text}<p class="run-detail">{run.output_text}</p>{/if}
               {#if run.error_message}<p class="run-detail error">{run.error_message}</p>{/if}

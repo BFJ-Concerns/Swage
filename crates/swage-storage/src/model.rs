@@ -1807,6 +1807,10 @@ pub struct ScheduleRun {
     pub turn_id: Option<Uuid>,
     /// The gate's verdict and reasoning, when the schedule declares a gate.
     pub gate: Option<GateDecision>,
+    /// The brief this run executed: the schedule's message as it stood when
+    /// the run was created. A later edit of the schedule leaves it in place,
+    /// so the run is read against what it actually ran.
+    pub executed_message: String,
     pub output_text: Option<String>,
     pub error_message: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -2205,16 +2209,19 @@ pub struct NewScheduleRun {
     pub state: ScheduleRunState,
     pub skip_reason: Option<SkipReason>,
     pub scheduled_for: Option<DateTime<Utc>>,
+    /// The schedule's message as it stands now — what this run executes.
+    pub executed_message: String,
     pub error_message: Option<String>,
 }
 
 impl NewScheduleRun {
-    /// A run about to execute: created `Pending`, to be advanced through
-    /// [`ScheduleRunUpdate`] as it progresses.
+    /// A run about to execute `message`: created `Pending`, to be advanced
+    /// through [`ScheduleRunUpdate`] as it progresses.
     pub fn pending(
         schedule_id: Uuid,
         trigger: ScheduleRunTrigger,
         scheduled_for: Option<DateTime<Utc>>,
+        message: impl Into<String>,
     ) -> Self {
         Self {
             schedule_id,
@@ -2222,6 +2229,7 @@ impl NewScheduleRun {
             state: ScheduleRunState::Pending,
             skip_reason: None,
             scheduled_for,
+            executed_message: message.into(),
             error_message: None,
         }
     }
@@ -2233,6 +2241,7 @@ impl NewScheduleRun {
         schedule_id: Uuid,
         trigger: ScheduleRunTrigger,
         scheduled_for: Option<DateTime<Utc>>,
+        message: impl Into<String>,
         error_message: impl Into<String>,
     ) -> Self {
         Self {
@@ -2241,6 +2250,7 @@ impl NewScheduleRun {
             state: ScheduleRunState::Skipped,
             skip_reason: Some(SkipReason::Overlap),
             scheduled_for,
+            executed_message: message.into(),
             error_message: Some(error_message.into()),
         }
     }

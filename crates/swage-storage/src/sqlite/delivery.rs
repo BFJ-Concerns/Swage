@@ -240,6 +240,7 @@ mod tests {
                 schedule.id,
                 ScheduleRunTrigger::Manual,
                 None,
+                "the brief",
             ))
             .await
             .unwrap();

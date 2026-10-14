@@ -324,6 +324,7 @@ async fn operator_runs_survive_restart_with_durable_history() {
             schedule.id,
             ScheduleRunTrigger::Tick,
             Some(Utc::now()),
+            "the brief",
         ))
         .await
         .unwrap();
@@ -343,6 +344,7 @@ async fn operator_runs_survive_restart_with_durable_history() {
             schedule.id,
             ScheduleRunTrigger::Tick,
             Some(Utc::now()),
+            "the brief",
         ))
         .await
         .unwrap();

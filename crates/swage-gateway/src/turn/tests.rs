@@ -3585,6 +3585,7 @@ impl ScheduleStore for MockStorage {
             session_id: None,
             turn_id: None,
             gate: None,
+            executed_message: run.executed_message,
             output_text: None,
             error_message: run.error_message,
             created_at: chrono::Utc::now(),

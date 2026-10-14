@@ -455,6 +455,7 @@ mod tests {
                 schedule.id,
                 ScheduleRunTrigger::Tick,
                 None,
+                "the brief",
             ))
             .await
             .unwrap();

@@ -239,7 +239,7 @@ fn row_to_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
 
 const SCHEDULE_RUN_COLUMNS: &str = "id, schedule_id, trigger_kind, state, skip_reason, \
      scheduled_for, session_id, turn_id, gate_model, gate_verdict, gate_reasoning, output_text, \
-     error_message, created_at, started_at, completed_at";
+     error_message, created_at, started_at, completed_at, executed_message";
 
 fn row_to_schedule_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduleRun> {
     let id: String = row.get(0)?;
@@ -258,6 +258,7 @@ fn row_to_schedule_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduleRun>
     let created_at: String = row.get(13)?;
     let started_at: Option<String> = row.get(14)?;
     let completed_at: Option<String> = row.get(15)?;
+    let executed_message: String = row.get(16)?;
 
     Ok(ScheduleRun {
         id: parse_uuid(&id)?,
@@ -272,6 +273,7 @@ fn row_to_schedule_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduleRun>
         session_id: session_id.as_deref().map(parse_uuid).transpose()?,
         turn_id: turn_id.as_deref().map(parse_uuid).transpose()?,
         gate: gate_decision_from_columns(9, gate_model, gate_verdict, gate_reasoning)?,
+        executed_message,
         output_text,
         error_message,
         created_at: parse_dt(&created_at)?,
@@ -513,8 +515,8 @@ impl ScheduleStore for SqliteStorage {
             conn.execute(
                 "INSERT INTO schedule_runs
                  (id, schedule_id, trigger_kind, state, skip_reason, scheduled_for,
-                  error_message, created_at, completed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                  executed_message, error_message, created_at, completed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     id.to_string(),
                     run.schedule_id.to_string(),
@@ -522,6 +524,7 @@ impl ScheduleStore for SqliteStorage {
                     &state,
                     &skip_reason,
                     &scheduled_for,
+                    &run.executed_message,
                     &run.error_message,
                     &created_at,
                     &completed_at,
@@ -538,6 +541,7 @@ impl ScheduleStore for SqliteStorage {
                 session_id: None,
                 turn_id: None,
                 gate: None,
+                executed_message: run.executed_message,
                 output_text: None,
                 error_message: run.error_message,
                 created_at: now,
@@ -1008,6 +1012,7 @@ mod tests {
                 schedule.id,
                 ScheduleRunTrigger::Tick,
                 Some(Utc::now()),
+                "the brief",
             ))
             .await
             .unwrap();
@@ -1045,6 +1050,43 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_keeps_the_brief_it_was_created_with() {
+        let (storage, topic_id, _session_id) = make_storage_with_session().await;
+        let schedule = storage
+            .create_schedule(fresh_schedule(topic_id))
+            .await
+            .unwrap();
+        let run = storage
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule.id,
+                ScheduleRunTrigger::Manual,
+                None,
+                "sweep the inbox",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(run.executed_message, "sweep the inbox");
+
+        storage
+            .update_schedule(
+                schedule.id,
+                UpdateSchedule {
+                    message: Some("sweep the inbox and the queue".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let fetched = storage.get_schedule_run(run.id).await.unwrap().unwrap();
+        assert_eq!(
+            fetched.executed_message, "sweep the inbox",
+            "an edit to the schedule leaves the run's brief as it ran"
+        );
+        let listed = storage.list_schedule_runs(schedule.id).await.unwrap();
+        assert_eq!(listed[0].executed_message, "sweep the inbox");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn one_in_flight_run_per_schedule_is_enforced_by_the_index() {
         let (storage, topic_id, _) = make_storage_with_session().await;
         let schedule = storage
@@ -1058,6 +1100,7 @@ mod tests {
                 schedule.id,
                 ScheduleRunTrigger::Tick,
                 None,
+                "the brief",
             ))
             .await
             .unwrap();
@@ -1069,6 +1112,7 @@ mod tests {
                 schedule.id,
                 ScheduleRunTrigger::Manual,
                 None,
+                "the brief",
             ))
             .await;
         assert!(
@@ -1083,6 +1127,7 @@ mod tests {
                 schedule.id,
                 ScheduleRunTrigger::Manual,
                 None,
+                "the brief",
                 "a previous run of this schedule was still in flight",
             ))
             .await
@@ -1105,6 +1150,7 @@ mod tests {
                 schedule.id,
                 ScheduleRunTrigger::Tick,
                 None,
+                "the brief",
             ))
             .await
             .expect("a new run inserts once the slot is free");
@@ -1132,6 +1178,7 @@ mod tests {
                 schedule_a.id,
                 ScheduleRunTrigger::Manual,
                 None,
+                "the brief",
             ))
             .await
             .unwrap();
@@ -1151,6 +1198,7 @@ mod tests {
                 schedule_a.id,
                 ScheduleRunTrigger::Tick,
                 Some(Utc::now()),
+                "the brief",
             ))
             .await
             .unwrap();
@@ -1170,6 +1218,7 @@ mod tests {
                 schedule_b.id,
                 ScheduleRunTrigger::Tick,
                 Some(Utc::now()),
+                "the brief",
             ))
             .await
             .unwrap();
@@ -1223,6 +1272,7 @@ mod tests {
                 schedule.id,
                 ScheduleRunTrigger::Tick,
                 None,
+                "the brief",
             ))
             .await
             .unwrap();
@@ -1327,6 +1377,7 @@ mod tests {
                 schedule.id,
                 ScheduleRunTrigger::Tick,
                 None,
+                "the brief",
             ))
             .await
             .unwrap();
@@ -1348,6 +1399,7 @@ mod tests {
                 schedule.id,
                 ScheduleRunTrigger::Manual,
                 None,
+                "the brief",
             ))
             .await
             .unwrap();
@@ -1394,6 +1446,7 @@ mod tests {
                     schedule.id,
                     ScheduleRunTrigger::Tick,
                     None,
+                    "the brief",
                 ))
                 .await
                 .unwrap();
@@ -1417,6 +1470,7 @@ mod tests {
                 schedule.id,
                 ScheduleRunTrigger::Manual,
                 None,
+                "the brief",
             ))
             .await
             .unwrap();

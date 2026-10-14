@@ -51,6 +51,7 @@ const RUN: ScheduleRun = {
   trigger: "manual",
   state: "completed",
   skip_reason: null,
+  executed_message: SCHEDULE.message,
   scheduled_for: null,
   session_id: "session-1",
   turn_id: "turn-1",
@@ -134,6 +135,26 @@ describe("ScheduleAutomationPanel", () => {
     expect(operatorApi.listSchedules).toHaveBeenCalled();
     expect(document.body.textContent).toContain("Review the queue.");
     expect(document.body.textContent).toContain("did the thing");
+  });
+
+  it("shows the brief a run executed only when the schedule has since changed", async () => {
+    vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValue({
+      runs: [
+        { ...RUN, id: "run-current", executed_message: SCHEDULE.message },
+        { ...RUN, id: "run-earlier", executed_message: "Review the inbox.", output_text: "earlier output" },
+      ],
+    });
+    component = mount(ScheduleAutomationPanel, {
+      target: document.body,
+      props: { topicId: "topic-1", sessionId: "session-1" },
+    });
+    await flushUi();
+
+    const rows = [...document.querySelectorAll(".run-row")];
+    const earlier = rows.find((row) => row.textContent?.includes("earlier output"));
+    const current = rows.find((row) => row.textContent?.includes("did the thing"));
+    expect(earlier?.textContent).toContain("Ran an earlier brief: Review the inbox.");
+    expect(current?.textContent).not.toContain("Ran an earlier brief");
   });
 
   it("attributes each schedule to its creator", async () => {
@@ -381,7 +402,7 @@ describe("passed one-shot cards", () => {
   });
   const older: ScheduleRun = {
     id: "older", schedule_id: schedule.id, trigger: "tick", state: "completed",
-    created_at: "2026-01-01T00:00:00Z",
+    executed_message: schedule.message, created_at: "2026-01-01T00:00:00Z",
   };
   const latest: ScheduleRun = {
     ...older, id: "latest", state: "failed", created_at: "2026-01-01T00:01:00Z",

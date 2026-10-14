@@ -1087,7 +1087,12 @@ async fn execute_schedule(
 ) -> Result<ScheduleRun, GatewayError> {
     let run = match state
         .storage
-        .create_schedule_run(NewScheduleRun::pending(schedule.id, trigger, scheduled_for))
+        .create_schedule_run(NewScheduleRun::pending(
+            schedule.id,
+            trigger,
+            scheduled_for,
+            schedule.message.clone(),
+        ))
         .await
     {
         Ok(run) => run,
@@ -1163,6 +1168,10 @@ async fn run_body(
             .await?;
     }
 
+    // The run executes the brief it recorded at creation — the schedule's
+    // message as it then stood — so the record and the turn can never
+    // disagree about what ran.
+    let brief = run.executed_message.as_str();
     // Resolve the session per policy: fresh creates one for the target
     // agent, continuation picks up the named session's agent as it stands
     // right now.
@@ -1180,7 +1189,7 @@ async fn run_body(
                     None,
                 )
                 .await?;
-            let input = compose_fresh_opening(&schedule.message, previous_outcome.as_deref());
+            let input = compose_fresh_opening(brief, previous_outcome.as_deref());
             (conversation.id, agent_id.clone(), input)
         }
         SessionPolicy::Continuation { session_id } => {
@@ -1192,7 +1201,7 @@ async fn run_body(
             (
                 session.id,
                 session.agent_id,
-                compose_continuation_brief(&schedule.message),
+                compose_continuation_brief(brief),
             )
         }
     };
@@ -1314,6 +1323,7 @@ async fn record_overlap_skip(
             schedule.id,
             trigger,
             scheduled_for,
+            schedule.message.clone(),
             MESSAGE,
         ))
         .await?;
@@ -2222,6 +2232,7 @@ fn map_run(run: ScheduleRun) -> wire::ScheduleRun {
         session_id: run.session_id,
         turn_id: run.turn_id,
         gate: run.gate,
+        executed_message: run.executed_message,
         output_text: run.output_text,
         error_message: run.error_message,
         created_at: run.created_at,
@@ -2411,6 +2422,7 @@ mod tests {
                 schedule.id,
                 ScheduleRunTrigger::Tick,
                 None,
+                "the brief",
             ))
             .await
             .expect("completed run");
@@ -2430,6 +2442,7 @@ mod tests {
                 schedule.id,
                 ScheduleRunTrigger::Tick,
                 None,
+                "the brief",
             ))
             .await
             .expect("gated run");
@@ -2455,6 +2468,7 @@ mod tests {
                 schedule.id,
                 ScheduleRunTrigger::Tick,
                 None,
+                "the brief",
             ))
             .await
             .expect("pending run");

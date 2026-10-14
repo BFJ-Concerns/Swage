@@ -4332,6 +4332,10 @@
             "null"
           ]
         },
+        "executed_message": {
+          "description": "The brief this run executed — the schedule's message as it stood when\nthe run was created, kept through later edits of the schedule.",
+          "type": "string"
+        },
         "gate": {
           "anyOf": [
             {
@@ -4407,6 +4411,7 @@
         "schedule_id",
         "trigger",
         "state",
+        "executed_message",
         "created_at"
       ]
     },

@@ -13,4 +13,9 @@ export type ScheduleRun = { id: string, schedule_id: string, trigger: ScheduleRu
  * depending on the schedule's session policy. Absent when the run
  * never reached a session (gated out, or skipped for overlap).
  */
-session_id?: string | null, turn_id?: string | null, gate?: GateDecision | null, output_text?: string | null, error_message?: string | null, created_at: string, started_at?: string | null, completed_at?: string | null, };
+session_id?: string | null, turn_id?: string | null, gate?: GateDecision | null,
+/**
+ * The brief this run executed — the schedule's message as it stood when
+ * the run was created, kept through later edits of the schedule.
+ */
+executed_message: string, output_text?: string | null, error_message?: string | null, created_at: string, started_at?: string | null, completed_at?: string | null, };

@@ -342,6 +342,9 @@ pub struct ScheduleRun {
     pub session_id: Option<Uuid>,
     pub turn_id: Option<Uuid>,
     pub gate: Option<GateDecision>,
+    /// The brief this run executed — the schedule's message as it stood when
+    /// the run was created, kept through later edits of the schedule.
+    pub executed_message: String,
     pub output_text: Option<String>,
     pub error_message: Option<String>,
     pub created_at: DateTime<Utc>,

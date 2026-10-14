@@ -331,6 +331,94 @@ async fn fresh_schedule_without_a_topic_stores_general_scope_and_projects_no_top
     );
 }
 
+/// Journey: a schedule runs, its brief is edited in place, it runs again —
+/// each run keeps the brief it executed, and the record and the wire say
+/// which.
+#[tokio::test(flavor = "multi_thread")]
+async fn runs_keep_the_brief_they_executed_across_an_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(
+        &dir.path().join("executed-brief.db"),
+        MockProvider::new(vec![
+            MockProvider::text_round("first result"),
+            MockProvider::text_round("second result"),
+        ]),
+    );
+    let router = build_router(state.clone());
+    let session_id = create_conversation(&router).await;
+
+    let (status, created) = request_json(
+        &router,
+        "POST",
+        "/api/schedules",
+        Some(json!({
+            "message": "sweep the inbox",
+            "spec": {"kind": "interval", "every": "every 1 hours"},
+            "session": {"policy": "continuation", "session_id": session_id},
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let schedule_id = created["id"].as_str().unwrap().to_string();
+
+    let (status, first) = request_json(
+        &router,
+        "POST",
+        &format!("/api/schedules/{schedule_id}/trigger"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(first["run"]["executed_message"], "sweep the inbox");
+
+    let (status, _) = request_json(
+        &router,
+        "PUT",
+        &format!("/api/schedules/{schedule_id}"),
+        Some(json!({ "message": "sweep the inbox and the queue" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, second) = request_json(
+        &router,
+        "POST",
+        &format!("/api/schedules/{schedule_id}/trigger"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(
+        second["run"]["executed_message"],
+        "sweep the inbox and the queue"
+    );
+
+    let (status, runs) = request_json(
+        &router,
+        "GET",
+        &format!("/api/schedules/{schedule_id}/runs"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let briefs: Vec<&str> = runs["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|run| run["executed_message"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        briefs,
+        vec!["sweep the inbox", "sweep the inbox and the queue"]
+    );
+    let stored = state
+        .storage
+        .list_schedule_runs(schedule_id.parse().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(stored[0].executed_message, "sweep the inbox");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn schedule_lifecycle_create_edit_pause_resume_trigger_delete() {
     let dir = tempfile::tempdir().unwrap();
@@ -1387,6 +1475,7 @@ async fn due_run_meeting_an_executing_predecessor_is_skipped_and_recorded() {
             created.id,
             ScheduleRunTrigger::Tick,
             Some(Utc::now()),
+            "the brief",
         ))
         .await
         .unwrap();
@@ -2073,6 +2162,7 @@ async fn restart_recovery_fails_runs_orphaned_by_a_previous_process() {
             schedule_c.id,
             ScheduleRunTrigger::Tick,
             Some(Utc::now()),
+            "the brief",
         ))
         .await
         .unwrap();
@@ -2087,6 +2177,7 @@ async fn restart_recovery_fails_runs_orphaned_by_a_previous_process() {
             schedule_a.id,
             ScheduleRunTrigger::Tick,
             Some(Utc::now()),
+            "the brief",
         ))
         .await
         .unwrap();
@@ -2096,6 +2187,7 @@ async fn restart_recovery_fails_runs_orphaned_by_a_previous_process() {
             schedule_b.id,
             ScheduleRunTrigger::Tick,
             Some(Utc::now()),
+            "the brief",
         ))
         .await
         .unwrap();

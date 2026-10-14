@@ -238,6 +238,7 @@ describe("OperatorDashboard", () => {
           trigger: "tick",
           state: "skipped",
           skip_reason: "gate",
+          executed_message: "Daily digest",
           scheduled_for: "2026-04-07T12:05:00Z",
           session_id: null,
           turn_id: null,
@@ -323,6 +324,7 @@ describe("OperatorDashboard", () => {
           trigger: "tick",
           state: "completed_empty",
           skip_reason: null,
+          executed_message: "Daily digest",
           scheduled_for: "2026-04-07T12:05:00Z",
           session_id: "session-1",
           turn_id: "turn-1",
@@ -465,7 +467,7 @@ describe("passed one-shot cards", () => {
   });
   const older: ScheduleRun = {
     id: "older", schedule_id: schedule.id, trigger: "tick", state: "completed",
-    created_at: "2026-01-01T00:00:00Z",
+    executed_message: schedule.message, created_at: "2026-01-01T00:00:00Z",
   };
   const latest: ScheduleRun = {
     ...older, id: "latest", state: "failed", created_at: "2026-01-01T00:01:00Z",
