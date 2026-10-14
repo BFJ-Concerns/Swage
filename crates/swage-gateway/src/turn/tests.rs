@@ -16149,6 +16149,7 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
         vec![],
         history,
         Some(MemoryIndexElement::new(None, Vec::new())),
+        None,
         test_environment(),
         vec![],
         "claude-test-model",
@@ -16184,6 +16185,7 @@ fn elements_built_without_memory_omit_the_memory_element() {
         vec![],
         vec![],
         vec![ChatMessage::new(Role::User, "Hello")],
+        None,
         None,
         test_environment(),
         vec![],
@@ -16239,6 +16241,7 @@ async fn named_assembly_composes_the_memory_element_like_any_other() {
         vec![],
         vec![],
         Some(memory),
+        None,
         test_environment(),
         vec![],
         "claude-test-model",
@@ -16454,6 +16457,7 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
             Some("Important topic context".to_string()),
             Vec::new(),
         )),
+        None,
         test_environment(),
         vec![],
         "claude-test-model",
@@ -16699,6 +16703,7 @@ fn assembly_elements_layer_operator_guidance_after_instructions() {
         guidance,
         vec![],
         vec![],
+        None,
         None,
         test_environment(),
         vec![],
@@ -20248,4 +20253,231 @@ async fn approval_scope_expired_live_waiter_interrupts_turn() {
 #[tokio::test]
 async fn approval_scope_expired_live_waiter_records_expired_feedback() {
     expired_live_waiter(false).await;
+}
+
+// -----------------------------------------------------------------------
+// Reference materials in context
+// -----------------------------------------------------------------------
+
+mod reference_materials {
+    //! Active material of the session's scope reaches the turn's context;
+    //! archived material, another session's and another topic's do not.
+    use swage_context::materials::{MaterialsElement, ReferenceMaterial, ReferenceMaterialScope};
+    use swage_storage::store::MaterialStore;
+    use swage_storage::{AttachmentScopeKind, MaterialSourceKind, NewMaterial, NewTopic};
+
+    use super::*;
+
+    fn new_material(
+        scope_kind: AttachmentScopeKind,
+        session_id: Option<Uuid>,
+        topic_id: Option<Uuid>,
+        title: &str,
+        text: &str,
+    ) -> NewMaterial {
+        NewMaterial {
+            id: Uuid::new_v4(),
+            scope_kind,
+            session_id,
+            topic_id,
+            source_kind: MaterialSourceKind::Manual,
+            source_attachment_id: None,
+            title: title.into(),
+            relative_path: format!("{}.md", title.to_lowercase()),
+            mime_type: "text/markdown".into(),
+            content_text: text.into(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_loader_carries_only_the_scopes_active_material() {
+        let storage = Arc::new(MockStorage::new());
+        let (_state, session_id) = make_state_with_storage(vec![], storage.clone()).await;
+        let general = storage.general_scope().await.expect("general scope");
+
+        assert!(
+            crate::material::load_reference_materials(
+                &(storage.clone() as Arc<dyn swage_storage::Storage>),
+                session_id,
+                &general
+            )
+            .await
+            .is_none(),
+            "no element when nothing is active"
+        );
+
+        storage
+            .create_material(new_material(
+                AttachmentScopeKind::Session,
+                Some(session_id),
+                Some(general.id),
+                "Plan",
+                "Launch on Tuesday.",
+            ))
+            .await
+            .unwrap();
+        let archived = storage
+            .create_material(new_material(
+                AttachmentScopeKind::Session,
+                Some(session_id),
+                Some(general.id),
+                "Old",
+                "superseded",
+            ))
+            .await
+            .unwrap();
+        storage.archive_material(archived.id).await.unwrap();
+        let other = storage
+            .create_session(new_session(general.id))
+            .await
+            .unwrap();
+        storage
+            .create_material(new_material(
+                AttachmentScopeKind::Session,
+                Some(other.id),
+                Some(general.id),
+                "Theirs",
+                "not yours",
+            ))
+            .await
+            .unwrap();
+        let long_text = "x".repeat(crate::material::INLINE_MATERIAL_BYTES + 1);
+        storage
+            .create_material(new_material(
+                AttachmentScopeKind::Session,
+                Some(session_id),
+                Some(general.id),
+                "Long",
+                &long_text,
+            ))
+            .await
+            .unwrap();
+
+        let element = crate::material::load_reference_materials(
+            &(storage.clone() as Arc<dyn swage_storage::Storage>),
+            session_id,
+            &general,
+        )
+        .await
+        .expect("active material yields the element");
+        let text = element.content()[0].text_content();
+        assert!(text.contains("- Plan (text/markdown, 18 bytes, attached to this session; id "));
+        assert!(text.contains("```text\nLaunch on Tuesday.\n```"), "{text}");
+        assert!(text.contains("- Long (text/markdown, 4097 bytes, attached to this session; id "));
+        assert!(
+            !text.contains(&long_text),
+            "a long material is listed, never quoted"
+        );
+        assert!(!text.contains("Old") && !text.contains("Theirs"), "{text}");
+        assert_eq!(
+            element.source(),
+            "reference materials (2 active, some quoted inline)"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_topic_sessions_context_carries_the_topics_material_and_not_another_topics() {
+        let storage = Arc::new(MockStorage::new());
+        let (_state, _general_session) = make_state_with_storage(vec![], storage.clone()).await;
+        let orchard = TopicStore::create(
+            storage.as_ref(),
+            NewTopic {
+                name: "Orchard".into(),
+                slug: "orchard".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let elsewhere = TopicStore::create(
+            storage.as_ref(),
+            NewTopic {
+                name: "Elsewhere".into(),
+                slug: "elsewhere".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let session = storage
+            .create_session(new_session(orchard.id))
+            .await
+            .unwrap();
+        storage
+            .create_material(new_material(
+                AttachmentScopeKind::Topic,
+                None,
+                Some(orchard.id),
+                "Guide",
+                "Prune in winter.",
+            ))
+            .await
+            .unwrap();
+        storage
+            .create_material(new_material(
+                AttachmentScopeKind::Topic,
+                None,
+                Some(elsewhere.id),
+                "Far",
+                "elsewhere",
+            ))
+            .await
+            .unwrap();
+
+        let element = crate::material::load_reference_materials(
+            &(storage.clone() as Arc<dyn swage_storage::Storage>),
+            session.id,
+            &orchard,
+        )
+        .await
+        .expect("the topic's material yields the element");
+        let text = element.content()[0].text_content();
+        assert!(text.contains("- Guide (text/markdown, 16 bytes, attached to the topic; id "));
+        assert!(!text.contains("Far"));
+    }
+
+    #[test]
+    fn the_builder_places_materials_between_memory_and_prompts_and_omits_them_when_absent() {
+        let materials = MaterialsElement::new(vec![ReferenceMaterial {
+            id: "m-1".into(),
+            title: "Plan".into(),
+            mime_type: "text/markdown".into(),
+            byte_count: 5,
+            scope: ReferenceMaterialScope::Session,
+            inline_text: Some("short".into()),
+        }]);
+        let mut elements = build_assembly_elements(
+            "Be helpful.",
+            vec![],
+            vec![],
+            vec![],
+            Some(MemoryIndexElement::new(None, Vec::new())),
+            Some(materials),
+            test_environment(),
+            vec![],
+            "claude-test-model",
+            swage_context::working_norms::WorkingNormsScaffold::Native,
+            &[],
+            None,
+        );
+        elements.sort_by_key(|element| std::cmp::Reverse(element.priority()));
+        let names: Vec<&str> = elements.iter().map(|element| element.name()).collect();
+        let position = |name: &str| names.iter().position(|n| *n == name).unwrap();
+        assert!(position("memory") < position("materials"));
+        assert!(position("materials") < position("prompts"));
+
+        let without = build_assembly_elements(
+            "Be helpful.",
+            vec![],
+            vec![],
+            vec![],
+            None,
+            None,
+            test_environment(),
+            vec![],
+            "claude-test-model",
+            swage_context::working_norms::WorkingNormsScaffold::Native,
+            &[],
+            None,
+        );
+        assert!(without.iter().all(|element| element.name() != "materials"));
+    }
 }

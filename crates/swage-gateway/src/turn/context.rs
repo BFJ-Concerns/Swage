@@ -4,6 +4,7 @@ use super::{
     SkillsElement, ToolRootSource, Uuid,
 };
 use swage_context::briefing::BriefingElement;
+use swage_context::materials::MaterialsElement;
 use swage_context::named_element::discover_named_elements;
 use swage_context::orientation::{
     AvailableSkill, ChannelOrientation, OrientationElement, SessionEnvironment, ToolRoot,
@@ -23,7 +24,10 @@ use swage_config::RESERVED_WORKFLOW_AGENT_ID;
 ///   operator-guidance rules (the standard agent-guidance files, resolved by
 ///   `operator_guidance_rules` from the config root and trusted workspaces)
 /// - `SkillsElement`  — from the active skill set
-///   memory content (may be empty)
+/// - `MemoryIndexElement` — the operator's profile and memory index, when
+///   the session carries memory
+/// - `MaterialsElement` — the active reference material of the session's
+///   scope, when any is active
 /// - `HistoryElement` — from the thread's message history
 ///
 /// The returned vec is suitable for passing to `swage_context::assembly::assemble()`.
@@ -40,6 +44,7 @@ pub(crate) fn build_assembly_elements(
     active_skills: Vec<ActiveSkill>,
     history: Vec<ChatMessage>,
     memory: Option<MemoryIndexElement>,
+    materials: Option<MaterialsElement>,
     environment: SessionEnvironment,
     available_skills: Vec<AvailableSkill>,
     model_id: &str,
@@ -115,6 +120,12 @@ pub(crate) fn build_assembly_elements(
     // composition did not name it.
     if let Some(memory) = memory {
         elements.push(Box::new(memory));
+    }
+    // The reference material the operator attached to the session or its
+    // topic: present when any is active, absent otherwise, so the default
+    // assembly never carries an element it would render empty.
+    if let Some(materials) = materials {
+        elements.push(Box::new(materials));
     }
     elements.push(Box::new(HistoryElement::new(history)));
     elements

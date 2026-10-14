@@ -517,6 +517,8 @@ pub(super) async fn process_turn_with_composition_and_focus(
     } else {
         None
     };
+    let reference_materials =
+        crate::material::load_reference_materials(&state.storage, session_id, &topic).await;
     let mut session_variables: std::collections::BTreeMap<String, String> =
         record_failed_turn_and_release_on_error(
             state,
@@ -575,6 +577,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
         active_skills,
         history_messages,
         memory_index,
+        reference_materials,
         environment,
         available_skills,
         config.default_model_id(),

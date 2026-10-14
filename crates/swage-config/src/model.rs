@@ -297,6 +297,10 @@ impl Default for ToolPermissionConfig {
             "knowledge-orientation-curation".to_string(),
             vec!["knowledge_curate_orientation".to_string()],
         );
+        bundles.insert(
+            "materials-read".to_string(),
+            vec!["material_read".to_string()],
+        );
         Self {
             allow: vec!["*".into()],
             deny: vec![],

@@ -13,6 +13,7 @@ pub mod file_search;
 pub mod file_write;
 pub mod hold;
 pub mod knowledge;
+pub mod material;
 pub mod memory;
 pub mod nested_tool_runtime;
 pub mod plugin;

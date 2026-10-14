@@ -743,12 +743,13 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         Tool, browser::browser_tools, docs_read::DocsReadTool, hold::WorkflowHoldTool,
         knowledge::KnowledgeCiteTool, knowledge::KnowledgeCurateOrientationTool,
         knowledge::KnowledgeCurateTool, knowledge::KnowledgeOrientTool,
-        knowledge::KnowledgeRecordTool, knowledge::KnowledgeSearchTool, memory::MemoryReadTool,
-        memory::MemoryWriteTool, plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
-        run_event::RunEventPostTool, schedule::ScheduleTool, schedule::WakeMeLaterTool,
-        session_variable::SessionVariableTool, surface::SurfaceLibraryTool,
-        surface::SurfaceReadTool, surface::SurfaceWriteTool, task_definition::TaskDefinitionTool,
-        tool_result_read::ToolResultReadTool, url_fetch::UrlFetchTool, web_search::WebSearchTool,
+        knowledge::KnowledgeRecordTool, knowledge::KnowledgeSearchTool, material::MaterialReadTool,
+        memory::MemoryReadTool, memory::MemoryWriteTool, plugin::discover_plugin_tools,
+        python_execute::PythonExecuteTool, run_event::RunEventPostTool, schedule::ScheduleTool,
+        schedule::WakeMeLaterTool, session_variable::SessionVariableTool,
+        surface::SurfaceLibraryTool, surface::SurfaceReadTool, surface::SurfaceWriteTool,
+        task_definition::TaskDefinitionTool, tool_result_read::ToolResultReadTool,
+        url_fetch::UrlFetchTool, web_search::WebSearchTool,
     };
 
     let max_output = config.tools.max_output_bytes;
@@ -799,6 +800,9 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         Arc::new(KnowledgeCiteTool),
         Arc::new(KnowledgeOrientTool),
         Arc::new(KnowledgeCurateOrientationTool),
+        // The reference material the operator attached: read by the id the
+        // turn's context lists. Host-only.
+        Arc::new(MaterialReadTool),
     ]);
 
     let base_tools = if let Some(browser_host) = browser_host {

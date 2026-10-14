@@ -1,11 +1,17 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use swage_core::ScopeLocation;
 
 use tokio::fs;
 use uuid::Uuid;
 
+use swage_context::materials::{MaterialsElement, ReferenceMaterial, ReferenceMaterialScope};
 use swage_core::{GatewayError, StorageError};
-use swage_storage::{Attachment, AttachmentScopeKind, Material, MaterialSourceKind, NewMaterial};
+use swage_storage::{
+    Attachment, AttachmentScopeKind, Material, MaterialSourceKind, MaterialStatus, NewMaterial,
+    Storage,
+};
 
 use crate::{state::AppState, tool::workspace::validate_path};
 
@@ -55,6 +61,68 @@ pub async fn create_material(
         })
         .await?;
     map_material_response(state, material).await
+}
+
+/// The longest material text carried inline in a turn's context; a longer
+/// material is listed with its id for `material_read`.
+pub const INLINE_MATERIAL_BYTES: usize = 4096;
+
+/// The reference material a turn in `session_id` sees: the session's own
+/// active materials and, inside a topic, the topic's. `None` when nothing is
+/// active, so the assembly carries no empty element. A store that cannot be
+/// read is omitted with a warning — the turn runs with what could be read,
+/// never with material nobody attached.
+pub async fn load_reference_materials(
+    storage: &Arc<dyn Storage>,
+    session_id: Uuid,
+    topic: &swage_storage::Topic,
+) -> Option<MaterialsElement> {
+    let mut materials = Vec::new();
+    match storage.list_materials_by_session(session_id).await {
+        Ok(own) => materials.extend(
+            own.into_iter()
+                .filter(|material| material.status == MaterialStatus::Active)
+                .map(|material| reference_material(material, ReferenceMaterialScope::Session)),
+        ),
+        Err(error) => {
+            tracing::warn!(%error, %session_id, "the session's materials could not be listed; omitted")
+        }
+    }
+    if !topic.is_general {
+        match storage.list_materials_by_topic(topic.id).await {
+            Ok(shared) => materials.extend(
+                shared
+                    .into_iter()
+                    .filter(|material| material.status == MaterialStatus::Active)
+                    .map(|material| reference_material(material, ReferenceMaterialScope::Topic)),
+            ),
+            Err(error) => {
+                tracing::warn!(%error, topic_id = %topic.id, "the topic's materials could not be listed; omitted")
+            }
+        }
+    }
+    if materials.is_empty() {
+        None
+    } else {
+        Some(MaterialsElement::new(materials))
+    }
+}
+
+/// One material as the context lists it: a short text material is quoted
+/// whole, anything else is named with its id for `material_read`.
+fn reference_material(material: Material, scope: ReferenceMaterialScope) -> ReferenceMaterial {
+    let byte_count = material.content_text.len();
+    let inline_text = (byte_count <= INLINE_MATERIAL_BYTES
+        && material.mime_type.starts_with("text/"))
+    .then_some(material.content_text);
+    ReferenceMaterial {
+        id: material.id.to_string(),
+        title: material.title,
+        mime_type: material.mime_type,
+        byte_count,
+        scope,
+        inline_text,
+    }
 }
 
 pub async fn get_material(

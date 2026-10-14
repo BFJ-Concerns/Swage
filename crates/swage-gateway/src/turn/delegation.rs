@@ -274,6 +274,9 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
                 .await
                 .into_element(),
         );
+        let reference_materials =
+            crate::material::load_reference_materials(&self.state.storage, session.id, &self.topic)
+                .await;
         let mut session_variables: std::collections::BTreeMap<String, String> = self
             .state
             .storage
@@ -311,6 +314,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             active_skills,
             delegated_history,
             memory_index,
+            reference_materials,
             environment,
             available_skills,
             self.config.default_model_id(),

@@ -11,6 +11,7 @@ pub mod delta_summarisation;
 pub mod element;
 pub mod history;
 pub mod js_assembly;
+pub mod materials;
 pub mod memory;
 pub mod named_element;
 pub mod orientation;
