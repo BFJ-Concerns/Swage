@@ -577,6 +577,15 @@ pub(super) async fn process_turn_with_composition_and_focus(
     } else {
         None
     };
+    let reference_materials = crate::material::load_reference_materials(
+        &state.storage,
+        session_id,
+        &topic,
+        swage_context::materials::MaterialReach::for_tools(
+            offered_tools.is_offered(crate::tool::material::MATERIAL_READ_TOOL),
+        ),
+    )
+    .await;
 
     let environment = build_session_environment(&topic, &tool_root, &session, &workspace_policy);
     let available_skills = available_skills_for_agent(&scope, &session.agent_id, Some(swage_root));
@@ -591,6 +600,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
         active_skills,
         history_messages,
         memory_index,
+        reference_materials,
         environment,
         available_skills,
         offered_tools,

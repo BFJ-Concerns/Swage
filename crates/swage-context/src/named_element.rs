@@ -11,7 +11,14 @@ use std::path::{Path, PathBuf};
 use swage_config::HierarchyLevel;
 
 /// Names owned by built-in context elements and their assembly bookkeeping.
-const RESERVED_ELEMENT_NAMES: &[&str] = &["history", "memory", "orientation", "prompts", "skills"];
+const RESERVED_ELEMENT_NAMES: &[&str] = &[
+    "history",
+    "materials",
+    "memory",
+    "orientation",
+    "prompts",
+    "skills",
+];
 
 pub(crate) fn has_valid_element_name_shape(name: &str) -> bool {
     swage_core::is_lowercase_identifier(name)

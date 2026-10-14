@@ -1,11 +1,19 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use swage_core::ScopeLocation;
 
 use tokio::fs;
 use uuid::Uuid;
 
+use swage_context::materials::{
+    MaterialReach, MaterialsElement, ReferenceMaterial, ReferenceMaterialScope,
+};
 use swage_core::{GatewayError, StorageError};
-use swage_storage::{Attachment, AttachmentScopeKind, Material, MaterialSourceKind, NewMaterial};
+use swage_storage::{
+    Attachment, AttachmentScopeKind, Material, MaterialSourceKind, MaterialStatus, NewMaterial,
+    Storage,
+};
 
 use crate::{state::AppState, tool::workspace::validate_path};
 
@@ -55,6 +63,84 @@ pub async fn create_material(
         })
         .await?;
     map_material_response(state, material).await
+}
+
+/// The longest material text quoted whole in a turn's context.
+pub const INLINE_MATERIAL_BYTES: usize = 4096;
+
+/// The most material text a turn's context quotes across all its materials,
+/// so a folder of short files is listed rather than poured into every turn.
+/// Materials past it are named with their id for `material_read`.
+pub const INLINE_MATERIALS_TOTAL_BYTES: usize = 16 * 1024;
+
+/// The reference material a turn in `session_id` sees: the session's own
+/// active materials and, inside a topic, the topic's. `None` when nothing is
+/// active, so the assembly carries no empty element. A store that cannot be
+/// read is omitted with a warning — the turn runs with what could be read,
+/// never with material nobody attached.
+pub async fn load_reference_materials(
+    storage: &Arc<dyn Storage>,
+    session_id: Uuid,
+    topic: &swage_storage::Topic,
+    reach: MaterialReach,
+) -> Option<MaterialsElement> {
+    let mut active = Vec::new();
+    match storage.list_materials_by_session(session_id).await {
+        Ok(own) => active.extend(
+            own.into_iter()
+                .map(|m| (m, ReferenceMaterialScope::Session)),
+        ),
+        Err(error) => {
+            tracing::warn!(%error, %session_id, "the session's materials could not be listed; omitted")
+        }
+    }
+    if !topic.is_general {
+        match storage.list_materials_by_topic(topic.id).await {
+            Ok(shared) => active.extend(
+                shared
+                    .into_iter()
+                    .map(|m| (m, ReferenceMaterialScope::Topic)),
+            ),
+            Err(error) => {
+                tracing::warn!(%error, topic_id = %topic.id, "the topic's materials could not be listed; omitted")
+            }
+        }
+    }
+    active.retain(|(material, _)| material.status == MaterialStatus::Active);
+    if active.is_empty() {
+        return None;
+    }
+    let mut quote_budget = INLINE_MATERIALS_TOTAL_BYTES;
+    let materials = active
+        .into_iter()
+        .map(|(material, scope)| reference_material(material, scope, &mut quote_budget))
+        .collect();
+    Some(MaterialsElement::new(materials, reach))
+}
+
+/// One material as the context lists it: a short text material is quoted
+/// whole while the turn's quote budget lasts; anything else is named with
+/// its id.
+fn reference_material(
+    material: Material,
+    scope: ReferenceMaterialScope,
+    quote_budget: &mut usize,
+) -> ReferenceMaterial {
+    let byte_count = material.content_text.len();
+    let quoted = byte_count <= INLINE_MATERIAL_BYTES
+        && byte_count <= *quote_budget
+        && material.mime_type.starts_with("text/");
+    if quoted {
+        *quote_budget -= byte_count;
+    }
+    ReferenceMaterial {
+        id: material.id.to_string(),
+        title: material.title,
+        mime_type: material.mime_type,
+        byte_count,
+        scope,
+        inline_text: quoted.then_some(material.content_text),
+    }
 }
 
 pub async fn get_material(
