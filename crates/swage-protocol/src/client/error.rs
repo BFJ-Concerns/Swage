@@ -26,6 +26,9 @@ pub enum ErrorCode {
     /// The body parsed but failed validation — a missing or unknown field,
     /// a value outside its contract.
     ValidationError,
+    /// The request reached a gateway bound beyond loopback without its
+    /// token; a client pairs once and is admitted thereafter.
+    Unauthorised,
     /// The caller may not perform this operation from where it is.
     Forbidden,
     /// The addressed entity does not exist.
@@ -54,6 +57,7 @@ impl ErrorCode {
     pub const fn status(self) -> u16 {
         match self {
             Self::MalformedBody => 400,
+            Self::Unauthorised => 401,
             Self::Forbidden => 403,
             Self::NotFound => 404,
             Self::Conflict | Self::TurnInProgress | Self::AlreadyConnected => 409,

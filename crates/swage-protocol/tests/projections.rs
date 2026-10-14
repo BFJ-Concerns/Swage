@@ -89,6 +89,14 @@ fn typescript_bindings_are_regenerated() {
     client::settings::SaveSettingsRequest::export_all(&cfg).expect("export save settings");
     client::settings::ModelDiscoveryResponse::export_all(&cfg).expect("export model discovery");
     client::settings::RestartStatusResponse::export_all(&cfg).expect("export restart status");
+    client::security_settings::SecuritySettingsResponse::export_all(&cfg)
+        .expect("export security settings");
+    client::security_settings::SaveSecuritySettingsRequest::export_all(&cfg)
+        .expect("export save security settings");
+    client::access::AccessStatusResponse::export_all(&cfg).expect("export access status");
+    client::access::PairingCodeResponse::export_all(&cfg).expect("export pairing code");
+    client::access::PairClientRequest::export_all(&cfg).expect("export pair client");
+    client::access::PairClientResponse::export_all(&cfg).expect("export pair client response");
     client::material::CreateAttachmentRequest::export_all(&cfg).expect("export attachment request");
     client::material::QueuedAttachmentResponse::export_all(&cfg).expect("export queued attachment");
     client::material::AttachmentListResponse::export_all(&cfg).expect("export attachments");

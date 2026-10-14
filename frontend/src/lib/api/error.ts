@@ -8,6 +8,7 @@
 
 import type { ApiErrorBody } from "../protocol/ApiErrorBody";
 import type { ErrorCode } from "../protocol/ErrorCode";
+import { markPairingRequired } from "../stores/access";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -28,6 +29,9 @@ export class ApiError extends Error {
    */
   static async fromResponse(response: Response, method: string, path: string): Promise<ApiError> {
     const text = await response.text().catch(() => "");
+    // A gateway bound beyond loopback refuses an unpaired client with 401:
+    // the pairing prompt takes over, and the caller's error stands as it is.
+    if (response.status === 401) markPairingRequired();
     const body = parseContract(text);
     if (body) {
       return new ApiError(response.status, body.code, body.message);
@@ -50,6 +54,7 @@ const ERROR_CODES = [
   "malformed_body",
   "unsupported_media_type",
   "validation_error",
+  "unauthorised",
   "forbidden",
   "not_found",
   "conflict",

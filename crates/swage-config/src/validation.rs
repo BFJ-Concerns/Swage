@@ -183,7 +183,7 @@ const KNOWN_TOP_LEVEL_SCALARS: &[(&str, &str)] = &[("dangerously_skip_permission
 /// Valid field names for each known section.
 fn known_fields_for(section: &str) -> &'static [&'static str] {
     match section {
-        "server" => &["host", "port"],
+        "server" => &["host", "port", "access"],
         "providers" => &["default", "entries"],
         "models" => &["default", "default_model_id", "entries"],
         "sandbox" => &["enabled", "allow_degraded_execution"],
@@ -290,6 +290,7 @@ fn check_field_type(
     let (expected, is_ok): (&str, bool) = match (section, field) {
         ("server", "host") => ("string", matches!(value, Value::String(_))),
         ("server", "port") => ("integer", matches!(value, Value::Integer(_))),
+        ("server", "access") => ("string", matches!(value, Value::String(_))),
         ("providers", "default") => ("string", matches!(value, Value::String(_))),
         ("providers", "entries") => ("table", matches!(value, Value::Table(_))),
         ("models", "default") => ("string", matches!(value, Value::String(_))),
@@ -380,6 +381,21 @@ fn check_field_semantics(
     let mut problems = Vec::new();
 
     match (section, field) {
+        ("server", "access") => {
+            if let Value::String(mode) = value
+                && !matches!(mode.as_str(), "token" | "warn" | "off")
+            {
+                problems.push(make_problem(
+                    file_path,
+                    Some(field_path.to_string()),
+                    ConfigProblemKind::SemanticError {
+                        message: format!(
+                            "server.access must be \"token\", \"warn\" or \"off\", got \"{mode}\""
+                        ),
+                    },
+                ));
+            }
+        }
         ("server", "port") => {
             if let Value::Integer(port) = value
                 && (*port < 1 || *port > 65535)

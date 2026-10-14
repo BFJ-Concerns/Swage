@@ -13,6 +13,10 @@ use swage_core::ApprovalTimeoutPolicy;
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    /// How requests from beyond loopback are gated: `token` (the shipped
+    /// default) admits paired clients only, `warn` admits and logs, `off`
+    /// admits. Loopback is never gated.
+    pub access: AccessGateMode,
 }
 
 impl Default for ServerConfig {
@@ -20,6 +24,7 @@ impl Default for ServerConfig {
         Self {
             host: "127.0.0.1".to_string(),
             port: 3000,
+            access: AccessGateMode::Token,
         }
     }
 }
@@ -753,6 +758,7 @@ impl Default for SchedulingConfig {
 
 // Declared once in swage-protocol: the wire type and the resolved config
 // type are one definition, with the partial, schema and semantics beside it.
+pub use swage_protocol::client::access::AccessGateMode;
 pub use swage_protocol::client::settings::{MemoryConfig, SessionsConfig};
 
 /// Model routes for voice. Voice speaks only to the default provider's

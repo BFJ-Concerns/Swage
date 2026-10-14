@@ -109,6 +109,106 @@ pub async fn save_settings(
     Ok(Json(crate::settings::save_settings(&state, request).await?))
 }
 
+/// Whether the gate applies to this gateway and whether this request is
+/// admitted — the web UI's first question before it asks for a pairing code.
+pub async fn access_status(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+) -> Json<swage_protocol::client::access::AccessStatusResponse> {
+    Json(crate::access_gate::access_status(&state, &request))
+}
+
+/// Issue a one-time pairing code — from the gateway's own machine only.
+pub async fn issue_pairing_code(
+    State(state): State<AppState>,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
+) -> Result<
+    (
+        StatusCode,
+        Json<swage_protocol::client::access::PairingCodeResponse>,
+    ),
+    ApiError,
+> {
+    let peer = connect_info.map(|Extension(ConnectInfo(addr))| addr);
+    Ok((
+        StatusCode::CREATED,
+        Json(crate::access_gate::issue_pairing_code(&state, peer)?),
+    ))
+}
+
+/// Redeem a pairing code: the token in the body and as the browser's cookie.
+pub async fn pair_client(
+    State(state): State<AppState>,
+    Json(request): Json<swage_protocol::client::access::PairClientRequest>,
+) -> Result<axum::response::Response, ApiError> {
+    crate::access_gate::pair_client(&state, request)
+}
+
+pub async fn get_install_security_settings(
+    State(state): State<AppState>,
+) -> Result<Json<swage_protocol::client::security_settings::SecuritySettingsResponse>, ApiError> {
+    Ok(Json(
+        crate::security_settings::read_security_settings(
+            &state,
+            swage_protocol::client::security_settings::SettingsScope::Install,
+        )
+        .await?,
+    ))
+}
+
+pub async fn save_install_security_settings(
+    State(state): State<AppState>,
+    Json(request): Json<swage_protocol::client::security_settings::SaveSecuritySettingsRequest>,
+) -> Result<Json<swage_protocol::client::security_settings::SecuritySettingsResponse>, ApiError> {
+    Ok(Json(
+        crate::security_settings::save_security_settings(
+            &state,
+            swage_protocol::client::security_settings::SettingsScope::Install,
+            request,
+        )
+        .await?,
+    ))
+}
+
+pub async fn get_topic_security_settings(
+    State(state): State<AppState>,
+    Path(topic_id): Path<Uuid>,
+) -> Result<Json<swage_protocol::client::security_settings::SecuritySettingsResponse>, ApiError> {
+    Ok(Json(
+        crate::security_settings::read_security_settings(
+            &state,
+            swage_protocol::client::security_settings::SettingsScope::Topic { topic_id },
+        )
+        .await?,
+    ))
+}
+
+pub async fn save_topic_security_settings(
+    State(state): State<AppState>,
+    Path(topic_id): Path<Uuid>,
+    Json(request): Json<swage_protocol::client::security_settings::SaveSecuritySettingsRequest>,
+) -> Result<Json<swage_protocol::client::security_settings::SecuritySettingsResponse>, ApiError> {
+    Ok(Json(
+        crate::security_settings::save_security_settings(
+            &state,
+            swage_protocol::client::security_settings::SettingsScope::Topic { topic_id },
+            request,
+        )
+        .await?,
+    ))
+}
+
+/// The security checks the conversation's session runs under: its topic's
+/// scope, or the install's for a session in the general scope.
+pub async fn conversation_security_settings(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<swage_protocol::client::security_settings::SecuritySettingsResponse>, ApiError> {
+    Ok(Json(
+        crate::security_settings::security_settings_for_session(&state, id).await?,
+    ))
+}
+
 pub async fn discover_provider_models(
     State(state): State<AppState>,
     Path(provider_id): Path<String>,

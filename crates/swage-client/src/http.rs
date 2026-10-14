@@ -17,6 +17,7 @@ pub use swage_protocol::client::topic::{
     WorkspaceAttachmentResponse,
 };
 
+pub use swage_protocol::client::access::PairingCodeResponse;
 pub use swage_protocol::client::approval::{ApprovalDecisionScope, ApprovalDecisionValue};
 pub use swage_protocol::hosting::{
     ApprovalDecisionRequest, ClientPresenceResponse, DevicePresenceResponse,
@@ -232,6 +233,23 @@ impl GatewayClient {
             .client
             .post(&url)
             .json(&body)
+            .send()
+            .await
+            .map_err(|e| self.map_reqwest_error(e, &url))?;
+        self.parse_response(response, &url).await
+    }
+
+    /// Issues a one-time pairing code for a client on another machine.
+    ///
+    /// Calls `POST /api/pair/codes`. The gateway issues codes to loopback
+    /// requests only, so this succeeds from the gateway's own machine and is
+    /// refused from anywhere else.
+    pub async fn issue_pairing_code(&self) -> Result<PairingCodeResponse, ClientError> {
+        let url = format!("{}/api/pair/codes", self.base_url);
+        let response = self
+            .client
+            .post(&url)
+            .json(&serde_json::json!({}))
             .send()
             .await
             .map_err(|e| self.map_reqwest_error(e, &url))?;

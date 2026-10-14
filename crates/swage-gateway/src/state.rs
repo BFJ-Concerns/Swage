@@ -181,6 +181,9 @@ pub struct AppState {
     /// configuration. When set, no per-turn sandbox is built and every turn's
     /// record names this boundary.
     pub declared_execution_boundary: Option<String>,
+    /// The token gate on a binding beyond loopback; open until startup reads
+    /// the binding and the token (crate::access_gate).
+    pub access_gate: crate::access_gate::SharedAccessGate,
     /// Hot-swapped runtime config used by new turns and settings reads.
     pub runtime_config: Arc<RwLock<ResolvedConfig>>,
     /// Hot-swapped provider catalogue used by new turns.
@@ -401,6 +404,7 @@ impl AppState {
                 .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
             declared_execution_boundary: declared_execution_boundary_from_env(),
+            access_gate: Arc::new(crate::access_gate::AccessGate::open()),
             runtime_config: Arc::new(RwLock::new(config)),
             runtime_provider: Arc::new(RwLock::new(provider)),
             runtime_tool_dispatcher: Arc::new(RwLock::new(tool_dispatcher)),

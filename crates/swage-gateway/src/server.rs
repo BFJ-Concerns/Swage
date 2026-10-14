@@ -391,6 +391,27 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/voice/capabilities", get(handlers::voice_capabilities))
         .route("/api/settings", get(handlers::get_settings))
         .route("/api/settings", put(handlers::save_settings))
+        // The token gate on a binding beyond loopback: whether this request
+        // is admitted, and pairing (crate::access_gate).
+        .route("/api/access", get(handlers::access_status))
+        .route("/api/pair/codes", post(handlers::issue_pairing_code))
+        .route("/api/pair", post(handlers::pair_client))
+        // Security checks per scope: the install here, a topic under
+        // /api/topics/{id}/settings/security, a session's view under
+        // /api/conversations/{id}/security.
+        .route(
+            "/api/settings/security",
+            get(handlers::get_install_security_settings)
+                .put(handlers::save_install_security_settings),
+        )
+        .route(
+            "/api/topics/{id}/settings/security",
+            get(handlers::get_topic_security_settings).put(handlers::save_topic_security_settings),
+        )
+        .route(
+            "/api/conversations/{id}/security",
+            get(handlers::conversation_security_settings),
+        )
         .route(
             "/api/settings/providers/{id}/models",
             get(handlers::discover_provider_models).post(handlers::discover_draft_provider_models),
@@ -422,6 +443,12 @@ pub fn build_router(state: AppState) -> Router {
         // API routes above take priority - the fallback only fires for
         // paths that don't match any registered route.
         .fallback(assets::serve_frontend)
+        // Admit or refuse by the token gate before any handler runs; on a
+        // loopback binding the layer passes everything through.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::access_gate::access_gate_middleware,
+        ))
         // Emit a tracing span for every inbound request.
         .layer(TraceLayer::new_for_http())
         // Assign a UUID request_id to each request; the ID is inherited by all
@@ -461,6 +488,218 @@ mod tests {
     /// with the same method and path template. The probe substitutes a nil
     /// UUID for each path parameter and asks only whether the router
     /// matched: a 404 or 405 means the manifest and the router disagree.
+    /// A binding beyond loopback admits an unpaired request only to liveness
+    /// and pairing; a paired request, or one from loopback, reaches everything.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lan_binding_admits_paired_and_loopback_requests_only() {
+        use axum::extract::ConnectInfo;
+        use std::net::SocketAddr;
+
+        let storage = Arc::new(MockStorage::new());
+        let mut state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            Arc::new(MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        state.access_gate = Arc::new(crate::access_gate::AccessGate::with_token(
+            "0.0.0.0",
+            "the-token",
+        ));
+        let router = build_router(state.clone());
+        let send = |router: axum::Router,
+                    method: &'static str,
+                    uri: &'static str,
+                    headers: Vec<(&'static str, String)>,
+                    peer: Option<&'static str>| async move {
+            let mut builder = Request::builder().method(method).uri(uri);
+            for (name, value) in headers {
+                builder = builder.header(name, value);
+            }
+            let body = if method == "POST" {
+                Body::from("{}")
+            } else {
+                Body::empty()
+            };
+            let mut request = builder
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap();
+            if let Some(peer) = peer {
+                request
+                    .extensions_mut()
+                    .insert(ConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+            }
+            router.oneshot(request).await.unwrap()
+        };
+
+        // Liveness and the access status answer anyone.
+        assert_eq!(
+            send(router.clone(), "GET", "/api/health", vec![], None)
+                .await
+                .status(),
+            200
+        );
+        let status = send(router.clone(), "GET", "/api/access", vec![], None).await;
+        assert_eq!(status.status(), 200);
+        let status_body = to_bytes(status.into_body(), usize::MAX).await.unwrap();
+        let status_json: serde_json::Value = serde_json::from_slice(&status_body).unwrap();
+        assert_eq!(status_json["gated"], true);
+        assert_eq!(status_json["admitted"], false);
+
+        // An unpaired request from beyond loopback is refused with the contract's code.
+        let refused = send(router.clone(), "GET", "/api/topics", vec![], None).await;
+        assert_eq!(refused.status(), 401);
+        let refused_body = to_bytes(refused.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&refused_body).unwrap()["code"],
+            "unauthorised"
+        );
+
+        // The token on a header, from loopback, or as the pairing cookie admits.
+        assert_eq!(
+            send(
+                router.clone(),
+                "GET",
+                "/api/topics",
+                vec![("x-swage-token", "the-token".into())],
+                None
+            )
+            .await
+            .status(),
+            200
+        );
+        assert_eq!(
+            send(
+                router.clone(),
+                "GET",
+                "/api/topics",
+                vec![("authorization", "Bearer the-token".into())],
+                None
+            )
+            .await
+            .status(),
+            200
+        );
+        assert_eq!(
+            send(
+                router.clone(),
+                "GET",
+                "/api/topics",
+                vec![],
+                Some("127.0.0.1:5000")
+            )
+            .await
+            .status(),
+            200
+        );
+        assert_eq!(
+            send(
+                router.clone(),
+                "GET",
+                "/api/topics",
+                vec![("x-swage-token", "wrong".into())],
+                None
+            )
+            .await
+            .status(),
+            401
+        );
+
+        // Pairing codes are issued from loopback only — a remote request is
+        // refused by the gate before the handler sees it, and a paired remote
+        // by the handler — and redeem once for the token, set as the cookie a
+        // browser carries thereafter.
+        assert_eq!(
+            send(router.clone(), "POST", "/api/pair/codes", vec![], None)
+                .await
+                .status(),
+            401
+        );
+        assert_eq!(
+            send(
+                router.clone(),
+                "POST",
+                "/api/pair/codes",
+                vec![("x-swage-token", "the-token".into())],
+                None
+            )
+            .await
+            .status(),
+            403
+        );
+        let issued = send(
+            router.clone(),
+            "POST",
+            "/api/pair/codes",
+            vec![],
+            Some("127.0.0.1:5000"),
+        )
+        .await;
+        assert_eq!(issued.status(), 201);
+        let issued_body = to_bytes(issued.into_body(), usize::MAX).await.unwrap();
+        let code =
+            serde_json::from_slice::<serde_json::Value>(&issued_body).unwrap()["pairing_code"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        let pair_request = Request::builder()
+            .method("POST")
+            .uri("/api/pair")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "pairing_code": code }).to_string(),
+            ))
+            .unwrap();
+        let paired = router.clone().oneshot(pair_request).await.unwrap();
+        assert_eq!(paired.status(), 200);
+        let cookie = paired
+            .headers()
+            .get("set-cookie")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(cookie.starts_with("swage_token=the-token;"), "{cookie}");
+        let paired_body = to_bytes(paired.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&paired_body).unwrap()["token"],
+            "the-token"
+        );
+        assert_eq!(
+            send(
+                router.clone(),
+                "GET",
+                "/api/topics",
+                vec![("cookie", "swage_token=the-token".into())],
+                None
+            )
+            .await
+            .status(),
+            200
+        );
+        let reused = Request::builder()
+            .method("POST")
+            .uri("/api/pair")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "pairing_code": code }).to_string(),
+            ))
+            .unwrap();
+        assert_eq!(router.clone().oneshot(reused).await.unwrap().status(), 422);
+
+        // Relaxing the gate admits without a token, at once: warn marks the response.
+        state.runtime_config.write().unwrap().server.access = swage_config::AccessGateMode::Warn;
+        let warned = send(router.clone(), "GET", "/api/topics", vec![], None).await;
+        assert_eq!(warned.status(), 200);
+        assert_eq!(
+            warned.headers().get("x-swage-access").unwrap(),
+            "unauthenticated"
+        );
+    }
+
     #[tokio::test]
     async fn every_manifest_route_is_registered_on_the_router() {
         let storage = Arc::new(MockStorage::new());

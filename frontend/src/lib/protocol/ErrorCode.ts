@@ -7,4 +7,4 @@
  * identifiers: add a code for a new class of failure rather than
  * widening the meaning of an existing one.
  */
-export type ErrorCode = "malformed_body" | "unsupported_media_type" | "validation_error" | "forbidden" | "not_found" | "conflict" | "turn_in_progress" | "already_connected" | "provider_error" | "sign_in_unsupported" | "sign_in_failed" | "provider_runtime_unavailable" | "internal_error";
+export type ErrorCode = "malformed_body" | "unsupported_media_type" | "validation_error" | "unauthorised" | "forbidden" | "not_found" | "conflict" | "turn_in_progress" | "already_connected" | "provider_error" | "sign_in_unsupported" | "sign_in_failed" | "provider_runtime_unavailable" | "internal_error";

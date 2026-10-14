@@ -2,6 +2,7 @@
 // manifest (crates/swage-protocol/src/client/routes.rs). Do not edit:
 // change the manifest and regenerate.
 
+import type { AccessStatusResponse } from "./AccessStatusResponse";
 import type { ConversationBranchListResponse } from "./ConversationBranchListResponse";
 import type { ConversationBranchResponse } from "./ConversationBranchResponse";
 import type { ConversationDetail } from "./ConversationDetail";
@@ -25,13 +26,18 @@ import type { MemoryPageListResponse } from "./MemoryPageListResponse";
 import type { MemoryPageResponse } from "./MemoryPageResponse";
 import type { ModelDiscoveryResponse } from "./ModelDiscoveryResponse";
 import type { MoveSurfaceModuleRequest } from "./MoveSurfaceModuleRequest";
+import type { PairClientRequest } from "./PairClientRequest";
+import type { PairClientResponse } from "./PairClientResponse";
+import type { PairingCodeResponse } from "./PairingCodeResponse";
 import type { ProviderSignInState } from "./ProviderSignInState";
 import type { RecentSessionsResponse } from "./RecentSessionsResponse";
 import type { RelinkWorkspaceAttachmentRequest } from "./RelinkWorkspaceAttachmentRequest";
 import type { RestartStatusResponse } from "./RestartStatusResponse";
 import type { SaveProviderSettings } from "./SaveProviderSettings";
+import type { SaveSecuritySettingsRequest } from "./SaveSecuritySettingsRequest";
 import type { SaveSettingsRequest } from "./SaveSettingsRequest";
 import type { SaveSurfaceToLibraryRequest } from "./SaveSurfaceToLibraryRequest";
+import type { SecuritySettingsResponse } from "./SecuritySettingsResponse";
 import type { SettingsResponse } from "./SettingsResponse";
 import type { StartProviderSignInRequest } from "./StartProviderSignInRequest";
 import type { StartProviderSignInResponse } from "./StartProviderSignInResponse";
@@ -283,6 +289,46 @@ export async function getSettings(): Promise<SettingsResponse> {
 /** Save gateway settings. */
 export async function saveSettings(body: SaveSettingsRequest): Promise<SettingsResponse> {
   return request<SettingsResponse>("PUT", `/api/settings`, body);
+}
+
+/** Whether the gateway gates this connection and whether it is admitted. */
+export async function accessStatus(): Promise<AccessStatusResponse> {
+  return request<AccessStatusResponse>("GET", `/api/access`);
+}
+
+/** Issue a one-time pairing code; loopback only. */
+export async function issuePairingCode(): Promise<PairingCodeResponse> {
+  return request<PairingCodeResponse>("POST", `/api/pair/codes`);
+}
+
+/** Redeem a pairing code for the gateway's token, set as the browser's cookie. */
+export async function pairClient(body: PairClientRequest): Promise<PairClientResponse> {
+  return request<PairClientResponse>("POST", `/api/pair`, body);
+}
+
+/** Read the install's security checks: effective, overrides and relaxations. */
+export async function getInstallSecuritySettings(): Promise<SecuritySettingsResponse> {
+  return request<SecuritySettingsResponse>("GET", `/api/settings/security`);
+}
+
+/** Replace the install's security overrides. */
+export async function saveInstallSecuritySettings(body: SaveSecuritySettingsRequest): Promise<SecuritySettingsResponse> {
+  return request<SecuritySettingsResponse>("PUT", `/api/settings/security`, body);
+}
+
+/** Read a topic's security checks: effective, overrides and relaxations. */
+export async function getTopicSecuritySettings(id: string): Promise<SecuritySettingsResponse> {
+  return request<SecuritySettingsResponse>("GET", `/api/topics/${encodeURIComponent(id)}/settings/security`);
+}
+
+/** Replace a topic's security overrides. */
+export async function saveTopicSecuritySettings(id: string, body: SaveSecuritySettingsRequest): Promise<SecuritySettingsResponse> {
+  return request<SecuritySettingsResponse>("PUT", `/api/topics/${encodeURIComponent(id)}/settings/security`, body);
+}
+
+/** Read the security checks a conversation's session runs under. */
+export async function conversationSecuritySettings(id: string): Promise<SecuritySettingsResponse> {
+  return request<SecuritySettingsResponse>("GET", `/api/conversations/${encodeURIComponent(id)}/security`);
 }
 
 /** List the platform's own documentation, hosted by the gateway. */

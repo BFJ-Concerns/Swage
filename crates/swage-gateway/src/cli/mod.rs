@@ -8,6 +8,7 @@
 pub mod completions;
 pub mod device;
 pub mod install;
+pub mod pair;
 pub mod recovery;
 pub mod restart;
 pub mod run;
@@ -135,6 +136,8 @@ pub enum GatewayCommand {
     Stop(StopArgs),
     /// Check whether the gateway is running.
     Status,
+    /// Issue a one-time code that pairs a device on the network with this gateway.
+    Pair,
 }
 
 // ---------------------------------------------------------------------------

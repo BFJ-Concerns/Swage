@@ -138,6 +138,7 @@ async fn main() {
             }
             GatewayCommand::Stop(stop_args) => swage_gateway::cli::stop::run(&stop_args).await,
             GatewayCommand::Status => swage_gateway::cli::status::run().await,
+            GatewayCommand::Pair => swage_gateway::cli::pair::run().await,
         },
         Some(Command::Device(args)) => match args.command {
             swage_gateway::cli::device::DeviceCommand::Connect(connect_args) => {

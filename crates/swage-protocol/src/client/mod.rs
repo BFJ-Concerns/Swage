@@ -1,6 +1,7 @@
 //! Client surface: types spoken between the gateway and its own clients
 //! (web frontend, CLI, desktop shell) over HTTP and WebSocket.
 
+pub mod access;
 pub mod approval;
 pub mod channel;
 pub mod context;
@@ -16,6 +17,7 @@ pub mod provider_signin;
 pub mod recovery;
 pub mod routes;
 pub mod schedule;
+pub mod security_settings;
 pub mod settings;
 pub mod settings_section;
 pub mod skill;
@@ -95,6 +97,12 @@ pub struct ClientSurface {
     effort_capability: settings::EffortCapability,
     skills: skill::SkillListResponse,
     save_settings: settings::SaveSettingsRequest,
+    security_settings: security_settings::SecuritySettingsResponse,
+    access_status: access::AccessStatusResponse,
+    pairing_code: access::PairingCodeResponse,
+    pair_client_request: access::PairClientRequest,
+    pair_client_response: access::PairClientResponse,
+    save_security_settings: security_settings::SaveSecuritySettingsRequest,
     model_discovery: settings::ModelDiscoveryResponse,
     save_provider_settings: settings::SaveProviderSettings,
     restart_status: settings::RestartStatusResponse,

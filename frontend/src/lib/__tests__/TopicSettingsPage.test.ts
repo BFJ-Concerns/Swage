@@ -24,6 +24,12 @@ vi.mock("../api/surfaces", () => ({
   removeTopicDefaultSurface: vi.fn(),
 }));
 
+vi.mock("../api/settings", () => ({
+  fetchTopicSecuritySettings: vi.fn(),
+  saveTopicSecuritySettings: vi.fn(),
+}));
+import * as settingsApi from "../api/settings";
+
 type MountedComponent = ReturnType<typeof mount>;
 
 async function flushUi(): Promise<void> {
@@ -89,6 +95,44 @@ describe("TopicSettingsPage", () => {
     expect(document.body.textContent).toContain("Research");
     expect(document.body.textContent).toContain("Workspaces 1");
     expect(document.body.textContent).toContain("Sessions 1");
+  });
+
+  it("shows the topic's security checks with what stands relaxed and saves its own overrides", async () => {
+    vi.mocked(settingsApi.fetchTopicSecuritySettings).mockResolvedValue({
+      scope: { kind: "topic", topic_id: "topic-1" },
+      effective: { sandbox_enabled: false, allow_degraded_execution: false,
+      access_gate: "token", require_approval: ["shell", "file_write"] },
+      overrides: {},
+      relaxed: [
+        { check: "sandbox", relaxed_by: { kind: "install" }, detail: "The per-turn sandbox is off." },
+      ],
+    });
+    vi.mocked(settingsApi.saveTopicSecuritySettings).mockResolvedValue({
+      scope: { kind: "topic", topic_id: "topic-1" },
+      effective: { sandbox_enabled: true, allow_degraded_execution: false,
+      access_gate: "token", require_approval: ["shell", "file_write"] },
+      overrides: { sandbox_enabled: true },
+      relaxed: [],
+    });
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "security" } });
+    await flushUi();
+
+    expect(document.body.textContent).toContain("Sandbox — relaxed by the install");
+    expect(document.body.textContent).toContain("The per-turn sandbox is off.");
+    expect(document.body.textContent).toContain("shell, file_write");
+
+    const sandbox = document.querySelector('select[aria-label="Sandbox for this topic"]') as HTMLSelectElement;
+    sandbox.value = "on";
+    sandbox.dispatchEvent(new Event("change", { bubbles: true }));
+    document.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushUi();
+
+    expect(settingsApi.saveTopicSecuritySettings).toHaveBeenCalledWith("topic-1", {
+      sandbox_enabled: true,
+      allow_degraded_execution: undefined,
+      require_approval: undefined,
+    });
+    expect(document.body.textContent).toContain("Every shipped check is in force for this topic.");
   });
 
   it("renders topic workspaces without global settings controls", async () => {

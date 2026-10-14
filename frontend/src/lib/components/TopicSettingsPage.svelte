@@ -22,6 +22,9 @@
     removeTopicDefaultSurface,
   } from "../api/surfaces";
   import type { LibraryEntrySummary } from "../protocol/LibraryEntrySummary";
+  import { fetchTopicSecuritySettings, saveTopicSecuritySettings } from "../api/settings";
+  import type { SecuritySettingsResponse } from "../protocol/SecuritySettingsResponse";
+  import type { SecurityCheck } from "../protocol/SecurityCheck";
   import type { TopicSettingsTab } from "../router";
   import type { Topic, ConversationSummary, WorkspaceAttachment } from "../types";
 
@@ -41,6 +44,7 @@
     { id: "workspaces", label: "Workspaces" },
     { id: "surfaces", label: "Surfaces" },
     { id: "sessions", label: "Sessions" },
+    { id: "security", label: "Security" },
   ];
 
   function openTab(next: TopicSettingsTab): void {
@@ -76,6 +80,72 @@
   let relinkingWorkspaceId = $state<string | null>(null);
   let pendingDelete = $state(false);
 
+  // The topic's security checks: what its sessions run under, what the
+  // topic itself overrides, and what stands relaxed. "inherit" leaves a
+  // check to the install.
+  let security = $state<SecuritySettingsResponse | null>(null);
+  let securityLoaded = $state(false);
+  let securityNotice = $state<string | null>(null);
+  let sandboxChoice = $state<"inherit" | "on" | "off">("inherit");
+  let confinementChoice = $state<"inherit" | "strict" | "allow_degraded">("inherit");
+  let approvalsChoice = $state<"inherit" | "own">("inherit");
+  let approvalsDraft = $state("");
+
+  const CHECK_LABELS: Record<SecurityCheck, string> = {
+    sandbox: "Sandbox",
+    sandbox_confinement: "Sandbox confinement",
+    approval_prompts: "Approval prompts",
+    access_gate: "Access gate",
+  };
+
+  function relaxedBy(entry: { relaxed_by: { kind: string } }): string {
+    return entry.relaxed_by.kind === "topic" ? "relaxed by this topic" : "relaxed by the install";
+  }
+
+  async function loadSecuritySettings(): Promise<void> {
+    if (!topic) return;
+    try {
+      security = await fetchTopicSecuritySettings(topic.id);
+      const overrides = security.overrides;
+      sandboxChoice = overrides.sandbox_enabled === undefined || overrides.sandbox_enabled === null
+        ? "inherit"
+        : overrides.sandbox_enabled ? "on" : "off";
+      confinementChoice = overrides.allow_degraded_execution === undefined || overrides.allow_degraded_execution === null
+        ? "inherit"
+        : overrides.allow_degraded_execution ? "allow_degraded" : "strict";
+      approvalsChoice = overrides.require_approval ? "own" : "inherit";
+      approvalsDraft = (overrides.require_approval ?? security.effective.require_approval)
+        .map((entry) => (typeof entry === "string" ? entry : entry.tool))
+        .join("\n");
+      securityLoaded = true;
+      error = null;
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to load the topic's security settings.";
+    }
+  }
+
+  async function saveSecuritySettings(): Promise<void> {
+    if (!topic) return;
+    isMutating = true;
+    securityNotice = null;
+    try {
+      security = await saveTopicSecuritySettings(topic.id, {
+        sandbox_enabled: sandboxChoice === "inherit" ? undefined : sandboxChoice === "on",
+        allow_degraded_execution: confinementChoice === "inherit" ? undefined : confinementChoice === "allow_degraded",
+        require_approval: approvalsChoice === "inherit"
+          ? undefined
+          : approvalsDraft.split("\n").map((line) => line.trim()).filter(Boolean),
+      });
+      securityNotice = security.relaxed.length === 0
+        ? "Saved. Every shipped check is in force for this topic."
+        : `Saved. Relaxed here: ${security.relaxed.map((entry) => CHECK_LABELS[entry.check]).join(", ")}.`;
+    } catch (err) {
+      error = err instanceof Error ? err.message : "Failed to save the topic's security settings.";
+    } finally {
+      isMutating = false;
+    }
+  }
+
   $effect(() => {
     aboutDraft = topic?.description ?? "";
   });
@@ -86,6 +156,7 @@
   // whether the page mounted on it or the user moved to it.
   $effect(() => {
     if (tab === "surfaces" && !surfacesLoaded) void loadSurfaceSettings();
+    if (tab === "security" && !securityLoaded) void loadSecuritySettings();
   });
 
   async function loadSurfaceSettings(): Promise<void> {
@@ -404,6 +475,70 @@
             <p class="shell-empty">No workspace folders are attached to this topic.</p>
           {/each}
         </div>
+      </section>
+    {:else if tab === "security"}
+      <section class="shell-section">
+        <h2 class="shell-section-title">Security checks</h2>
+        <p class="workspace-note">What sessions in this topic run under. Every shipped check is on by default; a check this topic leaves to the install follows the install's setting, and a relaxation is recorded in the audit trail and shown here and in each session.</p>
+        {#if security}
+          <div class="shell-grid" aria-label="Effective security checks">
+            <div class="shell-row">
+              <span class="shell-label">Sandbox</span>
+              <span class="shell-value">{security.effective.sandbox_enabled ? "On" : "Off"}</span>
+            </div>
+            <div class="shell-row">
+              <span class="shell-label">Sandbox confinement</span>
+              <span class="shell-value">{security.effective.allow_degraded_execution ? "A turn whose sandbox cannot start runs unconfined" : "Strict: a turn whose sandbox cannot start is refused"}</span>
+            </div>
+            <div class="shell-row">
+              <span class="shell-label">Approval prompts</span>
+              <span class="shell-value">{security.effective.require_approval.map((entry) => (typeof entry === "string" ? entry : entry.tool)).join(", ") || "none"}</span>
+            </div>
+          </div>
+          <div class="record-list" aria-label="Relaxed checks">
+            {#each security.relaxed as entry (entry.check)}
+              <article class="record-row relaxed-check">
+                <strong>{CHECK_LABELS[entry.check]} — {relaxedBy(entry)}</strong>
+                <span>{entry.detail}</span>
+              </article>
+            {:else}
+              <p class="shell-empty">Every shipped check is in force for this topic.</p>
+            {/each}
+          </div>
+          <form class="workspace-form" onsubmit={(event) => { event.preventDefault(); void saveSecuritySettings(); }}>
+            <label>Sandbox
+              <select aria-label="Sandbox for this topic" bind:value={sandboxChoice}>
+                <option value="inherit">Follow the install</option>
+                <option value="on">On</option>
+                <option value="off">Off (relaxed)</option>
+              </select>
+            </label>
+            <label>Sandbox confinement
+              <select aria-label="Sandbox confinement for this topic" bind:value={confinementChoice}>
+                <option value="inherit">Follow the install</option>
+                <option value="strict">Strict</option>
+                <option value="allow_degraded">Allow unconfined fallback (relaxed)</option>
+              </select>
+            </label>
+            <label>Approval prompts
+              <select aria-label="Approval prompts for this topic" bind:value={approvalsChoice}>
+                <option value="inherit">Follow the install</option>
+                <option value="own">This topic's own list</option>
+              </select>
+            </label>
+            {#if approvalsChoice === "own"}
+              <label>Tools asked about before they run, one per line
+                <textarea aria-label="Approval-gated tools for this topic" rows="4" bind:value={approvalsDraft}></textarea>
+              </label>
+            {/if}
+            <div class="workspace-actions">
+              <button type="submit" disabled={isMutating}>Save security settings</button>
+            </div>
+          </form>
+          {#if securityNotice}<p class="workspace-note">{securityNotice}</p>{/if}
+        {:else}
+          <p class="shell-empty">{securityLoaded ? "No settings." : "Loading…"}</p>
+        {/if}
       </section>
     {:else if tab === "surfaces"}
       <section class="shell-section">

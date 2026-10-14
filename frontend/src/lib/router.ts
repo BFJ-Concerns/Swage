@@ -24,7 +24,7 @@ export type SettingsTab =
   | "display"
   | "account";
 
-export type TopicSettingsTab = "overview" | "workspaces" | "sessions" | "surfaces";
+export type TopicSettingsTab = "overview" | "workspaces" | "sessions" | "surfaces" | "security";
 
 export interface Route {
   path: string;
