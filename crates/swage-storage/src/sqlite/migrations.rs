@@ -107,6 +107,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("064_turn_queue", CREATE_TURN_QUEUE),
         ("065_turn_execution_isolation", ADD_TURN_EXECUTION_ISOLATION),
         ("066_turn_failure_message", ADD_TURN_FAILURE_MESSAGE),
+        ("067_tool_call_audit", CREATE_TOOL_CALL_AUDIT_TRIGGERS),
     ]
 }
 
@@ -126,6 +127,72 @@ const ADD_TURN_EXECUTION_ISOLATION: &str = "
 /// a reload as it did live.
 const ADD_TURN_FAILURE_MESSAGE: &str = "
     ALTER TABLE turns ADD COLUMN failure_message TEXT;
+";
+
+/// Every settled tool call is an audit event of its own family, attributed
+/// to the session its turn belongs to, so the record lists a session's tool
+/// calls beside its state transitions and configuration changes (C15). A
+/// call settles when its status is written — ordinarily an update after the
+/// row was created with no status, or an insert that already carries one
+/// (a harness that records settled calls whole).
+const CREATE_TOOL_CALL_AUDIT_TRIGGERS: &str = "
+    CREATE TRIGGER IF NOT EXISTS trg_tool_calls_settled_audit
+    AFTER UPDATE OF status ON tool_calls
+    WHEN NEW.status IS NOT NULL AND (OLD.status IS NULL OR OLD.status <> NEW.status)
+    BEGIN
+        INSERT INTO audit_events (
+            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
+        ) VALUES (
+            lower(hex(randomblob(16))),
+            (SELECT threads.session_id FROM turns
+                JOIN threads ON threads.id = turns.thread_id
+                WHERE turns.id = NEW.turn_id),
+            'tool_call',
+            NEW.id,
+            'tool_call',
+            'tool ' || NEW.tool || ' ' || NEW.status,
+            json_object(
+                'tool', NEW.tool,
+                'status', NEW.status,
+                'turn_id', NEW.turn_id,
+                'call_id', NEW.call_id,
+                'agent_id', NEW.agent_id,
+                'duration_ms', NEW.duration_ms,
+                'parent_call_id', COALESCE(NEW.parent_call_id, ''),
+                'display_summary', COALESCE(NEW.display_summary, '')
+            ),
+            strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        );
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_tool_calls_inserted_settled_audit
+    AFTER INSERT ON tool_calls
+    WHEN NEW.status IS NOT NULL
+    BEGIN
+        INSERT INTO audit_events (
+            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
+        ) VALUES (
+            lower(hex(randomblob(16))),
+            (SELECT threads.session_id FROM turns
+                JOIN threads ON threads.id = turns.thread_id
+                WHERE turns.id = NEW.turn_id),
+            'tool_call',
+            NEW.id,
+            'tool_call',
+            'tool ' || NEW.tool || ' ' || NEW.status,
+            json_object(
+                'tool', NEW.tool,
+                'status', NEW.status,
+                'turn_id', NEW.turn_id,
+                'call_id', NEW.call_id,
+                'agent_id', NEW.agent_id,
+                'duration_ms', NEW.duration_ms,
+                'parent_call_id', COALESCE(NEW.parent_call_id, ''),
+                'display_summary', COALESCE(NEW.display_summary, '')
+            ),
+            strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        );
+    END;
 ";
 
 const CREATE_TURN_QUEUE: &str = "

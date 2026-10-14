@@ -702,4 +702,96 @@ mod tests {
         assert_eq!(calls[1].call_id, "toolu_b");
         assert!(calls[1].result.is_none());
     }
+
+    async fn session_of(storage: &SqliteStorage) -> String {
+        storage
+            .with_conn(|conn| {
+                conn.query_row("SELECT id FROM sessions", [], |row| row.get::<_, String>(0))
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn tool_call_events(storage: &SqliteStorage) -> Vec<crate::AuditEvent> {
+        crate::AuditStore::list_audit_events_filtered(
+            storage,
+            crate::AuditEventFilter {
+                event_kind: Some("tool_call".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn settling_a_call_records_one_tool_call_event_attributed_to_its_session() {
+        let (storage, turn_id) = make_turn().await;
+        let record = storage
+            .create_tool_call(new_call(turn_id, "call-1", 0))
+            .await
+            .unwrap();
+        assert!(
+            tool_call_events(&storage).await.is_empty(),
+            "a call that has not settled is not yet an event"
+        );
+
+        storage
+            .update_tool_call_result(
+                record.id,
+                "{\"ok\":true}",
+                "{\"ok\":true}",
+                "success",
+                12,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        let events = tool_call_events(&storage).await;
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.entity_kind, "tool_call");
+        assert_eq!(event.entity_id, record.id.to_string());
+        assert_eq!(
+            event.session_id.map(|id| id.to_string()),
+            Some(session_of(&storage).await)
+        );
+        assert_eq!(event.summary, "tool shell success");
+        assert_eq!(event.metadata["tool"], "shell");
+        assert_eq!(event.metadata["status"], "success");
+        assert_eq!(event.metadata["call_id"], "call-1");
+        assert_eq!(event.metadata["turn_id"], turn_id.to_string());
+        assert_eq!(event.metadata["duration_ms"], 12);
+        assert_eq!(event.metadata["display_summary"], "ls");
+
+        // Settling the same row again with the same status is not a second
+        // event; a changed status is.
+        storage
+            .update_tool_call_result(record.id, "{}", "{}", "success", 13, false, None)
+            .await
+            .unwrap();
+        assert_eq!(tool_call_events(&storage).await.len(), 1);
+        storage
+            .update_tool_call_result(record.id, "{}", "{}", "error", 14, false, None)
+            .await
+            .unwrap();
+        assert_eq!(tool_call_events(&storage).await.len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_call_inserted_already_settled_is_an_event_at_insertion() {
+        let (storage, turn_id) = make_turn().await;
+        let mut call = new_call(turn_id, "whole", 0);
+        call.status = Some("success".into());
+        call.result = Some("done".into());
+        let record = storage.create_tool_call(call).await.unwrap();
+        let events = tool_call_events(&storage).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].entity_id, record.id.to_string());
+        assert_eq!(
+            events[0].session_id.map(|id| id.to_string()),
+            Some(session_of(&storage).await)
+        );
+    }
 }

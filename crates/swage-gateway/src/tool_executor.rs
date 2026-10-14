@@ -212,7 +212,13 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
         let resolved_params = if tool.device_secret_keys().is_empty() {
             params.clone()
         } else {
-            resolve_secret_params(params, tool.device_secret_keys(), &self.secret_manager).await?
+            resolve_secret_params(
+                params,
+                tool.device_secret_keys(),
+                &self.secret_manager,
+                ctx.session_id().parse().ok(),
+            )
+            .await?
         };
         let gateway_ctx =
             GatewayToolContext::new(ctx, self.ws_tx.clone(), Arc::clone(&self.storage))
@@ -269,6 +275,7 @@ async fn resolve_secret_params(
     params: &Value,
     keys: &[&str],
     secret_manager: &SecretManager,
+    session_id: Option<uuid::Uuid>,
 ) -> Result<Value, ToolError> {
     let mut resolved = params.clone();
     let Some(object) = resolved.as_object_mut() else {
@@ -284,12 +291,13 @@ async fn resolve_secret_params(
         if !reference.starts_with("secret://") {
             continue;
         }
-        let secret = secret_manager.resolve(reference).await.map_err(|error| {
-            ToolError::ExecutionFailed {
+        let secret = secret_manager
+            .resolve_for_session(reference, session_id)
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
                 name: "secret_resolution".into(),
                 message: error.to_string(),
-            }
-        })?;
+            })?;
         *value = Value::String(secret.value);
     }
     Ok(resolved)

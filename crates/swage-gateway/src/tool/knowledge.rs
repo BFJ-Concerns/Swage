@@ -118,6 +118,44 @@ pub(crate) async fn session_topic(
     Ok((topic.id, topic.location(), capture_scope))
 }
 
+/// Write a knowledge-base write to the audit trail, attributed to the calling
+/// session: a recorded observation, a curation assertion, a citation. The
+/// write itself has landed when this runs, so a failed record is reported as
+/// exactly that — the knowledge is kept and the model is told the trail
+/// missed it — never as the write failing, which would invite a duplicate.
+async fn record_knowledge_event(
+    tool: &str,
+    state: &AppState,
+    ctx: &dyn ToolContext,
+    entity_kind: &str,
+    entity_id: Uuid,
+    event_kind: &str,
+    summary: String,
+    metadata: Value,
+) -> Result<(), ToolError> {
+    state
+        .storage
+        .create_audit_event(swage_storage::NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: ctx.session_id().parse::<Uuid>().ok(),
+            entity_kind: entity_kind.to_owned(),
+            entity_id: entity_id.to_string(),
+            event_kind: event_kind.to_owned(),
+            summary,
+            metadata,
+        })
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            failed(
+                tool,
+                format!(
+                    "{entity_kind} {entity_id} was written, but recording it in the audit trail failed: {error}"
+                ),
+            )
+        })
+}
+
 // ---------------------------------------------------------------------------
 // knowledge_search
 // ---------------------------------------------------------------------------
@@ -440,6 +478,34 @@ impl Tool for KnowledgeRecordTool {
             None => None,
         };
 
+        record_knowledge_event(
+            RECORD_TOOL,
+            state,
+            ctx,
+            "observation",
+            observation.id,
+            "knowledge_recorded",
+            format!(
+                "observation recorded from {}",
+                observation
+                    .origin
+                    .url
+                    .as_deref()
+                    .or(observation.origin.local_path.as_deref())
+                    .unwrap_or("an unnamed origin")
+            ),
+            json!({
+                "topic_id": topic_id,
+                "origin": observation.origin,
+                "body_sha256": observation.body_sha256,
+                "body_bytes": observation.body_bytes,
+                "media_type": observation.media_type,
+                "searchable": extraction.is_some(),
+                "agent_id": ctx.agent_id(),
+            }),
+        )
+        .await?;
+
         Ok(json!({
             "observation_id": observation.id,
             "version": extraction.as_ref().map(|e| e.version),
@@ -647,6 +713,27 @@ impl Tool for KnowledgeCurateTool {
             .await
             .map_err(|error| failed(CURATE_TOOL, error))?;
 
+        record_knowledge_event(
+            CURATE_TOOL,
+            state,
+            ctx,
+            "curation_assertion",
+            assertion.id,
+            "knowledge_curated",
+            format!(
+                "observation {} judged {}",
+                assertion.observation_id, assertion.kind
+            ),
+            json!({
+                "topic_id": topic_id,
+                "observation_id": assertion.observation_id,
+                "kind": assertion.kind.to_string(),
+                "target_observation_id": assertion.target_observation_id,
+                "agent_id": ctx.agent_id(),
+            }),
+        )
+        .await?;
+
         Ok(json!({
             "assertion_id": assertion.id,
             "observation_id": assertion.observation_id,
@@ -726,6 +813,25 @@ impl Tool for KnowledgeCiteTool {
             })
             .await
             .map_err(|error| failed(CITE_TOOL, error))?;
+
+        record_knowledge_event(
+            CITE_TOOL,
+            state,
+            ctx,
+            "citation",
+            citation.id,
+            "knowledge_cited",
+            format!("observation {} cited", citation.observation_id),
+            json!({
+                "topic_id": topic_id,
+                "observation_id": citation.observation_id,
+                "version": citation.derivation_version,
+                "start_offset": citation.start_offset,
+                "end_offset": citation.end_offset,
+                "agent_id": ctx.agent_id(),
+            }),
+        )
+        .await?;
 
         Ok(json!({
             "citation_id": citation.id,
@@ -1744,6 +1850,19 @@ mod tests {
         assert_eq!(result["start_offset"], json!("before ".len()));
         let citation_id = result["citation_id"].as_str().unwrap().parse().unwrap();
         assert!(storage.get_citation(citation_id).await.unwrap().is_some());
+        // The citation is an audit event of its own family, attributed to the
+        // session that cited and reachable by the citation's id.
+        let cited_events = storage
+            .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                entity_kind: Some("citation".into()),
+                entity_id: Some(citation_id.to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(cited_events.len(), 1, "{cited_events:?}");
+        assert_eq!(cited_events[0].event_kind, "knowledge_cited");
+        assert!(cited_events[0].session_id.is_some());
 
         let fabricated = KnowledgeCiteTool
             .execute(
@@ -1873,5 +1992,94 @@ mod tests {
 
         let result = tool.execute(json!({"query": "anything"}), &ctx).await;
         assert!(matches!(result, Err(ToolError::ExecutionFailed { .. })));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn knowledge_writes_are_audit_events_attributed_to_the_calling_session() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                agent_id: "researcher".into(),
+                ..swage_storage::fixtures::new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let state = AppState::new_with_config_root(
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            root.path().to_path_buf(),
+        );
+        let base = swage_tool::context::MockToolContext::new("researcher", session.id.to_string());
+        let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
+        let ctx = GatewayToolContext::new(
+            &base,
+            ws_tx,
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+        )
+        .with_app_state(Some(state));
+
+        let recorded = KnowledgeRecordTool
+            .execute(
+                json!({
+                    "content": "Prune apple trees in late winter while dormant.",
+                    "url": "https://example.test/pruning",
+                    "extracted_text": "Prune apple trees in late winter while dormant.",
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let observation_id = recorded["observation_id"].as_str().unwrap().to_owned();
+        let curated = KnowledgeCurateTool
+            .execute(
+                json!({ "observation_id": observation_id, "kind": "stale" }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let events = storage
+            .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                session_id: Some(session.id),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let find = |kind: &str| {
+            events
+                .iter()
+                .find(|event| event.event_kind == kind)
+                .unwrap_or_else(|| panic!("no {kind} event attributed to the session: {events:?}"))
+        };
+        let recorded_event = find("knowledge_recorded");
+        assert_eq!(recorded_event.entity_kind, "observation");
+        assert_eq!(recorded_event.entity_id, observation_id);
+        assert_eq!(
+            recorded_event.metadata["origin"]["url"],
+            "https://example.test/pruning"
+        );
+        assert_eq!(recorded_event.metadata["searchable"], true);
+        let curated_event = find("knowledge_curated");
+        assert_eq!(curated_event.entity_kind, "curation_assertion");
+        assert_eq!(
+            curated_event.entity_id,
+            curated["assertion_id"].as_str().unwrap()
+        );
+        assert_eq!(curated_event.metadata["kind"], "stale");
+        // An observation is also reachable by its id as the entity.
+        let by_entity = storage
+            .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                entity_id: Some(observation_id.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(by_entity.len(), 1);
     }
 }

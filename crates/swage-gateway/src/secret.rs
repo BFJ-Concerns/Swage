@@ -295,11 +295,23 @@ impl SecretManager {
     }
 
     pub async fn resolve(&self, reference: &str) -> Result<ResolvedSecret, GatewayError> {
+        self.resolve_for_session(reference, None).await
+    }
+
+    /// Resolve a reference on a session's behalf — a tool call carrying a
+    /// `secret://` parameter — so the access event names the session that
+    /// used the secret.
+    pub async fn resolve_for_session(
+        &self,
+        reference: &str,
+        session_id: Option<Uuid>,
+    ) -> Result<ResolvedSecret, GatewayError> {
         let id = parse_secret_reference(reference)?;
         let record = self.required_secret(id).await?;
         if record.status != "active" {
-            self.audit_secret_event(
+            self.audit_secret_event_for_session(
                 &record,
+                session_id,
                 "access_failed",
                 "secret access failed",
                 json!({"reason": "revoked_or_inactive"}),
@@ -313,8 +325,9 @@ impl SecretManager {
 
         let BackendValue { value, observed_at } = self.read_backend_value(&record).await?;
         validate_resolved_material(&record.material_kind, &value)?;
-        self.audit_secret_event(
+        self.audit_secret_event_for_session(
             &record,
+            session_id,
             "accessed",
             "secret accessed",
             json!({"observed_at": observed_at}),
@@ -515,10 +528,24 @@ impl SecretManager {
         summary: &str,
         metadata: Value,
     ) -> Result<(), GatewayError> {
+        self.audit_secret_event_for_session(record, None, event_kind, summary, metadata)
+            .await
+    }
+
+    /// A secret event with the session it happened in, where one did: the
+    /// operator's management of secrets has none; a tool's use of one does.
+    async fn audit_secret_event_for_session(
+        &self,
+        record: &SecretRecord,
+        session_id: Option<Uuid>,
+        event_kind: &str,
+        summary: &str,
+        metadata: Value,
+    ) -> Result<(), GatewayError> {
         self.storage
             .create_audit_event(NewAuditEvent {
                 id: format!("secret-{}-{}", event_kind, Uuid::new_v4()),
-                session_id: None,
+                session_id,
                 entity_kind: "secret".into(),
                 entity_id: record.id.to_string(),
                 event_kind: event_kind.into(),
@@ -1115,6 +1142,60 @@ mod tests {
         assert_eq!(
             values,
             vec!["file-value".to_string(), "managed-value".to_string()]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tools_secret_access_is_attributed_to_its_session() {
+        use swage_storage::store::{SessionStore, TopicStore};
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(swage_storage::fixtures::new_session(topic.id))
+            .await
+            .unwrap();
+        let manager = SecretManager::new(storage.clone());
+        let managed = manager
+            .create_secret(CreateSecretRequest {
+                name: "Managed provider key".into(),
+                material_kind: "provider_key".into(),
+                owner_kind: "service".into(),
+                backend_kind: "managed".into(),
+                scope_kind: "gateway".into(),
+                scope_id: None,
+                metadata: None,
+                value: Some("managed-key".into()),
+                external_reference: None,
+            })
+            .await
+            .unwrap();
+
+        manager
+            .resolve_for_session(&managed.reference, Some(session.id))
+            .await
+            .unwrap();
+        manager.resolve(&managed.reference).await.unwrap();
+
+        let accesses: Vec<_> = storage
+            .list_audit_events()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_kind == "accessed")
+            .collect();
+        assert_eq!(accesses.len(), 2);
+        assert_eq!(
+            accesses
+                .iter()
+                .filter(|event| event.session_id == Some(session.id))
+                .count(),
+            1,
+            "the tool's access names its session; the operator's names none: {accesses:?}"
+        );
+        assert!(
+            accesses
+                .iter()
+                .all(|event| event.session_id.is_none() || event.session_id == Some(session.id))
         );
     }
 }

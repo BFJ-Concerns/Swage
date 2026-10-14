@@ -586,7 +586,7 @@ pub async fn write_surface_module(
         .storage
         .create_audit_event(NewAuditEvent {
             id: Uuid::new_v4().to_string(),
-            session_id: None,
+            session_id: Some(surface.session_id),
             entity_kind: "surface".into(),
             entity_id: surface.id.to_string(),
             event_kind: "surface_module_written".into(),
@@ -654,7 +654,7 @@ pub async fn delete_surface_module(
         .storage
         .create_audit_event(NewAuditEvent {
             id: Uuid::new_v4().to_string(),
-            session_id: None,
+            session_id: Some(surface.session_id),
             entity_kind: "surface".into(),
             entity_id: surface.id.to_string(),
             event_kind: "surface_module_deleted".into(),
@@ -716,7 +716,7 @@ pub async fn move_surface_module(
         .storage
         .create_audit_event(NewAuditEvent {
             id: Uuid::new_v4().to_string(),
-            session_id: None,
+            session_id: Some(surface.session_id),
             entity_kind: "surface".into(),
             entity_id: surface.id.to_string(),
             event_kind: "surface_module_moved".into(),
@@ -791,6 +791,7 @@ pub async fn create_surface_annotation(
         state,
         &surface.title,
         surface.id,
+        Some(surface.session_id),
         &annotation,
         "surface_annotation_created",
         None,
@@ -852,11 +853,14 @@ pub async fn update_surface_annotation(
         })?;
 
     let surface = state.storage.get_page(updated.surface_id).await?;
-    let title = surface.map(|surface| surface.title).unwrap_or_default();
+    let (title, session_id) = surface
+        .map(|surface| (surface.title, Some(surface.session_id)))
+        .unwrap_or_default();
     record_annotation_change(
         state,
         &title,
         updated.surface_id,
+        session_id,
         &updated,
         "surface_annotation_updated",
         Some(&existing),
@@ -902,10 +906,13 @@ async fn delete_surface_annotation_after_read(
     author: &str,
 ) -> Result<(), GatewayError> {
     let surface = state.storage.get_page(existing.surface_id).await?;
-    let title = surface.map(|surface| surface.title).unwrap_or_default();
+    let (title, session_id) = surface
+        .map(|surface| (surface.title, Some(surface.session_id)))
+        .unwrap_or_default();
     let audit_event = annotation_change_event(
         &title,
         existing.surface_id,
+        session_id,
         &existing,
         "surface_annotation_deleted",
         Some(&existing),
@@ -936,10 +943,12 @@ async fn delete_surface_annotation_after_read(
 /// propagates AFTER the mutation landed, matching write_surface_module: a loud
 /// applied-but-unrecorded error, never a success report on an unrecorded
 /// change.
+#[allow(clippy::too_many_arguments)]
 async fn record_annotation_change(
     state: &AppState,
     surface_title: &str,
     surface_id: Uuid,
+    surface_session_id: Option<Uuid>,
     annotation: &SurfaceAnnotation,
     event_kind: &str,
     prior: Option<&SurfaceAnnotation>,
@@ -950,6 +959,7 @@ async fn record_annotation_change(
         .create_audit_event(annotation_change_event(
             surface_title,
             surface_id,
+            surface_session_id,
             annotation,
             event_kind,
             prior,
@@ -960,9 +970,11 @@ async fn record_annotation_change(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn annotation_change_event(
     surface_title: &str,
     surface_id: Uuid,
+    surface_session_id: Option<Uuid>,
     annotation: &SurfaceAnnotation,
     event_kind: &str,
     prior: Option<&SurfaceAnnotation>,
@@ -971,7 +983,9 @@ fn annotation_change_event(
 ) -> NewAuditEvent {
     NewAuditEvent {
         id: Uuid::new_v4().to_string(),
-        session_id: None,
+        // The surface's session: the write was made in it, whether by the
+        // session's agent or the person at its view.
+        session_id: surface_session_id,
         entity_kind: "surface".into(),
         entity_id: surface_id.to_string(),
         event_kind: event_kind.into(),
@@ -1908,6 +1922,7 @@ mod tests {
         let audit = annotation_change_event(
             "Planning",
             surface_id,
+            None,
             &existing,
             "surface_annotation_deleted",
             None,
@@ -2205,5 +2220,66 @@ mod tests {
             .await
             .expect_err("the general scope is not a topic");
         assert!(matches!(error, GatewayError::TopicNotFound { .. }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn module_and_annotation_writes_are_attributed_to_the_surfaces_session() {
+        let (state, storage, surface_id, module_id, _) = seeded().await;
+        let session_id = storage
+            .get_page(surface_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .session_id;
+        let note = create_surface_annotation(
+            &state,
+            surface_id,
+            annotation(module_id, "attributed"),
+            "user",
+        )
+        .await
+        .unwrap();
+        move_surface_module(
+            &state,
+            surface_id,
+            module_id,
+            MoveSurfaceModuleRequest { position: 0 },
+            "user",
+        )
+        .await
+        .unwrap();
+        delete_surface_annotation(&state, note.id, "user")
+            .await
+            .unwrap();
+        delete_surface_module(&state, surface_id, module_id, "user")
+            .await
+            .unwrap();
+
+        let by_session = storage
+            .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                session_id: Some(session_id),
+                entity_kind: Some("surface".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut kinds: Vec<&str> = by_session
+            .iter()
+            .map(|event| event.event_kind.as_str())
+            .collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        assert_eq!(
+            kinds,
+            vec![
+                "surface_annotation_created",
+                "surface_annotation_deleted",
+                "surface_created",
+                "surface_module_deleted",
+                "surface_module_moved",
+                "surface_module_written",
+            ],
+            "every write on the surface is listed by its session: {by_session:?}"
+        );
     }
 }
