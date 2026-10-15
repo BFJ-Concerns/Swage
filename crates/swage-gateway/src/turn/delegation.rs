@@ -293,7 +293,8 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             session.active_workspace_attachment_id,
         )
         .await;
-        let environment = build_session_environment(&self.topic, &self.tool_root, session);
+        let environment =
+            build_session_environment(&self.topic, &self.tool_root, session, &workspace_policy);
         let available_skills = available_skills_for_agent(
             &self.topic.location(),
             &self.agent_id,

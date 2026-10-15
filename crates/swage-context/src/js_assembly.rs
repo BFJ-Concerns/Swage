@@ -905,6 +905,7 @@ mod tests {
         let elements: Vec<Box<dyn ContextElement>> = vec![
             Box::new(OrientationElement::new(
                 SessionEnvironment {
+                    workspaces: vec![],
                     topic_name: String::new(),
                     topic_description: String::new(),
                     tool_root: crate::orientation::ToolRoot::ManagedScratch(
@@ -1038,6 +1039,7 @@ mod tests {
         vec![
             Box::new(OrientationElement::new(
                 SessionEnvironment {
+                    workspaces: vec![],
                     topic_name: "Atelier".into(),
                     topic_description: String::new(),
                     tool_root: crate::orientation::ToolRoot::ManagedScratch(
