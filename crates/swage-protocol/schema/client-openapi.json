@@ -813,6 +813,10 @@
       },
       "ConversationDetail": {
         "properties": {
+          "agent_display_name": {
+            "description": "The display name resolved in the session's topic scope.",
+            "type": "string"
+          },
           "agent_id": {
             "description": "The agent definition the session runs under.",
             "type": "string"
@@ -865,6 +869,7 @@
         "required": [
           "id",
           "agent_id",
+          "agent_display_name",
           "created_at",
           "last_activity",
           "root_thread_id",
@@ -888,6 +893,10 @@
       },
       "ConversationResponse": {
         "properties": {
+          "agent_display_name": {
+            "description": "The display name resolved in the session's topic scope.",
+            "type": "string"
+          },
           "agent_id": {
             "description": "The agent definition the session runs under.",
             "type": "string"
@@ -922,6 +931,7 @@
         "required": [
           "id",
           "agent_id",
+          "agent_display_name",
           "created_at",
           "last_activity"
         ],

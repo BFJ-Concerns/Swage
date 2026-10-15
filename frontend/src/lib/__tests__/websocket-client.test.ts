@@ -529,7 +529,8 @@ describe("queued input transport", () => {
     const { createConversationStore } = await import("../stores/conversations");
     const { createStreamingStore } = await import("../stores/streaming");
     vi.spyOn(api, "createConversation").mockResolvedValue({
-      id: "conv-1", agent_id: "gateway", topic_id: "topic-1",
+      id: "conv-1", agent_id: "gateway",
+      agent_display_name: "Swage default", topic_id: "topic-1",
       created_at: "2026-10-04T10:00:00Z", last_activity: "2026-10-04T10:00:00Z",
     });
     vi.spyOn(api, "listConversations").mockResolvedValue([]);
