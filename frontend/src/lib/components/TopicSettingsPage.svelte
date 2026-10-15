@@ -149,6 +149,7 @@
   async function loadTopicSettings(): Promise<void> {
     if (!topic) return;
     isLoading = true;
+    error = null;
     try {
       const [workspaceList, sessionList] = await Promise.all([
         listTopicWorkspaces(topic.id),
@@ -294,7 +295,12 @@
     </div>
 
     {#if error}
-      <div class="notice error" role="alert">{error}</div>
+      <div class="notice error" role="alert">
+        {error}
+        {#if !worktopicsLoaded}
+          <button type="button" disabled={isLoading} onclick={() => void loadTopicSettings()}>Retry</button>
+        {/if}
+      </div>
     {:else if isLoading}
       <div class="notice">Loading topic settings…</div>
     {/if}
@@ -401,7 +407,9 @@
               </div>
             </article>
           {:else}
-            <p class="shell-empty">No workspace folders are attached to this topic.</p>
+            {#if worktopicsLoaded}
+              <p class="shell-empty">No workspace folders are attached to this topic.</p>
+            {/if}
           {/each}
         </div>
       </section>
@@ -502,12 +510,21 @@
     color: var(--ink-soft);
   }
 
+  .head > div {
+    min-width: 0;
+  }
+
   .title {
     margin: 4px 0 6px;
     font-family: var(--font-display);
     font-weight: 400;
-    font-size: clamp(42px, 8vw, 76px);
-    line-height: 0.9;
+    font-size: 28px;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
     letter-spacing: 0.02em;
     text-transform: uppercase;
   }
