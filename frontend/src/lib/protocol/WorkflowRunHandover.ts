@@ -8,7 +8,7 @@ import type { WorkflowHandoverFailedCallRef } from "./WorkflowHandoverFailedCall
  * call failed, and where the pending event queue stood, so whoever picks
  * the work up starts from the record instead of a re-run.
  */
-export type WorkflowRunHandover = { "classification": "interrupted", failure: string, failed_call: WorkflowHandoverFailedCall,
+export type WorkflowRunHandover = { "classification": "author_error", failure: string, } | { "classification": "interrupted", failure: string, failed_call: WorkflowHandoverFailedCall,
 /**
  * Highest journal seq at interruption — where replay would resume.
  */

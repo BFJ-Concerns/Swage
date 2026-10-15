@@ -452,6 +452,13 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
 /// the two new host-call kinds (event, gate); SQLite cannot widen a CHECK in
 /// place, so the table is rebuilt, existing rows carrying over unchanged.
 const CREATE_WORKFLOW_RUN_EVENTS: &str = "
+    CREATE TABLE workflow_run_acknowledgements (
+        run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+        consumer TEXT NOT NULL,
+        acknowledged_at TEXT NOT NULL,
+        PRIMARY KEY (consumer, run_id)
+    );
+
     CREATE TABLE IF NOT EXISTS workflow_run_events (
         id                 TEXT NOT NULL PRIMARY KEY,
         run_id             TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,

@@ -2279,6 +2279,23 @@ impl swage_storage::ProviderRoundStore for MockStorage {
 
 #[async_trait]
 impl swage_storage::WorkflowStore for MockStorage {
+    async fn list_unacknowledged_workflow_runs(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<swage_storage::WorkflowRunRecord>, StorageError> {
+        Ok(vec![])
+    }
+    async fn acknowledge_workflow_runs(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: &[Uuid],
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
     async fn create_workflow_script(
         &self,
         _: swage_storage::NewWorkflowScript,

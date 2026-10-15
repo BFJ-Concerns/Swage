@@ -43,12 +43,23 @@ pub async fn account_for_run(
         })?;
 
     let Some(account) = account else {
+        let entries = state
+            .storage
+            .list_workflow_journal(run_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let workers = crate::workflow::journal_with_rounds(state, entries)
+            .await?
+            .into_iter()
+            .filter(|entry| entry.agent_call.is_some())
+            .collect::<Vec<_>>();
         return Ok(json!({
+            "workers": workers,
             "run_id": run_id,
             "script_name": record.script_name,
             "state": record.state,
             "ended": false,
-            "note": "This run has not ended, so it has no account yet.",
+            "note": "This run has not ended; worker activity is recorded below.",
         }));
     };
 

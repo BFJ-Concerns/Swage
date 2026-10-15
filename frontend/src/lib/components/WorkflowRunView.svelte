@@ -40,7 +40,9 @@
       case "returned":
         return "Returned";
       case "threw":
-        return `Threw — ${ending.error}`;
+        return `Threw — ${ending.error.split("\n")[0]}`;
+      case "author_error":
+        return `Author error — ${ending.error}`;
       case "cancelled":
         return "Cancelled";
       case "wound_down":
@@ -93,6 +95,12 @@
       <section class="ending">
         <h3>Ending</h3>
         <p class="ending-line">{describeEnding(account.ending)}</p>
+        {#if account.cancellation}
+          <p>Cancelled by {account.cancellation.source} at {account.cancellation.requested_at}{account.cancellation.actor ? ` (${account.cancellation.actor})` : ""}{account.cancellation.session_id ? ` in session ${account.cancellation.session_id}` : ""}</p>
+        {/if}
+        {#if account.ending.ending === "threw" && account.ending.error.includes("\n")}
+          <details><summary>Engine details</summary><pre>{account.ending.error}</pre></details>
+        {/if}
       </section>
 
       <section class="workers">
@@ -117,7 +125,7 @@
         {/each}
       </section>
 
-      {#if account.partial_results}
+      {#if account.partial_results && account.partial_results.results.length > 0}
         <section class="partial">
           <h3>Partial results</h3>
           <p class="reason">{account.partial_results.reason}</p>

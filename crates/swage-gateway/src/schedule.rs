@@ -1619,6 +1619,8 @@ struct GateStateDigest {
     /// runs judges "is there work" from this list, not from the clock.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     open_workflow_runs: Vec<DigestWorkflowRun>,
+    ended_workflow_runs: Vec<swage_protocol::client::workflow::WorkflowRunEndingNotice>,
+    more_ended_workflow_runs: bool,
     /// What the gate declared it observes, read from the scheduled
     /// session's trusted workspace at this fire: each file's presence,
     /// size and opening excerpt, or why it could not be read. The gate's
@@ -1925,7 +1927,17 @@ async fn assemble_gate_state_digest(
             .map(|session| session.topic_id),
     };
     let mut open_workflow_runs = Vec::new();
+    let mut ended_workflow_runs = Vec::new();
+    let mut more_ended_workflow_runs = false;
     if let Some(topic_id) = topic_id {
+        let mut ended = storage
+            .list_unacknowledged_workflow_runs(topic_id, &format!("schedule:{}", schedule.id), 101)
+            .await?;
+        more_ended_workflow_runs = ended.len() > 100;
+        ended.truncate(100);
+        for run in ended {
+            ended_workflow_runs.push(crate::workflow::ending_notice(run));
+        }
         for run in storage.list_workflow_runs(topic_id).await? {
             if crate::tool::workflow_run_status::is_terminal_run_state(&run.state) {
                 continue;
@@ -1978,6 +1990,8 @@ async fn assemble_gate_state_digest(
         recent_runs,
         latest_session_message,
         open_workflow_runs,
+        ended_workflow_runs,
+        more_ended_workflow_runs,
         observations,
     })
 }
@@ -2026,7 +2040,32 @@ async fn run_gate_check(
             GatewayError::ValidationError(format!("gate model call failed: {error}"))
         })?;
 
-    Ok(parse_gate_reply(&gate.model, &response.content))
+    let evaluation = parse_gate_reply(&gate.model, &response.content);
+    if !digest.ended_workflow_runs.is_empty() {
+        let topic_id = match &schedule.session_policy {
+            SessionPolicy::Fresh { topic_id, .. } => *topic_id,
+            SessionPolicy::Continuation { session_id } => state
+                .storage
+                .get_session(*session_id)
+                .await?
+                .map(|session| session.topic_id),
+        }
+        .ok_or_else(|| {
+            GatewayError::ValidationError(
+                "the schedule has no topic for its ending receipts".into(),
+            )
+        })?;
+        let ids = digest
+            .ended_workflow_runs
+            .iter()
+            .map(|run| run.run_id)
+            .collect::<Vec<_>>();
+        state
+            .storage
+            .acknowledge_workflow_runs(topic_id, &format!("schedule:{}", schedule.id), &ids)
+            .await?;
+    }
+    Ok(evaluation)
 }
 
 fn build_gate_prompt(schedule: &Schedule, gate: &GateConfig, digest: &GateStateDigest) -> String {
@@ -2864,6 +2903,24 @@ mod tests {
             1,
             "an ended run is not state"
         );
+        let notices = serde_json::to_value(&digest).expect("digest JSON");
+        assert_eq!(
+            notices["ended_workflow_runs"][0]["run_id"],
+            serde_json::json!(ended.id),
+            "the gate must discover unseen endings"
+        );
+        storage
+            .acknowledge_workflow_runs(topic.id, &format!("schedule:{}", schedule.id), &[ended.id])
+            .await
+            .expect("acknowledge gate read");
+        let next = assemble_gate_state_digest(&dyn_storage, &schedule)
+            .await
+            .expect("next digest");
+        assert!(
+            next.ended_workflow_runs.is_empty(),
+            "acknowledged endings must not repeat"
+        );
+
         let open = &digest.open_workflow_runs[0];
         assert_eq!(open.run_id, holding.id);
         assert_eq!(open.state, "running");

@@ -1137,6 +1137,19 @@ pub trait ChannelQueueStore: Send + Sync {
 /// Durable saved workflow definitions and detached run state.
 #[async_trait]
 pub trait WorkflowStore: Send + Sync {
+    async fn list_unacknowledged_workflow_runs(
+        &self,
+        topic_id: Uuid,
+        consumer: &str,
+        limit: usize,
+    ) -> Result<Vec<WorkflowRunRecord>, StorageError>;
+    async fn acknowledge_workflow_runs(
+        &self,
+        topic_id: Uuid,
+        consumer: &str,
+        run_ids: &[Uuid],
+    ) -> Result<(), StorageError>;
+
     async fn create_workflow_script(
         &self,
         script: NewWorkflowScript,
@@ -2908,6 +2921,23 @@ mod tests {
 
     #[async_trait]
     impl WorkflowStore for StubStorage {
+        async fn list_unacknowledged_workflow_runs(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<WorkflowRunRecord>, StorageError> {
+            Ok(vec![])
+        }
+        async fn acknowledge_workflow_runs(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &[Uuid],
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
         async fn create_workflow_script(
             &self,
             _: NewWorkflowScript,

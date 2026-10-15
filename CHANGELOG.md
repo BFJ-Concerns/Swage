@@ -43,6 +43,15 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Interrupted workflow cancellation is refused plainly, and unclaimed cancellation requests leave no misleading audit record.
+- Workflow run status explains how to acknowledge handled run endings.
+- Workflow starts report their observed state and time, including runs that finish immediately.
+- Open workflow inspection includes the provider-round activity shown on the run page.
+- Workflow author errors retain their classification and identifier case; empty partial results are omitted and engine traces are secondary.
+- API workflow cancellations retain their source and request time in the terminal account.
+- Workflow endings close outstanding holds consistently; late answers report the settled run state.
+- Leads and schedule gates discover unseen workflow endings through bounded, durable acknowledgements.
+
 - Session previews in the recent list, sidebar, conversation selector, delete controls and Operator deck show plain text without Markdown formatting or link destinations. Operator session summaries are limited to three lines.
 - The workflow-authoring skill states event-kind names as the gateway accepts them: segments are joined by `.`, `:` or `/` only, with `_` and `-` allowed inside a segment but never separating one.
 - Denying a tool approval identifies the user's denial in the tool card and the feedback sent to the model, distinct from an approval timeout.

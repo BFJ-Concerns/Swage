@@ -268,11 +268,20 @@
     "workflow_run_detail": {
       "$ref": "#/$defs/WorkflowRunDetailResponse"
     },
+    "workflow_run_ending_notice": {
+      "$ref": "#/$defs/WorkflowRunEndingNotice"
+    },
     "workflow_run_list": {
       "$ref": "#/$defs/WorkflowRunListResponse"
     },
+    "workflow_run_start_result": {
+      "$ref": "#/$defs/WorkflowRunStartResult"
+    },
     "workflow_run_started_event": {
       "$ref": "#/$defs/WorkflowRunStartedEvent"
+    },
+    "workflow_run_status_request": {
+      "$ref": "#/$defs/WorkflowRunStatusRequest"
     },
     "workflow_script_list": {
       "$ref": "#/$defs/WorkflowScriptListResponse"
@@ -378,6 +387,9 @@
     "workflow_decision_event_payload",
     "workflow_run_detail",
     "workflow_run_list",
+    "workflow_run_ending_notice",
+    "workflow_run_status_request",
+    "workflow_run_start_result",
     "workflow_run_started_event",
     "workflow_entry_event",
     "workflow_run_completed_event",
@@ -8446,6 +8458,36 @@
         "created_at"
       ]
     },
+    "WorkflowRunCancellation": {
+      "description": "The recorded request which cancelled a run.",
+      "type": "object",
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requested_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "requested_at"
+      ]
+    },
     "WorkflowRunCompletedEvent": {
       "type": "object",
       "properties": {
@@ -8527,6 +8569,23 @@
           ]
         },
         {
+          "description": "Invalid workflow input refused before its worker spawned.",
+          "type": "object",
+          "properties": {
+            "ending": {
+              "type": "string",
+              "const": "author_error"
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ending",
+            "error"
+          ]
+        },
+        {
           "description": "An operator or a parent run cancelled it.",
           "type": "object",
           "properties": {
@@ -8573,6 +8632,36 @@
             "reason"
           ]
         }
+      ]
+    },
+    "WorkflowRunEndingNotice": {
+      "description": "An ended run awaiting acknowledgement by a lead or schedule gate.",
+      "type": "object",
+      "properties": {
+        "completed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "script_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "state"
       ]
     },
     "WorkflowRunEvent": {
@@ -8633,6 +8722,22 @@
     "WorkflowRunHandover": {
       "description": "The durable account a failed run leaves behind: what stopped it, which\ncall failed, and where the pending event queue stood, so whoever picks\nthe work up starts from the record instead of a re-run.",
       "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "classification": {
+              "type": "string",
+              "const": "author_error"
+            },
+            "failure": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "classification",
+            "failure"
+          ]
+        },
         {
           "description": "An attributed agent-call failure stopped the run.",
           "type": "object",
@@ -8863,6 +8968,131 @@
         "runs"
       ]
     },
+    "WorkflowRunStartResult": {
+      "description": "A run's observed state when its start request returns.",
+      "type": "object",
+      "properties": {
+        "args": true,
+        "budget": {
+          "$ref": "#/$defs/WorkflowBudget"
+        },
+        "carrying_skill": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "completed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "error_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "final_output": true,
+        "handover": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowRunHandover"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "script_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "script_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "script_version": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source": {
+          "description": "Source retained for runs whose workflow was not a saved script version.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_hash": {
+          "description": "SHA-256 of the exact source executed by this run.",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/WorkflowRunState"
+        },
+        "status_as_of": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "task": {
+          "description": "Opaque identity declared by the workflow script for grouping its runs.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "terminal_account": {
+          "description": "The run's terminal account: how it ended and where its workers stood.\nAbsent only while the run is still going.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowRunTerminalAccount"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "topic_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "workers_dispatched": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "topic_id",
+        "source_hash",
+        "state",
+        "args",
+        "budget",
+        "created_at",
+        "status_as_of",
+        "workers_dispatched"
+      ]
+    },
     "WorkflowRunStartedEvent": {
       "type": "object",
       "properties": {
@@ -8893,15 +9123,48 @@
         }
       ]
     },
+    "WorkflowRunStatusRequest": {
+      "type": "object",
+      "properties": {
+        "acknowledge_run_ids": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "maxItems": 100
+        },
+        "run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "WorkflowRunTerminalAccount": {
       "description": "The one terminal record of a run: what ended it, where every worker stood,\nand — when the script never returned — the completed work still recoverable\nfrom it.",
       "type": "object",
       "properties": {
+        "cancellation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowRunCancellation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "ending": {
           "$ref": "#/$defs/WorkflowRunEnding"
         },
         "partial_results": {
-          "description": "Present exactly when the run ended without its script returning.",
+          "description": "Present when a run ended without returning and has completed worker output.",
           "anyOf": [
             {
               "$ref": "#/$defs/WorkflowPartialResults"

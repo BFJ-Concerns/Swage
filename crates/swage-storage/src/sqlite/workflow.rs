@@ -333,6 +333,47 @@ fn json_column(
 
 #[async_trait]
 impl WorkflowStore for SqliteStorage {
+    async fn list_unacknowledged_workflow_runs(
+        &self,
+        topic_id: Uuid,
+        consumer: &str,
+        limit: usize,
+    ) -> Result<Vec<WorkflowRunRecord>, StorageError> {
+        let consumer = consumer.to_owned();
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs
+                WHERE topic_id=?1 AND state IN ('completed','failed','cancelled')
+                AND NOT EXISTS (SELECT 1 FROM workflow_run_acknowledgements a WHERE a.run_id=workflow_runs.id AND a.consumer=?2)
+                ORDER BY completed_at, id LIMIT ?3"))?;
+            stmt.query_map(params![topic_id.to_string(), consumer, limit.min(101) as i64], run_row)?.collect()
+        }).await
+    }
+    async fn acknowledge_workflow_runs(
+        &self,
+        topic_id: Uuid,
+        consumer: &str,
+        run_ids: &[Uuid],
+    ) -> Result<(), StorageError> {
+        if run_ids.len() > 100 {
+            return Err(StorageError::QueryFailed(
+                "at most 100 endings can be acknowledged together".into(),
+            ));
+        }
+        let consumer = consumer.to_owned();
+        let run_ids = run_ids.to_vec();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            for id in run_ids {
+                tx.execute("INSERT INTO workflow_run_acknowledgements (run_id, consumer, acknowledged_at)
+                    SELECT id, ?2, ?3 FROM workflow_runs WHERE id=?1 AND topic_id=?4 AND state IN ('completed','failed','cancelled')
+                    ON CONFLICT (consumer, run_id) DO NOTHING",
+                    params![id.to_string(), consumer, Utc::now().to_rfc3339(), topic_id.to_string()])?;
+            }
+            tx.commit()?;
+            Ok(())
+        }).await
+    }
+
     async fn create_workflow_script(
         &self,
         script: NewWorkflowScript,
@@ -639,7 +680,15 @@ impl WorkflowStore for SqliteStorage {
             .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
         let error = error_message.map(str::to_string);
         let now = Utc::now().to_rfc3339();
-        self.with_conn(move |conn| { conn.execute("UPDATE workflow_runs SET state=?2, final_output_json=?3, handover_json=?4, error_message=?5, wake_at=NULL, completed_at=CASE WHEN ?2='running' THEN NULL ELSE ?6 END WHERE id=?1", params![id.to_string(),state,output,handover,error,now])?; Ok(()) }).await
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let changed = tx.execute("UPDATE workflow_runs SET state=?2, final_output_json=?3, handover_json=?4, error_message=?5, wake_at=NULL, completed_at=CASE WHEN ?2='running' THEN NULL ELSE ?6 END WHERE id=?1 AND state NOT IN ('completed', 'failed', 'cancelled')", params![id.to_string(),state,output,handover,error,now])?;
+            if changed > 0 && matches!(state.as_str(), "completed" | "failed" | "cancelled") {
+                tx.execute("UPDATE workflow_run_holds SET state='closed' WHERE run_id=?1 AND state='open'", [id.to_string()])?;
+            }
+            tx.commit()?;
+            Ok(())
+        }).await
     }
     async fn set_workflow_run_terminal_account(
         &self,
@@ -687,6 +736,7 @@ impl WorkflowStore for SqliteStorage {
                 tx.commit()?;
                 return Ok(false);
             }
+            tx.execute("UPDATE workflow_run_holds SET state='closed' WHERE run_id=?1 AND state='open'", [&run_id])?;
             if let Some(error) = journal_error {
                 let entry_ids = {
                     let mut statement = tx.prepare(
@@ -912,7 +962,7 @@ impl WorkflowStore for SqliteStorage {
             let mut stmt = conn.prepare(&format!(
                 "SELECT {} FROM workflow_run_holds h \
                  JOIN workflow_runs r ON r.id = h.run_id \
-                 WHERE r.topic_id = ?1 AND h.state = 'open' \
+                 WHERE r.topic_id = ?1 AND h.state = 'open' AND r.state NOT IN ('completed', 'failed', 'cancelled') \
                  ORDER BY h.raised_at ASC",
                 RUN_HOLD_COLUMNS
                     .split(", ")
@@ -1277,6 +1327,84 @@ mod tests {
     use crate::{NewTopic, TopicStore};
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn run_accounts_ending_receipts_are_bounded_durable_and_scoped() {
+        let storage = SqliteStorage::in_memory().expect("storage");
+        let topic = crate::TopicStore::general_scope(&storage)
+            .await
+            .expect("topic");
+        let other = storage
+            .create(crate::NewTopic {
+                name: "other".into(),
+                slug: "other".parse().expect("slug"),
+            })
+            .await
+            .expect("other topic");
+        for _ in 0..103 {
+            let run = storage
+                .create_workflow_run(crate::fixtures::new_workflow_run(topic.id))
+                .await
+                .expect("run");
+            storage
+                .update_workflow_run_state(run.id, "completed", None, None, None)
+                .await
+                .expect("finish");
+        }
+        let foreign = storage
+            .create_workflow_run(crate::fixtures::new_workflow_run(other.id))
+            .await
+            .expect("foreign");
+        storage
+            .update_workflow_run_state(foreign.id, "failed", None, None, None)
+            .await
+            .expect("finish foreign");
+        let page = storage
+            .list_unacknowledged_workflow_runs(topic.id, "lead", 100)
+            .await
+            .expect("page");
+        assert_eq!(page.len(), 100, "the caller's limit bounds the page");
+        assert!(page.iter().all(|run| run.topic_id == topic.id));
+        let acknowledged = page.iter().map(|run| run.id).collect::<Vec<_>>();
+        storage
+            .acknowledge_workflow_runs(topic.id, "lead", &acknowledged)
+            .await
+            .expect("acknowledge");
+        storage
+            .acknowledge_workflow_runs(topic.id, "lead", &acknowledged)
+            .await
+            .expect("repeat acknowledgement");
+        let remaining = storage
+            .list_unacknowledged_workflow_runs(topic.id, "lead", 100)
+            .await
+            .expect("next page");
+        assert_eq!(
+            remaining.len(),
+            3,
+            "acknowledgements are durable and deduplicated"
+        );
+        assert!(remaining.iter().all(|run| !acknowledged.contains(&run.id)));
+        assert_eq!(
+            storage
+                .list_unacknowledged_workflow_runs(topic.id, "schedule", 100)
+                .await
+                .expect("other consumer")
+                .len(),
+            100
+        );
+        storage
+            .acknowledge_workflow_runs(topic.id, "lead", &[foreign.id])
+            .await
+            .expect("cross-topic acknowledgement");
+        assert_eq!(
+            storage
+                .list_unacknowledged_workflow_runs(other.id, "lead", 100)
+                .await
+                .expect("foreign still owed")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn list_parked_workflow_runs_returns_only_parked_runs_across_topics() {
         let storage = SqliteStorage::in_memory().expect("storage");
         let first_topic = storage
@@ -1609,11 +1737,33 @@ mod tests {
             .expect("read")
             .expect("hold");
         assert_eq!(
-            unanswered.state, "open",
+            unanswered.state, "closed",
             "a run that cannot resume is never given a verdict"
         );
         assert!(unanswered.verdict.is_none());
         assert!(unanswered.answer_agent_id.is_none());
+        assert!(
+            storage
+                .list_open_workflow_run_holds(topic.id)
+                .await
+                .expect("list")
+                .is_empty(),
+            "terminal runs must leave the open-hold listing"
+        );
+        storage
+            .update_workflow_run_state(run.id, "completed", None, None, None)
+            .await
+            .expect("late completion");
+        assert_eq!(
+            storage
+                .get_workflow_run(run.id)
+                .await
+                .expect("read")
+                .expect("run")
+                .state,
+            "cancelled",
+            "the first terminal state wins"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

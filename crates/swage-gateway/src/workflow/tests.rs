@@ -19219,3 +19219,269 @@ async fn a_usage_record_outside_the_contract_is_rejected_not_passed_through() {
         "error names the offending record: {message}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_accounts_start_observes_immediate_outcomes() {
+    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+    let topic = storage.general_scope().await.expect("topic");
+    let (state, _) = scripted_state(&storage, vec![]);
+    let session = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .expect("session");
+    for (source, expected) in [
+        ("return 42;", "completed"),
+        ("await agent('bad', {bogusOption: true});", "failed"),
+    ] {
+        let before = chrono::Utc::now();
+        let result = GatewayWorkflowLauncher::new(state.clone())
+            .start_inline(session.id, source, Value::Null, None, false)
+            .await
+            .expect("start");
+        assert_eq!(
+            result["state"], expected,
+            "the start result must observe an immediately settled run"
+        );
+        let observed = chrono::DateTime::parse_from_rfc3339(
+            result["status_as_of"].as_str().expect("observation time"),
+        )
+        .expect("timestamp");
+        assert!(observed >= before && observed <= chrono::Utc::now());
+        if expected == "completed" {
+            assert_eq!(result["final_output"], 42);
+            assert_eq!(result["workers_dispatched"], 0);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_accounts_author_errors_keep_the_defect_and_no_empty_results() {
+    for (source, sentence) in [
+        (r#"await agent("bad", {bogusOption: true});"#, "bogusOption"),
+        (r#"await agent("bad", {schema: {type: 7}});"#, "schema"),
+        (
+            r#"await workflow("missingChildWorkflow", {});"#,
+            "missingChildWorkflow",
+        ),
+        (r#"await workflow("child", {value: BigInt(1)});"#, "JSON"),
+    ] {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let topic = storage.general_scope().await.expect("topic");
+        let _skills = crate::skill::TestSkillRootGuard::empty(topic.id);
+        let (state, provider) = scripted_state(&storage, vec![]);
+        let Json(started) = start_inline_run(
+            State(state.clone()),
+            Path(topic.id),
+            Json(StartInlineWorkflowRunRequest {
+                source: source.into(),
+                args: Value::Null,
+                budget: None,
+            }),
+        )
+        .await
+        .expect("launch");
+        wait_for_terminal(&state, started.id).await;
+        let record = storage
+            .get_workflow_run(started.id)
+            .await
+            .expect("read")
+            .expect("run");
+        assert_eq!(
+            record.handover.as_ref().expect("handover")["classification"],
+            "author_error"
+        );
+        let account = record.terminal_account.expect("account");
+        assert_eq!(account["ending"]["ending"], "author_error");
+        assert!(
+            account["ending"]["error"]
+                .as_str()
+                .expect("defect")
+                .contains(sentence),
+            "{account}"
+        );
+        assert!(
+            account.get("partial_results").is_none(),
+            "no completed worker means no partial results"
+        );
+        assert!(
+            provider.requests.lock().expect("requests").is_empty(),
+            "invalid inputs must cost no provider call"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_accounts_inspection_reads_an_outstanding_provider_round() {
+    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+    let topic = storage.general_scope().await.expect("topic");
+    let session = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .expect("session");
+    let opened = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let state = AppState::new(
+        storage.clone(),
+        storage.clone(),
+        Arc::new(GatedRoundProvider {
+            round_opened: opened.clone(),
+            release: release.clone(),
+        }),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let Json(started) = start_inline_run(
+        State(state.clone()),
+        Path(topic.id),
+        Json(StartInlineWorkflowRunRequest {
+            source: "return await agent('wait for the provider', {maxAttempts: 1});".into(),
+            args: Value::Null,
+            budget: None,
+        }),
+    )
+    .await
+    .expect("launch");
+    opened.notified().await;
+    wait_for_open_worker_round(&storage).await;
+    let detail = get_run(State(state.clone()), Path(started.id))
+        .await
+        .expect("page")
+        .0;
+    let expected = serde_json::to_value(
+        only_agent_call(&detail)
+            .provider_rounds
+            .as_ref()
+            .expect("rounds"),
+    )
+    .expect("json");
+    let status =
+        crate::tool::workflow_run_status::status_for_session(&state, session.id, Some(started.id))
+            .await
+            .expect("status");
+    let account =
+        crate::tool::workflow_run_account::account_for_run(&state, session.id, started.id)
+            .await
+            .expect("account");
+    // End the real in-flight work before assertions, including on a broken projection.
+    release.notify_one();
+    wait_for_terminal(&state, started.id).await;
+    assert_eq!(
+        status["runs"][0]["workers"][0]["agent_call"]["provider_rounds"], expected,
+        "status carries the page's round activity"
+    );
+    assert_eq!(
+        account["workers"][0]["agent_call"]["provider_rounds"], expected,
+        "open account carries the page's round activity"
+    );
+    assert_eq!(expected.as_array().expect("round list").len(), 1);
+    assert!(expected[0]["completed_at"].is_null());
+    assert!(expected[0]["started_at"].is_string());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_accounts_api_cancellation_retains_source_and_time() {
+    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+    let topic = storage.general_scope().await.expect("topic");
+    let session = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .expect("session");
+    let opened = Arc::new(Notify::new());
+    let state = AppState::new(
+        storage.clone(),
+        storage.clone(),
+        Arc::new(GatedRoundProvider {
+            round_opened: opened.clone(),
+            release: Arc::new(Notify::new()),
+        }),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let Json(started) = start_inline_run(
+        State(state.clone()),
+        Path(topic.id),
+        Json(StartInlineWorkflowRunRequest {
+            source: "return await agent('wait', {maxAttempts: 1});".into(),
+            args: Value::Null,
+            budget: None,
+        }),
+    )
+    .await
+    .expect("launch");
+    opened.notified().await;
+    let before = chrono::Utc::now();
+    cancel_run(State(state.clone()), Path(started.id))
+        .await
+        .expect("API cancellation");
+    wait_for_terminal(&state, started.id).await;
+    let result = crate::tool::workflow_run_account::account_for_run(&state, session.id, started.id)
+        .await
+        .expect("read account");
+    assert_eq!(result["account"]["cancellation"]["source"], "API request");
+    let requested = chrono::DateTime::parse_from_rfc3339(
+        result["account"]["cancellation"]["requested_at"]
+            .as_str()
+            .expect("request time"),
+    )
+    .expect("timestamp");
+    assert!(requested >= before && requested <= chrono::Utc::now());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_fix_interrupted_cancellation_is_refused_without_an_audit_claim() {
+    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+    let topic = storage.general_scope().await.unwrap();
+    let (state, _) = scripted_state(&storage, vec![]);
+    let run = storage
+        .create_workflow_run(swage_storage::fixtures::new_workflow_run(topic.id))
+        .await
+        .unwrap();
+    storage
+        .update_workflow_run_state(run.id, "interrupted", None, None, None)
+        .await
+        .unwrap();
+    let result = cancel_run(State(state), Path(run.id)).await;
+    assert!(
+        result.is_err(),
+        "an interrupted run without an engine must refuse cancellation plainly"
+    );
+    assert!(
+        recorded_cancellation(storage.as_ref(), run.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "a refused cancellation must not claim an audit event"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_fix_parent_cancellation_does_not_reuse_an_unclaimed_api_request() {
+    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+    let topic = storage.general_scope().await.unwrap();
+    let (state, _) = scripted_state(&storage, vec![]);
+    let run = storage
+        .create_workflow_run(swage_storage::fixtures::new_workflow_run(topic.id))
+        .await
+        .unwrap();
+    storage
+        .update_workflow_run_state(run.id, "interrupted", None, None, None)
+        .await
+        .unwrap();
+    let _ = cancel_run(State(state.clone()), Path(run.id)).await;
+    storage
+        .update_workflow_run_state(run.id, "running", None, None, None)
+        .await
+        .unwrap();
+    // Parent cancellation signals the engine directly. Exercise its terminal-account writer.
+    let account = terminal_account_from_journal(&[], WorkflowRunEnding::Cancelled, None);
+    record_terminal_account(storage.as_ref(), &state.worktree_host, run.id, account)
+        .await
+        .unwrap();
+    let account = terminal_account_of(&storage, run.id).await;
+    assert!(
+        account.cancellation.is_none(),
+        "a later parent cancellation must not inherit the unclaimed API request"
+    );
+}

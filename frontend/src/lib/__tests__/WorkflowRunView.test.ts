@@ -66,6 +66,25 @@ function emptyAccount(ending: WorkflowRunEnding): WorkflowRunTerminalAccount {
 describe("WorkflowRunView", () => {
   let component: MountedComponent | undefined;
 
+  it("run accounts preserve the author defect and hide empty partial results", () => {
+    const account = emptyAccount({ ending: "author_error", error: "UnknownAgentOptionError: unknown option bogusOption" });
+    account.partial_results = { reason: "no result", results: [] };
+    component = render(run(account));
+    expect(document.querySelector(".ending-line")?.textContent).toBe("Author error — UnknownAgentOptionError: unknown option bogusOption");
+    expect(document.body.textContent).not.toContain("Partial results");
+  });
+
+  it("run accounts render cancellation provenance", () => {
+    const account = emptyAccount({ ending: "cancelled" });
+    account.cancellation = { source: "API request", actor: "operator", session_id: "session-1", requested_at: "2026-10-15T10:00:00Z" };
+    component = render(run(account));
+    const text = document.querySelector(".ending")?.textContent;
+    expect(text).toContain("API request");
+    expect(text).toContain("2026-10-15T10:00:00Z");
+    expect(text).toContain("operator");
+    expect(text).toContain("session-1");
+  });
+
   afterEach(() => {
     if (component) unmount(component);
     component = undefined;
