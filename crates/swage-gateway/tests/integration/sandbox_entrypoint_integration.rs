@@ -190,8 +190,9 @@ struct Recorded(std::sync::Mutex<Vec<swage_sandbox::EgressConnection>>);
 
 #[async_trait::async_trait]
 impl swage_sandbox::EgressRecorder for Recorded {
-    async fn record(&self, connection: swage_sandbox::EgressConnection) {
+    async fn record(&self, connection: swage_sandbox::EgressConnection) -> Result<(), String> {
         self.0.lock().unwrap().push(connection);
+        Ok(())
     }
 }
 

@@ -15747,7 +15747,7 @@ fn sandbox_config_skips_missing_trusted_workspace_paths() {
     };
 
     let roots = PolicyRoots {
-        home: None,
+        home: temp_dir.path().join("home"),
         data_root: temp_dir.path().join("data-root"),
     };
     let sandbox_config = build_sandbox_config(&agent_config, Some(&policy), &roots).unwrap();
@@ -15819,7 +15819,7 @@ fn a_linked_worktree_writes_its_gitdir_and_the_repository_it_belongs_to() {
 
     let agent_config = AgentConfig::new("worker").with_workspace(&worktree, vec![worktree.clone()]);
     let roots = PolicyRoots {
-        home: None,
+        home: temp_dir.path().join("home"),
         data_root: temp_dir.path().join("data-root"),
     };
     let sandbox_config = build_sandbox_config(&agent_config, None, &roots).unwrap();
@@ -15843,7 +15843,7 @@ fn the_policy_masks_private_home_paths_and_the_data_root_and_opens_the_shared_ca
     let agent_config =
         AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
     let roots = PolicyRoots {
-        home: Some(home.clone()),
+        home: home.clone(),
         data_root: data_root.clone(),
     };
     let sandbox_config = build_sandbox_config(&agent_config, None, &roots).unwrap();
@@ -15876,16 +15876,19 @@ fn the_policy_masks_private_home_paths_and_the_data_root_and_opens_the_shared_ca
         "an absent cache is not opened: {writes:?}"
     );
 
-    // A grant into the data root hands the decision to the grant.
-    let inside = data_root.join("scratch");
+    // A grant beneath the data root keeps the root masked: the grant is a
+    // write path the mount layer reopens on its own, deeper, so the store,
+    // secrets and other sessions beside it stay hidden.
+    let inside = data_root.join("scratch").join("session-1");
     std::fs::create_dir_all(&inside).unwrap();
     let granted = AgentConfig::new("worker").with_workspace(&inside, vec![inside.clone()]);
     let sandbox_config = build_sandbox_config(&granted, None, &roots).unwrap();
     assert!(
-        !sandbox_config
+        sandbox_config
             .masked_paths
             .contains(&sandbox_path(&data_root))
     );
+    assert!(sandbox_config.write_paths.contains(&sandbox_path(&inside)));
 }
 
 #[test]
@@ -15922,7 +15925,7 @@ fn worker_placement_replaces_other_filesystem_authority() {
 
     assert!(policy.attachments.is_empty());
     let roots = PolicyRoots {
-        home: None,
+        home: temp_dir.path().join("home"),
         data_root: temp_dir.path().join("data-root"),
     };
     let sandbox_config = build_sandbox_config(&agent_config, Some(&policy), &roots).unwrap();

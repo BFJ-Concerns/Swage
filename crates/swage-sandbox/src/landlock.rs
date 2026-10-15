@@ -261,11 +261,11 @@ impl LandlockRuleset {
         }
 
         // Add rules for each write path, capping to available ABI flags.
-        let write_flags = if abi >= 3 {
-            (WRITE_ALLOWED_BASE | ACCESS_FS_TRUNCATE) & handled_flags
-        } else {
-            WRITE_ALLOWED_BASE & handled_flags
-        };
+        // REFER is denied by default once handled (ABI 2), and a rename or
+        // link across directories needs it on both; a writable tree where
+        // `mv a/x b/x` fails is not a writable tree, so it is granted with the
+        // write set wherever the kernel knows it.
+        let write_flags = write_flags_for_abi(abi) & handled_flags;
 
         for path in &self.write_paths {
             add_path_rule(ruleset_fd, path, write_flags);
@@ -322,6 +322,19 @@ fn detect_abi() -> i64 {
             LANDLOCK_CREATE_RULESET_VERSION,
         )
     }
+}
+
+/// The rights a write path receives at `abi`: the baseline, cross-directory
+/// rename and link from ABI 2, truncation from ABI 3.
+fn write_flags_for_abi(abi: i64) -> u64 {
+    let mut flags = WRITE_ALLOWED_BASE;
+    if abi >= 2 {
+        flags |= ACCESS_FS_REFER;
+    }
+    if abi >= 3 {
+        flags |= ACCESS_FS_TRUNCATE;
+    }
+    flags
 }
 
 /// Returns (flags_to_use, missing_feature_names) for the given ABI version.
@@ -501,6 +514,15 @@ mod tests {
     // -----------------------------------------------------------------------
     // flags_for_abi
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_write_path_may_rename_across_directories_from_abi_2_and_truncate_from_abi_3() {
+        assert_eq!(write_flags_for_abi(1) & ACCESS_FS_REFER, 0);
+        assert_ne!(write_flags_for_abi(2) & ACCESS_FS_REFER, 0);
+        assert_eq!(write_flags_for_abi(2) & ACCESS_FS_TRUNCATE, 0);
+        assert_ne!(write_flags_for_abi(3) & ACCESS_FS_TRUNCATE, 0);
+        assert_ne!(write_flags_for_abi(5) & ACCESS_FS_REFER, 0);
+    }
 
     #[test]
     fn abi_1_flags_exclude_refer_and_truncate() {

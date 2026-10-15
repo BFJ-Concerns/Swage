@@ -99,8 +99,11 @@ pub(crate) fn build_bwrap_command_with_path(
     cmd.args(["--ro-bind", "/", "/"]);
 
     // Minimal virtual filesystem. These mounts must overlay the read-only
-    // root: mounting the root afterwards exposes the host's nodev /dev.
+    // root: mounting the root afterwards exposes the host's nodev /dev, and
+    // without its own procfs the sandbox would see the host's, whose
+    // /proc/<pid>/root walks around every mask below.
     cmd.args(["--dev", "/dev"]);
+    cmd.args(["--proc", "/proc"]);
     cmd.args(["--tmpfs", "/tmp"]);
 
     // The host IPC socket may live under /tmp (a relocated or over-long
@@ -119,30 +122,21 @@ pub(crate) fn build_bwrap_command_with_path(
             .arg(egress);
     }
 
-    // The write set: the workspace when its grant allows, its git metadata,
-    // the shared caches, attachments granted write. The working directory is
-    // not bound writable unless the policy lists it.
-    for path in &config.write_paths {
+    // The policy's mounts, shallowest path first, so the deepest mount at any
+    // point wins: a mask inside a writable tree still hides, and a grant
+    // inside a masked tree reopens only its own subtree. The write set binds
+    // writable (the working directory only when the policy lists it), the
+    // read-only paths overlay, and a mask makes a directory an empty tmpfs
+    // and a file read as /dev/null. A masked path absent on the host needs
+    // no mask.
+    for (path, kind) in policy_mounts(config) {
         let p = path.as_os_str();
-        cmd.arg("--bind").arg(p).arg(p);
-    }
-
-    // Read-only overlays hold a path read-only inside a writable tree.
-    for path in &config.read_only_paths {
-        let p = path.as_os_str();
-        cmd.arg("--ro-bind").arg(p).arg(p);
-    }
-
-    // Masks hide private paths: a directory becomes an empty tmpfs, a file
-    // reads as /dev/null. Last, so a mask inside the write set still wins.
-    // A masked path that does not exist on the host needs no mask.
-    for path in &config.masked_paths {
-        let p = path.as_os_str();
-        if path.is_dir() {
-            cmd.arg("--tmpfs").arg(p);
-        } else if path.is_file() {
-            cmd.arg("--ro-bind").arg("/dev/null").arg(p);
-        }
+        match kind {
+            PolicyMount::Write => cmd.arg("--bind").arg(p).arg(p),
+            PolicyMount::ReadOnly => cmd.arg("--ro-bind").arg(p).arg(p),
+            PolicyMount::MaskDirectory => cmd.arg("--tmpfs").arg(p),
+            PolicyMount::MaskFile => cmd.arg("--ro-bind").arg("/dev/null").arg(p),
+        };
     }
 
     // Expose the IPC socket path to the agent process via the environment.
@@ -160,6 +154,44 @@ pub(crate) fn build_bwrap_command_with_path(
     cmd.arg("--").arg(agent_binary).arg("--sandbox-mode");
 
     Ok(cmd)
+}
+
+/// One mount the policy asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PolicyMount {
+    Write,
+    ReadOnly,
+    MaskDirectory,
+    MaskFile,
+}
+
+/// The policy's mounts ordered shallowest first, so bubblewrap applies the
+/// deepest last and it wins. Ties keep the policy's own order: masks after
+/// grants at the same depth, so an identical path masked and granted reads
+/// as masked.
+fn policy_mounts(config: &SandboxConfig) -> Vec<(&Path, PolicyMount)> {
+    let mut mounts: Vec<(&Path, PolicyMount)> = Vec::new();
+    mounts.extend(
+        config
+            .write_paths
+            .iter()
+            .map(|path| (path.as_path(), PolicyMount::Write)),
+    );
+    mounts.extend(
+        config
+            .read_only_paths
+            .iter()
+            .map(|path| (path.as_path(), PolicyMount::ReadOnly)),
+    );
+    for path in &config.masked_paths {
+        if path.is_dir() {
+            mounts.push((path.as_path(), PolicyMount::MaskDirectory));
+        } else if path.is_file() {
+            mounts.push((path.as_path(), PolicyMount::MaskFile));
+        }
+    }
+    mounts.sort_by_key(|(path, _)| path.components().count());
+    mounts
 }
 
 // ---------------------------------------------------------------------------
@@ -239,6 +271,73 @@ mod tests {
         assert!(
             args.contains(&OsStr::new("--die-with-parent")),
             "missing --die-with-parent; args: {args:?}"
+        );
+    }
+
+    #[test]
+    fn command_gives_the_sandbox_its_own_proc() {
+        let cmd = build_bwrap_command_with_path(
+            Path::new("/usr/bin/bwrap"),
+            &basic_config(),
+            Path::new("/run/swage/agent.sock"),
+            None,
+            Path::new("/usr/bin/swage-agent"),
+        )
+        .unwrap();
+        let args = args_of(&cmd);
+        let root = args
+            .windows(3)
+            .position(|w| w == [OsStr::new("--ro-bind"), OsStr::new("/"), OsStr::new("/")])
+            .unwrap();
+        let proc_ = args
+            .windows(2)
+            .position(|w| w == [OsStr::new("--proc"), OsStr::new("/proc")])
+            .expect("the sandbox mounts its own /proc over the host's");
+        assert!(root < proc_, "the procfs must overlay the root bind");
+    }
+
+    #[test]
+    fn a_grant_inside_a_masked_tree_is_bound_after_the_mask_and_a_mask_inside_a_grant_after_the_grant()
+     {
+        let home = tempfile::tempdir().unwrap();
+        let data_root = home.path().join(".swage");
+        let scratch = data_root.join("scratch").join("session-1");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let ssh = home.path().join(".ssh");
+        std::fs::create_dir(&ssh).unwrap();
+        let config = SandboxConfig::builder()
+            .working_directory(&scratch)
+            .write_path(&scratch)
+            .write_path(home.path())
+            .masked_path(&data_root)
+            .masked_path(&ssh)
+            .build()
+            .unwrap();
+        let cmd = build_bwrap_command_with_path(
+            Path::new("/usr/bin/bwrap"),
+            &config,
+            Path::new("/run/swage/agent.sock"),
+            None,
+            Path::new("/usr/bin/swage-agent"),
+        )
+        .unwrap();
+        let args = args_of(&cmd);
+        let position = |needle: &Path| {
+            args.iter()
+                .position(|a| *a == needle.as_os_str())
+                .unwrap_or_else(|| panic!("{} must be mounted; args: {args:?}", needle.display()))
+        };
+        let home_bind = position(home.path());
+        let root_mask = position(&data_root);
+        let ssh_mask = position(&ssh);
+        let scratch_bind = position(&scratch);
+        assert!(
+            home_bind < root_mask && home_bind < ssh_mask,
+            "masks under the home grant follow it"
+        );
+        assert!(
+            root_mask < scratch_bind,
+            "the scratch grant under the masked data root follows the mask"
         );
     }
 

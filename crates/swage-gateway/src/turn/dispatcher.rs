@@ -155,16 +155,27 @@ pub(super) fn sandbox_path(path: &Path) -> PathBuf {
 /// The operator's home and the gateway's data root, as the policy needs them:
 /// the private paths to mask and the shared caches to open hang off both.
 pub(crate) struct PolicyRoots {
-    pub(crate) home: Option<PathBuf>,
+    pub(crate) home: PathBuf,
     pub(crate) data_root: PathBuf,
 }
 
 impl PolicyRoots {
-    pub(crate) fn from_environment(data_root: &Path) -> Self {
-        Self {
-            home: std::env::var_os("HOME").map(PathBuf::from),
+    /// The roots from the gateway's environment. A gateway with no `HOME`
+    /// cannot say where the private paths and caches are, so it builds no
+    /// sandbox rather than one with the masks silently missing.
+    pub(crate) fn from_environment(data_root: &Path) -> Result<Self, swage_core::SandboxError> {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|home| !home.as_os_str().is_empty())
+            .ok_or_else(|| swage_core::SandboxError::Unavailable {
+                message: "HOME is not set, so the sandbox cannot place its private-path masks \
+                          and shared caches; start the gateway with HOME set"
+                    .into(),
+            })?;
+        Ok(Self {
+            home,
             data_root: sandbox_path(data_root),
-        }
+        })
     }
 }
 
@@ -274,29 +285,26 @@ pub(crate) fn build_sandbox_config(
         }
     }
 
-    if let Some(home) = &roots.home {
-        for cache in SHARED_CACHE_PATHS {
-            let path = home.join(cache);
-            if path.is_dir() {
-                builder = builder.write_path(sandbox_path(&path));
-            }
-        }
-        for private in MASKED_HOME_PATHS {
-            let path = home.join(private);
-            if path.exists() {
-                builder = builder.masked_path(sandbox_path(&path));
-            }
+    for cache in SHARED_CACHE_PATHS {
+        let path = roots.home.join(cache);
+        if path.is_dir() {
+            builder = builder.write_path(sandbox_path(&path));
         }
     }
-    // The gateway's own data root — its store, secrets and token — is masked
-    // unless a grant reaches into it, in which case the grant decides.
-    if roots.data_root.exists()
-        && !granted
-            .iter()
-            .any(|path| path.starts_with(&roots.data_root) || roots.data_root.starts_with(path))
-    {
+    for private in MASKED_HOME_PATHS {
+        let path = roots.home.join(private);
+        if path.exists() {
+            builder = builder.masked_path(sandbox_path(&path));
+        }
+    }
+    // The gateway's own data root — its store, secrets and token — is always
+    // masked. A grant beneath it (the managed scratch workspace lives there)
+    // reopens only its own subtree: the mount layer applies the deeper path
+    // last, so the grant shows through the mask without the rest of the root.
+    if roots.data_root.exists() {
         builder = builder.masked_path(&roots.data_root);
     }
+    tracing::debug!(?granted, "sandbox policy grants");
 
     builder.build()
 }
@@ -353,7 +361,7 @@ pub(super) async fn build_turn_sandbox(
     }
     #[cfg(test)]
     if state.test_sandbox_enabled() {
-        let roots = PolicyRoots::from_environment(&state.config_root);
+        let roots = PolicyRoots::from_environment(&state.config_root)?;
         let config =
             build_sandbox_config(agent_config, workspace_policy, &roots).map_err(|error| {
                 swage_core::SandboxError::SpawnFailed {
@@ -467,7 +475,7 @@ async fn build_turn_sandbox_for_backend_selection(
     bubblewrap_available: bool,
     spawn_fallback: bool,
 ) -> Result<TurnSandboxBuild, swage_core::SandboxError> {
-    let roots = PolicyRoots::from_environment(&state.config_root);
+    let roots = PolicyRoots::from_environment(&state.config_root)?;
     let sandbox_config =
         build_sandbox_config(agent_config, workspace_policy, &roots).map_err(|error| {
             swage_core::SandboxError::SpawnFailed {
@@ -736,7 +744,9 @@ mod tests {
         struct Dropped;
         #[async_trait::async_trait]
         impl swage_sandbox::EgressRecorder for Dropped {
-            async fn record(&self, _: swage_sandbox::EgressConnection) {}
+            async fn record(&self, _: swage_sandbox::EgressConnection) -> Result<(), String> {
+                Ok(())
+            }
         }
         swage_sandbox::EgressSetup {
             policy: Arc::new(Closed),

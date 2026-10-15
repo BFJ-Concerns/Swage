@@ -58,6 +58,9 @@ impl HostPattern {
 pub struct SessionEgressPolicy {
     allowed: Vec<HostPattern>,
     judge: Option<SharedRequestJudge>,
+    /// Where the turn's input is read for the judge and the judgement is
+    /// recorded; a judgement that cannot be recorded refuses (C68).
+    storage: Arc<dyn Storage>,
     /// The session and turn a judgement is attributed to. A sandbox with
     /// neither — a turn no session owns — has nobody to answer for an
     /// unlisted host, so such a host is refused.
@@ -70,6 +73,7 @@ impl SessionEgressPolicy {
     pub fn new(
         allowed_hosts: &[String],
         judge: Option<SharedRequestJudge>,
+        storage: Arc<dyn Storage>,
         session_id: Option<Uuid>,
         turn_id: Option<Uuid>,
         agent_id: impl Into<String>,
@@ -80,6 +84,7 @@ impl SessionEgressPolicy {
                 .map(|pattern| HostPattern::parse(pattern))
                 .collect(),
             judge,
+            storage,
             session_id,
             turn_id,
             agent_id: agent_id.into(),
@@ -108,20 +113,70 @@ impl EgressPolicy for SessionEgressPolicy {
                     .into(),
             };
         };
+        // A network request carries no justification of its own; the judge
+        // is given the task the turn is doing, as the person stated it, and
+        // weighs the host against that.
+        let task = match self.storage.get_turn(turn_id).await {
+            Ok(Some(turn)) => turn.user_input,
+            Ok(None) => None,
+            Err(error) => {
+                return EgressVerdict::Refused {
+                    reason: format!("the turn's task could not be read for the judge: {error}"),
+                };
+            }
+        };
+        let reach = RequestedReach::NetworkHost {
+            host: request.host.clone(),
+            port: request.port,
+        };
+        let arguments = serde_json::json!({
+            "host": request.host,
+            "port": request.port,
+            "task": task.as_deref().map(|text| excerpt(text, 2000)),
+        });
         let judgement = judge
             .judge(JudgeRequest {
                 session_id,
                 turn_id,
                 agent_id: self.agent_id.clone(),
                 tool_name: EGRESS_TOOL_NAME.into(),
-                arguments: serde_json::json!({ "host": request.host, "port": request.port }),
+                arguments: arguments.clone(),
                 justification: None,
-                reach: RequestedReach::NetworkHost {
-                    host: request.host.clone(),
-                    port: request.port,
-                },
+                reach: reach.clone(),
             })
             .await;
+        // The judgement is part of the record before the connection can be
+        // made, as every judgement is; one that cannot be written refuses.
+        let recorded = self
+            .storage
+            .create_audit_event(swage_storage::NewAuditEvent {
+                id: Uuid::new_v4().to_string(),
+                session_id: Some(session_id),
+                entity_kind: "turn".into(),
+                entity_id: turn_id.to_string(),
+                event_kind: "request_judged".into(),
+                summary: format!(
+                    "{} {} for {EGRESS_TOOL_NAME}: {}",
+                    judgement.verdict.as_str(),
+                    reach.summary(),
+                    judgement.reason
+                ),
+                metadata: serde_json::json!({
+                    "tool": EGRESS_TOOL_NAME,
+                    "arguments": arguments,
+                    "reach": reach.record(),
+                    "justification": serde_json::Value::Null,
+                    "verdict": judgement.verdict.as_str(),
+                    "reason": judgement.reason,
+                    "judge": judgement.judge,
+                }),
+            })
+            .await;
+        if let Err(error) = recorded {
+            return EgressVerdict::Refused {
+                reason: format!("the judgement could not be recorded: {error}"),
+            };
+        }
         match judgement.verdict {
             JudgeVerdict::Allowed => EgressVerdict::Allowed {
                 basis: format!(
@@ -144,8 +199,19 @@ impl EgressPolicy for SessionEgressPolicy {
     }
 }
 
+/// The first `limit` characters of a text, marked where it was cut.
+fn excerpt(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        text.to_owned()
+    } else {
+        let head: String = text.chars().take(limit).collect();
+        format!("{head}…")
+    }
+}
+
 /// Writes every connection attempt to the audit record, attributed to the
-/// session and turn whose sandboxed command made it.
+/// session and turn whose sandboxed command made it. A write that fails is
+/// returned, and the proxy refuses the connection on it.
 pub struct AuditEgressRecorder {
     storage: Arc<dyn Storage>,
     session_id: Option<Uuid>,
@@ -164,7 +230,7 @@ impl AuditEgressRecorder {
 
 #[async_trait]
 impl EgressRecorder for AuditEgressRecorder {
-    async fn record(&self, connection: EgressConnection) {
+    async fn record(&self, connection: EgressConnection) -> Result<(), String> {
         let (verdict, detail) = match &connection.verdict {
             EgressVerdict::Allowed { basis } => ("allowed", basis.clone()),
             EgressVerdict::Refused { reason } => ("refused", reason.clone()),
@@ -190,9 +256,14 @@ impl EgressRecorder for AuditEgressRecorder {
                 "detail": detail,
             }),
         };
-        if let Err(error) = self.storage.create_audit_event(event).await {
-            tracing::error!(%error, host = %connection.host, "egress connection could not be recorded");
-        }
+        self.storage
+            .create_audit_event(event)
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                tracing::error!(%error, host = %connection.host, "egress connection could not be recorded");
+                error.to_string()
+            })
     }
 }
 
@@ -209,6 +280,7 @@ pub fn turn_egress_setup(
         policy: Arc::new(SessionEgressPolicy::new(
             allowed_hosts,
             judge,
+            storage.clone(),
             session_id,
             turn_id,
             agent_id,
@@ -223,7 +295,38 @@ mod tests {
 
     use swage_agent::{Judgement, RequestJudge};
     use swage_storage::SqliteStorage;
-    use swage_storage::store::{AuditStore, SessionStore, TopicStore};
+    use swage_storage::store::{AuditStore, SessionStore, ThreadStore, TopicStore, TurnStore};
+    use swage_storage::{NewThread, NewTurn, TurnState};
+
+    /// A store with one session and one turn whose input is the task text.
+    async fn store_with_turn() -> (Arc<SqliteStorage>, Uuid, Uuid) {
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let topic = storage.general_scope().await.expect("topic");
+        let session = storage
+            .create_session(swage_storage::fixtures::new_session(topic.id))
+            .await
+            .expect("session");
+        let thread = ThreadStore::create(
+            storage.as_ref(),
+            NewThread {
+                session_id: session.id,
+                agent_id: "agent".into(),
+            },
+        )
+        .await
+        .expect("thread");
+        let turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "agent".into(),
+                state: TurnState::Pending,
+                user_input: Some("fetch the deps and build".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .expect("turn");
+        (storage, session.id, turn.id)
+    }
 
     use super::*;
 
@@ -265,17 +368,20 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_listed_host_is_allowed_without_the_judge_and_an_unlisted_one_is_judged() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_listed_host_is_allowed_without_the_judge_and_an_unlisted_one_is_judged_and_recorded()
+    {
         let judge = Arc::new(ScriptedJudge {
             verdict: JudgeVerdict::Allowed,
             asked: Mutex::new(Vec::new()),
         });
+        let (storage, session_id, turn_id) = store_with_turn().await;
         let policy = SessionEgressPolicy::new(
             &["github.com".into(), "*.crates.io".into()],
             Some(judge.clone()),
-            Some(Uuid::new_v4()),
-            Some(Uuid::new_v4()),
+            storage.clone(),
+            Some(session_id),
+            Some(turn_id),
             "agent",
         );
 
@@ -305,18 +411,38 @@ mod tests {
                 port: 443
             }
         );
+        assert_eq!(
+            asked[0].arguments["task"], "fetch the deps and build",
+            "the judge is shown the task the turn is doing"
+        );
+        drop(asked);
+
+        // The judgement is on the record like every other, beside the
+        // connection event the proxy writes.
+        let judged: Vec<_> = storage
+            .list_audit_events_by_session(session_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_kind == "request_judged")
+            .collect();
+        assert_eq!(judged.len(), 1, "{judged:?}");
+        assert_eq!(judged[0].metadata["reach"]["kind"], "network_host");
+        assert_eq!(judged[0].metadata["verdict"], "allowed");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn an_unlisted_host_fails_closed_on_a_refusal_or_with_no_judge() {
+        let (storage, session_id, turn_id) = store_with_turn().await;
         let refusing = SessionEgressPolicy::new(
             &[],
             Some(Arc::new(ScriptedJudge {
                 verdict: JudgeVerdict::Refused,
                 asked: Mutex::new(Vec::new()),
             })),
-            Some(Uuid::new_v4()),
-            Some(Uuid::new_v4()),
+            storage.clone(),
+            Some(session_id),
+            Some(turn_id),
             "agent",
         );
         assert_eq!(
@@ -329,8 +455,9 @@ mod tests {
         let unjudged = SessionEgressPolicy::new(
             &[],
             None,
-            Some(Uuid::new_v4()),
-            Some(Uuid::new_v4()),
+            storage.clone(),
+            Some(session_id),
+            Some(turn_id),
             "agent",
         );
         let verdict = unjudged.decide(&request("example.org")).await;
@@ -343,6 +470,7 @@ mod tests {
                 verdict: JudgeVerdict::Allowed,
                 asked: Mutex::new(Vec::new()),
             })),
+            storage,
             None,
             None,
             "agent",
@@ -370,7 +498,8 @@ mod tests {
                     basis: "the install's reachable hosts".into(),
                 },
             })
-            .await;
+            .await
+            .expect("recorded");
         recorder
             .record(EgressConnection {
                 host: "example.org".into(),
@@ -380,7 +509,8 @@ mod tests {
                     reason: "no judge".into(),
                 },
             })
-            .await;
+            .await
+            .expect("recorded");
 
         let events = storage
             .list_audit_events_by_session(session.id)

@@ -81,10 +81,12 @@ pub struct EgressConnection {
     pub verdict: EgressVerdict,
 }
 
-/// Receives every connection attempt, decided, before it proceeds.
+/// Receives every connection attempt, decided, before it proceeds. A record
+/// that cannot be written refuses the connection: an unrecorded effect is
+/// the failure the proxy exists to prevent.
 #[async_trait]
 pub trait EgressRecorder: Send + Sync {
-    async fn record(&self, connection: EgressConnection);
+    async fn record(&self, connection: EgressConnection) -> Result<(), String>;
 }
 
 /// The policy and recorder a sandbox's proxy runs with.
@@ -104,16 +106,21 @@ pub struct EgressSetup {
 pub struct EgressProxy {
     socket: SocketManager,
     accept_task: JoinHandle<()>,
+    /// Flipped when the proxy is dropped; every connection task watches it
+    /// and stops, so no accepted connection outlives the sandbox.
+    closing: tokio::sync::watch::Sender<bool>,
 }
 
 impl EgressProxy {
     /// Bind the proxy's socket and start serving it.
     pub fn start(setup: EgressSetup) -> Result<Self, SandboxError> {
         let (socket, listener) = SocketManager::create("swage-egress")?;
-        let accept_task = tokio::spawn(accept_loop(listener, setup));
+        let (closing, closed) = tokio::sync::watch::channel(false);
+        let accept_task = tokio::spawn(accept_loop(listener, setup, closed));
         Ok(Self {
             socket,
             accept_task,
+            closing,
         })
     }
 
@@ -126,17 +133,28 @@ impl EgressProxy {
 impl Drop for EgressProxy {
     fn drop(&mut self) {
         self.accept_task.abort();
+        let _ = self.closing.send(true);
     }
 }
 
-async fn accept_loop(listener: UnixListener, setup: EgressSetup) {
+async fn accept_loop(
+    listener: UnixListener,
+    setup: EgressSetup,
+    closed: tokio::sync::watch::Receiver<bool>,
+) {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
                 let setup = setup.clone();
+                let mut closed = closed.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = serve(stream, setup).await {
-                        tracing::debug!(%error, "egress connection ended with an error");
+                    tokio::select! {
+                        result = serve(stream, setup) => {
+                            if let Err(error) = result {
+                                tracing::debug!(%error, "egress connection ended with an error");
+                            }
+                        }
+                        _ = closed.changed() => {}
                     }
                 });
             }
@@ -172,9 +190,12 @@ pub(crate) enum RequestError {
 /// `CONNECT host:port HTTP/1.1` names the destination in its target. A plain
 /// request carries an absolute URI (`GET http://host:port/path HTTP/1.1`),
 /// which is rewritten to the origin form the destination expects, with the
-/// hop-by-hop `Proxy-Connection` header dropped. Anything else is refused as
-/// a bad request: a proxy that guessed would send traffic somewhere the
-/// record never named.
+/// hop-by-hop `Proxy-Connection` header dropped and `Connection: close` set,
+/// so the connection carries exactly one decided, recorded request — a
+/// client that keeps the connection alive would otherwise send its next
+/// request, perhaps for another host, straight down the first tunnel.
+/// Anything else is refused as a bad request: a proxy that guessed would
+/// send traffic somewhere the record never named.
 pub(crate) fn parse_request(head: &[u8]) -> Result<ProxyRequest, RequestError> {
     let text = std::str::from_utf8(head)
         .map_err(|_| RequestError::BadRequest("request head is not UTF-8".into()))?;
@@ -221,13 +242,14 @@ pub(crate) fn parse_request(head: &[u8]) -> Result<ProxyRequest, RequestError> {
             break;
         }
         let name = line.split(':').next().unwrap_or_default().trim();
-        if name.eq_ignore_ascii_case("proxy-connection") {
+        if name.eq_ignore_ascii_case("proxy-connection") || name.eq_ignore_ascii_case("connection")
+        {
             continue;
         }
         forwarded.push_str(line);
         forwarded.push_str("\r\n");
     }
-    forwarded.push_str("\r\n");
+    forwarded.push_str("Connection: close\r\n\r\n");
     Ok(ProxyRequest {
         method: method.to_owned(),
         host,
@@ -336,7 +358,7 @@ async fn serve(mut stream: UnixStream, setup: EgressSetup) -> std::io::Result<()
             port: request.port,
         })
         .await;
-    setup
+    if let Err(error) = setup
         .recorder
         .record(EgressConnection {
             host: request.host.clone(),
@@ -344,7 +366,18 @@ async fn serve(mut stream: UnixStream, setup: EgressSetup) -> std::io::Result<()
             method: request.method.clone(),
             verdict: verdict.clone(),
         })
+        .await
+    {
+        return respond(
+            &mut stream,
+            "503 Service Unavailable",
+            &format!(
+                "swage: the connection to {}:{} could not be recorded, so it was not made: {error}",
+                request.host, request.port
+            ),
+        )
         .await;
+    }
     if let EgressVerdict::Refused { reason } = verdict {
         return respond(
             &mut stream,
@@ -534,8 +567,18 @@ mod tests {
 
     #[async_trait]
     impl EgressRecorder for Recorded {
-        async fn record(&self, connection: EgressConnection) {
+        async fn record(&self, connection: EgressConnection) -> Result<(), String> {
             self.0.lock().unwrap().push(connection);
+            Ok(())
+        }
+    }
+
+    struct FailingRecorder;
+
+    #[async_trait]
+    impl EgressRecorder for FailingRecorder {
+        async fn record(&self, _: EgressConnection) -> Result<(), String> {
+            Err("the record is read-only".into())
         }
     }
 
@@ -618,7 +661,15 @@ mod tests {
         assert_eq!((request.host.as_str(), request.port), ("example.org", 80));
         assert_eq!(
             request.forward_head.as_deref().unwrap(),
-            b"GET /index.html HTTP/1.1\r\nHost: example.org\r\nAccept: */*\r\n\r\n"
+            b"GET /index.html HTTP/1.1\r\nHost: example.org\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+        );
+        // A client's own keep-alive is replaced: one request per connection.
+        let kept_alive =
+            parse_request(b"GET http://example.org/ HTTP/1.1\r\nConnection: keep-alive\r\n\r\n")
+                .unwrap();
+        assert_eq!(
+            kept_alive.forward_head.as_deref().unwrap(),
+            b"GET / HTTP/1.1\r\nConnection: close\r\n\r\n"
         );
         assert_eq!(
             parse_request(b"GET http://example.org:8080 HTTP/1.1\r\n\r\n")
@@ -710,6 +761,49 @@ mod tests {
             EgressVerdict::Refused {
                 reason: "not on the list".into()
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_connection_whose_record_cannot_be_written_is_refused_before_connecting() {
+        let (address, _server) = echo_server().await;
+        let proxy = EgressProxy::start(EgressSetup {
+            policy: Arc::new(AllowHosts(vec!["127.0.0.1"])),
+            recorder: Arc::new(FailingRecorder),
+        })
+        .unwrap();
+        let response = send(
+            &proxy,
+            &format!("CONNECT 127.0.0.1:{} HTTP/1.1\r\n\r\n", address.port()),
+        )
+        .await;
+        assert!(
+            response.starts_with("HTTP/1.1 503 Service Unavailable"),
+            "{response}"
+        );
+        assert!(
+            response.contains("could not be recorded, so it was not made"),
+            "{response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_the_proxy_ends_its_accepted_connections() {
+        let (setup, _) = setup(vec!["127.0.0.1"]);
+        let proxy = EgressProxy::start(setup).unwrap();
+        let mut stream = UnixStream::connect(proxy.socket_path()).await.unwrap();
+        // The head is incomplete, so the connection task is waiting in read.
+        stream
+            .write_all(b"CONNECT 127.0.0.1:1 HTTP/1.1\r\n")
+            .await
+            .unwrap();
+        drop(proxy);
+        let mut buffer = Vec::new();
+        let ended =
+            tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut buffer)).await;
+        assert!(
+            ended.is_ok(),
+            "the accepted connection must end when the proxy is dropped"
         );
     }
 
