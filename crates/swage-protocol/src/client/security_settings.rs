@@ -92,6 +92,8 @@ pub struct SecurityOverrides {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, TS)]
 #[ts(optional_fields = nullable)]
 pub struct SecuritySettingsResponse {
+    /// Tools currently registered with the gateway, available to the approval picker.
+    pub available_tools: Vec<String>,
     pub scope: SettingsScope,
     pub effective: EffectiveSecurityChecks,
     pub overrides: SecurityOverrides,

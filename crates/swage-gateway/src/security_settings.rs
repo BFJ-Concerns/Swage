@@ -180,7 +180,16 @@ impl ResolvedScope {
             )?,
         };
         let relaxed = relaxations(&effective, &self.scope, &overrides, &install_overrides);
+        let dispatcher = state.active_tool_dispatcher();
+        let mut available_tools: Vec<String> = dispatcher
+            .registry()
+            .list()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        available_tools.sort();
         Ok(SecuritySettingsResponse {
+            available_tools,
             scope: self.scope.clone(),
             effective,
             overrides,
@@ -505,6 +514,84 @@ mod tests {
             root.path().to_path_buf(),
         );
         (state, storage, root)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn general_save_cannot_overwrite_newer_security_settings() {
+        let (state, _, _root) = fixture().await;
+        let mut old =
+            serde_json::to_value(crate::settings::load_settings(&state).await.unwrap()).unwrap();
+        old["sandbox"] = serde_json::json!({"enabled": false, "allow_degraded_execution": false});
+        old["tool_permissions"]["require_approval"] = serde_json::json!([]);
+        save_security_settings(
+            &state,
+            SettingsScope::Install,
+            save(SecurityOverrides {
+                sandbox_enabled: Some(true),
+                allow_degraded_execution: Some(true),
+                require_approval: Some(vec![RequireApprovalEntry::Simple("shell".into())]),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        crate::settings::save_settings(&state, serde_json::from_value(old).unwrap())
+            .await
+            .unwrap();
+        let reading = read_security_settings(&state, SettingsScope::Install)
+            .await
+            .unwrap();
+        assert!(
+            reading.effective.sandbox_enabled,
+            "general save reverted the sandbox"
+        );
+        assert!(
+            reading.effective.allow_degraded_execution,
+            "general save reverted confinement"
+        );
+        assert_eq!(
+            serde_json::to_value(reading.effective.require_approval).unwrap(),
+            serde_json::json!(["shell"])
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unconfined_fallback_is_saved_and_read_as_effective() {
+        let (state, _, _root) = fixture().await;
+        save_security_settings(
+            &state,
+            SettingsScope::Install,
+            save(SecurityOverrides {
+                allow_degraded_execution: Some(true),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        let reading = read_security_settings(&state, SettingsScope::Install)
+            .await
+            .unwrap();
+        assert_eq!(reading.overrides.allow_degraded_execution, Some(true));
+        assert!(reading.effective.allow_degraded_execution);
+        assert!(state.active_config().sandbox.allow_degraded_execution);
+    }
+
+    #[tokio::test]
+    async fn security_reading_lists_the_active_registry_for_the_picker() {
+        let (state, _, _root) = fixture().await;
+        state.replace_runtime(
+            state.active_config(),
+            state.active_provider(),
+            crate::tool::ToolDispatcher::allow_all(vec![Arc::new(
+                crate::tool::file_read::FileReadTool {
+                    max_output_bytes: 4096,
+                },
+            ) as Arc<dyn crate::tool::Tool>]),
+        );
+        let reading = read_security_settings(&state, SettingsScope::Install)
+            .await
+            .expect("reading");
+        assert_eq!(reading.available_tools, vec!["file_read"]);
     }
 
     fn save(overrides: SecurityOverrides) -> SaveSecuritySettingsRequest {

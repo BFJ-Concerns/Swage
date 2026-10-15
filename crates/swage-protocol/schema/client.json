@@ -4268,17 +4268,6 @@
             "$ref": "#/$defs/SaveProviderSettings"
           }
         },
-        "sandbox": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SandboxConfig"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
         "sessions": {
           "anyOf": [
             {
@@ -4293,7 +4282,7 @@
         "tool_permissions": {
           "anyOf": [
             {
-              "$ref": "#/$defs/ToolPermissionConfig"
+              "$ref": "#/$defs/ToolGrantSettings"
             },
             {
               "type": "null"
@@ -4838,6 +4827,13 @@
       "description": "A scope's security settings as the settings surface reads them.",
       "type": "object",
       "properties": {
+        "available_tools": {
+          "description": "Tools currently registered with the gateway, available to the approval picker.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "effective": {
           "$ref": "#/$defs/EffectiveSecurityChecks"
         },
@@ -4855,6 +4851,7 @@
         }
       },
       "required": [
+        "available_tools",
         "scope",
         "effective",
         "overrides",
@@ -6628,6 +6625,38 @@
         "tool",
         "arguments",
         "truncated"
+      ]
+    },
+    "ToolGrantSettings": {
+      "description": "Tool grants editable through general settings; approval requirements belong\nto the scoped security settings.",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "bundles": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "deny": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "allow",
+        "deny",
+        "bundles"
       ]
     },
     "ToolPermissionConfig": {

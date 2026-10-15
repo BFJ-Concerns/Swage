@@ -5,6 +5,7 @@ import { mount, unmount } from "svelte";
 import TopicSettingsPage from "../components/TopicSettingsPage.svelte";
 import * as topicsApi from "../api/topics";
 import * as surfacesApi from "../api/surfaces";
+import type { SecuritySettingsResponse } from "../protocol/SecuritySettingsResponse";
 import type { Topic } from "../types";
 
 vi.mock("../api/topics", () => ({
@@ -99,6 +100,7 @@ describe("TopicSettingsPage", () => {
 
   it("shows the topic's security checks with what stands relaxed and saves its own overrides", async () => {
     vi.mocked(settingsApi.fetchTopicSecuritySettings).mockResolvedValue({
+      available_tools: ["shell", "file_write"],
       scope: { kind: "topic", topic_id: "topic-1" },
       effective: { sandbox_enabled: false, allow_degraded_execution: false,
       access_gate: "token", require_approval: ["shell", "file_write"] },
@@ -108,6 +110,7 @@ describe("TopicSettingsPage", () => {
       ],
     });
     vi.mocked(settingsApi.saveTopicSecuritySettings).mockResolvedValue({
+      available_tools: ["shell", "file_write"],
       scope: { kind: "topic", topic_id: "topic-1" },
       effective: { sandbox_enabled: true, allow_degraded_execution: false,
       access_gate: "token", require_approval: ["shell", "file_write"] },
@@ -133,6 +136,81 @@ describe("TopicSettingsPage", () => {
       require_approval: undefined,
     });
     expect(document.body.textContent).toContain("Every shipped check is in force for this topic.");
+  });
+
+  it("saves unconfined fallback and reloads its persisted override", async () => {
+    const reading: SecuritySettingsResponse = {
+      available_tools: [], scope: { kind: "topic", topic_id: topic.id },
+      effective: { sandbox_enabled: true, allow_degraded_execution: false, access_gate: "token", require_approval: [] },
+      overrides: {}, relaxed: [],
+    };
+    vi.mocked(settingsApi.fetchTopicSecuritySettings).mockImplementation(async () => JSON.parse(JSON.stringify(reading)));
+    vi.mocked(settingsApi.saveTopicSecuritySettings).mockImplementation(async (_id, overrides) => {
+      reading.overrides = JSON.parse(JSON.stringify(overrides));
+      reading.effective.allow_degraded_execution = overrides.allow_degraded_execution ?? false;
+      return JSON.parse(JSON.stringify(reading));
+    });
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "security" } });
+    await flushUi();
+    const confinement = document.querySelector<HTMLSelectElement>('[aria-label="Sandbox confinement for this topic"]')!;
+    confinement.value = "allow_degraded";
+    confinement.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUi();
+    document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushUi();
+    expect(vi.mocked(settingsApi.saveTopicSecuritySettings)).toHaveBeenLastCalledWith(topic.id, {
+      sandbox_enabled: undefined, allow_degraded_execution: true, require_approval: undefined,
+    });
+    unmount(component);
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "security" } });
+    await flushUi();
+    expect(document.querySelector<HTMLSelectElement>('[aria-label="Sandbox confinement for this topic"]')?.value).toBe("allow_degraded");
+    expect(document.querySelector('[aria-label="Effective security checks"]')?.textContent).toContain("Allow unconfined fallback");
+  });
+
+  it("edits a topic approval timeout while preserving policy, and removes a tool", async () => {
+    const reading: SecuritySettingsResponse = {
+      available_tools: ["shell", "file_write"], scope: { kind: "topic" as const, topic_id: topic.id },
+      effective: { sandbox_enabled: true, allow_degraded_execution: false, access_gate: "token" as const,
+        require_approval: [{ tool: "shell", timeout: 12, timeout_policy: "interrupt" as const }] },
+      overrides: { require_approval: [{ tool: "shell", timeout: 12, timeout_policy: "interrupt" }] }, relaxed: [],
+    };
+    vi.mocked(settingsApi.fetchTopicSecuritySettings).mockResolvedValue(reading);
+    vi.mocked(settingsApi.saveTopicSecuritySettings).mockImplementation(async (_id, overrides) => {
+      reading.overrides = JSON.parse(JSON.stringify(overrides));
+      reading.effective = { ...reading.effective, ...reading.overrides };
+      return JSON.parse(JSON.stringify(reading));
+    });
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "security" } });
+    await flushUi();
+    const mode = document.querySelector<HTMLSelectElement>('[aria-label="Approval prompts for this topic"]')!;
+    mode.value = "own"; mode.dispatchEvent(new Event("change", { bubbles: true })); await flushUi();
+    expect(document.querySelector('[aria-label="Timeout for shell"]')).not.toBeNull();
+    const timeout = document.querySelector<HTMLInputElement>('[aria-label="Timeout for shell"]')!;
+    timeout.value = "27"; timeout.dispatchEvent(new Event("change", { bubbles: true })); await flushUi();
+    document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushUi();
+    expect(settingsApi.saveTopicSecuritySettings).toHaveBeenLastCalledWith(topic.id, {
+      sandbox_enabled: undefined, allow_degraded_execution: undefined,
+      require_approval: [{ tool: "shell", timeout: 27, timeout_policy: "interrupt" }],
+    });
+    const picker = document.querySelector<HTMLSelectElement>('[aria-label="Tool to require approval"]')!;
+    picker.value = "file_write"; picker.dispatchEvent(new Event("change", { bubbles: true })); await flushUi();
+    Array.from(document.querySelectorAll("button")).find(button => button.textContent?.trim() === "Add tool")!.click();
+    await flushUi();
+    document.querySelector<HTMLButtonElement>('[aria-label="Remove file_write approval"]')!.click(); await flushUi();
+    document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushUi();
+    expect(vi.mocked(settingsApi.saveTopicSecuritySettings).mock.calls.at(-1)![1].require_approval)
+      .toEqual([{ tool: "shell", timeout: 27, timeout_policy: "interrupt" }]);
+    unmount(component);
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "security" } });
+    await flushUi();
+    expect(document.querySelector<HTMLInputElement>('[aria-label="Timeout for shell"]')?.value).toBe("27");
+    document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushUi();
+    expect(vi.mocked(settingsApi.saveTopicSecuritySettings).mock.calls.at(-1)![1].require_approval)
+      .toEqual([{ tool: "shell", timeout: 27, timeout_policy: "interrupt" }]);
   });
 
   it("renders topic workspaces without global settings controls", async () => {

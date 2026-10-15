@@ -3,7 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
 import { fromStore, writable } from "svelte/store";
 
+import { parseRoute } from "../router";
 import SettingsPage from "../components/SettingsPage.svelte";
+import type { SecuritySettingsResponse } from "../protocol/SecuritySettingsResponse";
 import type { Schedule } from "../protocol/Schedule";
 import type { SettingsPayload, SettingsResponse } from "../types";
 
@@ -15,6 +17,8 @@ import * as operatorApi from "../api/operator";
 import { makeSchedule } from "./fixtures/schedules";
 
 vi.mock("../api/settings", () => ({
+  fetchInstallSecuritySettings: vi.fn(),
+  saveInstallSecuritySettings: vi.fn(),
   discoverModels: vi.fn(),
   fetchSettings: vi.fn(),
   restartGateway: vi.fn(),
@@ -179,9 +183,9 @@ describe("SettingsPage", () => {
       default_model: payload.default_model,
       generation_presets: payload.generation_presets,
       tool_runtime: payload.tool_runtime ?? emptySettings().tool_runtime,
-      tool_permissions: payload.tool_permissions ?? emptySettings().tool_permissions,
+      tool_permissions: { ...emptySettings().tool_permissions, ...payload.tool_permissions },
       hitl: payload.hitl ?? emptySettings().hitl,
-      sandbox: payload.sandbox,
+      sandbox: emptySettings().sandbox,
       context: payload.context ?? emptySettings().context,
       pricing: payload.pricing ?? emptySettings().pricing,
       observability: payload.observability ?? emptySettings().observability,
@@ -209,6 +213,106 @@ describe("SettingsPage", () => {
     component = undefined;
     document.body.innerHTML = "";
     vi.clearAllMocks();
+  });
+
+  it("omits security fields from an Automation autosave holding an old snapshot", async () => {
+    const old = emptySettings();
+    old.sandbox.enabled = false;
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(old);
+    component = mount(SettingsPage, { target: document.body, props: { tab: "automation" } });
+    await flushUi();
+    const newer = { available_tools: [], scope: { kind: "install" as const },
+      effective: { sandbox_enabled: true, allow_degraded_execution: true, access_gate: "token" as const, require_approval: ["shell"] },
+      overrides: { sandbox_enabled: true, allow_degraded_execution: true, require_approval: ["shell"] }, relaxed: [] };
+    vi.mocked(settingsApi.saveInstallSecuritySettings).mockResolvedValue(newer);
+    await settingsApi.saveInstallSecuritySettings(newer.overrides);
+    const editor = document.querySelector<HTMLTextAreaElement>('[aria-label="Tool bundles"]')!;
+    editor.value = '{"inspect":["file_read"]}';
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    const body = vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0];
+    expect(body).not.toHaveProperty("sandbox");
+    expect(body.tool_permissions).not.toHaveProperty("require_approval");
+    expect(body.tool_permissions?.bundles).toEqual({ inspect: ["file_read"] });
+  });
+
+  it("saves unconfined fallback and reloads its persisted override", async () => {
+    const reading: SecuritySettingsResponse = {
+      available_tools: [], scope: { kind: "install" },
+      effective: { sandbox_enabled: true, allow_degraded_execution: false, access_gate: "token", require_approval: [] },
+      overrides: {}, relaxed: [],
+    };
+    vi.mocked(settingsApi.fetchInstallSecuritySettings).mockImplementation(async () => JSON.parse(JSON.stringify(reading)));
+    vi.mocked(settingsApi.saveInstallSecuritySettings).mockImplementation(async (overrides) => {
+      reading.overrides = JSON.parse(JSON.stringify(overrides));
+      reading.effective.allow_degraded_execution = overrides.allow_degraded_execution ?? false;
+      return JSON.parse(JSON.stringify(reading));
+    });
+    component = mount(SettingsPage, { target: document.body, props: { tab: "security" } });
+    await flushUi();
+    const confinement = document.querySelector<HTMLSelectElement>('[aria-label="Sandbox confinement for the install"]')!;
+    confinement.value = "allow_degraded";
+    confinement.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUi();
+    document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushUi();
+    expect(vi.mocked(settingsApi.saveInstallSecuritySettings)).toHaveBeenLastCalledWith({
+      sandbox_enabled: undefined, allow_degraded_execution: true, require_approval: undefined, access_gate: undefined,
+    });
+    unmount(component);
+    component = mount(SettingsPage, { target: document.body, props: { tab: "security" } });
+    await flushUi();
+    expect(document.querySelector<HTMLSelectElement>('[aria-label="Sandbox confinement for the install"]')?.value).toBe("allow_degraded");
+    expect(document.querySelector('[aria-label="Effective security checks"]')?.textContent).toContain("Allow unconfined fallback");
+  });
+
+  it("edits install security through its own reading and saves picker timeouts and removals", async () => {
+    expect(parseRoute("/settings/security").settingsTab).toBe("security");
+    const reading: SecuritySettingsResponse = {
+      available_tools: ["shell", "file_write"], scope: { kind: "install" as const },
+      effective: { sandbox_enabled: true, allow_degraded_execution: false, access_gate: "token" as const, require_approval: [] },
+      overrides: {}, relaxed: [],
+    };
+    vi.mocked(settingsApi.fetchInstallSecuritySettings).mockResolvedValue(reading);
+    vi.mocked(settingsApi.saveInstallSecuritySettings).mockImplementation(async (overrides) => {
+      reading.overrides = JSON.parse(JSON.stringify(overrides));
+      reading.effective = { ...reading.effective, ...reading.overrides };
+      return JSON.parse(JSON.stringify(reading));
+    });
+    component = mount(SettingsPage, { target: document.body, props: { tab: "security" } });
+    await flushUi();
+    expect(document.querySelector('[aria-label="Sandbox for the install"]')).not.toBeNull();
+    expect(document.body.textContent).not.toContain("require a gateway restart");
+    const choose = (label: string, value: string) => {
+      const select = document.querySelector<HTMLSelectElement>(`[aria-label="${label}"]`)!;
+      select.value = value; select.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    choose("Sandbox for the install", "off");
+    choose("Access gate for the install", "warn");
+    choose("Approval prompts for the install", "own");
+    await flushUi();
+    choose("Tool to require approval", "shell");
+    await flushUi(); buttonNamed("Add tool").click(); await flushUi();
+    const timeout = document.querySelector<HTMLInputElement>('[aria-label="Timeout for shell"]')!;
+    timeout.value = "42"; timeout.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUi(); buttonNamed("Save security settings").click(); await flushUi();
+    expect(settingsApi.saveInstallSecuritySettings).toHaveBeenLastCalledWith({
+      sandbox_enabled: false, allow_degraded_execution: undefined, access_gate: "warn",
+      require_approval: [{ tool: "shell", timeout: 42, timeout_policy: null }],
+    });
+    expect(settingsApi.saveSettings).not.toHaveBeenCalled();
+    choose("Approval prompts for the install", "own"); await flushUi();
+    choose("Tool to require approval", "file_write"); await flushUi();
+    buttonNamed("Add tool").click(); await flushUi();
+    document.querySelector<HTMLButtonElement>('[aria-label="Remove file_write approval"]')!.click();
+    await flushUi(); buttonNamed("Save security settings").click(); await flushUi();
+    expect(vi.mocked(settingsApi.saveInstallSecuritySettings).mock.calls.at(-1)![0].require_approval)
+      .toEqual([{ tool: "shell", timeout: 42, timeout_policy: null }]);
+    unmount(component);
+    component = mount(SettingsPage, { target: document.body, props: { tab: "security" } });
+    await flushUi();
+    expect(document.querySelector<HTMLInputElement>('[aria-label="Timeout for shell"]')?.value).toBe("42");
+    expect(document.querySelector('[aria-label="Remove file_write approval"]')).toBeNull();
   });
 
   it("refuses invalid provider URL drafts before autosave and accepts corrections or clearing", async () => {
@@ -454,11 +558,13 @@ describe("SettingsPage", () => {
     });
     await flushUi();
     document.querySelector<HTMLInputElement>('[aria-label="Enable web search"]')!.click();
-    buttonNamed("Disabled").click();
+    const delay = document.querySelector<HTMLInputElement>('[aria-label="Archive sessions after days"]')!;
+    delay.value = "8";
+    delay.dispatchEvent(new Event("input", { bubbles: true }));
     await new Promise((resolve) => setTimeout(resolve, 850));
     await flushUi();
     expect(settingsApi.saveSettings, "an incomplete search draft must not block other settings").toHaveBeenCalled();
-    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].sandbox?.enabled).toBe(false);
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].sessions?.archive_after_days).toBe(8);
     expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].tool_runtime?.search).toBeNull();
     expect(document.querySelector<HTMLInputElement>('[aria-label="Enable web search"]')!.checked).toBe(true);
     expect(document.querySelector<HTMLInputElement>('[aria-label="Search base URL"]')!.value).toBe("");
@@ -476,11 +582,12 @@ describe("SettingsPage", () => {
     vi.mocked(settingsApi.saveSettings).mockClear();
     document.querySelector<HTMLInputElement>('[aria-label="Search base URL"]')!.value = "";
     document.querySelector<HTMLInputElement>('[aria-label="Search base URL"]')!.dispatchEvent(new Event("input", { bubbles: true }));
-    buttonNamed("Enabled").click();
+    delay.value = "9";
+    delay.dispatchEvent(new Event("input", { bubbles: true }));
     await new Promise((resolve) => setTimeout(resolve, 850));
     await flushUi();
     expect(settingsApi.saveSettings).toHaveBeenCalled();
-    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].sandbox?.enabled).toBe(true);
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].sessions?.archive_after_days).toBe(9);
     expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].tool_runtime?.search).toEqual({
       provider_type: "searxng", base_url: "http://127.0.0.1:35123",
     });

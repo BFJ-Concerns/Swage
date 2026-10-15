@@ -3872,17 +3872,6 @@
             },
             "type": "object"
           },
-          "sandbox": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/SandboxConfig"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null
-          },
           "sessions": {
             "anyOf": [
               {
@@ -3897,7 +3886,7 @@
           "tool_permissions": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/ToolPermissionConfig"
+                "$ref": "#/components/schemas/ToolGrantSettings"
               },
               {
                 "type": "null"
@@ -4442,6 +4431,13 @@
       "SecuritySettingsResponse": {
         "description": "A scope's security settings as the settings surface reads them.",
         "properties": {
+          "available_tools": {
+            "description": "Tools currently registered with the gateway, available to the approval picker.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "effective": {
             "$ref": "#/components/schemas/EffectiveSecurityChecks"
           },
@@ -4459,6 +4455,7 @@
           }
         },
         "required": [
+          "available_tools",
           "scope",
           "effective",
           "overrides",
@@ -6232,6 +6229,38 @@
           "tool",
           "arguments",
           "truncated"
+        ],
+        "type": "object"
+      },
+      "ToolGrantSettings": {
+        "description": "Tool grants editable through general settings; approval requirements belong\nto the scoped security settings.",
+        "properties": {
+          "allow": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "bundles": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "object"
+          },
+          "deny": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "allow",
+          "deny",
+          "bundles"
         ],
         "type": "object"
       },

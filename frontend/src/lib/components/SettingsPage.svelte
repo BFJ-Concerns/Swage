@@ -11,6 +11,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { fetchSettings, restartGateway, saveSettings } from "../api/settings";
+  import SecuritySettingsPanel from "./settings/SecuritySettingsPanel.svelte";
   import ScheduleAutomationPanel from "./ScheduleAutomationPanel.svelte";
   import AutomationSettingsPanel from "./settings/AutomationSettingsPanel.svelte";
   import AgentDefinitionsPanel from "./AgentDefinitionsPanel.svelte";
@@ -34,6 +35,7 @@
     | "commands"
     | "skills"
     | "generation"
+    | "security"
     | "automation"
     | "plugins"
     | "channels"
@@ -183,7 +185,9 @@
     try {
       isPersisting = true;
       normaliseDefaultModel();
-      const saved = await saveSettings({ ...settings, tool_runtime: toolRuntimeForSave(settings.tool_runtime) });
+      const { sandbox: _sandbox, tool_permissions, ...general } = settings;
+      const { require_approval: _approvals, ...grants } = tool_permissions;
+      const saved = await saveSettings({ ...general, tool_permissions: grants, tool_runtime: toolRuntimeForSave(settings.tool_runtime) });
       const searchDraft = settings.tool_runtime.search;
       settings = saved;
       lastSavedArchiveDelay = saved.sessions.archive_after_days;
@@ -239,6 +243,7 @@
       title: "Generation",
       sub: "Reusable parameter sets for sampling — temperature, max tokens, stop sequences. Each model can pick a preset or fall back to the provider default.",
     },
+    security: { title: "Security", sub: "Security checks for the install. Saved changes apply to the next turn." },
     automation: {
       title: "Automation",
       sub: "Schedules become active when created, without a gateway restart. Manage scheduled work and runtime settings here.",
@@ -280,6 +285,7 @@
   // Pages rendered in the compact settings-shell layout. Some are fully wired
   // frontend surfaces; the non-functional subset gets an explicit banner.
   const SHELL_LAYOUT_TABS: ReadonlySet<SettingsTabId> = new Set([
+    "security",
     "agents",
     "commands",
     "skills",
@@ -357,7 +363,13 @@
       </div>
     {/if}
 
-    {#if tab === "agents"}
+    {#if tab === "security"}
+      <SecuritySettingsPanel onSaved={async () => {
+        settings = await fetchSettings();
+        lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
+        await onSettingsSaved?.();
+      }} />
+    {:else if tab === "agents"}
       <AgentDefinitionsPanel {topicId} />
     {:else if tab === "commands"}
       <CommandsPanel {topicId} />

@@ -7,4 +7,8 @@ import type { SettingsScope } from "./SettingsScope";
 /**
  * A scope's security settings as the settings surface reads them.
  */
-export type SecuritySettingsResponse = { scope: SettingsScope, effective: EffectiveSecurityChecks, overrides: SecurityOverrides, relaxed: Array<RelaxedCheck>, };
+export type SecuritySettingsResponse = {
+/**
+ * Tools currently registered with the gateway, available to the approval picker.
+ */
+available_tools: Array<string>, scope: SettingsScope, effective: EffectiveSecurityChecks, overrides: SecurityOverrides, relaxed: Array<RelaxedCheck>, };

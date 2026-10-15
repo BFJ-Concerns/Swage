@@ -100,6 +100,18 @@ vi.mock("../api/sessions", () => ({
 }));
 
 vi.mock("../api/settings", () => ({
+  fetchConversationSecuritySettings: vi.fn(async () => ({
+    available_tools: [],
+    scope: { kind: "install" },
+    overrides: {},
+    relaxed: [],
+    effective: {
+      sandbox_enabled: true,
+      allow_degraded_execution: false,
+      access_gate: "token",
+      require_approval: [],
+    },
+  })),
   fetchSettings: vi.fn(async () => ({ models: {}, default_model: null })),
 }));
 

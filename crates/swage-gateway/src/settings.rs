@@ -153,7 +153,6 @@ pub async fn save_settings(
         tool_runtime,
         tool_permissions,
         hitl,
-        sandbox,
         context,
         pricing,
         observability,
@@ -163,8 +162,6 @@ pub async fn save_settings(
         voice,
     } = request;
 
-    let tool_permissions: Option<swage_config::ToolPermissionConfig> =
-        config_from_wire(tool_permissions)?;
     let hitl: Option<swage_config::HitlConfig> = config_from_wire(hitl)?;
     let communication: Option<swage_config::CommunicationConfig> = config_from_wire(communication)?;
     let voice: Option<swage_config::VoiceConfig> = config_from_wire(voice)?;
@@ -227,7 +224,6 @@ pub async fn save_settings(
             tool_runtime: tool_runtime.clone(),
             tool_permissions: tool_permissions.clone(),
             hitl: hitl.clone(),
-            sandbox: sandbox.clone(),
             context: context.clone(),
             pricing: pricing.clone(),
             observability: observability.clone(),
@@ -302,10 +298,12 @@ pub async fn save_settings(
     if let Some(tool_runtime) = tool_runtime {
         apply_tool_runtime_settings(&mut runtime_config.tools, tool_runtime)?;
     }
-    runtime_config.tools.permissions =
-        tool_permissions.unwrap_or_else(|| runtime_config.tools.permissions.clone());
+    if let Some(grants) = tool_permissions {
+        runtime_config.tools.permissions.allow = grants.allow;
+        runtime_config.tools.permissions.deny = grants.deny;
+        runtime_config.tools.permissions.bundles = grants.bundles.into_iter().collect();
+    }
     runtime_config.hitl = hitl.unwrap_or_else(|| runtime_config.hitl.clone());
-    runtime_config.sandbox = sandbox.unwrap_or_else(|| runtime_config.sandbox.clone());
     runtime_config.context = context.unwrap_or_else(|| runtime_config.context.clone());
     runtime_config.pricing = pricing.unwrap_or_else(|| runtime_config.pricing.clone());
     runtime_config.observability =
@@ -844,9 +842,8 @@ where
 #[derive(Debug, Clone, Default)]
 struct RuntimeSectionUpdates {
     tool_runtime: Option<ToolRuntimeSettings>,
-    tool_permissions: Option<swage_config::ToolPermissionConfig>,
+    tool_permissions: Option<swage_protocol::client::settings::ToolGrantSettings>,
     hitl: Option<swage_config::HitlConfig>,
-    sandbox: Option<swage_config::SandboxConfig>,
     context: Option<swage_config::ContextConfig>,
     pricing: Option<swage_config::PricingConfig>,
     observability: Option<swage_config::ObservabilityConfig>,
@@ -864,7 +861,6 @@ fn apply_runtime_settings_to_partial(
         tool_runtime,
         tool_permissions,
         hitl,
-        sandbox,
         context,
         pricing,
         observability,
@@ -910,19 +906,12 @@ fn apply_runtime_settings_to_partial(
         let tools = partial.tools.get_or_insert_with(Default::default);
         tools.allow = Some(tool_permissions.allow);
         tools.deny = Some(tool_permissions.deny);
-        tools.bundles = Some(tool_permissions.bundles);
-        tools.require_approval = Some(tool_permissions.require_approval);
+        tools.bundles = Some(tool_permissions.bundles.into_iter().collect());
     }
     if let Some(hitl) = hitl {
         partial.hitl = Some(swage_config::merge::PartialHitlConfig {
             timeout: Some(hitl.timeout),
             timeout_policy: Some(hitl.timeout_policy),
-        });
-    }
-    if let Some(sandbox) = sandbox {
-        partial.sandbox = Some(swage_config::merge::PartialSandboxConfig {
-            enabled: Some(sandbox.enabled),
-            allow_degraded_execution: Some(sandbox.allow_degraded_execution),
         });
     }
     if let Some(context) = context {
@@ -1053,7 +1042,7 @@ fn validate_tool_runtime_settings(runtime: &ToolRuntimeSettings) -> Result<(), A
 }
 
 fn validate_tool_permissions(
-    permissions: &swage_protocol::client::settings::ToolPermissionConfig,
+    permissions: &swage_protocol::client::settings::ToolGrantSettings,
 ) -> Result<(), ApiError> {
     validate_named_list("tool allow rules", &permissions.allow)?;
     validate_named_list("tool deny rules", &permissions.deny)?;
@@ -1064,13 +1053,6 @@ fn validate_tool_permissions(
             ));
         }
         validate_named_list("tool bundle entries", tools)?;
-    }
-    for entry in &permissions.require_approval {
-        if entry.tool_name().trim().is_empty() {
-            return Err(ApiError::validation(
-                "approval-gated tool names must not be empty".to_string(),
-            ));
-        }
     }
     Ok(())
 }
@@ -1914,17 +1896,12 @@ mod tests {
             .into_iter()
             .collect(),
             tool_runtime: None,
-            tool_permissions: Some(swage_protocol::client::settings::ToolPermissionConfig {
+            tool_permissions: Some(swage_protocol::client::settings::ToolGrantSettings {
                 allow: vec!["file_read".to_string()],
                 deny: vec!["shell".to_string()],
                 bundles: Default::default(),
-                require_approval: vec![],
             }),
             hitl: Some(wire_from_config(swage_config::HitlConfig::default())),
-            sandbox: Some(swage_protocol::client::settings::SandboxConfig {
-                enabled: false,
-                allow_degraded_execution: true,
-            }),
             context: Some(swage_protocol::client::settings::ContextConfig {
                 assembly: "default".to_string(),
                 alternatives: Vec::new(),
@@ -2035,7 +2012,6 @@ mod tests {
             tool_runtime: None,
             tool_permissions: None,
             hitl: None,
-            sandbox: None,
             context: None,
             pricing: None,
             observability: None,
@@ -2234,7 +2210,6 @@ mod tests {
             tool_runtime: None,
             tool_permissions: None,
             hitl: None,
-            sandbox: None,
             context: None,
             pricing: None,
             observability: None,
@@ -2391,7 +2366,6 @@ mod tests {
             }),
             tool_permissions: None,
             hitl: None,
-            sandbox: None,
             context: None,
             pricing: None,
             observability: None,
@@ -2563,7 +2537,6 @@ mod tests {
             tool_runtime: None,
             tool_permissions: None,
             hitl: None,
-            sandbox: None,
             context: None,
             pricing: Some(wire_from_config(pricing)),
             observability: Some(wire_from_config(observability)),
@@ -2603,14 +2576,12 @@ mod tests {
             models: HashMap::new(),
             generation_presets: HashMap::new(),
             tool_runtime: None,
-            tool_permissions: Some(swage_protocol::client::settings::ToolPermissionConfig {
+            tool_permissions: Some(swage_protocol::client::settings::ToolGrantSettings {
                 allow: vec!["*".into()],
                 deny: vec!["".into()],
                 bundles: Default::default(),
-                require_approval: vec![],
             }),
             hitl: Some(wire_from_config(swage_config::HitlConfig::default())),
-            sandbox: Some(wire_from_config(swage_config::SandboxConfig::default())),
             context: Some(wire_from_config(swage_config::ContextConfig::default())),
             pricing: None,
             observability: None,
@@ -2688,15 +2659,10 @@ mod tests {
         let mut partial = swage_config::PartialConfig::default();
         let mut bundles = HashMap::new();
         bundles.insert("dangerous".to_string(), vec!["shell".to_string()]);
-        let permissions = swage_config::ToolPermissionConfig {
+        let permissions = swage_protocol::client::settings::ToolGrantSettings {
             allow: vec!["file_read".into()],
             deny: vec!["shell".into()],
-            bundles,
-            require_approval: vec![swage_config::RequireApprovalEntry::WithOptions {
-                tool: "python_execute".into(),
-                timeout: Some(120),
-                timeout_policy: Some(swage_core::ApprovalTimeoutPolicy::Interrupt),
-            }],
+            bundles: bundles.into_iter().collect(),
         };
 
         apply_runtime_settings_to_partial(
@@ -2706,10 +2672,6 @@ mod tests {
                 hitl: Some(swage_config::HitlConfig {
                     timeout: 600,
                     timeout_policy: swage_core::ApprovalTimeoutPolicy::Interrupt,
-                }),
-                sandbox: Some(swage_config::SandboxConfig {
-                    enabled: false,
-                    allow_degraded_execution: true,
                 }),
                 context: Some(swage_config::ContextConfig {
                     assembly: "compact".into(),
@@ -2740,8 +2702,8 @@ mod tests {
         assert!(body.contains("[hitl]"));
         assert!(body.contains("timeout = 600"));
         assert!(body.contains("timeout_policy = \"interrupt\""));
-        assert!(body.contains("[sandbox]"));
-        assert!(body.contains("enabled = false"));
+        assert!(!body.contains("[sandbox]"));
+        assert!(!body.contains("require_approval"));
         assert!(body.contains("[context]"));
         assert!(body.contains("assembly = \"compact\""));
         assert!(body.contains("budget = 8192"));
