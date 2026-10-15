@@ -1148,6 +1148,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_tools_secret_access_is_attributed_to_its_session() {
         use swage_storage::store::{SessionStore, TopicStore};
+        // The managed backend needs its encryption key; each test supplies
+        // it, since the suite may run one test per process.
+        let _guard = with_secret_env();
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
         let topic = storage.general_scope().await.unwrap();
         let session = storage
