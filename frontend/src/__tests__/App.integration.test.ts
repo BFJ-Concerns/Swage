@@ -252,7 +252,7 @@ function makeSettings(
       message_ttl_secs: 86_400,
       expiry_interval_secs: 60,
     },
-    sessions: { archive_after_days: 7 },
+    sessions: { archive_after_days: 7, max_delegation_depth: 4 },
     memory: { curator_idle_minutes: 10 },
     voice: {},
     restart_required: false,

@@ -1998,6 +1998,33 @@ mod tests {
     }
 
     #[test]
+    fn delegation_depth_cascades_through_partial_config() {
+        assert_eq!(
+            serde_json::to_value(resolve(PartialConfig::default()).sessions).unwrap()["max_delegation_depth"],
+            4,
+            "the runtime cascade supplies the declared depth default"
+        );
+        let base: PartialConfig = toml::from_str("[sessions]\nmax_delegation_depth = 2\n").unwrap();
+        let overlay: PartialConfig =
+            toml::from_str("[sessions]\nmax_delegation_depth = 6\n").unwrap();
+        let resolved = resolve(merge_partial(base, overlay));
+        assert_eq!(
+            serde_json::to_value(&resolved.sessions).unwrap()["max_delegation_depth"],
+            6,
+            "the child layer controls delegation depth"
+        );
+        let reloaded = resolve(PartialConfig::from(resolved.clone()));
+        assert_eq!(
+            serde_json::to_value(&reloaded.sessions).unwrap()["max_delegation_depth"],
+            6
+        );
+        assert_eq!(
+            serde_json::to_value(resolve(PartialConfig::default()).sessions).unwrap()["max_delegation_depth"],
+            4
+        );
+    }
+
+    #[test]
     fn sessions_archive_delay_defaults_and_overlays() {
         assert_eq!(
             resolve(PartialConfig::default())
@@ -2009,12 +2036,14 @@ mod tests {
         let base = PartialConfig {
             sessions: Some(PartialSessionsConfig {
                 archive_after_days: Some(30),
+                ..Default::default()
             }),
             ..Default::default()
         };
         let overlay = PartialConfig {
             sessions: Some(PartialSessionsConfig {
                 archive_after_days: Some(3),
+                ..Default::default()
             }),
             ..Default::default()
         };
