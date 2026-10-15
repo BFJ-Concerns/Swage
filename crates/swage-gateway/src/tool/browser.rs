@@ -277,10 +277,9 @@ impl Tool for BrowserScrollTool {
     }
 
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
-        if params
-            .get("ref")
-            .is_some_and(|value| value.as_str().is_none_or(|text| text.trim().is_empty()))
-        {
+        if params.get("ref").is_some_and(|value| {
+            !value.is_null() && value.as_str().is_none_or(|text| text.trim().is_empty())
+        }) {
             return Err(ToolError::InvalidParameters {
                 name: self.name().into(),
                 message: "ref must be a non-empty string".into(),

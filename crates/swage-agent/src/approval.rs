@@ -103,8 +103,17 @@ impl From<(String, bool, String)> for ToolDispatchResult {
             approval_note: None,
             execution: if status == "success" {
                 swage_protocol::client::conversation::ToolExecution::succeeded()
-            } else {
+            } else if matches!(
+                status.as_str(),
+                "blocked" | "rejected" | "expired" | "refused"
+            ) {
                 swage_protocol::client::conversation::ToolExecution::refused()
+            } else {
+                swage_protocol::client::conversation::ToolExecution {
+                    outcome: swage_protocol::client::conversation::ToolOutcome::Failed,
+                    stage: swage_protocol::client::conversation::ToolExecutionStage::Unknown,
+                    completion: swage_protocol::client::conversation::ToolCompletion::Unknown,
+                }
             },
         }
     }

@@ -78,7 +78,27 @@ pub async fn shutdown_active_turns(state: &AppState) {
     state.turn_shutdown_started.store(true, Ordering::Release);
     let turns = state.active_turns.lock().await;
     let count = turns.len();
-    for token in turns.values() {
+    for (session_id, token) in turns.iter() {
+        // Shutdown owns interruption; a person's Stop owns cancellation.
+        // Record that distinction before waking the execution token, so a
+        // cooperative cancellation cannot win the terminal-state write.
+        let interrupted: Result<(), StorageError> = async {
+            for thread in state.storage.list_by_session(*session_id).await? {
+                for turn in state.storage.list_turns_by_thread(thread.id).await? {
+                    if !turn.state.is_terminal() {
+                        state
+                            .storage
+                            .update_turn_state(turn.id, TurnState::Interrupted)
+                            .await?;
+                    }
+                }
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = interrupted {
+            warn!(%session_id, %error, "failed to record shutdown interruption");
+        }
         token.cancel();
     }
     // Drop the lock before sleeping so turn tasks can acquire it to write state.
@@ -467,6 +487,7 @@ mod tests {
                 .unwrap();
             storage
                 .create_tool_call(NewToolCall {
+                    execution: None,
                     turn_id: turn.id,
                     agent_id: "gateway".into(),
                     call_id: turn.id.to_string(),

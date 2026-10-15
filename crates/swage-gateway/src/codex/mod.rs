@@ -430,7 +430,7 @@ async fn run_turn_inner(
                     if let Some(turn_id) = codex_turn_id.as_deref() {
                         let _ = client.request("turn/interrupt", json!({"threadId":codex_thread_id,"turnId":turn_id})).await;
                     }
-                    state.storage.update_turn_state(request.turn_id, TurnState::Interrupted).await?;
+                    state.storage.update_turn_state(request.turn_id, TurnState::Cancelled).await?;
                     state.storage.update_state(request.thread_id, ThreadState::Idle).await?;
                     settle_provider_round(
                         &request,
@@ -849,9 +849,10 @@ async fn handle_tool_call(
             )
         }
     };
-    let record = state
+    let _ = state
         .storage
         .create_tool_call(NewToolCall {
+            execution: Some(execution),
             turn_id: request.turn_id,
             agent_id: request.agent_id.clone(),
             call_id: call_id.clone(),
@@ -870,12 +871,6 @@ async fn handle_tool_call(
             display_summary,
         })
         .await;
-    if let Ok(record) = record {
-        let _ = state
-            .storage
-            .record_tool_call_execution(record.id, execution)
-            .await;
-    }
     let _ = request.event_tx.send(AgentEvent::ToolEnd {
         execution: Some(execution),
         call_id,
@@ -1057,7 +1052,7 @@ fn provider_error(error: swage_codex::ClientError) -> AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use swage_storage::NewTurn;
+    use swage_storage::{NewTurn, SessionStore, ThreadStore, TurnStore};
     use swage_tool::permission::RequireApprovalEntry;
     use swage_tool::tool::Tool;
 
@@ -1275,7 +1270,7 @@ mod tests {
     ) -> (Result<OutboundMessage, AgentError>, Vec<AgentEvent>) {
         let cancellation = CancellationToken::new();
         cancellation.cancel();
-        let (result, _, _, events) = run_scripted_turn_inner(
+        let (result, _, storage, events) = run_scripted_turn_inner(
             scenario,
             ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new()),
             permissions(&[], &[]),
@@ -1285,6 +1280,14 @@ mod tests {
             cancellation,
         )
         .await;
+        let sessions = storage.list_sessions_by_agent_id("gateway").await.unwrap();
+        let threads = storage.list_by_session(sessions[0].id).await.unwrap();
+        let turns = storage.list_turns_by_thread(threads[0].id).await.unwrap();
+        assert_eq!(
+            turns[0].state.to_string(),
+            "cancelled",
+            "provider cancellation must persist the turn's cancelled state"
+        );
         (result, events)
     }
 

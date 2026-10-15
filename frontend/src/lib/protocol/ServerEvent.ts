@@ -23,7 +23,7 @@ parent_call_id?: string | null,
  * One-line headline for the call, from the tool's declared display
  * hints. Omitted when the tool declares none.
  */
-summary?: string | null, } | { "type": "tool_end", execution?: ToolExecution, call_id: string, tool: string, result: string | Record<string, unknown>,
+summary?: string | null, } | { "type": "tool_end", execution?: ToolExecution, call_id: string, tool: string, result: string | Record<string, unknown> | null,
 /**
  * "success" or "error".
  */

@@ -100,28 +100,6 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
 
 #[async_trait]
 impl ToolCallStore for SqliteStorage {
-    async fn record_tool_call_execution(
-        &self,
-        id: Uuid,
-        execution: swage_protocol::client::conversation::ToolExecution,
-    ) -> Result<(), StorageError> {
-        let encoded =
-            serde_json::to_string(&execution).map_err(|error| StorageError::Corruption {
-                message: error.to_string(),
-            })?;
-        self.with_conn(move |conn| {
-            let updated = conn.execute(
-                "UPDATE tool_calls SET execution=?1 WHERE id=?2",
-                params![encoded, id.to_string()],
-            )?;
-            if updated != 1 {
-                return Err(rusqlite::Error::QueryReturnedNoRows);
-            }
-            Ok(())
-        })
-        .await
-    }
-
     async fn create_tool_call(
         &self,
         tool_call: NewToolCall,
@@ -136,8 +114,8 @@ impl ToolCallStore for SqliteStorage {
                  (id, turn_id, agent_id, call_id, tool, arguments, model_arguments,
                   result, model_result, status,
                   duration_ms, truncated, total_bytes, provider_round, position, created_at,
-                  parent_call_id, display_summary)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                  parent_call_id, display_summary, execution)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
                 params![
                     id.to_string(),
                     tool_call.turn_id.to_string(),
@@ -157,11 +135,12 @@ impl ToolCallStore for SqliteStorage {
                     &now_str,
                     &tool_call.parent_call_id,
                     &tool_call.display_summary,
+                    tool_call.execution.map(|value| serde_json::to_string(&value)).transpose().map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
                 ],
             )?;
 
             Ok(ToolCallRecord {
-                execution: None,
+                execution: tool_call.execution,
                 id,
                 turn_id: tool_call.turn_id,
                 agent_id: tool_call.agent_id,
@@ -231,6 +210,7 @@ impl ToolCallStore for SqliteStorage {
         duration_ms: i64,
         truncated: bool,
         total_bytes: Option<i64>,
+        execution: Option<swage_protocol::client::conversation::ToolExecution>,
     ) -> Result<(), StorageError> {
         let id = id.to_string();
         let result = result.to_owned();
@@ -241,7 +221,7 @@ impl ToolCallStore for SqliteStorage {
             let updated = conn.execute(
                 "UPDATE tool_calls
                  SET result=?1, model_result=?2, status=?3, duration_ms=?4, truncated=?5,
-                     total_bytes=?6
+                     total_bytes=?6, execution=?8
                  WHERE id=?7",
                 params![
                     &result,
@@ -251,6 +231,12 @@ impl ToolCallStore for SqliteStorage {
                     truncated as i32,
                     total_bytes,
                     &id,
+                    execution
+                        .map(|value| serde_json::to_string(&value))
+                        .transpose()
+                        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(
+                            error
+                        )))?,
                 ],
             )?;
             if updated != 1 {
@@ -349,6 +335,7 @@ mod tests {
 
     fn new_call(turn_id: Uuid, call_id: &str, position: i32) -> NewToolCall {
         NewToolCall {
+            execution: None,
             turn_id,
             agent_id: "agent-test".into(),
             call_id: call_id.into(),
@@ -437,6 +424,7 @@ mod tests {
                 42,
                 false,
                 Some(22),
+                None,
             )
             .await
             .unwrap();
@@ -475,14 +463,16 @@ mod tests {
             .await
             .unwrap();
         storage
-            .update_tool_call_result(first.id, "first", "first", "success", 1, false, None)
+            .update_tool_call_result(first.id, "first", "first", "success", 1, false, None, None)
             .await
             .unwrap();
         let mut later = new_call(turn_id, "reused", 0);
         later.provider_round = 2;
         let second = storage.create_tool_call(later).await.unwrap();
         storage
-            .update_tool_call_result(second.id, "second", "second", "success", 2, false, None)
+            .update_tool_call_result(
+                second.id, "second", "second", "success", 2, false, None, None,
+            )
             .await
             .unwrap();
 
@@ -510,6 +500,7 @@ mod tests {
                 10,
                 true,
                 Some(50_000),
+                None,
             )
             .await
             .unwrap();
@@ -669,6 +660,7 @@ mod tests {
         // Create two tool calls.
         let call_a = storage
             .create_tool_call(NewToolCall {
+                execution: None,
                 turn_id,
                 agent_id: "agent-test".into(),
                 call_id: "toolu_a".into(),
@@ -691,6 +683,7 @@ mod tests {
 
         let _call_b = storage
             .create_tool_call(NewToolCall {
+                execution: None,
                 turn_id,
                 agent_id: "agent-test".into(),
                 call_id: "toolu_b".into(),
@@ -721,6 +714,7 @@ mod tests {
                 5,
                 false,
                 Some(20),
+                None,
             )
             .await
             .unwrap();

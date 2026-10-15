@@ -112,7 +112,7 @@ pub enum ServerEvent {
         execution: Option<super::conversation::ToolExecution>,
         call_id: String,
         tool: String,
-        #[ts(type = "string | Record<string, unknown>")]
+        #[ts(type = "string | Record<string, unknown> | null")]
         result: serde_json::Value,
         /// "success" or "error".
         status: String,

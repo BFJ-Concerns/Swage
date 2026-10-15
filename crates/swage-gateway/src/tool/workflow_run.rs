@@ -75,10 +75,9 @@ impl Tool for WorkflowRunTool {
     }
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         for key in ["name", "source"] {
-            if params
-                .get(key)
-                .is_some_and(|value| value.as_str().is_none_or(|text| text.trim().is_empty()))
-            {
+            if params.get(key).is_some_and(|value| {
+                !value.is_null() && value.as_str().is_none_or(|text| text.trim().is_empty())
+            }) {
                 return Err(ToolError::InvalidParameters {
                     name: self.name().into(),
                     message: format!("{key} must be a non-empty string"),

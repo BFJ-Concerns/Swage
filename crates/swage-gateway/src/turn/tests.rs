@@ -727,6 +727,7 @@ async fn seed_finished_turn(
     for (position, (tool, arguments, status)) in calls.iter().enumerate() {
         let call = storage
             .create_tool_call(swage_storage::NewToolCall {
+                execution: None,
                 turn_id: turn.id,
                 agent_id: "gateway".to_string(),
                 call_id: format!("call-{position}"),
@@ -4874,23 +4875,6 @@ impl MessageStore for MockStorage {
 
 #[async_trait]
 impl ToolCallStore for MockStorage {
-    async fn record_tool_call_execution(
-        &self,
-        id: Uuid,
-        execution: swage_protocol::client::conversation::ToolExecution,
-    ) -> Result<(), StorageError> {
-        let mut db = self.db.lock().await;
-        db.tool_calls
-            .iter_mut()
-            .find(|record| record.id == id)
-            .ok_or_else(|| StorageError::NotFound {
-                entity: "tool_call".into(),
-                id: id.to_string(),
-            })?
-            .execution = Some(execution);
-        Ok(())
-    }
-
     async fn create_tool_call(
         &self,
         tool_call: NewToolCall,
@@ -4901,7 +4885,7 @@ impl ToolCallStore for MockStorage {
             ));
         }
         let record = ToolCallRecord {
-            execution: None,
+            execution: tool_call.execution,
             id: Uuid::new_v4(),
             turn_id: tool_call.turn_id,
             agent_id: tool_call.agent_id,
@@ -4952,6 +4936,7 @@ impl ToolCallStore for MockStorage {
         duration_ms: i64,
         truncated: bool,
         total_bytes: Option<i64>,
+        execution: Option<swage_protocol::client::conversation::ToolExecution>,
     ) -> Result<(), StorageError> {
         if self.fail_tool_call_settlement.load(Ordering::SeqCst) {
             return Err(StorageError::QueryFailed(
@@ -4966,6 +4951,7 @@ impl ToolCallStore for MockStorage {
             tc.duration_ms = Some(duration_ms);
             tc.truncated = truncated;
             tc.total_bytes = total_bytes;
+            tc.execution = execution;
         }
         Ok(())
     }
@@ -6679,7 +6665,7 @@ async fn a_turn_on_an_archived_session_returns_it_to_the_recent_list() {
 }
 
 #[tokio::test]
-async fn cancelled_turn_stores_partial_and_marks_interrupted() {
+async fn cancelled_turn_stores_partial_and_marks_cancelled() {
     let storage = Arc::new(MockStorage::new());
 
     let topic = storage.general_scope().await.expect("create default topic");
@@ -6756,7 +6742,7 @@ async fn cancelled_turn_stores_partial_and_marks_interrupted() {
     let threads = state.storage.list_by_session(session_id).await.unwrap();
     let thread_id = threads[0].id;
     let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
-    assert_eq!(turns[0].state, TurnState::Interrupted);
+    assert_eq!(turns[0].state, TurnState::Cancelled);
     assert_eq!(
         turns[0].assistant_response.as_deref(),
         Some(INTERRUPTED_PARTIAL)
@@ -6774,7 +6760,7 @@ async fn cancelled_turn_stores_partial_and_marks_interrupted() {
     assert_eq!(conversation.messages[1].content, INTERRUPTED_PARTIAL);
     assert_eq!(
         conversation.messages[1].turn_state,
-        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+        Some(swage_protocol::client::conversation::TurnState::Cancelled)
     );
 }
 
@@ -6839,7 +6825,7 @@ async fn cancelled_turn_without_partial_stores_no_assistant_response() {
         .list_turns_by_thread(threads[0].id)
         .await
         .unwrap();
-    assert_eq!(turns[0].state, TurnState::Interrupted);
+    assert_eq!(turns[0].state, TurnState::Cancelled);
     assert_eq!(turns[0].assistant_response, None);
 
     let conversation = crate::service::ConversationService::new(
@@ -6924,7 +6910,7 @@ async fn cancelled_before_next_tool_persists_completed_round_text() {
     assert_eq!(conversation.messages[1].content, COMPLETED_ROUND_PARTIAL);
     assert_eq!(
         conversation.messages[1].turn_state,
-        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+        Some(swage_protocol::client::conversation::TurnState::Cancelled)
     );
 }
 
@@ -6991,7 +6977,7 @@ async fn cancelled_before_next_round_persists_completed_round_text() {
     assert_eq!(conversation.messages[1].content, COMPLETED_ROUND_PARTIAL);
     assert_eq!(
         conversation.messages[1].turn_state,
-        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+        Some(swage_protocol::client::conversation::TurnState::Cancelled)
     );
 }
 
@@ -7055,7 +7041,7 @@ async fn cancelled_during_later_stream_persists_all_accumulated_text() {
         .list_turns_by_thread(threads[0].id)
         .await
         .unwrap();
-    assert_eq!(turns[0].state, TurnState::Interrupted);
+    assert_eq!(turns[0].state, TurnState::Cancelled);
     assert_eq!(
         turns[0].assistant_response.as_deref(),
         Some(expected.as_str())
@@ -7073,7 +7059,7 @@ async fn cancelled_during_later_stream_persists_all_accumulated_text() {
     assert_eq!(conversation.messages[1].content, expected);
     assert_eq!(
         conversation.messages[1].turn_state,
-        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+        Some(swage_protocol::client::conversation::TurnState::Cancelled)
     );
     let thread = ThreadStore::get(&*state.storage, threads[0].id)
         .await
@@ -7146,7 +7132,7 @@ async fn cancelled_hook_approval_persists_completed_round_text() {
     assert_eq!(conversation.messages[1].content, COMPLETED_ROUND_PARTIAL);
     assert_eq!(
         conversation.messages[1].turn_state,
-        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+        Some(swage_protocol::client::conversation::TurnState::Cancelled)
     );
 }
 
@@ -8610,7 +8596,7 @@ async fn cancelled_during_tool_dispatch_persists_partial_without_waiting() {
     assert_eq!(conversation.messages[1].role, "assistant");
     assert_eq!(conversation.messages[1].content, COMPLETED_ROUND_PARTIAL);
     assert_eq!(
-        serde_json::to_value(&conversation.messages[1].turn_state).unwrap(),
+        serde_json::to_value(conversation.messages[1].turn_state).unwrap(),
         serde_json::json!("cancelled")
     );
 
@@ -8624,7 +8610,7 @@ async fn cancelled_during_tool_dispatch_persists_partial_without_waiting() {
 }
 
 #[tokio::test]
-async fn cancelled_dispatch_with_failed_record_remains_cancelled_and_marks_turn_failed() {
+async fn cancelled_dispatch_with_failed_record_remains_cancelled_and_keeps_cause() {
     let round_1 = vec![
         StreamChunk::Delta {
             content: COMPLETED_ROUND_PARTIAL.into(),
@@ -8720,8 +8706,8 @@ async fn cancelled_dispatch_with_failed_record_remains_cancelled_and_marks_turn_
     let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
     assert_eq!(
         turns[0].state,
-        TurnState::Failed,
-        "record failure must remain visible on a cancelled turn"
+        TurnState::Cancelled,
+        "record failure must not replace the stopped turn state"
     );
     assert!(events.iter().any(|event| matches!(event, ServerEvent::Error { message, .. } if message.contains("tool-call settlement refused"))), "record failure must reach the client: {events:?}");
     assert!(
@@ -9472,6 +9458,7 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
         .expect("create parent assistant message");
     storage
         .create_tool_call(NewToolCall {
+            execution: None,
             turn_id: parent_turn.id,
             agent_id: "gateway".to_string(),
             call_id: "call_1".to_string(),
@@ -9657,6 +9644,7 @@ async fn later_turn_rebuilds_failed_tool_replay_as_error() {
         .expect("create assistant message");
     storage
         .create_tool_call(NewToolCall {
+            execution: None,
             turn_id: failed_turn.id,
             agent_id: "gateway".to_string(),
             call_id: "call_fail".to_string(),
@@ -13095,7 +13083,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             .expect("list child turns");
         if child_turns
             .iter()
-            .any(|turn| turn.state == TurnState::Interrupted)
+            .any(|turn| turn.state == TurnState::Cancelled)
         {
             break;
         }
@@ -13103,7 +13091,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
     }
 
     assert_eq!(child_turns.len(), 1, "expected one child turn");
-    assert_eq!(child_turns[0].state, TurnState::Interrupted);
+    assert_eq!(child_turns[0].state, TurnState::Cancelled);
 
     let delegate = state
         .storage
@@ -18046,7 +18034,7 @@ async fn sandbox_degradation_approval_preserves_cancelled_wait() {
         .await
         .expect("approval task should finish")
         .expect("approval should complete as cancelled");
-    assert_eq!(outcome, SandboxDegradationApproval::Interrupted);
+    assert_eq!(outcome, SandboxDegradationApproval::Cancelled);
 
     let stored_turn = state
         .storage
@@ -18849,6 +18837,7 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
     for (position, call_id, tool) in [(0, "call-append", "file_edit"), (1, "call-long", "shell")] {
         let created = storage
             .create_tool_call(NewToolCall {
+                execution: None,
                 turn_id: turn.id,
                 agent_id: "gateway".into(),
                 call_id: call_id.into(),
@@ -18882,6 +18871,7 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
             "success",
             3,
             false,
+            None,
             None,
         )
         .await
@@ -18964,6 +18954,7 @@ async fn assistantless_delegated_round_follows_the_delegated_task() {
     }
     storage
         .create_tool_call(NewToolCall {
+            execution: None,
             turn_id,
             agent_id: "child".into(),
             call_id: "child-call".into(),
@@ -19324,7 +19315,10 @@ async fn operation_outcome_shell_failure_is_recorded_and_streamed_without_losing
             _ => None,
         })
         .unwrap();
-    assert!(!model_result.1);
+    assert!(
+        *model_result.1,
+        "the model must receive the operation failure flag"
+    );
     assert!(model_result.0.contains("INTENTIONAL_FAILURE"));
     assert!(model_result.0.contains("23"));
     assert_eq!(failure.status.as_deref(), Some("error"));
@@ -20560,6 +20554,16 @@ async fn settlement_empty_optional_targets_are_validation_failures() {
             "empty workflow target must be rejected before gateway access: {error}"
         );
     }
+    for params in [
+        serde_json::json!({"name":"saved", "source":null}),
+        serde_json::json!({"name":null, "source":"return null;"}),
+    ] {
+        let error = workflow.execute(params, &ctx).await.unwrap_err();
+        assert!(
+            matches!(error, ToolError::ExecutionFailed { .. }),
+            "an omitted optional target represented by null must reach gateway validation: {error}"
+        );
+    }
     let host = crate::browser::BrowserHost::new(crate::browser::BrowserConfig::from_tool_config(
         &Default::default(),
         std::path::Path::new("/unused"),
@@ -20671,4 +20675,116 @@ async fn settlement_failed_approval_write_is_retryable_on_both_routes() {
 #[tokio::test]
 async fn settlement_websocket_expiry_continues_a_reject_policy_turn() {
     expired_live_waiter(true, true).await;
+}
+
+#[tokio::test]
+async fn settlement_integrity_failure_keeps_the_live_cause_on_readback() {
+    struct FailingRecordProvider {
+        storage: Arc<MockStorage>,
+        inner: MockProvider,
+    }
+    #[async_trait]
+    impl LlmProvider for FailingRecordProvider {
+        fn model_id(&self) -> &str {
+            self.inner.model_id()
+        }
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            self.inner.complete(request).await
+        }
+        async fn complete_with_tools(
+            &self,
+            request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            self.inner.complete_with_tools(request).await
+        }
+        fn stream(
+            &self,
+            request: CompletionRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+            // Preparation is complete. Lose a reconstructive write and its
+            // degradation record during the actual provider round.
+            self.storage.fail_snapshot_writes();
+            self.storage.fail_audit_writes();
+            self.inner.stream(request)
+        }
+    }
+    let _home = SwageHomeGuard::new();
+    let storage = Arc::new(MockStorage::new());
+    let provider = FailingRecordProvider {
+        storage: storage.clone(),
+        inner: MockProvider::new(vec![
+            StreamChunk::Delta {
+                content: "reply before the recording failure".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]),
+    };
+    let (state, session_id) = make_state_with_provider_and_root(
+        Arc::new(provider),
+        storage.clone(),
+        Some(_home.path().to_path_buf()),
+    )
+    .await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Reply",
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .unwrap();
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let reason = events
+        .iter()
+        .find_map(|event| match event {
+            ServerEvent::Error { code, message } if code == "turn_record_lost" => Some(message),
+            _ => None,
+        })
+        .expect("a real recording failure must reach the client");
+    let thread = storage.list_by_session(session_id).await.unwrap().remove(0);
+    let turn = storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(turn.state, TurnState::Failed);
+    assert_eq!(
+        turn.failure_message.as_ref(),
+        Some(reason),
+        "record-integrity failure must keep its live explanation"
+    );
+    let poll = crate::handlers::get_turn(
+        axum::extract::State(state.clone()),
+        crate::error::Path(turn.id),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(
+        serde_json::to_value(poll).unwrap()["failure_message"],
+        *reason
+    );
+    let history = crate::service::ConversationService::new(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.topic_store),
+    )
+    .get_conversation(session_id)
+    .await
+    .unwrap();
+    assert!(
+        history
+            .messages
+            .iter()
+            .any(|message| message.failure_message.as_ref() == Some(reason)),
+        "history must keep the recording failure cause"
+    );
 }

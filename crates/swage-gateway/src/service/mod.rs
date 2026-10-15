@@ -1051,6 +1051,7 @@ default_effort = "high"
 
         svc.storage
             .create_tool_call(NewToolCall {
+                execution: None,
                 turn_id: turn.id,
                 agent_id: "gateway".to_string(),
                 call_id: "toolu_01".into(),
@@ -1136,6 +1137,7 @@ default_effort = "high"
         // Native python_execute call.
         svc.storage
             .create_tool_call(NewToolCall {
+                execution: None,
                 turn_id: turn.id,
                 agent_id: "gateway".to_string(),
                 call_id: "py_01".into(),
@@ -1159,6 +1161,7 @@ default_effort = "high"
         // Sub-tool dispatched from within python_execute.
         svc.storage
             .create_tool_call(NewToolCall {
+                execution: None,
                 turn_id: turn.id,
                 agent_id: "gateway".to_string(),
                 call_id: "sub_01".into(),

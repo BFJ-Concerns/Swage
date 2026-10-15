@@ -68,6 +68,7 @@ impl swage_python::NestedToolHost for NestedToolRuntime {
         });
 
         let new_call = NewToolCall {
+            execution: None,
             turn_id: self.turn_id,
             agent_id: "gateway".to_string(),
             call_id: call_id.clone(),
@@ -239,9 +240,6 @@ impl NestedToolRuntime {
         let event_total_bytes = metadata
             .total_bytes
             .and_then(|total| u64::try_from(total).ok());
-        self.storage
-            .record_tool_call_execution(record_id, execution)
-            .await?;
         let settled = self
             .storage
             .update_tool_call_result(
@@ -252,6 +250,7 @@ impl NestedToolRuntime {
                 duration_ms as i64,
                 metadata.truncated,
                 metadata.total_bytes,
+                Some(execution),
             )
             .await;
 
@@ -718,6 +717,7 @@ mod tests {
         );
         let record = storage
             .create_tool_call(swage_storage::model::NewToolCall {
+                execution: None,
                 turn_id,
                 agent_id: "gateway".into(),
                 call_id: "nested-secret".into(),

@@ -175,7 +175,7 @@ export function createConversationStore(): ConversationStore {
       last_activity: message.origin === "platform" ? updatedSummary.last_activity : message.timestamp,
       ...(message.content && message.origin !== "platform" ? { message_preview: message.content } : {}),
       has_interrupted_turn:
-        updatedSummary.has_interrupted_turn || (message.turn_state === "interrupted" || message.turn_state === "cancelled"),
+        updatedSummary.has_interrupted_turn || message.turn_state === "interrupted",
     };
 
     conversationsStore.set(

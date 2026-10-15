@@ -995,10 +995,9 @@ mod tests {
             .await
             .expect_err("strategy error should propagate");
 
-        assert_eq!(
-            err.execution(),
-            swage_protocol::client::conversation::ToolExecution::failed(),
-            "execution strategy errors must retain their execution stage"
+        assert!(
+            matches!(err, ToolError::ExecutionFailed { .. }),
+            "expected ExecutionFailed from strategy, got: {err:?}"
         );
         assert!(err.to_string().contains("strategy rejected"));
     }

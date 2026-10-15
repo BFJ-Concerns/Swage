@@ -768,7 +768,9 @@ pub(super) async fn process_turn_with_composition_and_focus(
 
     // Wait for the agent task to finish and surface any panic or error.
     let mut terminal_account = None;
-    match agent_handle.await {
+    let agent_result = agent_handle.await;
+    let cancelled = matches!(&agent_result, Ok(Err(AgentError::Cancelled)));
+    match agent_result {
         Ok(Ok(_outbound)) => {}
         Ok(Err(AgentError::ProviderRefused)) => {
             terminal_account = Some(
@@ -784,7 +786,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
         }
         Ok(Err(AgentError::Cancelled)) => {
             // Cancellation is cooperative — the agent already set
-            // TurnState::Interrupted and ThreadState::Idle in storage.
+            // TurnState::Cancelled and ThreadState::Idle in storage.
             let _ = ws_tx.send(ServerEvent::Cancelled {});
         }
         Ok(Err(AgentError::OutputSchemaFailed { .. })) => {
@@ -850,15 +852,17 @@ pub(super) async fn process_turn_with_composition_and_focus(
     // force_turn_failure, not update_turn_state: the agent has usually
     // already marked the turn Completed, and the ordinary write's
     // first-terminal-wins guard would silently no-op — this transition is
-    // the guard's one sanctioned override. The state write may itself fail
+    // the guard's one sanctioned override. A stopped turn keeps cancellation;
+    // record loss is still retained and reported separately. The state write may itself fail
     // on the same broken store — then the log and the client error are the
     // loudest surfaces left.
     if let Some(reason) = record_integrity_lost {
         tracing::error!(turn_id = ?turn_id, %reason, "turn record integrity lost");
-        if let Err(error) = state
-            .storage
-            .force_turn_failure(turn_id.unwrap_or(prepared_turn_id))
-            .await
+        if !cancelled
+            && let Err(error) = state
+                .storage
+                .force_turn_failure(turn_id.unwrap_or(prepared_turn_id))
+                .await
         {
             tracing::error!(error = %error, "failed to mark record-degraded turn as failed");
         }

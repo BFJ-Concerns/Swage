@@ -594,13 +594,12 @@ describe("turns that ended without a reply, as loaded", () => {
       arguments: { command: "sleep 30" },
     });
     // On Stop the gateway ends the running call as cancelled with no result
-    // before it reports the turn cancelled. The wire carries that missing
-    // result as JSON null, which the generated event type does not admit.
+    // before it reports the turn cancelled. The absent result is JSON null.
     streamingStore.handleServerEvent({
       type: "tool_end",
       call_id: "call-sleep",
       tool: "shell",
-      result: null as unknown as string,
+      result: null,
       status: "cancelled",
       duration_ms: 6200,
       truncated: false,

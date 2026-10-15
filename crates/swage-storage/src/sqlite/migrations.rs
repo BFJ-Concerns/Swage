@@ -345,10 +345,6 @@ ALTER TABLE turns ADD COLUMN delegated_input_tokens INTEGER;
 ALTER TABLE turns ADD COLUMN delegated_output_tokens INTEGER;
 ";
 
-/// One-line display headline per tool call, derived from the tool's declared
-/// display hints at execution time. Nullable: a tool with no hint stores
-/// NULL and renderers use their generic fallback.
-
 const CREATE_SESSION_VARIABLES: &str = "
     CREATE TABLE session_variables (
         session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,

@@ -217,6 +217,7 @@ mod tests {
 
     fn new_call(turn_id: uuid::Uuid, call_id: &str, result: Option<String>) -> NewToolCall {
         NewToolCall {
+            execution: None,
             turn_id,
             agent_id: "agent-a".into(),
             call_id: call_id.into(),

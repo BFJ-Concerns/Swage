@@ -23,6 +23,8 @@ pub struct TurnExecutionContext {
 /// agent's config and active session state.
 #[derive(Clone)]
 pub struct AgentToolContext {
+    /// Exact durable row for this invocation, independent of provider call IDs.
+    pub tool_call_record_id: Option<Uuid>,
     pub execution_started: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub agent_id: String,
     pub session_id: String,
@@ -47,6 +49,7 @@ impl AgentToolContext {
         working_directory: impl Into<PathBuf>,
     ) -> Self {
         Self {
+            tool_call_record_id: None,
             execution_started: Default::default(),
             agent_id: agent_id.into(),
             session_id: session_id.into(),

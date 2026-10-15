@@ -1592,6 +1592,7 @@ pub struct ToolCallRecord {
 /// `id` and `created_at` are assigned by the storage layer.
 #[derive(Debug, Clone)]
 pub struct NewToolCall {
+    pub execution: Option<swage_protocol::client::conversation::ToolExecution>,
     pub turn_id: Uuid,
     /// The agent that issued this tool call.
     pub agent_id: String,
@@ -2789,6 +2790,7 @@ mod tests {
     #[test]
     fn new_tool_call_is_debug_clone() {
         let original = NewToolCall {
+            execution: None,
             turn_id: Uuid::new_v4(),
             agent_id: "agent-1".to_string(),
             call_id: "toolu_03".to_string(),
@@ -2847,6 +2849,7 @@ mod tests {
     #[test]
     fn new_tool_call_carries_parent_call_id() {
         let sub = NewToolCall {
+            execution: None,
             turn_id: Uuid::new_v4(),
             agent_id: "agent-1".to_string(),
             call_id: "sub_01".to_string(),

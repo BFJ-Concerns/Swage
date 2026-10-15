@@ -470,6 +470,7 @@ async fn an_interrupted_turn_keeps_its_tool_calls_after_restart() {
     for (position, call_id, tool) in [(0, "call-write", "file_write"), (1, "call-shell", "shell")] {
         let record = storage
             .create_tool_call(NewToolCall {
+                execution: None,
                 turn_id: turn.id,
                 agent_id: "gateway".into(),
                 call_id: call_id.into(),
@@ -498,6 +499,7 @@ async fn an_interrupted_turn_keeps_its_tool_calls_after_restart() {
                     "success",
                     3,
                     false,
+                    None,
                     None,
                 )
                 .await
