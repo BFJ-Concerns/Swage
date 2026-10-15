@@ -423,6 +423,8 @@ mod tests {
             let schedule = crate::schedule::create_schedule(
                 &state,
                 CreateScheduleRequest {
+                    overlap_policy: Default::default(),
+                    pending_cap: 1,
                     message: "schedule brief".into(),
                     spec: ScheduleSpec::Interval {
                         every: "every 5 seconds".into(),

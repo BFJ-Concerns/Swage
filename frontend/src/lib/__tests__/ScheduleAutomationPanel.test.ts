@@ -47,6 +47,7 @@ const SCHEDULE: Schedule = makeSchedule({ gate: { model: "cheap", criteria: null
 
 const RUN: ScheduleRun = {
   id: "run-1",
+  overlap_policy: "skip" as const,
   schedule_id: "schedule-1",
   trigger: "manual",
   state: "completed",
@@ -390,6 +391,33 @@ describe("ScheduleAutomationPanel", () => {
     expect(workflowApi.createSchedule).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain("Enter a gate model");
   });
+  it("schedule outcomes submits the selected queue cap through the form", async () => {
+    vi.mocked(workflowApi.createSchedule).mockResolvedValue(makeSchedule({ overlap_policy: "queue", pending_cap: 2 }));
+    component = mount(ScheduleAutomationPanel, { target: document.body, props: { topicId: "topic-1", sessionId: "session-1" } });
+    await flushUi();
+    const label = [...document.querySelectorAll("label")].find(node => node.textContent?.includes("While a previous run is active"));
+    const select = label?.querySelector("select");
+    expect(select, "overlap choice is available in the form").toBeDefined();
+    if (!select) throw new Error("missing overlap selector");
+    select.value = "queue"; select.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUi();
+    const cap = document.querySelector<HTMLInputElement>('input[type="number"]');
+    expect(cap).not.toBeNull();
+    setFieldValue(cap!, "2");
+    const message = document.querySelector<HTMLTextAreaElement>("textarea");
+    setFieldValue(message!, "queued work");
+    clickButton("Create schedule"); await flushUi();
+    expect(workflowApi.createSchedule).toHaveBeenCalledWith(expect.objectContaining({ overlap_policy: "queue", pending_cap: 2 }));
+  });
+
+  it("schedule outcomes renders completed tool errors as an error badge", async () => {
+    vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValue({ runs: [{ ...RUN, task_outcome: "Completed with errors: shell (call-23): error" }] });
+    component = mount(ScheduleAutomationPanel, { target: document.body, props: { topicId: "topic-1", sessionId: "session-1" } });
+    await flushUi();
+    expect(document.querySelector(".status-run-failed")?.textContent).toBe("completed with errors");
+    expect(document.body.textContent).toContain("shell (call-23): error");
+  });
+
 });
 
 

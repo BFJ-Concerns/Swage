@@ -234,7 +234,9 @@ describe("OperatorDashboard", () => {
       runs: [
         {
           id: "run-1",
-          schedule_id: "schedule-1",
+          overlap_policy: "skip" as const,
+    overlap_policy: "skip" as const,
+  schedule_id: "schedule-1",
           trigger: "tick",
           state: "skipped",
           skip_reason: "gate",
@@ -279,7 +281,9 @@ describe("OperatorDashboard", () => {
       .mockResolvedValue(makeOverview());
     const run = {
       id: "run-current",
-      schedule_id: "schedule-1",
+      overlap_policy: "skip" as const,
+    overlap_policy: "skip" as const,
+  schedule_id: "schedule-1",
       trigger: "tick" as const,
       state: "completed" as const,
       skip_reason: null,
@@ -363,7 +367,9 @@ describe("OperatorDashboard", () => {
       runs: [
         {
           id: "run-empty",
-          schedule_id: "schedule-1",
+          overlap_policy: "skip" as const,
+    overlap_policy: "skip" as const,
+  schedule_id: "schedule-1",
           trigger: "tick",
           state: "completed_empty",
           skip_reason: null,
@@ -394,6 +400,20 @@ describe("OperatorDashboard", () => {
     expect(document.body.textContent).toContain("completed empty");
     expect(document.body.textContent).toContain("No assistant text produced.");
   });
+  it("schedule outcomes renders completed tool errors with an attention badge", async () => {
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOverview());
+    vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValue({ runs: [{ id: "errored-run", schedule_id: "schedule-1", trigger: "tick", state: "completed", executed_message: "Daily digest", overlap_policy: "skip", task_outcome: "Completed with errors: file_write (call-refused): rejected", output_text: "Prepared the digest; saving it failed.", created_at: "2026-04-07T12:05:00Z" }] });
+    component = mount(OperatorDashboard, { target: document.body });
+    await settleUi();
+    const button = [...document.querySelectorAll("button")].find(node => node.textContent?.trim() === "Runs");
+    button!.click(); await settleUi();
+    const entry = [...document.querySelectorAll(".run-entry")].find(node => node.textContent?.includes("file_write"));
+    expect(entry?.textContent).toContain("completed with errors");
+    expect(entry?.textContent).toContain("Prepared the digest; saving it failed.");
+    expect(entry?.textContent).toContain("file_write (call-refused): rejected");
+    expect(entry?.querySelector<HTMLElement>(".badge")?.style.getPropertyValue("--badge-hue")).toBe("var(--status-wants-human-hue)");
+  });
+
 });
 
 describe("OperatorDashboard approvals layout", () => {

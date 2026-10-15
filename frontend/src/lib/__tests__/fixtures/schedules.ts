@@ -2,6 +2,7 @@ import type { Schedule } from "../../protocol/Schedule";
 
 export function makeSchedule(overrides: Partial<Schedule> = {}): Schedule {
   return {
+    overlap_policy: "skip", pending_cap: 1,
     id: "schedule-1",
     message: "Review the queue.",
     status: "active",

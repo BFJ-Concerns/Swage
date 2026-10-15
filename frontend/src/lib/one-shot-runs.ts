@@ -11,5 +11,5 @@ export function passedOneShot(schedule: Schedule): boolean {
 
 /** Whether a run has yet to reach an outcome. */
 export function runUnsettled(run: ScheduleRun | undefined): boolean {
-  return run?.state === "pending" || run?.state === "running";
+  return run?.state === "queued" || run?.state === "pending" || run?.state === "running";
 }

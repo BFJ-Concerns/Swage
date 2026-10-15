@@ -48,6 +48,7 @@
       return "No assistant text produced.";
     }
     if (run.state === "skipped") {
+      if (run.skip_reason === "pending_cap") return run.error_message ?? "pending fire cap reached";
       return run.skip_reason === "gate"
         ? (run.gate?.reasoning ?? "gate decided no work was needed")
         : "a previous run was still executing";
@@ -57,10 +58,12 @@
   }
 
   function describeRunState(run: ScheduleRun): string {
+    if (run.task_outcome) return "completed with errors";
     return run.state === "completed_empty" ? "completed empty" : run.state;
   }
 
   function runRegister(run: ScheduleRun): Register {
+    if (run.task_outcome) return "wants-a-human";
     if (run.state === "completed" || run.state === "completed_empty") return "calm";
     if (run.state === "failed") return "wants-a-human";
     return "not-yet";
@@ -337,6 +340,7 @@
                 </div>
                 <p class="detail-copy">
                   {describeSpec(schedule)} · {describeSession(schedule)}
+                  · {schedule.overlap_policy}{schedule.overlap_policy === "queue" ? ` (cap ${schedule.pending_cap})` : ""}
                   {#if schedule.gate}
                     · gated by {schedule.gate.model}
                   {/if}
@@ -409,6 +413,9 @@
                           <p class="detail-copy">
                             gate ({run.gate.model}): {run.gate.verdict} — {run.gate.reasoning}
                           </p>
+                        {/if}
+                        {#if run.task_outcome}
+                          <p class="detail-copy">{run.task_outcome}</p>
                         {/if}
                         {#if describeRunOutcome(run)}
                           <p class="detail-copy">{describeRunOutcome(run)}</p>

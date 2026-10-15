@@ -3,4 +3,4 @@
 /**
  * Why a run was skipped rather than executed.
  */
-export type SkipReason = "gate" | "overlap";
+export type SkipReason = "pending_cap" | "gate" | "overlap";

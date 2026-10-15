@@ -3469,6 +3469,8 @@ impl ScheduleStore for MockStorage {
     async fn create_schedule(&self, schedule: NewSchedule) -> Result<Schedule, StorageError> {
         let now = chrono::Utc::now();
         let created = Schedule {
+            overlap_policy: Default::default(),
+            pending_cap: 1,
             id: Uuid::new_v4(),
             message: schedule.message,
             status: schedule.status,
@@ -3576,6 +3578,8 @@ impl ScheduleStore for MockStorage {
                 | ScheduleRunState::Skipped
         );
         let created = ScheduleRun {
+            overlap_policy: Default::default(),
+            task_outcome: None,
             id: Uuid::new_v4(),
             schedule_id: run.schedule_id,
             trigger: run.trigger,
@@ -3600,6 +3604,12 @@ impl ScheduleStore for MockStorage {
         Ok(created)
     }
 
+    async fn claim_queued_schedule_run(
+        &self,
+        _: Uuid,
+    ) -> Result<Option<ScheduleRun>, StorageError> {
+        unimplemented!()
+    }
     async fn get_schedule_run(&self, id: Uuid) -> Result<Option<ScheduleRun>, StorageError> {
         Ok(self.db.lock().await.schedule_runs.get(&id).cloned())
     }

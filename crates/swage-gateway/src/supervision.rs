@@ -297,6 +297,7 @@ fn classify_schedule_run_status(
     now: DateTime<Utc>,
 ) -> String {
     match state {
+        ScheduleRunState::Queued => "queued".to_string(),
         ScheduleRunState::Pending | ScheduleRunState::Running => {
             if now - created_at > STUCK_AFTER {
                 "stuck".to_string()
@@ -313,7 +314,7 @@ fn classify_schedule_run_status(
 fn is_active_status(status: &str) -> bool {
     matches!(
         status,
-        "running" | "awaiting_approval" | "delegating" | "stuck"
+        "queued" | "running" | "awaiting_approval" | "delegating" | "stuck"
     )
 }
 

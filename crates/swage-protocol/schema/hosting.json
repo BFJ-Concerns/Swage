@@ -1174,6 +1174,15 @@
         "has_running_turn"
       ]
     },
+    "OverlapPolicy": {
+      "description": "What a fire does while a previous run is in flight.",
+      "type": "string",
+      "enum": [
+        "skip",
+        "queue",
+        "overlap"
+      ]
+    },
     "PresenceGatewayResponse": {
       "type": "object",
       "properties": {
@@ -1282,6 +1291,14 @@
           ],
           "format": "date-time"
         },
+        "overlap_policy": {
+          "$ref": "#/$defs/OverlapPolicy"
+        },
+        "pending_cap": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
         "routing": {
           "$ref": "#/$defs/DeliveryRoutingRequest"
         },
@@ -1300,6 +1317,8 @@
         }
       },
       "required": [
+        "overlap_policy",
+        "pending_cap",
         "id",
         "message",
         "status",

@@ -278,6 +278,8 @@ async fn a_fresh_schedule_runs_prompt_is_recorded_and_projected_as_the_schedules
     let created = schedule::create_schedule(
         &state,
         CreateScheduleRequest {
+            overlap_policy: Default::default(),
+            pending_cap: 1,
             message: "Check the queue.".into(),
             spec: ScheduleSpec::Interval {
                 every: "every 1 hours".into(),

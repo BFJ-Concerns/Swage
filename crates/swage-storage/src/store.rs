@@ -1064,6 +1064,12 @@ pub trait ScheduleStore: Send + Sync {
 
     async fn create_schedule_run(&self, run: NewScheduleRun) -> Result<ScheduleRun, StorageError>;
 
+    /// Atomically claim the oldest waiting fire; the one-active index arbitrates ownership.
+    async fn claim_queued_schedule_run(
+        &self,
+        schedule_id: Uuid,
+    ) -> Result<Option<ScheduleRun>, StorageError>;
+
     async fn get_schedule_run(&self, id: Uuid) -> Result<Option<ScheduleRun>, StorageError>;
 
     async fn list_schedule_runs(&self, schedule_id: Uuid)
@@ -2839,6 +2845,12 @@ mod tests {
             &self,
             _: NewScheduleRun,
         ) -> Result<ScheduleRun, StorageError> {
+            unimplemented!()
+        }
+        async fn claim_queued_schedule_run(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<ScheduleRun>, StorageError> {
             unimplemented!()
         }
         async fn get_schedule_run(&self, _: Uuid) -> Result<Option<ScheduleRun>, StorageError> {

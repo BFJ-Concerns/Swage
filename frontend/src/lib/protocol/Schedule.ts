@@ -2,6 +2,7 @@
 import type { DeliveryRoutingRequest } from "./DeliveryRoutingRequest";
 import type { GateConfig } from "./GateConfig";
 import type { GateWarning } from "./GateWarning";
+import type { OverlapPolicy } from "./OverlapPolicy";
 import type { ScheduleCreator } from "./ScheduleCreator";
 import type { ScheduleSpec } from "./ScheduleSpec";
 import type { ScheduleStatus } from "./ScheduleStatus";
@@ -10,7 +11,7 @@ import type { SessionPolicy } from "./SessionPolicy";
 /**
  * A schedule as returned by the API.
  */
-export type Schedule = { id: string, message: string, status: ScheduleStatus, spec: ScheduleSpec, session: SessionPolicy,
+export type Schedule = { overlap_policy: OverlapPolicy, pending_cap: number, id: string, message: string, status: ScheduleStatus, spec: ScheduleSpec, session: SessionPolicy,
 /**
  * Where this schedule came from — a person or an agent.
  */
