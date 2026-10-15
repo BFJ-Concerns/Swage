@@ -390,7 +390,15 @@ fn run_test_suite() -> Result<()> {
                 "Running Rust tests (nextest)",
                 command(
                     "cargo",
-                    ["nextest", "run", "--workspace", "--profile", "ci"],
+                    [
+                        "nextest",
+                        "run",
+                        "--workspace",
+                        "--profile",
+                        "ci",
+                        "--success-output",
+                        "immediate",
+                    ],
                 ),
             );
             record_stage_result(
@@ -403,7 +411,16 @@ fn run_test_suite() -> Result<()> {
         Ok("cargo") | Err(_) => record_stage_result(
             &mut failures,
             "Running Rust tests",
-            command("cargo", ["test", "--workspace", "--no-fail-fast"]),
+            command(
+                "cargo",
+                [
+                    "test",
+                    "--workspace",
+                    "--no-fail-fast",
+                    "--",
+                    "--show-output",
+                ],
+            ),
         ),
         Ok(other) => return Err(format!("unknown SWAGE_TEST_RUNNER '{other}'").into()),
     }
