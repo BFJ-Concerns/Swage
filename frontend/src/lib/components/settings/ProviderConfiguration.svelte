@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { SETTINGS_LABELS } from "../../settings-labels";
   import { untrack } from "svelte";
   import { providerBaseUrlError } from "./provider-endpoint";
   import type { DiscoveredModel, ModelSettings, ProviderSettings } from "../../types";
@@ -56,8 +57,8 @@
   {#if !collapsed}
     <div class="provider-body">
       {#if provider.protocol !== "codex"}
-        <div class="field"><div class="key">Base URL<small>Override the provider's canonical endpoint when needed.</small></div><div class="val"><input type="text" class="text" aria-label={`Base URL for ${displayName}`} aria-invalid={!!baseUrlError} aria-describedby={baseUrlError ? `provider-${id}-base-url-error` : undefined} value={baseUrlDraft} oninput={editBaseUrl} placeholder="Provider default" autocomplete="off" />{#if baseUrlError}<p id={`provider-${id}-base-url-error`} class="field-error" role="alert">{baseUrlError}</p>{/if}</div></div>
-        <div class="field"><div class="key">API key<small>Paste a new value to store or rotate this provider's credential.</small></div><div class="val key-val"><input type="password" class="text" bind:value={provider.api_key} placeholder={provider.has_credential ? "Stored credential" : "Paste to store"} autocomplete="off" /><span class="credential-status" class:set={provider.has_credential}>{provider.has_credential ? "Stored" : "Empty"}</span></div></div>
+        <div class="field"><div class="key">{SETTINGS_LABELS["providers.*.base_url"]}<small>Override the provider's canonical endpoint when needed.</small></div><div class="val"><input type="text" class="text" aria-label={`${SETTINGS_LABELS["providers.*.base_url"]} for ${displayName}`} aria-invalid={!!baseUrlError} aria-describedby={baseUrlError ? `provider-${id}-base-url-error` : undefined} value={baseUrlDraft} oninput={editBaseUrl} placeholder="Provider default" autocomplete="off" />{#if baseUrlError}<p id={`provider-${id}-base-url-error`} class="field-error" role="alert">{baseUrlError}</p>{/if}</div></div>
+        <div class="field"><div class="key">{SETTINGS_LABELS["providers.*.api_key"]}<small>Paste a new value to store or rotate this provider's credential.</small></div><div class="val key-val"><input type="password" class="text" bind:value={provider.api_key} placeholder={provider.has_credential ? "Stored credential" : "Paste to store"} autocomplete="off" /><span class="credential-status" class:set={provider.has_credential}>{provider.has_credential ? "Stored" : "Empty"}</span></div></div>
       {:else}
         <CodexProviderAuthentication providerId={id} {saved} state={signInState} {deviceCode} {onbegin} {oncheck} {oncopy} {onend} />
       {/if}

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { SETTINGS_LABELS } from "../settings-labels";
   import { fetchAuditEvents, fetchOperatorHistory } from "../api/operator";
   import type { OperatorHistoryResponse } from "../protocol/OperatorHistoryResponse";
   import type { AuditEventView } from "../protocol/AuditEventView";
@@ -26,7 +27,7 @@
     return JSON.stringify(state, null, 2);
   }
 
-  type ChangedField = { label: string; prior: string; next: string };
+  type ChangedField = { id: string; label: string; prior: string; next: string };
 
   function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -42,18 +43,37 @@
     return typeof value === "string" ? value : JSON.stringify(value);
   }
 
-  // The settings that differ between two recorded states, descending into
-  // nested objects so a nested change is named by its own path. Arrays and
-  // scalars compare whole; a redacted credential compares as its recorded
-  // marker, so it never reads as changed unless the record says it did.
-  function changedFields(prior: unknown, next: unknown, path: string[] = []): ChangedField[] {
-    if (isRecord(prior) && isRecord(next)) {
-      const keys = [...new Set([...Object.keys(prior), ...Object.keys(next)])].sort();
-      return keys.flatMap((key) => changedFields(prior[key], next[key], [...path, key]));
+  function fieldLabel(path: string[]): string {
+    // Dictionary keys are identities, even when they contain dots or underscores.
+    const named = ["providers", "models", "generation_presets"].includes(path[0]) && path.length > 1;
+    const lookup = path.map((segment, index) => named && index === 1 ? "*" : segment);
+    if (lookup[0] === "context" && lookup[1] === "assembly") lookup.splice(1, 1);
+    for (let length = lookup.length; length > 0; length--) {
+      const label = SETTINGS_LABELS[lookup.slice(0, length).join(".")];
+      if (label) {
+        const identity = named ? [labelSegment(path[0]), path[1]]
+          : lookup[0] === "tool_runtime" && lookup[1] === "search" && length > 2
+            ? [SETTINGS_LABELS["tool_runtime.search"]] : [];
+        return [...identity, label, ...lookup.slice(length).map(labelSegment)].join(" › ");
+      }
     }
-    if (path.length > 0 && JSON.stringify(prior) === JSON.stringify(next)) return [];
-    if (path.length === 0) return changedFields(isRecord(prior) ? prior : {}, isRecord(next) ? next : {}, path);
-    return [{ label: path.map(labelSegment).join(" › "), prior: formatValue(prior), next: formatValue(next) }];
+    return path.map((segment, index) => named && index === 1 ? segment : labelSegment(segment)).join(" › ") || "Value";
+  }
+
+  // Objects compare by field, including when the other snapshot is absent.
+  // Arrays and scalars compare whole; redacted values stay as recorded.
+  function changedFields(prior: unknown, next: unknown, path: string[] = []): ChangedField[] {
+    if (JSON.stringify(prior) === JSON.stringify(next)) return [];
+    if ((isRecord(prior) && (isRecord(next) || next == null)) ||
+        (isRecord(next) && prior == null)) {
+      const before = isRecord(prior) ? prior : {};
+      const after = isRecord(next) ? next : {};
+      const keys = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort();
+      if (keys.length > 0) {
+        return keys.flatMap((key) => changedFields(before[key], after[key], [...path, key]));
+      }
+    }
+    return [{ id: JSON.stringify(path), label: fieldLabel(path), prior: formatValue(prior), next: formatValue(next) }];
   }
 
   function auditFilter(before?: AuditEventCursor) {
@@ -182,7 +202,7 @@
                 <table class="changed-fields">
                   <thead><tr><th scope="col">Setting</th><th scope="col">Prior</th><th scope="col">New</th></tr></thead>
                   <tbody>
-                    {#each changes as change (change.label)}
+                    {#each changes as change (change.id)}
                       <tr><th scope="row">{change.label}</th><td>{change.prior}</td><td>{change.next}</td></tr>
                     {/each}
                   </tbody>
