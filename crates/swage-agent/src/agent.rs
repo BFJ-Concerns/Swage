@@ -3301,7 +3301,10 @@ impl Agent {
 mod judge_seam_tests {
     //! An unattended turn's request beyond its grants goes to the judge and
     //! fails closed without a yes; a granted call still runs unreviewed.
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use async_trait::async_trait;
     use serde_json::{Value, json};
@@ -3353,6 +3356,40 @@ mod judge_seam_tests {
                 })
             }
         }
+    }
+
+    struct CountedOutsideRead {
+        executions: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for CountedOutsideRead {
+        fn name(&self) -> &str {
+            OutsideReadTool.name()
+        }
+        fn description(&self) -> &str {
+            OutsideReadTool.description()
+        }
+        fn parameters(&self) -> Value {
+            OutsideReadTool.parameters()
+        }
+        async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+            let result = OutsideReadTool.execute(params, ctx).await;
+            if result.is_ok() {
+                self.executions.fetch_add(1, Ordering::SeqCst);
+            }
+            result
+        }
+    }
+
+    fn observe_outside_reads(agent: &mut Agent) -> Arc<AtomicUsize> {
+        let executions = Arc::new(AtomicUsize::new(0));
+        agent.tool_dispatcher = Some(ToolDispatcher::allow_all(vec![
+            Arc::new(CountedOutsideRead {
+                executions: executions.clone(),
+            }) as Arc<dyn Tool>,
+        ]));
+        executions
     }
 
     /// Answers every request with the scripted judgement and keeps what it
@@ -3559,10 +3596,16 @@ mod judge_seam_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_refused_request_does_not_run_and_the_model_reads_the_reason() {
         let judge = scripted(JudgeVerdict::Refused, "the task never named this path");
-        let (agent, execution, storage) = unattended_fixture(Some(judge)).await;
+        let (mut agent, execution, storage) = unattended_fixture(Some(judge)).await;
 
+        let executions = observe_outside_reads(&mut agent);
         let result = dispatch_outside_read(&agent, &execution).await;
 
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            0,
+            "a refused request must not execute the tool"
+        );
         assert!(result.is_error);
         assert_eq!(result.status, "refused");
         assert!(result.execution_prevented);
@@ -3583,10 +3626,16 @@ mod judge_seam_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn with_no_judge_the_request_fails_closed_and_is_still_recorded() {
-        let (agent, execution, storage) = unattended_fixture(None).await;
+        let (mut agent, execution, storage) = unattended_fixture(None).await;
 
+        let executions = observe_outside_reads(&mut agent);
         let result = dispatch_outside_read(&agent, &execution).await;
 
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            0,
+            "a refused request must not execute the tool"
+        );
         assert!(result.is_error);
         assert_eq!(result.status, "refused");
         assert!(result.execution_prevented);
@@ -3658,6 +3707,7 @@ mod judge_seam_tests {
         });
         let (mut agent, execution, storage) =
             unattended_fixture(judge.clone().map(|judge| judge as SharedRequestJudge)).await;
+        let executions = observe_outside_reads(&mut agent);
         agent.config.approval_prompts_enabled = true;
         agent.approval_registrar = Some(Arc::new(|_, sender| {
             sender
@@ -3686,6 +3736,11 @@ mod judge_seam_tests {
             )
             .await
             .expect("dispatch settles");
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            usize::from(expected == "success"),
+            "only allowed or human-approved requests may execute the tool"
+        );
         assert_eq!(result.status, expected, "{}", result.content);
         let mut cards = 0;
         while let Ok(event) = rx.try_recv() {
@@ -3749,6 +3804,7 @@ mod judge_seam_tests {
     async fn failed_record_refuses(attended: bool) {
         let judge = scripted(JudgeVerdict::Allowed, "the task names this plan");
         let (mut agent, execution, storage) = unattended_fixture(Some(judge.clone())).await;
+        let executions = observe_outside_reads(&mut agent);
         agent.config.approval_prompts_enabled = attended;
         storage
             .with_conn(|conn| {
@@ -3793,6 +3849,11 @@ mod judge_seam_tests {
             )
             .await
             .expect("refusal is a tool result");
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            0,
+            "an unrecorded judgement must never execute the tool"
+        );
         assert_eq!(result.status, "refused", "{}", result.content);
         assert!(result.execution_prevented);
         assert!(
