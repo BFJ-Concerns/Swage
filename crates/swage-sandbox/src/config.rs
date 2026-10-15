@@ -316,6 +316,7 @@ mod tests {
             Err(SandboxConfigError::MissingField { field }) => {
                 assert_eq!(field, "working_directory");
             }
+            Err(error) => panic!("expected Err(MissingField), got {error}"),
             Ok(_) => panic!("expected Err(MissingField), but build succeeded"),
         }
     }
