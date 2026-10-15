@@ -2916,13 +2916,14 @@ mod tests {
             instructions: "Use the external delegated specialist instructions.".to_string(),
             ..swage_config::ResolvedConfig::default()
         };
-        let state = AppState::for_test(
+        let state = AppState::new_with_config_root(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(provider) as Arc<dyn LlmProvider>,
             config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
+            swage_home.path().to_path_buf(),
         );
         let router = MessageRouter::new(state.storage.clone(), None);
         let delegate_msg = router
@@ -3077,7 +3078,7 @@ mod tests {
             .expect("write agent permissions");
         }
 
-        let state = AppState::for_test(
+        let state = AppState::new_with_config_root(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -3087,6 +3088,7 @@ mod tests {
                 Arc::new(NamedTool::new("target_only")) as Arc<dyn crate::tool::Tool>,
             ]),
             None,
+            swage_home.path().to_path_buf(),
         );
         let router = MessageRouter::new(state.storage.clone(), None);
         let delegate_msg = router
