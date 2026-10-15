@@ -48,7 +48,7 @@ pub async fn run() -> Result<(), ClientError> {
     let issued = client.issue_pairing_code().await?;
     println!("Pairing code: {}", issued.pairing_code);
     println!(
-        "Enter it in the device's pairing prompt before {}.",
+        "Enter it in the pairing prompt on the device you are connecting from, before {}.",
         issued.expires_at.format("%H:%M:%S UTC")
     );
     Ok(())

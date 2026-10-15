@@ -36,8 +36,9 @@
       <h2 id="pairing-title">Pair this device</h2>
       <p>
         This gateway is reachable over the network and admits paired devices only.
-        On the machine running Swage, run <code>swage gateway pair</code> and enter
-        the code it prints. Pairing is remembered: you will not be asked again on this device.
+        On the machine the gateway runs on, run <code>swage gateway pair</code> and
+        enter the code it prints here within ten minutes. Pairing is remembered: you
+        will not be asked again on this device.
       </p>
       <label>
         Pairing code
