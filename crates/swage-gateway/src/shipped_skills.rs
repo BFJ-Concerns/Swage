@@ -249,19 +249,19 @@ mod tests {
     /// rule, and how a granted agent answers.
     #[test]
     fn the_research_skill_makes_a_sweep_request_a_first_action_dispatch() {
-        let skill = include_str!("../../../shipped/skills/research/SKILL.md");
+        let skill = reflowed(include_str!("../../../shipped/skills/research/SKILL.md"));
         assert!(
             skill.contains(
-                "your first and\nonly action is `workflow_run` with `name: \"research-sweep\"`"
+                "your first and only action is `workflow_run` with `name: \"research-sweep\"`"
             ),
             "a research request dispatches the sweep as the turn's first action"
         );
         assert!(
-            skill.contains("no\n`web_search`, no `url_fetch`"),
+            skill.contains("no `web_search`, no `url_fetch`"),
             "and names the inline gathering it forbids"
         );
         assert!(
-            skill.contains("`workflow_run_status` with the\nrun reference as `run_id` returns the ended run with its `final_output`"),
+            skill.contains("`workflow_run_status` with the run reference as `run_id` returns the ended run with its `final_output`"),
             "a finished sweep is delivered from the run record"
         );
         assert!(
@@ -270,18 +270,28 @@ mod tests {
         );
         assert!(
             skill.contains(
-                "Your reply\nto a request for the findings is that text, whole and unaltered"
+                "Your reply to a request for the findings is that text, whole and unaltered"
             ),
             "a request for the findings is answered with the record's own report, not a synthesis"
+        );
+        assert!(
+            skill.contains("A run that has ended with no `final_output`"),
+            "a failed run is reported as not completed, with nothing presented as findings"
         );
         assert!(
             skill.contains("Copy the `quote` character for character into a Markdown block quote"),
             "delivered findings reproduce the validated quote exactly"
         );
         assert!(
-            skill.contains("You have no tool that reads a\ncitation by its id"),
+            skill.contains("You have no tool that reads a citation by its id"),
             "and say how a citation's context is reached"
         );
+    }
+
+    /// Prose with its line wrapping removed, so a test pins a sentence and
+    /// not where the Markdown happens to break it.
+    fn reflowed(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
     #[test]

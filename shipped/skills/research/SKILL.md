@@ -67,7 +67,10 @@ finished sweep. The findings are never rebuilt from the knowledge base,
 re-cited, or sought through the HTTP API or the file system: the record
 holds the synthesis the sweep made, and anything assembled another way
 is a different document presented under the sweep's name. A run that is
-still going reads as not ended, and the reply says so.
+still going reads as not ended, and the reply says so. A run that has
+ended with no `final_output` — `state` failed or cancelled, or
+`error_message` set — produced no findings: say that the sweep did not
+complete, give its `error_message`, and present nothing as its findings.
 
 The run's final output carries the report as the person reads it, in
 `rendered`: every finding numbered in the record's order with its claim,

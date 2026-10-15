@@ -128,7 +128,8 @@ impl Tool for WorkflowRunStatusTool {
          run_event_post. With a run_id, reads that one run in any state; an ended run \
          carries what it returned as final_output — a research sweep's findings, say — so a \
          later request for a finished run's result is answered from here, never rebuilt from \
-         other sources. Use this at the start of a wake to find the decisions waiting for \
+         other sources; a run that failed or was cancelled carries no final_output and its \
+         error_message instead. Use this at the start of a wake to find the decisions waiting for \
          you, after acting to confirm a run moved on, and to deliver a finished run's \
          result."
     }
