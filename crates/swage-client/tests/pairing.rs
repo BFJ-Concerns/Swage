@@ -74,24 +74,29 @@ async fn pairing_survives_a_new_client_and_authenticates_http_without_redeeming_
 
 #[tokio::test]
 async fn native_websocket_presents_the_token_in_a_header_without_a_query() {
-    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+    use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+    #[expect(
+        clippy::result_large_err,
+        reason = "tungstenite fixes the handshake callback's error response type"
+    )]
+    fn require_token(request: &Request, response: Response) -> Result<Response, ErrorResponse> {
+        assert_eq!(
+            request
+                .headers()
+                .get("X-Swage-Token")
+                .map(|value| value.to_str().unwrap()),
+            Some("upgrade-token")
+        );
+        assert!(request.uri().query().is_none());
+        Ok(response)
+    }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        tokio_tungstenite::accept_hdr_async(stream, |request: &Request, response: Response| {
-            assert_eq!(
-                request
-                    .headers()
-                    .get("X-Swage-Token")
-                    .map(|value| value.to_str().unwrap()),
-                Some("upgrade-token")
-            );
-            assert!(request.uri().query().is_none());
-            Ok(response)
-        })
-        .await
-        .unwrap()
+        tokio_tungstenite::accept_hdr_async(stream, require_token)
+            .await
+            .unwrap()
     });
     let result =
         GatewayWebSocket::connect_with_token(&address, uuid::Uuid::new_v4(), Some("upgrade-token"))
