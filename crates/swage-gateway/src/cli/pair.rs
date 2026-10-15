@@ -42,9 +42,11 @@ pub async fn run() -> Result<(), ClientError> {
         });
     }
 
-    // The code is issued to loopback requests only, so the gateway is reached
-    // at its loopback address whatever address it is bound to.
-    let client = GatewayClient::new(&loopback_address(&meta.address)?);
+    // The gateway issues codes to its own machine only — a request over
+    // loopback, or one arriving from the address it is bound to — and the
+    // recorded address is reachable from here either way: a wildcard binding
+    // over loopback, a specific address from itself.
+    let client = GatewayClient::new(&meta.address);
     let issued = client.issue_pairing_code().await?;
     println!("Pairing code: {}", issued.pairing_code);
     println!(
@@ -52,51 +54,4 @@ pub async fn run() -> Result<(), ClientError> {
         issued.expires_at.format("%H:%M:%S UTC")
     );
     Ok(())
-}
-
-/// The loopback form of a gateway's listening address: the same scheme and
-/// port, the host replaced by `127.0.0.1`.
-fn loopback_address(address: &str) -> Result<String, ClientError> {
-    let (scheme, rest) =
-        address
-            .split_once("://")
-            .ok_or_else(|| ClientError::GatewayNotRunning {
-                reason: format!("the recorded gateway address {address:?} has no scheme"),
-            })?;
-    let authority = rest.split('/').next().unwrap_or_default();
-    let port = authority
-        .rsplit_once(':')
-        .map(|(_, port)| port)
-        .filter(|port| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()))
-        .ok_or_else(|| ClientError::GatewayNotRunning {
-            reason: format!("the recorded gateway address {address:?} has no port"),
-        })?;
-    Ok(format!("{scheme}://127.0.0.1:{port}"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_binding_beyond_loopback_is_paired_through_its_loopback_address() {
-        assert_eq!(
-            loopback_address("http://0.0.0.0:3000").unwrap(),
-            "http://127.0.0.1:3000"
-        );
-        assert_eq!(
-            loopback_address("http://192.168.1.20:38417/").unwrap(),
-            "http://127.0.0.1:38417"
-        );
-        assert_eq!(
-            loopback_address("http://127.0.0.1:3000").unwrap(),
-            "http://127.0.0.1:3000"
-        );
-    }
-
-    #[test]
-    fn an_address_without_a_port_or_scheme_is_refused() {
-        assert!(loopback_address("http://gateway.local").is_err());
-        assert!(loopback_address("127.0.0.1:3000").is_err());
-    }
 }

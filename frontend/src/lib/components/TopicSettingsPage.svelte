@@ -86,6 +86,9 @@
   let security = $state<SecuritySettingsResponse | null>(null);
   let securityLoaded = $state(false);
   let securityNotice = $state<string | null>(null);
+  // The approval entries as loaded, structured options included, so a save
+  // that never retyped an entry keeps its timeout and policy.
+  let approvalsLoaded: SecuritySettingsResponse["effective"]["require_approval"] = [];
   let sandboxChoice = $state<"inherit" | "on" | "off">("inherit");
   let confinementChoice = $state<"inherit" | "strict" | "allow_degraded">("inherit");
   let approvalsChoice = $state<"inherit" | "own">("inherit");
@@ -114,7 +117,8 @@
         ? "inherit"
         : overrides.allow_degraded_execution ? "allow_degraded" : "strict";
       approvalsChoice = overrides.require_approval ? "own" : "inherit";
-      approvalsDraft = (overrides.require_approval ?? security.effective.require_approval)
+      approvalsLoaded = overrides.require_approval ?? security.effective.require_approval;
+      approvalsDraft = approvalsLoaded
         .map((entry) => (typeof entry === "string" ? entry : entry.tool))
         .join("\n");
       securityLoaded = true;
@@ -134,7 +138,16 @@
         allow_degraded_execution: confinementChoice === "inherit" ? undefined : confinementChoice === "allow_degraded",
         require_approval: approvalsChoice === "inherit"
           ? undefined
-          : approvalsDraft.split("\n").map((line) => line.trim()).filter(Boolean),
+          : approvalsDraft
+              .split("\n")
+              .map((line) => line.trim())
+              .filter(Boolean)
+              .map(
+                // An entry the person did not retype keeps the timeout and
+                // policy it was loaded with; the page shows tool names only.
+                (tool) =>
+                  approvalsLoaded.find((entry) => typeof entry !== "string" && entry.tool === tool) ?? tool,
+              ),
       });
       securityNotice = security.relaxed.length === 0
         ? "Saved. Every shipped check is in force for this topic."

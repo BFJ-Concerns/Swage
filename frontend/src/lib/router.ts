@@ -137,7 +137,7 @@ export function parseRoute(location: string): Route {
     };
   }
   const topicSettingsMatch = pathname.match(
-    /^\/settings\/topic\/([^/]+)(?:\/(overview|workspaces|sessions|surfaces))?$/,
+    /^\/settings\/topic\/([^/]+)(?:\/(overview|workspaces|sessions|surfaces|security))?$/,
   );
   if (topicSettingsMatch) {
     return {

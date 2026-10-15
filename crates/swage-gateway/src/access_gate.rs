@@ -55,6 +55,10 @@ pub struct AccessGate {
     /// Whether the bound address reaches beyond loopback; `false` means the
     /// gate never applies, whatever the mode.
     beyond_loopback: bool,
+    /// The one address the gateway is bound to, when it is a specific one: a
+    /// request arriving from it comes from the gateway's own machine, which
+    /// a binding to a LAN address alone does not reach over loopback.
+    bound_address: Option<IpAddr>,
     token: Option<String>,
     pairing_codes: Mutex<HashMap<String, DateTime<Utc>>>,
 }
@@ -65,6 +69,7 @@ impl AccessGate {
     pub fn open() -> Self {
         Self {
             beyond_loopback: false,
+            bound_address: None,
             token: None,
             pairing_codes: Mutex::new(HashMap::new()),
         }
@@ -77,6 +82,7 @@ impl AccessGate {
         let token = load_or_create_token(&config_root.join(TOKEN_FILE))?;
         Ok(Self {
             beyond_loopback,
+            bound_address: specific_address(host),
             token: Some(token),
             pairing_codes: Mutex::new(HashMap::new()),
         })
@@ -86,6 +92,7 @@ impl AccessGate {
     pub(crate) fn with_token(host: &str, token: &str) -> Self {
         Self {
             beyond_loopback: !host_is_loopback(host),
+            bound_address: specific_address(host),
             token: Some(token.to_owned()),
             pairing_codes: Mutex::new(HashMap::new()),
         }
@@ -157,7 +164,7 @@ pub async fn access_gate_middleware(
     if UNGATED_PATHS.contains(&path) {
         return next.run(request).await;
     }
-    if peer_is_loopback(&request) || gate.admits(presented_token(&request).as_deref()) {
+    if peer_is_local(gate, &request) || gate.admits(presented_token(&request).as_deref()) {
         return next.run(request).await;
     }
     match mode {
@@ -190,17 +197,19 @@ pub fn access_status(state: &AppState, request: &Request<Body>) -> AccessStatusR
         gated: gate.gated(mode),
         mode,
         admitted: !gate.gated(mode)
-            || peer_is_loopback(request)
+            || peer_is_local(gate, request)
             || gate.admits(presented_token(request).as_deref()),
     }
 }
 
-/// Issue a pairing code — from loopback only, the gateway's own machine.
+/// Issue a pairing code — from the gateway's own machine only: loopback, or
+/// the one address the gateway is bound to.
 pub fn issue_pairing_code(
     state: &AppState,
     peer: Option<SocketAddr>,
 ) -> Result<PairingCodeResponse, ApiError> {
-    if !peer.is_some_and(|addr| addr.ip().is_loopback()) {
+    let gate = &state.access_gate;
+    if !peer.is_some_and(|addr| addr.ip().is_loopback() || gate.bound_address == Some(addr.ip())) {
         return Err(ApiError::forbidden(
             "pairing codes are issued from the gateway's own machine only",
         ));
@@ -224,11 +233,36 @@ pub fn pair_client(state: &AppState, request: PairClientRequest) -> Result<Respo
     Ok(response)
 }
 
-fn peer_is_loopback(request: &Request<Body>) -> bool {
+/// The address the gateway is bound to when it is one specific address;
+/// `None` for loopback and for the wildcard addresses.
+fn specific_address(host: &str) -> Option<IpAddr> {
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    host.parse::<IpAddr>()
+        .ok()
+        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+}
+
+/// Whether a request came from the gateway's own machine: over loopback, or
+/// from the one address the gateway is bound to — a binding to a LAN address
+/// alone does not listen on loopback, and the machine's own requests to it
+/// arrive from that address.
+fn peer_is_local(gate: &AccessGate, request: &Request<Body>) -> bool {
     request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .is_some_and(|ConnectInfo(addr)| addr.ip().is_loopback())
+        .is_some_and(|ConnectInfo(addr)| {
+            addr.ip().is_loopback() || gate.bound_address == Some(addr.ip())
+        })
+}
+
+/// Whether the request opens a WebSocket, the one client that cannot send a
+/// header of its own and so may carry the token in its query.
+fn is_websocket_upgrade(request: &Request<Body>) -> bool {
+    request
+        .headers()
+        .get(header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
 }
 
 /// The token a request presents, by any of the routes a client has.
@@ -252,6 +286,9 @@ fn presented_token(request: &Request<Body>) -> Option<String> {
                 return Some(value.trim().to_owned());
             }
         }
+    }
+    if !is_websocket_upgrade(request) {
+        return None;
     }
     request.uri().query().and_then(|query| {
         query.split('&').find_map(|pair| {
@@ -368,9 +405,41 @@ mod tests {
             None,
         );
         assert_eq!(presented_token(&cookie).as_deref(), Some("ghi"));
-        let query = request("/api/conversations/x/ws?token=jkl", &[], None);
+        let query = request(
+            "/api/conversations/x/ws?token=jkl",
+            &[("upgrade", "websocket")],
+            None,
+        );
         assert_eq!(presented_token(&query).as_deref(), Some("jkl"));
         assert_eq!(presented_token(&request("/api/topics", &[], None)), None);
+        // The query carries the token for a WebSocket only; a plain request
+        // with a token in its URL presents nothing.
+        assert_eq!(
+            presented_token(&request("/api/topics?token=jkl", &[], None)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_peer_at_the_bound_address_is_the_gateways_own_machine() {
+        let gate = AccessGate::with_token("192.168.1.20", "t");
+        assert!(peer_is_local(
+            &gate,
+            &request("/api/topics", &[], Some("127.0.0.1:1"))
+        ));
+        assert!(peer_is_local(
+            &gate,
+            &request("/api/topics", &[], Some("192.168.1.20:1"))
+        ));
+        assert!(!peer_is_local(
+            &gate,
+            &request("/api/topics", &[], Some("192.168.1.30:1"))
+        ));
+        let wildcard = AccessGate::with_token("0.0.0.0", "t");
+        assert!(!peer_is_local(
+            &wildcard,
+            &request("/api/topics", &[], Some("192.168.1.20:1"))
+        ));
     }
 
     #[test]

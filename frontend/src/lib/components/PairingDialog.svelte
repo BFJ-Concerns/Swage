@@ -63,7 +63,7 @@
     inset: 0;
     display: grid;
     place-items: center;
-    background: color-mix(in srgb, var(--color-bg, #000) 70%, transparent);
+    background: color-mix(in srgb, var(--ink) 70%, transparent);
     z-index: 50;
   }
   .pairing-dialog {
@@ -71,8 +71,8 @@
     gap: 0.75rem;
     max-width: 28rem;
     padding: 1.5rem;
-    background: var(--color-surface, #fff);
-    color: var(--color-text, #000);
+    background: var(--paper);
+    color: var(--ink);
     border-radius: 0.5rem;
   }
   .pairing-dialog label {
@@ -80,6 +80,6 @@
     gap: 0.25rem;
   }
   .pairing-error {
-    color: var(--color-danger, #b00020);
+    color: var(--error);
   }
 </style>
