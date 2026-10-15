@@ -5809,8 +5809,27 @@ async fn workflow_read_only_attachment_placement_stays_read_only() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_workflow_workers_write_only_inside_their_own_worktrees() {
+    assert_live_workflow_workers_write_only_inside_their_own_worktrees().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn live_worker_worktree_journey_completes_twenty_times_under_parallel_load() {
+    // Four independent journeys overlap while the rest of the crate runs.
+    // Each journey retains the original placement, journal and cleanup assertions.
+    use futures::{StreamExt, stream};
+    stream::iter(1..=20)
+        .map(|attempt| async move {
+            assert_live_workflow_workers_write_only_inside_their_own_worktrees().await;
+            eprintln!("live worker worktree journey completed: {attempt}/20");
+        })
+        .buffer_unordered(4)
+        .collect::<Vec<_>>()
+        .await;
+}
+
+async fn assert_live_workflow_workers_write_only_inside_their_own_worktrees() {
     let fixture = tempfile::tempdir().expect("scratch fixture");
     let repo = fixture.path().join("repo");
     seed_git_repo(&repo);
