@@ -1928,13 +1928,14 @@ two sandbox-eligible tools.
 
 ### Workspace tool output
 
-Tools that produce file artefacts write them into the attached workspace at:
+Local gateway sessions store tool artefacts in managed session scratch,
+independently of attached workspace write permission:
 
 ```
-.swage/tool-output/<turn_id>/<call_id>/<filename>
+<session scratch directory>/.swage/tool-output/<turn_id>/<call_id>/<filename>
 ```
 
-`shell` writes stdout and stderr artefacts only when the stream was truncated;
+`shell` retains stdout and stderr artefacts only when the stream was truncated;
 a non-truncated stream is reported inline and the artefact file is removed.
 `browser_click`, `browser_select`, and `browser_scroll` write a post-action
 screenshot when the browser screenshot policy is not `Off`; `browser_type`
@@ -1944,18 +1945,17 @@ inline with no artefact. `url_fetch` writes `raw-body.html` only when the
 HTML body exceeds its capture limit; a body that fits is reported inline and
 the artefact file is removed.
 
-The tool result reports the artefact's relative path (e.g.
-`.swage/tool-output/turn/call/stdout.txt`). `file_read` can open text
+The local tool result reports the artefact's full path. `file_read` can open text
 artefacts directly; it refuses binary content, so screenshots are not
 readable through `file_read`. The `<turn_id>/<call_id>` structure prevents
 repeated calls from overwriting each other.
 
-On first write, the gateway creates `.swage/tool-output/` and writes a
-`.gitignore` containing `*` into it, so tool output never appears as
-untracked files in the workspace's Git repository.
+On first write, the gateway creates `.swage/tool-output/` in session scratch
+and writes a `.gitignore` containing `*` into it. Local gateway tool output
+does not create files or directories in an attached workspace.
 
-Sessions without an attached workspace write tool output into the session's
-scratch directory instead.
+Paired-device execution still stores artefacts in its working directory at
+`.swage/tool-output/` and reports relative paths.
 
 Plugin tools (`plugin.rs`) are dynamically registered from operator
 configuration; their names come from the plugin manifest.

@@ -202,6 +202,19 @@ pub(crate) fn build_sandbox_config(
         }
     }
 
+    if let Some(directory) = &agent_config.tool_output_directory {
+        std::fs::create_dir_all(directory).map_err(|source| {
+            swage_sandbox::SandboxConfigError::OutputDirectory {
+                path: directory.clone(),
+                source,
+            }
+        })?;
+        let directory = sandbox_path(directory);
+        builder = builder
+            .read_write_mount(&directory)
+            .landlock_write_path(&directory)
+            .tool_output_location(swage_tool::context::ToolOutputLocation { directory });
+    }
     builder.build()
 }
 

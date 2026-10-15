@@ -1,4 +1,4 @@
-//! File write tool — creates or overwrites files within the workspace.
+//! File write tool — creates, appends to, or replaces files in the workspace.
 //!
 //! Creates parent directories as needed. Validates the target path stays
 //! within the workspace root before writing.
@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use swage_core::ToolError;
 use swage_tool::context::ToolContext;
+use tokio::io::AsyncWriteExt;
 
 use crate::tool::Tool;
 use crate::tool::workspace::{
@@ -43,6 +44,10 @@ impl Tool for FileWriteTool {
                     "type": "string",
                     "description": "Path to the file, relative to the workspace root."
                 },
+                "append": {
+                    "type": "boolean",
+                    "description": "Append content to the file instead of replacing it. Defaults to false."
+                },
                 "content": {
                     "type": "string",
                     "description": "Content to write to the file."
@@ -73,6 +78,16 @@ impl Tool for FileWriteTool {
             })?
             .to_string();
 
+        let append = match params.get("append") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(value)) => *value,
+            Some(_) => {
+                return Err(ToolError::InvalidParameters {
+                    name: self.name().into(),
+                    message: "append must be a boolean".into(),
+                });
+            }
+        };
         let resolved = resolve_new_context_path(ctx, &path_str)
             .map_err(|_| location_approval_error(self.name(), ctx, &path_str, "write", false))?;
 
@@ -90,22 +105,60 @@ impl Tool for FileWriteTool {
 
         let byte_count = content.len();
 
-        tokio::fs::write(&resolved.path, content.as_bytes())
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .append(append)
+            .truncate(false)
+            .open(&resolved.path)
             .await
-            .map_err(|e| {
-                let message = match e.kind() {
-                    std::io::ErrorKind::PermissionDenied => {
-                        format!("Permission denied: {path_str}")
-                    }
-                    _ => format!("Failed to write {path_str}: {e}"),
-                };
-                ToolError::ExecutionFailed {
-                    name: self.name().to_owned(),
-                    message,
-                }
+            .map_err(|e| ToolError::ExecutionFailed {
+                name: self.name().into(),
+                message: format!("Failed to open {path_str}: {e}"),
             })?;
+        let prior_bytes = file
+            .metadata()
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                name: self.name().into(),
+                message: format!("Failed to inspect {path_str}: {e}"),
+            })?
+            .len();
+        if !append {
+            file.set_len(0)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed {
+                    name: self.name().into(),
+                    message: format!("Failed to truncate {path_str}: {e}"),
+                })?;
+        }
+        file.write_all(content.as_bytes()).await.map_err(|e| {
+            let message = match e.kind() {
+                std::io::ErrorKind::PermissionDenied => {
+                    format!("Permission denied: {path_str}")
+                }
+                _ => format!("Failed to write {path_str}: {e}"),
+            };
+            ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message,
+            }
+        })?;
 
-        Ok(json!({"output": format!("Wrote {byte_count} bytes to {path_str}")}))
+        file.flush()
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
+                name: self.name().into(),
+                message: format!("Failed to flush {path_str}: {error}"),
+            })?;
+        let output = if append {
+            format!("Appended {byte_count} bytes to {path_str}")
+        } else if prior_bytes > 0 {
+            format!("Wrote {byte_count} bytes to {path_str}; replaced {prior_bytes} bytes")
+        } else {
+            format!("Wrote {byte_count} bytes to {path_str}")
+        };
+        Ok(json!({"output": output}))
     }
 }
 
@@ -237,5 +290,66 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, ToolError::InvalidParameters { .. }));
         assert!(err.to_string().contains("content"), "got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    #[tokio::test(flavor = "multi_thread")]
+    async fn regression_append_accumulates_and_preserves_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = crate::tool::workspace::writable_test_context(dir.path(), vec![]);
+        std::fs::write(dir.path().join("plan.md"), "# Ferry\nreference\n").unwrap();
+        for i in 0..6 {
+            let result = FileWriteTool
+                .execute(
+                    json!({"path":"plan.md", "content":format!("# Entry {i}\n"), "append":true}),
+                    &ctx,
+                )
+                .await
+                .unwrap();
+            let content = std::fs::read_to_string(dir.path().join("plan.md")).unwrap();
+            assert!(
+                content.starts_with("# Ferry\nreference\n"),
+                "append erased the existing section: {content}"
+            );
+            assert_eq!(content.lines().count(), 3 + i);
+            assert!(result["output"].as_str().unwrap().starts_with("Appended"));
+        }
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn regression_replacement_reports_prior_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = crate::tool::workspace::writable_test_context(dir.path(), vec![]);
+        std::fs::write(dir.path().join("notes"), "old content").unwrap();
+        let result = FileWriteTool
+            .execute(json!({"path":"notes", "content":"new"}), &ctx)
+            .await
+            .unwrap();
+        assert!(
+            result["output"]
+                .as_str()
+                .unwrap()
+                .contains("replaced 11 bytes"),
+            "{result}"
+        );
+        assert_eq!(std::fs::read(dir.path().join("notes")).unwrap(), b"new");
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn regression_append_rejects_non_boolean_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = crate::tool::workspace::writable_test_context(dir.path(), vec![]);
+        let result = FileWriteTool
+            .execute(
+                json!({"path":"notes", "content":"new", "append":"true"}),
+                &ctx,
+            )
+            .await;
+        assert!(
+            matches!(result, Err(ToolError::InvalidParameters { .. })),
+            "{result:?}"
+        );
+        assert!(!dir.path().join("notes").exists());
     }
 }

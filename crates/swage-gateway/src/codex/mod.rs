@@ -1007,7 +1007,7 @@ async fn handle_approval(
 fn path_allowed(path: &Path, roots: &[std::path::PathBuf]) -> bool {
     roots
         .iter()
-        .any(|root| crate::tool::workspace::validate_path(root, &path.to_string_lossy()).is_ok())
+        .any(|root| crate::tool::workspace::validate_path(root, &path).is_ok())
 }
 
 async fn record_audit(

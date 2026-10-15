@@ -28,10 +28,10 @@ pub struct ResolvedToolPath {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolOutputArtifactPath {
     pub absolute: PathBuf,
-    pub relative: String,
+    pub reported: String,
 }
 
-/// Builds a workspace-local path for a full tool-output artefact.
+/// Builds a runtime path for a full tool-output artefact.
 ///
 /// The path includes the turn id and tool-call id where available so repeated
 /// calls do not overwrite each other while remaining readable by `file_read`.
@@ -45,34 +45,155 @@ pub fn tool_output_artifact_path(ctx: &dyn ToolContext, filename: &str) -> ToolO
         .map(sanitise_path_segment)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let artifact = format!("{turn_id}/{call_id}/{filename}");
-    let relative = format!("{TOOL_OUTPUT_ROOT}/{artifact}");
-    let absolute = tool_output_root(ctx).join(artifact);
+    let absolute = tool_output_root(ctx).join(&artifact);
+    let reported = if ctx.tool_output_directory().is_some() {
+        absolute.to_string_lossy().into_owned()
+    } else {
+        format!("{TOOL_OUTPUT_ROOT}/{artifact}")
+    };
 
-    ToolOutputArtifactPath { absolute, relative }
+    ToolOutputArtifactPath { absolute, reported }
 }
 
 /// Creates an artefact at `<tool-output root>/<turn>/<call>/<file>`.
 ///
-/// The root ignores itself so tool output does not dirty a workspace repository.
+/// Output directories and files are opened relative to held directory handles:
+/// sandboxed commands can edit this tree, so none of its links confer authority.
 pub async fn create_tool_output_artifact(
     ctx: &dyn ToolContext,
     path: &Path,
 ) -> io::Result<tokio::fs::File> {
-    create_self_ignoring_directory(&tool_output_root(ctx)).await?;
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::File::create(path).await
+    let base = ctx
+        .tool_output_directory()
+        .unwrap_or_else(|| ctx.working_directory())
+        .to_owned();
+    let root = tool_output_root(ctx);
+    let relative = path
+        .strip_prefix(&root)
+        .map_err(io::Error::other)?
+        .to_owned();
+    tokio::task::spawn_blocking(move || create_output_file(&base, &relative))
+        .await
+        .map_err(io::Error::other)?
+        .map(tokio::fs::File::from_std)
 }
 
 fn tool_output_root(ctx: &dyn ToolContext) -> PathBuf {
-    ctx.working_directory().join(TOOL_OUTPUT_ROOT)
+    ctx.tool_output_directory()
+        .unwrap_or_else(|| ctx.working_directory())
+        .join(TOOL_OUTPUT_ROOT)
 }
 
-/// Creates runtime storage whose contents, including the ignore file, stay out of Git.
-async fn create_self_ignoring_directory(path: &Path) -> io::Result<()> {
-    tokio::fs::create_dir_all(path).await?;
-    tokio::fs::write(path.join(".gitignore"), b"*\n").await
+#[cfg(unix)]
+fn create_output_file(base: &Path, relative: &Path) -> io::Result<std::fs::File> {
+    use std::ffi::CString;
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
+
+    fn name(component: &std::ffi::OsStr) -> io::Result<CString> {
+        CString::new(component.as_bytes()).map_err(io::Error::other)
+    }
+    fn open_at(
+        dir: &std::fs::File,
+        name: &std::ffi::CStr,
+        flags: i32,
+    ) -> io::Result<std::fs::File> {
+        // SAFETY: the directory descriptor and NUL-terminated name remain valid
+        // throughout the call. A successful open returns a newly owned descriptor.
+        let fd = unsafe {
+            libc::openat(
+                dir.as_raw_fd(),
+                name.as_ptr(),
+                flags | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: fd is a successful openat result, owned exclusively here.
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+    }
+    fn directory_at(dir: &std::fs::File, path: &Path) -> io::Result<std::fs::File> {
+        let mut dir = dir.try_clone()?;
+        for component in path.components() {
+            let Component::Normal(component) = component else {
+                return Err(io::Error::other("Invalid tool-output path component"));
+            };
+            let component = name(component)?;
+            // SAFETY: the descriptor and name are valid for this call.
+            if unsafe { libc::mkdirat(dir.as_raw_fd(), component.as_ptr(), 0o700) } < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::AlreadyExists {
+                    return Err(error);
+                }
+            }
+            dir = open_at(&dir, &component, libc::O_RDONLY | libc::O_DIRECTORY)?;
+        }
+        Ok(dir)
+    }
+
+    let base = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(base)?;
+    let root = directory_at(&base, Path::new(TOOL_OUTPUT_ROOT))?;
+    let temporary =
+        CString::new(format!(".gitignore-{}", uuid::Uuid::new_v4())).expect("UUID has no NUL");
+    let mut ignore = open_at(
+        &root,
+        &temporary,
+        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+    )?;
+    let installed = (|| {
+        ignore.write_all(b"*\n")?;
+        // SAFETY: both names and the held directory descriptor are valid. Rename
+        // replaces the directory entry itself, never following its destination.
+        if unsafe {
+            libc::renameat(
+                root.as_raw_fd(),
+                temporary.as_ptr(),
+                root.as_raw_fd(),
+                c".gitignore".as_ptr(),
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    })();
+    if installed.is_err() {
+        // SAFETY: removes only this temporary entry relative to the held root.
+        unsafe {
+            libc::unlinkat(root.as_raw_fd(), temporary.as_ptr(), 0);
+        }
+    }
+    installed?;
+    let parent = directory_at(
+        &root,
+        relative
+            .parent()
+            .ok_or_else(|| io::Error::other("Missing tool-output parent"))?,
+    )?;
+    let filename = relative
+        .file_name()
+        .ok_or_else(|| io::Error::other("Missing tool-output filename"))?;
+    // Exclusive creation also refuses hard links, special files and existing
+    // artefacts without ever opening their targets for writing.
+    open_at(
+        &parent,
+        &name(filename)?,
+        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+    )
+}
+
+#[cfg(not(unix))]
+fn create_output_file(_base: &Path, _relative: &Path) -> io::Result<std::fs::File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Tool-output storage requires directory-relative file creation",
+    ))
 }
 
 pub fn location_approval_error(
@@ -83,10 +204,19 @@ pub fn location_approval_error(
     directory_target: bool,
 ) -> ToolError {
     let path = approval_root_for_request(ctx, requested, directory_target)
-        .unwrap_or_else(|| requested.to_string());
+        .unwrap_or_else(|| PathBuf::from(requested));
+    let Some(path) = path.to_str() else {
+        return ToolError::ExecutionFailed {
+            name: tool_name.to_string(),
+            message: format!(
+                "Cannot request location approval for a non-UTF-8 path: {}",
+                path.display()
+            ),
+        };
+    };
     ToolError::RequiresLocationApproval {
         name: tool_name.to_string(),
-        path,
+        path: path.to_owned(),
         access: access.to_string(),
         timeout_secs: None,
         timeout_policy: None,
@@ -96,9 +226,10 @@ pub fn location_approval_error(
 /// Resolves a tool path against the current turn's workspace roots.
 ///
 /// Relative paths are interpreted from `ctx.working_directory()`. Absolute
-/// paths are accepted only when they remain inside the working directory or one
-/// of `ctx.allowed_paths()`. Built-in file tools use this resolver as their
-/// runtime permission boundary so location approvals can take effect without
+/// paths are accepted only when they remain inside the working directory, one
+/// of `ctx.allowed_paths()`, or `ctx.tool_output_directory()`. Built-in file tools
+/// use this resolver as their runtime permission boundary so location approvals
+/// can take effect without
 /// rebuilding a sandbox mount set mid-turn.
 pub fn resolve_context_path(
     ctx: &dyn ToolContext,
@@ -114,7 +245,7 @@ pub fn resolve_context_path(
     };
     let mut last_error = None;
     for root in allowed_roots {
-        match validate_path(&root, &candidate.to_string_lossy()) {
+        match validate_path(&root, &candidate) {
             Ok(path) => return Ok(ResolvedToolPath { root, path }),
             Err(error) => last_error = Some(error),
         }
@@ -122,7 +253,8 @@ pub fn resolve_context_path(
     Err(last_error.unwrap_or_else(|| format!("Path is outside the workspace: {requested}")))
 }
 
-/// Resolves a not-yet-created tool path against the runtime workspace roots.
+/// Resolves a not-yet-created tool path against the same permitted roots as
+/// `resolve_context_path`, including the tool-output directory.
 pub fn resolve_new_context_path(
     ctx: &dyn ToolContext,
     requested: &str,
@@ -137,7 +269,7 @@ pub fn resolve_new_context_path(
     };
     let mut last_error = None;
     for root in allowed_roots {
-        match validate_new_path(&root, &candidate.to_string_lossy()) {
+        match validate_new_path(&root, &candidate) {
             Ok(path) => return Ok(ResolvedToolPath { root, path }),
             Err(error) => last_error = Some(error),
         }
@@ -165,6 +297,14 @@ pub async fn require_workspace_write_access(
     {
         return Ok(());
     }
+    let attachments = workspace_attachment_access(ctx, tool_name).await?;
+    require_attachment_write_access(&attachments, path, tool_name)
+}
+
+async fn workspace_attachment_access(
+    ctx: &dyn ToolContext,
+    tool_name: &str,
+) -> Result<Vec<crate::turn::WorkspaceAttachmentAccess>, ToolError> {
     let Some(gateway) = ctx
         .as_any()
         .downcast_ref::<crate::tool_executor::GatewayToolContext>()
@@ -190,10 +330,23 @@ pub async fn require_workspace_write_access(
         crate::turn::load_workspace_attachment_access(gateway.storage(), session.topic_id)
             .await
             .map_err(|error| failure(format!("Cannot check workspace write access: {error}")))?;
+    Ok(attachments)
+}
+
+fn require_attachment_write_access(
+    attachments: &[crate::turn::WorkspaceAttachmentAccess],
+    path: &Path,
+    tool_name: &str,
+) -> Result<(), ToolError> {
+    let failure = |message| ToolError::ExecutionFailed {
+        name: tool_name.to_owned(),
+        message,
+    };
     // A more specific attachment overrides its parent. Equally specific,
     // conflicting declarations retain the read-only restriction.
     let effective = attachments
-        .into_iter()
+        .iter()
+        .filter(|access| access.grant.is_trusted || !access.grant.can_write)
         .filter_map(|access| {
             let root = access
                 .grant
@@ -221,6 +374,7 @@ pub(crate) async fn require_native_file_write_access(
     tool_name: &str,
     params: &Value,
     ctx: &dyn ToolContext,
+    device_owned: bool,
 ) -> Result<(), ToolError> {
     let paths: Vec<&str> = match tool_name {
         "file_write" => params["path"].as_str().into_iter().collect(),
@@ -232,6 +386,10 @@ pub(crate) async fn require_native_file_write_access(
             .collect::<Result<Vec<_>, _>>()?,
         _ => return Ok(()),
     };
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let attachments = workspace_attachment_access(ctx, tool_name).await?;
     for requested in paths {
         let path = Path::new(requested);
         let path = if path.is_absolute() {
@@ -240,13 +398,23 @@ pub(crate) async fn require_native_file_write_access(
             ctx.working_directory().join(path)
         };
         let path = normalise_path(&path);
+        if device_owned {
+            if !attachments.iter().any(|access| {
+                path.starts_with(&access.grant.path)
+                    || path.starts_with(Path::new(&access.attachment.path))
+            }) {
+                // This path belongs to the paired machine. Only its receiver
+                // can resolve it; traversing the host filesystem is unrelated.
+                continue;
+            }
+        }
         let path = resolve_existing_prefix(&path, requested).map_err(|message| {
             ToolError::ExecutionFailed {
                 name: tool_name.to_owned(),
                 message,
             }
         })?;
-        require_workspace_write_access(ctx, &path, tool_name).await?;
+        require_attachment_write_access(&attachments, &path, tool_name)?;
     }
     Ok(())
 }
@@ -287,10 +455,15 @@ pub(crate) fn writable_test_context(
 /// Works with both existing and not-yet-existing paths — the normalisation
 /// step resolves `..` components without requiring the path to be on disk.
 /// Symlink targets are checked even when their final path does not exist yet.
-pub fn validate_path(workspace_root: &Path, requested: &str) -> Result<PathBuf, String> {
+pub fn validate_path(
+    workspace_root: &Path,
+    requested: impl AsRef<Path>,
+) -> Result<PathBuf, String> {
+    let requested = requested.as_ref();
+    let display = requested.display();
     // Absolute paths are only accepted if they fall inside the workspace root.
-    let raw = if Path::new(requested).is_absolute() {
-        PathBuf::from(requested)
+    let raw = if requested.is_absolute() {
+        requested.to_path_buf()
     } else {
         workspace_root.join(requested)
     };
@@ -303,14 +476,9 @@ pub fn validate_path(workspace_root: &Path, requested: &str) -> Result<PathBuf, 
         .canonicalize()
         .unwrap_or_else(|_| workspace_root.to_path_buf());
 
-    // Reject traversals that escape the workspace.
-    if !normalised.starts_with(&canonical_root) {
-        return Err(format!("Path is outside the workspace: {requested}"));
-    }
-
-    let resolved = resolve_existing_prefix(&normalised, requested)?;
+    let resolved = resolve_existing_prefix(&normalised, &display.to_string())?;
     if !resolved.starts_with(&canonical_root) {
-        return Err(format!("Path is outside the workspace: {requested}"));
+        return Err(format!("Path is outside the workspace: {display}"));
     }
 
     Ok(resolved)
@@ -318,10 +486,14 @@ pub fn validate_path(workspace_root: &Path, requested: &str) -> Result<PathBuf, 
 
 /// Validates a not-yet-created path without allowing symlink ancestors to
 /// redirect the final write outside the workspace.
-pub fn validate_new_path(workspace_root: &Path, requested: &str) -> Result<PathBuf, String> {
+pub fn validate_new_path(
+    workspace_root: &Path,
+    requested: impl AsRef<Path>,
+) -> Result<PathBuf, String> {
+    let requested = requested.as_ref();
     let resolved = validate_path(workspace_root, requested)?;
     if resolved.file_name().is_none() {
-        return Err(format!("Path has no file name: {requested}"));
+        return Err(format!("Path has no file name: {}", requested.display()));
     }
     Ok(resolved)
 }
@@ -330,7 +502,7 @@ pub fn validate_new_path(workspace_root: &Path, requested: &str) -> Result<PathB
 /// from its leading sample.
 pub enum FileContent {
     Text(Vec<u8>),
-    Binary { len: u64 },
+    Binary { len: Option<u64> },
 }
 
 /// Reads a file for a file tool. Text is read whole; a binary file is never
@@ -346,12 +518,22 @@ pub async fn read_file_content(path: &Path) -> io::Result<FileContent> {
                 Ok(FileContent::Text(bytes))
             }
             None => Ok(FileContent::Binary {
-                len: file.metadata()?.len(),
+                len: match file.metadata()?.len() {
+                    0 => None,
+                    len => Some(len),
+                },
             }),
         }
     })
     .await
     .map_err(io::Error::other)?
+}
+
+/// A binary classification implies non-empty content. Zero metadata length
+/// on virtual files therefore means that the byte length is unknown.
+pub fn binary_size_description(len: Option<u64>) -> String {
+    len.map(|len| format!("{len} bytes"))
+        .unwrap_or_else(|| "unknown byte length".into())
 }
 
 /// Reads the classification sample from the start of `source`, returning it
@@ -528,7 +710,12 @@ fn normalise_path(path: &Path) -> PathBuf {
 
 fn context_roots(ctx: &dyn ToolContext) -> Result<Vec<PathBuf>, String> {
     let mut roots = vec![canonical_existing_root(ctx.working_directory())?];
-    for path in ctx.allowed_paths() {
+    for path in ctx
+        .allowed_paths()
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(ctx.tool_output_directory())
+    {
         let root = if !path.exists() {
             resolve_existing_prefix(&normalise_path(path), &path.to_string_lossy())?
         } else {
@@ -576,7 +763,7 @@ fn approval_root_for_request(
     ctx: &dyn ToolContext,
     requested: &str,
     directory_target: bool,
-) -> Option<String> {
+) -> Option<PathBuf> {
     let raw = if Path::new(requested).is_absolute() {
         PathBuf::from(requested)
     } else {
@@ -592,9 +779,7 @@ fn approval_root_for_request(
     } else {
         normalised.parent()?
     };
-    resolve_existing_prefix(root, requested)
-        .ok()
-        .map(|path| path.to_string_lossy().into_owned())
+    resolve_existing_prefix(root, requested).ok()
 }
 
 /// Follows every symlink before appending missing path components, including
@@ -651,6 +836,54 @@ mod tests {
         tempfile::TempDir::new().expect("create temp dir")
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn regression_output_writes_do_not_follow_planted_links() {
+        use std::os::unix::fs::symlink;
+        use tokio::io::AsyncWriteExt;
+
+        for site in [".gitignore", "stdout.txt", "call-directory", "output-root"] {
+            let dir = tmp_workspace();
+            let outside = tmp_workspace();
+            let victim = outside.path().join("victim.txt");
+            std::fs::write(&victim, b"keep me").unwrap();
+            let ctx = swage_tool::context::MockToolContext::new("agent", "session");
+            let mut ctx = ctx;
+            ctx.working_directory = dir.path().into();
+            let artifact = tool_output_artifact_path(&ctx, "stdout.txt");
+            let root = tool_output_root(&ctx);
+            std::fs::create_dir_all(artifact.absolute.parent().unwrap()).unwrap();
+            match site {
+                ".gitignore" => symlink(&victim, root.join(".gitignore")).unwrap(),
+                "stdout.txt" => symlink(&victim, &artifact.absolute).unwrap(),
+                "call-directory" => {
+                    let parent = artifact.absolute.parent().unwrap();
+                    std::fs::remove_dir(parent).unwrap();
+                    symlink(outside.path(), parent).unwrap();
+                }
+                "output-root" => {
+                    std::fs::remove_dir_all(&root).unwrap();
+                    symlink(outside.path(), &root).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            if let Ok(mut file) = create_tool_output_artifact(&ctx, &artifact.absolute).await {
+                file.write_all(b"output").await.unwrap();
+                file.flush().await.unwrap();
+            }
+            assert_eq!(
+                std::fs::read(&victim).unwrap(),
+                b"keep me",
+                "{site} redirected a gateway write"
+            );
+            assert_eq!(
+                std::fs::read_dir(outside.path()).unwrap().count(),
+                1,
+                "{site} created output outside its root"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn tool_output_artifact_is_readable_without_untracked_git_changes() {
         use std::process::Command;
@@ -682,7 +915,7 @@ mod tests {
         drop(file);
 
         let resolved =
-            resolve_context_path(&ctx, &artifact.relative).expect("resolve reported relative path");
+            resolve_context_path(&ctx, &artifact.reported).expect("resolve reported path");
         assert_eq!(
             tokio::fs::read(resolved.path).await.unwrap(),
             b"full tool output"
@@ -1040,5 +1273,137 @@ mod tests {
             "a missing grant must remain usable: {resolved:?}"
         );
         assert_eq!(resolved.unwrap().path, attachment_root);
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    use swage_tool::context::MockToolContext;
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn regression_non_utf8_root_read_write_and_approval() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(std::ffi::OsStr::from_bytes(b"root-\xff"));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("notes"), "hello").unwrap();
+        let mut ctx = MockToolContext::new("agent", "session");
+        ctx.working_directory = root.clone();
+        assert_eq!(
+            resolve_context_path(&ctx, "notes").unwrap().path,
+            root.join("notes")
+        );
+        assert_eq!(
+            resolve_new_context_path(&ctx, "new/notes").unwrap().path,
+            root.join("new/notes")
+        );
+        assert_eq!(
+            approval_root_for_request(&ctx, "new/notes", false).unwrap(),
+            root.join("new")
+        );
+        let error = location_approval_error("file_write", &ctx, "unapproved/notes", "write", false);
+        assert!(
+            matches!(error, ToolError::ExecutionFailed { ref message, .. } if message.contains("non-UTF-8")),
+            "a display path became approval authority: {error:?}"
+        );
+        let ctx = writable_test_context(&root, vec![]);
+        crate::tool::Tool::execute(
+            &crate::tool::file_write::FileWriteTool,
+            json!({"path":"new/notes", "content":"lossless"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let read = crate::tool::Tool::execute(
+            &crate::tool::file_read::FileReadTool {
+                max_output_bytes: 100,
+            },
+            json!({"path":"new/notes"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(read["output"], "lossless");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn regression_canonical_candidate_accepts_approved_symlink_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        let allowed = dir.path().join("allowed");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::write(allowed.join("notes"), "hello").unwrap();
+        std::os::unix::fs::symlink(&allowed, workspace.join("alias")).unwrap();
+        let mut ctx = MockToolContext::new("agent", "session");
+        ctx.working_directory = workspace;
+        ctx.allowed_paths.push(allowed.clone());
+        assert_eq!(
+            resolve_context_path(&ctx, "alias/notes").unwrap().path,
+            allowed.join("notes")
+        );
+        assert_eq!(
+            resolve_new_context_path(&ctx, "alias/new").unwrap().path,
+            allowed.join("new")
+        );
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn regression_untrusted_child_cannot_release_read_only_parent() {
+        use swage_storage::NewWorkspaceAttachment;
+        let dir = tempfile::tempdir().unwrap();
+        let child = dir.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        let ctx = writable_test_context(dir.path(), vec![]);
+        let session = ctx
+            .storage()
+            .get_session(uuid::Uuid::parse_str(ctx.session_id()).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        for (path, trusted, permissions) in [
+            (dir.path(), true, vec!["read".into()]),
+            (child.as_path(), false, vec!["read".into(), "write".into()]),
+        ] {
+            ctx.storage()
+                .create_workspace_attachment(NewWorkspaceAttachment {
+                    topic_id: session.topic_id,
+                    label: path.display().to_string(),
+                    path: path.display().to_string(),
+                    permissions,
+                    is_trusted: trusted,
+                })
+                .await
+                .unwrap();
+        }
+        let result = crate::tool::Tool::execute(
+            &crate::tool::file_write::FileWriteTool,
+            json!({"path":"child/notes", "content":"forbidden"}),
+            &ctx,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "untrusted child released a write: {result:?}"
+        );
+        assert!(!child.join("notes").exists());
+    }
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn regression_device_preflight_does_not_traverse_unattached_host_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("cycle", dir.path().join("cycle")).unwrap();
+        let ctx = writable_test_context(dir.path(), vec![]);
+        let result = require_native_file_write_access(
+            "file_write",
+            &json!({"path":"cycle/notes"}),
+            &ctx,
+            true,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "host traversal blocked device-owned path: {result:?}"
+        );
     }
 }

@@ -344,13 +344,18 @@ pub(crate) async fn build_agent_config_for_topic_workspace(
         &topic.location(),
         session_id,
     );
-    let agent_config = build_agent_config_with_workspace(
+    let mut agent_config = build_agent_config_with_workspace(
         agent_id,
         config,
         output_schema_override,
         &tool_root.path,
         allowed_paths,
     );
+    agent_config.tool_output_directory = Some(managed_scratch_workspace(
+        &state.config_root,
+        &topic.location(),
+        session_id,
+    ));
     (agent_config, tool_root)
 }
 

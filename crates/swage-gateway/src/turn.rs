@@ -669,6 +669,16 @@ pub(super) async fn process_turn_with_composition_and_focus(
         &tool_root.path,
         allowed_paths,
     );
+    let output_directory = managed_scratch_workspace(&state.config_root, &scope, session.id);
+    tokio::fs::create_dir_all(&output_directory)
+        .await
+        .map_err(|error| {
+            GatewayError::ConfigError(format!(
+                "failed to create tool output directory {}: {error}",
+                output_directory.display()
+            ))
+        })?;
+    agent_config.tool_output_directory = Some(output_directory);
     if !task_defines_output_retries && let Some(max_retries) = max_output_retries_override {
         agent_config.max_output_retries = max_retries;
     }
@@ -919,3 +929,86 @@ pub(crate) mod tests;
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod output_scratch_regressions {
+    use super::*;
+    use swage_core::StreamChunk;
+    use swage_storage::{SessionStore, TopicStore, WorkspaceAttachmentStore};
+
+    #[tokio::test]
+    async fn regression_disabled_sandbox_turn_can_write_artifacts_with_attached_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let storage = Arc::new(tests::MockStorage::new());
+        let (state, session_id) = tests::make_state_with_storage_and_root(
+            vec![
+                StreamChunk::Delta {
+                    content: "done".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            storage.clone(),
+            Some(root.path().into()),
+        )
+        .await;
+        {
+            let mut config = state.runtime_config.write().unwrap();
+            config.sandbox.enabled = false;
+            config.sandbox.allow_degraded_execution = true;
+        }
+        let topic = storage.general_scope().await.unwrap();
+        let attachment = storage
+            .create_workspace_attachment(swage_storage::NewWorkspaceAttachment {
+                topic_id: topic.id,
+                label: "workspace".into(),
+                path: workspace.path().to_str().unwrap().into(),
+                permissions: vec!["read".into()],
+                is_trusted: true,
+            })
+            .await
+            .unwrap();
+        storage
+            .set_session_active_workspace(session_id, Some(attachment.id))
+            .await
+            .unwrap();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "hello",
+            mpsc::unbounded_channel().0,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .unwrap();
+        let output = managed_scratch_workspace(root.path(), &topic.location(), session_id);
+        let mut base = swage_tool::context::MockToolContext::new("gateway", session_id.to_string());
+        base.working_directory = workspace.path().into();
+        let mut ctx = swage_tool::context::serialise_tool_context(&base);
+        ctx.tool_output_directory = Some(swage_tool::context::ToolOutputLocation {
+            directory: output.clone(),
+        });
+        let result = crate::tool::shell::ShellTool {
+            timeout: std::time::Duration::from_secs(5),
+            max_output_bytes: 4,
+        }
+        .execute(
+            serde_json::json!({"command": "printf 'artifact text'"}),
+            &ctx,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "disabled sandbox turn must permit output artefacts: {result:?}"
+        );
+        let result = result.unwrap();
+        let path = std::path::Path::new(result["stdout_artifact_path"].as_str().unwrap());
+        assert!(path.starts_with(output));
+        assert_eq!(std::fs::read(path).unwrap(), b"artifact text");
+        assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 0);
+    }
+}
