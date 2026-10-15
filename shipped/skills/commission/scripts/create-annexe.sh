@@ -392,13 +392,20 @@ if [ -z "$push_url" ]; then
 fi
 
 # Making the remote repo. On GitHub the repo is created explicitly, private,
-# before the push (gh refuses an existing name, so this runs only on the create
-# path). On a Forgejo instance the first push creates it (push-to-create,
-# private by default). A failure here leaves the work safely committed
-# locally — re-running just retries.
-if [ "$forge" = github ] && [ "$mode" = create ]; then
-  echo "create-annexe: creating private repository $gh_repo on GitHub."
-  gh repo create "$gh_repo" --private --description "Planning annexe for $project: intent, ideas, issues and build state" >/dev/null
+# before the push, whenever the probe found it absent — on the create path and
+# on a repair whose first run committed locally and then failed to create
+# (gh refuses an existing name, so an existing repo is never created twice).
+# On a Forgejo instance the first push creates it (push-to-create, private by
+# default). A failure here leaves the work safely committed locally —
+# re-running just retries.
+if [ "$forge" = github ]; then
+  if [ "$mode" = repair ] && [ -z "${remote_exists:-}" ]; then
+    if gh repo view "$gh_repo" --json name >/dev/null 2>&1; then remote_exists=yes; else remote_exists=no; fi
+  fi
+  if [ "${remote_exists:-no}" = no ]; then
+    echo "create-annexe: creating private repository $gh_repo on GitHub."
+    gh repo create "$gh_repo" --private --description "Planning annexe for $project: intent, ideas, issues and build state" >/dev/null
+  fi
 fi
 
 # Push to the intended URL explicitly, never to whatever 'origin' happens to be

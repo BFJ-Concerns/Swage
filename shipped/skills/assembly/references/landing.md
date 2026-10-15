@@ -27,9 +27,14 @@ pass; how each reports is that reviewer's own contract.
   open with `gh pr create --base <base> --head <branch> --title "WIP: …"
   --body-file <pr.md>`; read back with `gh pr view <n> --json
   number,title,body,headRefName,baseRefName,state,mergedAt,mergeCommit,url`;
-  de-WIP and re-block with `gh pr edit <n> --title …`; close unmerged
-  with `gh pr close <n> --comment "<reason>"`; switch on
-  delete-branch-on-merge with `gh repo edit --delete-branch-on-merge`.
+  de-WIP and re-block with `gh pr edit <n> --repo <owner>/<repo> --title …`;
+  close unmerged with `gh pr close <n> --repo <owner>/<repo> --comment
+  "<reason>"`; switch on delete-branch-on-merge with `gh repo edit
+  <owner>/<repo> --delete-branch-on-merge` (the repository is that
+  command's positional argument, not a flag). The landing prompts in
+  build-verify.js and estate-unit.js carry the open and read-back verbs
+  inline, because a worker reads only its prompt; this section is the
+  whole route, and a change to a verb lands here and in both prompts.
   GitHub has no PR-dependency field: an ordering that targeting cannot
   express is stated in the PR body (`Depends on #n`) and checked by
   reading the dependency's state before landing. Authentication is `gh`'s
