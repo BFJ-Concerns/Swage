@@ -5,8 +5,8 @@
 //!
 //! 1. **Summarise** — condense older turns into a summary via an LLM call.
 //! 2. **Truncate** — remove oldest messages beyond the summary.
-//! 3. **Aggressive truncate** — keep only system messages and the single most
-//!    recent message. All dropped messages are already safe in storage.
+//! 3. **Aggressive truncate** — keep system messages and the most recent
+//!    message with its tool round. All dropped messages are already safe in storage.
 
 use uuid::Uuid;
 
@@ -240,7 +240,19 @@ async fn try_summarise(
         return (messages, 0);
     }
 
-    let midpoint = messages.len() / 2;
+    let mut midpoint = messages.len() / 2;
+    while midpoint > 0 && carries_tool_result(&messages[midpoint]) {
+        midpoint -= 1;
+    }
+    if midpoint == 0 {
+        midpoint = messages.len() / 2;
+        while midpoint < messages.len() && carries_tool_result(&messages[midpoint]) {
+            midpoint += 1;
+        }
+    }
+    if midpoint == messages.len() {
+        return (messages, 0);
+    }
     let old_messages = &messages[..midpoint];
     let new_messages = messages[midpoint..].to_vec();
 
@@ -367,13 +379,13 @@ fn truncate(messages: Vec<ChatMessage>, threshold: &CompactionThreshold) -> Vec<
         }
     };
 
-    let start = non_system.len().saturating_sub(target_keep);
+    let start = retained_start(&non_system, target_keep);
     let mut result = system_msgs;
     result.extend_from_slice(&non_system[start..]);
     result
 }
 
-/// Keep only system messages and the single most recent non-system message.
+/// Keep system messages and the newest non-system message with its tool round.
 ///
 /// This is the last-resort tier before declaring the context uncompactable.
 fn aggressive_truncate(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
@@ -381,10 +393,37 @@ fn aggressive_truncate(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
         messages.into_iter().partition(|m| m.role() == Role::System);
 
     let mut result = system_msgs;
-    if let Some(last) = non_system.into_iter().last() {
-        result.push(last);
-    }
+    let start = retained_start(&non_system, 1);
+    result.extend_from_slice(&non_system[start..]);
     result
+}
+
+/// A retained suffix starts with a whole tool round. Prefer dropping the
+/// round to meet the budget; if it is the newest round, retain it whole and
+/// let the caller report an uncompactable context rather than send an orphan.
+fn retained_start(messages: &[ChatMessage], keep: usize) -> usize {
+    let proposed = messages.len().saturating_sub(keep);
+    let mut start = proposed;
+    while start < messages.len() && carries_tool_result(&messages[start]) {
+        start += 1;
+    }
+    if start == messages.len() && proposed < messages.len() {
+        start = proposed;
+        while start > 0 && carries_tool_result(&messages[start]) {
+            start -= 1;
+        }
+    }
+    start
+}
+
+fn carries_tool_result(message: &ChatMessage) -> bool {
+    message.role() == Role::Tool
+        || message.tool_call_id().is_some()
+        || message.tool_replay().is_some_and(|parts| {
+            parts
+                .iter()
+                .any(|part| matches!(part, swage_core::ToolReplayPart::ToolResult { .. }))
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -981,6 +1020,105 @@ mod tests {
     // -----------------------------------------------------------------------
     // compact integration tests (async)
     // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn continuity_every_compaction_tier_keeps_tool_results_with_their_calls() {
+        let mut orphans = Vec::new();
+        for replay in [false, true] {
+            for batch_size in [1, 2] {
+                let mut messages = vec![text_msg(Role::User, "older")];
+                let calls: Vec<_> = (0..batch_size)
+                    .map(|index| swage_core::ToolCall {
+                        call_id: format!("paired-{index}"),
+                        name: "file_read".into(),
+                        arguments: serde_json::json!({"path": "fixture"}),
+                    })
+                    .collect();
+                let results: Vec<_> = calls
+                    .iter()
+                    .map(|call| swage_core::ToolResult {
+                        call_id: call.call_id.clone(),
+                        content: "validated".into(),
+                        is_error: false,
+                    })
+                    .collect();
+                if replay {
+                    messages.extend(swage_core::tool::build_tool_round_messages(
+                        &calls, &results, "",
+                    ));
+                } else {
+                    messages.push(ChatMessage::assistant_tool_calls("", calls));
+                    messages.extend(
+                        results.iter().map(|result| {
+                            ChatMessage::tool_result(&result.call_id, &result.content)
+                        }),
+                    );
+                }
+                messages.push(text_msg(Role::User, "continue"));
+                let provider = SummaryProvider::new("summary");
+                let storage = stub_storage();
+                let (compacted, _) = compact_with_model(
+                    messages.clone(),
+                    &CompactionThreshold::MessageCount(3),
+                    provider.as_ref(),
+                    storage.as_ref(),
+                    Uuid::new_v4(),
+                    None,
+                    None,
+                    false,
+                )
+                .await
+                .unwrap();
+                for (tier, output) in [
+                    ("runtime", compacted),
+                    (
+                        "summary",
+                        try_summarise(messages.clone(), provider.as_ref(), None)
+                            .await
+                            .0,
+                    ),
+                    (
+                        "truncate",
+                        truncate(messages.clone(), &CompactionThreshold::MessageCount(2)),
+                    ),
+                    (
+                        "aggressive",
+                        aggressive_truncate(messages[..messages.len() - 1].to_vec()),
+                    ),
+                ] {
+                    let mut seen = std::collections::HashSet::new();
+                    for message in &output {
+                        for call in message.tool_calls().into_iter().flatten() {
+                            seen.insert(call.call_id.as_str());
+                        }
+                        if let Some(id) = message.tool_call_id()
+                            && !seen.contains(id)
+                        {
+                            orphans.push(format!("{tier}: {id}"));
+                        }
+                        for part in message.tool_replay().into_iter().flatten() {
+                            match part {
+                                swage_core::ToolReplayPart::ToolCall { call_id, .. } => {
+                                    seen.insert(call_id.as_str());
+                                }
+                                swage_core::ToolReplayPart::ToolResult { call_id, .. } => {
+                                    if !seen.contains(call_id.as_str()) {
+                                        orphans.push(format!("{tier} replay: {call_id}"));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    assert!(!output.is_empty(), "{tier} must preserve usable context");
+                }
+            }
+        }
+        assert!(
+            orphans.is_empty(),
+            "orphan tool results after compaction: {orphans:?}"
+        );
+    }
 
     #[tokio::test]
     async fn compact_below_threshold_returns_unchanged() {

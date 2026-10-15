@@ -43,6 +43,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Runtime fallback compaction keeps tool calls with their results across summarisation and both truncation tiers, preventing orphaned results in later model requests.
+
 - Anthropic messages completions accept thinking blocks alongside text, so conversation summaries and degradation diagnosis calls can decode the proxy’s responses.
 
 - Session previews in the recent list, sidebar, conversation selector, delete controls and Operator deck show plain text without Markdown formatting or link destinations. Operator session summaries are limited to three lines.
