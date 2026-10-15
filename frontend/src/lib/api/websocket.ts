@@ -158,8 +158,12 @@ export function createWebSocketClient(
     socket.onmessage = (event: MessageEvent) => {
       if (ws !== socket) return;
       try {
-        const parsed = parseServerEventFrame(JSON.parse(event.data as string));
+        let parsed = parseServerEventFrame(JSON.parse(event.data as string));
         if (parsed.type === "error" && parsed.code === "already_connected") {
+          parsed = {
+            ...parsed,
+            message: "This conversation is open in another tab. Switch to that tab to continue, or close it and retry here.",
+          };
           if (pendingFrames.length > 0) {
             pendingFrames = [];
             emitDeliveryFailure();

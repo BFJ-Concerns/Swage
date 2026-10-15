@@ -524,16 +524,20 @@ describe("connection failure classification", () => {
     const store = createConnectionStore({ wsClientFactory: () => createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" }) });
     const received: ServerEvent[] = [];
     store.onServerEvent(event => received.push(event));
-    store.connectTo("conv-abc");
+    const conversationId = "90257eb5-4078-47b3-a997-8f2fc8d72953";
+    const rawMessage = `Conversation ${conversationId} already has an active connection`;
+    store.connectTo(conversationId);
     latestWs().simulateOpen();
-    latestWs().simulateMessage({ type: "error", code: "already_connected", message: "Conversation already has an active connection" });
+    latestWs().simulateMessage({ type: "error", code: "already_connected", message: rawMessage });
     latestWs().simulateUnexpectedClose(1000);
     expect(store.status).toBe("error");
-    expect(store.errorMessage).toBe("Conversation already has an active connection");
+    expect(store.errorMessage).toBe("This conversation is open in another tab. Switch to that tab to continue, or close it and retry here.");
+    expect(store.errorMessage).not.toContain(rawMessage);
+    expect(store.errorMessage).not.toContain(conversationId);
     expect(received).toEqual([]);
     vi.advanceTimersByTime(60_000);
     expect(MockWebSocket.instances).toHaveLength(1);
-    store.connectTo("conv-abc");
+    store.connectTo(conversationId);
     latestWs().simulateOpen();
     expect(store.status).toBe("connected");
     expect(store.errorMessage).toBeNull();
@@ -570,7 +574,7 @@ describe("connection failure classification", () => {
     latestWs().simulateMessage({ type: "error", code: "already_connected", message: "Conversation already has an active connection" });
 
     expect(store.status).toBe("error");
-    expect(store.errorMessage).toBe("Conversation already has an active connection");
+    expect(store.errorMessage).toBe("This conversation is open in another tab. Switch to that tab to continue, or close it and retry here.");
     expect(stream.isStreaming).toBe(true);
     expect(stream.streamedContent).toBe("Still working");
     expect(stream.turnStartedAt).toBe(startedAt);
