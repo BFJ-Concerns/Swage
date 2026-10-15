@@ -398,15 +398,15 @@ pub(crate) async fn require_native_file_write_access(
             ctx.working_directory().join(path)
         };
         let path = normalise_path(&path);
-        if device_owned {
-            if !attachments.iter().any(|access| {
+        if device_owned
+            && !attachments.iter().any(|access| {
                 path.starts_with(&access.grant.path)
                     || path.starts_with(Path::new(&access.attachment.path))
-            }) {
-                // This path belongs to the paired machine. Only its receiver
-                // can resolve it; traversing the host filesystem is unrelated.
-                continue;
-            }
+            })
+        {
+            // This path belongs to the paired machine. Only its receiver
+            // can resolve it; traversing the host filesystem is unrelated.
+            continue;
         }
         let path = resolve_existing_prefix(&path, requested).map_err(|message| {
             ToolError::ExecutionFailed {
