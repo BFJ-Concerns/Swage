@@ -95,7 +95,7 @@ async fn next_signal_of_kind(
 #[tokio::test(flavor = "multi_thread")]
 async fn a_surface_update_inside_the_upgrade_handshake_window_reaches_the_surface() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(StubProvider),
@@ -147,7 +147,7 @@ async fn an_agents_annotation_signals_a_surface_with_no_conversation_open() {
         .await
         .unwrap();
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(StubProvider),
@@ -240,7 +240,7 @@ async fn saving_to_the_library_signals_open_catalogues_by_identity_only() {
         .await
         .unwrap();
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(StubProvider),

@@ -12,7 +12,12 @@ workspace = true
 name = "swage"
 path = "src/main.rs"
 
+[features]
+# Retained temporary roots for development-only state constructors.
+test-fixtures = ["dep:tempfile"]
+
 [dependencies]
+tempfile = { workspace = true, optional = true }
 swage-core = { path = "../swage-core" }
 swage-tool = { path = "../swage-tool" }
 swage-config = { path = "../swage-config" }
@@ -58,6 +63,7 @@ chromiumoxide = "0.9.1"
 jsonschema = { workspace = true }
 
 [dev-dependencies]
+swage-gateway = { path = ".", features = ["test-fixtures"] }
 swage-agent = { path = "../swage-agent", features = ["test-fixtures"] }
 swage-storage = { path = "../swage-storage", features = ["test-fixtures"] }
 swage-workflow = { path = "../swage-workflow", features = ["test-fixtures"] }

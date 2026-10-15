@@ -152,7 +152,7 @@ async fn start_ptc_test_server(
         .await
         .expect("PTC workspace should be the default active workspace");
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),

@@ -119,7 +119,7 @@ async fn start_test_server(
         None => SqliteStorage::in_memory().unwrap(),
     });
     let config = swage_config::ResolvedConfig::default();
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(provider),

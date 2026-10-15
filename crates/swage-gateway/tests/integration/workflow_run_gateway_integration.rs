@@ -282,7 +282,7 @@ async fn shipped_research_sweep_runs_valid_arguments_through_each_staged_role() 
     let provider = Arc::new(ResearchSweepProvider {
         stage_prompts: Mutex::new(vec![]),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn LlmProvider>,

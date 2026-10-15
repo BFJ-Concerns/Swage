@@ -60,7 +60,7 @@ impl LlmProvider for MockProvider {
 
 async fn start_test_server() -> (Router, SocketAddr) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(MockProvider),
@@ -160,7 +160,7 @@ async fn presence_snapshot_tracks_client_disconnect_and_reconnect() {
 /// A gateway whose state the test keeps, so it can register a device.
 async fn start_device_test_server() -> (SocketAddr, AppState) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(MockProvider),

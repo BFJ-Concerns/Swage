@@ -51,7 +51,7 @@ fn make_test_router() -> (Router, Arc<SqliteStorage>) {
     // Use a stub provider — these tests exercise the HTTP API layer and
     // storage, not LLM streaming.
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(StubProvider),

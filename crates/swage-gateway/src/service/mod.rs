@@ -66,7 +66,7 @@ mod tests {
             .general_scope()
             .await
             .expect("default topic should exist");
-        let state = crate::state::AppState::new(
+        let state = crate::state::AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(MockProvider::new(vec![])),

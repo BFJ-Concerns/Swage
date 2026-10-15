@@ -464,7 +464,7 @@ mod tests {
     #[tokio::test]
     async fn every_manifest_route_is_registered_on_the_router() {
         let storage = Arc::new(MockStorage::new());
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(MockProvider::new(vec![])),

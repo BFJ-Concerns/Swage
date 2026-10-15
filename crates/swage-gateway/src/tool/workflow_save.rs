@@ -227,7 +227,7 @@ mod tests {
 
     fn state() -> (AppState, Arc<SqliteStorage>) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),

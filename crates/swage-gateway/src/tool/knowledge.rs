@@ -1516,7 +1516,7 @@ mod tests {
             .unwrap();
 
         let provider = Arc::new(MockProvider::new(vec![]));
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider as Arc<dyn LlmProvider>,
@@ -1714,7 +1714,7 @@ mod tests {
             .await
             .unwrap();
         let provider = Arc::new(MockProvider::new(vec![]));
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider as Arc<dyn LlmProvider>,
@@ -1824,7 +1824,7 @@ mod tests {
             .await
             .unwrap();
         let provider = Arc::new(MockProvider::new(vec![]));
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider as Arc<dyn LlmProvider>,

@@ -81,7 +81,7 @@ async fn carried_workflow_runs_over_http_and_authored_source_shadows_it() {
     environment.set_swage_home(root.path());
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let topic = storage.general_scope().await.unwrap();
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(StubProvider),
@@ -202,7 +202,7 @@ async fn carried_workflow_runs_over_http_and_authored_source_shadows_it() {
 async fn terminal_run_rejects_operator_events_without_adding_to_the_queue() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let topic = storage.general_scope().await.unwrap();
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(StubProvider),
@@ -253,7 +253,7 @@ async fn terminal_run_rejects_operator_events_without_adding_to_the_queue() {
 async fn inline_run_keeps_anonymous_identity_in_its_public_projection() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let topic = storage.general_scope().await.unwrap();
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(StubProvider),
@@ -294,7 +294,7 @@ async fn inline_run_keeps_anonymous_identity_in_its_public_projection() {
 async fn cancelled_run_rejects_operator_events_without_adding_to_the_queue() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let topic = storage.general_scope().await.unwrap();
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(StubProvider),

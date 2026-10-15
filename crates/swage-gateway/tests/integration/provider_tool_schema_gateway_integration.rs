@@ -75,7 +75,7 @@ async fn gateway_turn_projects_registered_union_tool_schema_on_openai_wire() {
         "test-model",
         format!("http://{upstream_address}"),
     )));
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn LlmProvider>,

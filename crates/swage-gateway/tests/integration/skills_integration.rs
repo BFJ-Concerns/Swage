@@ -12,20 +12,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::support::{ProcessEnvGuard, WsStream, start_live_server, ws_collect_until_with};
-
-/// RAII guard that sets SWAGE_HOME for a test and restores it on drop.
-struct SwageHomeGuard {
-    _guard: ProcessEnvGuard,
-}
-
-impl SwageHomeGuard {
-    fn set(path: &std::path::Path) -> Self {
-        let mut guard = ProcessEnvGuard::new();
-        guard.set_swage_home(path);
-        Self { _guard: guard }
-    }
-}
+use crate::support::{WsStream, start_live_server, ws_collect_until_with};
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -92,10 +79,10 @@ fn fixed_response_provider_with_capture(
 async fn fresh_root_lists_orients_and_activates_a_shipped_skill() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
-    let _env_guard = SwageHomeGuard::set(root);
     let (provider, requests) = fixed_response_provider_with_capture("Commission ready.");
     let (router, addr, storage) =
-        start_test_server_with_config(provider, swage_config::ResolvedConfig::default()).await;
+        start_test_server_with_config(root, provider, swage_config::ResolvedConfig::default())
+            .await;
     let topic = swage_storage::store::TopicStore::general_scope(storage.as_ref())
         .await
         .unwrap();
@@ -205,17 +192,19 @@ fn create_skill_with_tools(
 }
 
 async fn start_test_server_with_config(
+    root: &std::path::Path,
     provider: impl LlmProvider + 'static,
     config: swage_config::ResolvedConfig,
 ) -> (Router, SocketAddr, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
         config,
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         None,
+        root.to_path_buf(),
     );
     let router = build_router(state);
 
@@ -329,13 +318,13 @@ async fn slash_command_activates_skill_and_appears_in_assembly_report() {
         "Review the code change systematically:\n\n1. Correctness\n2. Edge cases\n3. Clarity",
     );
 
-    // Point SWAGE_HOME at the temp directory so the gateway discovers our skills.
-    let _env_guard = SwageHomeGuard::set(root);
-
     let config = swage_config::ResolvedConfig::default();
-    let (router, addr, storage) =
-        start_test_server_with_config(fixed_response_provider("I'll review the code."), config)
-            .await;
+    let (router, addr, storage) = start_test_server_with_config(
+        root,
+        fixed_response_provider("I'll review the code."),
+        config,
+    )
+    .await;
 
     // Create a conversation in that topic.
     let topic_id = create_topic(&storage, "research").await;
@@ -436,11 +425,13 @@ async fn agent_level_skill_appears_in_assembly_without_invocation() {
         "You are a helpful coding assistant. Be precise and concise.",
     );
 
-    let _env_guard = SwageHomeGuard::set(root);
     let config = swage_config::ResolvedConfig::default();
-    let (router, addr, _storage) =
-        start_test_server_with_config(fixed_response_provider("Hello! How can I help?"), config)
-            .await;
+    let (router, addr, _storage) = start_test_server_with_config(
+        root,
+        fixed_response_provider("Hello! How can I help?"),
+        config,
+    )
+    .await;
 
     // Create a conversation — agent-level skills should auto-activate.
     let (status, body) = http(&router, "POST", "/api/conversations").await;
@@ -520,10 +511,9 @@ async fn activated_skill_persists_across_multiple_turns() {
         "Help the user debug issues step by step.",
     );
 
-    let _env_guard = SwageHomeGuard::set(root);
     let config = swage_config::ResolvedConfig::default();
     let (provider, requests) = fixed_response_provider_with_capture("Let me help.");
-    let (router, addr, storage) = start_test_server_with_config(provider, config).await;
+    let (router, addr, storage) = start_test_server_with_config(root, provider, config).await;
 
     let topic_id = create_topic(&storage, "research").await;
     let (status, body) = http(&router, "POST", &format!("/api/topics/{topic_id}/sessions")).await;
@@ -644,10 +634,9 @@ async fn deactivating_agent_level_skill_returns_error() {
         "You are a code assistant.",
     );
 
-    let _env_guard = SwageHomeGuard::set(root);
     let config = swage_config::ResolvedConfig::default();
     let (router, addr, _storage) =
-        start_test_server_with_config(fixed_response_provider("ok"), config).await;
+        start_test_server_with_config(root, fixed_response_provider("ok"), config).await;
 
     let (status, body) = http(&router, "POST", "/api/conversations").await;
     assert_eq!(status, StatusCode::CREATED);
@@ -718,10 +707,9 @@ async fn skills_listing_shows_resolved_skills_with_override() {
         "Format code according to topic standards.",
     );
 
-    let _env_guard = SwageHomeGuard::set(root);
     let config = swage_config::ResolvedConfig::default();
     let (router, _addr, storage) =
-        start_test_server_with_config(fixed_response_provider("ok"), config).await;
+        start_test_server_with_config(root, fixed_response_provider("ok"), config).await;
 
     let topic_id = create_topic(&storage, "research").await;
 

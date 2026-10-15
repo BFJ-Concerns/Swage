@@ -6228,7 +6228,7 @@ async fn make_state_with_provider_and_root(
             None,
             config_root,
         ),
-        None => AppState::new(
+        None => AppState::for_test(
             storage_backend,
             topic_store,
             provider,
@@ -6275,7 +6275,7 @@ async fn make_state_with_config_and_storage(
     .expect("create default thread");
 
     let provider = Arc::new(MockProvider::new(provider_chunks));
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         provider as Arc<dyn LlmProvider>,
@@ -6675,7 +6675,7 @@ async fn cancelled_turn_stores_partial_and_marks_interrupted() {
     .await
     .expect("create default thread");
 
-    let state = Arc::new(AppState::new(
+    let state = Arc::new(AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(PendingProvider) as Arc<dyn LlmProvider>,
@@ -6774,7 +6774,7 @@ async fn cancelled_turn_without_partial_stores_no_assistant_response() {
     .expect("create default thread");
 
     let stream_polled = Arc::new(Notify::new());
-    let state = Arc::new(AppState::new(
+    let state = Arc::new(AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(EmptyPendingProvider {
@@ -7160,7 +7160,7 @@ async fn provider_retry_events_name_the_requested_turn_model() {
             },
         );
     }
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
@@ -8163,7 +8163,7 @@ async fn make_state_with_tool_provider_and_storage(
     .await
     .expect("create default thread");
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         provider,
@@ -8205,7 +8205,7 @@ pub(crate) async fn make_state_with_capturing_tools(
 
     let (provider, captured) = CapturingMultiRoundProvider::new(rounds);
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -8472,7 +8472,7 @@ async fn cancelled_during_tool_dispatch_persists_partial_without_waiting() {
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MultiRoundMockProvider::new(vec![round_1])) as Arc<dyn LlmProvider>,
@@ -8596,7 +8596,7 @@ async fn cancelled_dispatch_with_failed_record_remains_cancelled_and_marks_turn_
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MultiRoundMockProvider::new(vec![round_1])) as Arc<dyn LlmProvider>,
@@ -9062,7 +9062,7 @@ async fn later_turn_rebuilds_tool_replay_from_persisted_compact_rows() {
         ],
     ]));
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         first_provider as Arc<dyn LlmProvider>,
@@ -9239,7 +9239,7 @@ async fn later_turn_rebuilds_multi_round_tool_replay_as_separate_pairs() {
         ],
     ]));
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         first_provider as Arc<dyn LlmProvider>,
@@ -9443,7 +9443,7 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
             finish_reason: None,
         },
     ]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -9617,7 +9617,7 @@ async fn later_turn_rebuilds_failed_tool_replay_as_error() {
             finish_reason: None,
         },
     ]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -10486,7 +10486,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         Arc::new(ShellMockTool) as Arc<dyn crate::tool::Tool>,
     ]);
 
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -10517,6 +10517,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         }),
         dispatcher,
         None,
+        swage_home.path().to_path_buf(),
     );
 
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -11067,7 +11068,7 @@ async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant()
         Arc::new(ShellMockTool) as Arc<dyn crate::tool::Tool>,
         Arc::new(FileReadMockTool) as Arc<dyn crate::tool::Tool>,
     ]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -11217,7 +11218,7 @@ async fn completed_detached_result_reaches_parent_next_turn() {
         crate::tool::ToolDispatcher::allow_all(vec![
             Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn crate::tool::Tool>
         ]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -11637,7 +11638,7 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
             },
         ],
     ]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -11992,7 +11993,7 @@ async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
             },
         ],
     ]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -12128,7 +12129,7 @@ async fn delegated_skill_selection_is_carried_by_the_composition_once() {
         })
         .await
         .expect("target agent definition");
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MockProvider::new(vec![
@@ -12142,6 +12143,7 @@ async fn delegated_skill_selection_is_carried_by_the_composition_once() {
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
+        swage_home.path().to_path_buf(),
     );
 
     let outcome = GatewayDelegationHandler::new(state)
@@ -13241,7 +13243,7 @@ async fn capture_provider_effort_for_selected_model(
             .await
             .expect("select session model");
     }
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -13421,7 +13423,7 @@ async fn process_turn_resolves_effort_against_the_declared_capability_and_record
             ..Default::default()
         },
     );
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -13552,7 +13554,7 @@ async fn process_turn_passes_tool_context_to_tools() {
 
     let provider = Arc::new(MultiRoundMockProvider::new(vec![round_1, round_2]));
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         provider as Arc<dyn LlmProvider>,
@@ -13623,7 +13625,7 @@ async fn process_turn_resolves_config_per_topic_and_completes_turn() {
     .await
     .expect("thread");
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -13669,7 +13671,7 @@ async fn process_turn_uses_hot_swapped_runtime_config_for_next_turn() {
     let (provider, captured_request) = CapturingProvider::new(chunks);
     let (storage, session_id) = make_storage_with_session().await;
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
@@ -13758,7 +13760,7 @@ async fn invalid_call_scoped_assembly_is_rejected_before_provider_dispatch() {
     let _guard = SwageHomeGuard::isolate();
     let (provider, captured_request) = CapturingProvider::new(vec![]);
     let (storage, session_id) = make_storage_with_session().await;
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -13810,7 +13812,7 @@ async fn unknown_forced_context_assembly_rejects_call_scoped_override() {
             forced_variant: Some("missing".to_owned()),
         },
     );
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -13916,7 +13918,7 @@ async fn forced_default_context_assembly_runs_and_records_forced_reason() {
             forced_variant: Some("default".to_owned()),
         },
     );
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -14266,7 +14268,7 @@ async fn process_turn_uses_hot_swapped_runtime_tool_policy_for_next_turn() {
     let (provider, captured_request) = CapturingProvider::new(chunks);
     let (storage, session_id) = make_storage_with_session().await;
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
@@ -14322,7 +14324,7 @@ async fn process_turn_stream_request_includes_registered_tool_definitions() {
     let (provider, captured_request) = CapturingProvider::new(chunks);
     let (storage, session_id) = make_storage_with_session().await;
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -14455,7 +14457,7 @@ async fn turn_model_snapshot_records_the_effective_model_and_its_source() {
             ..Default::default()
         },
     );
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -14634,7 +14636,7 @@ async fn process_turn_stream_request_inherits_global_permissions_without_workspa
     let (provider, captured_request) = CapturingProvider::new(chunks);
     let (storage, session_id) = make_storage_with_session().await;
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -14865,7 +14867,7 @@ async fn tool_context_working_directory_is_passed_during_tool_execution() {
 
     let provider = Arc::new(MultiRoundMockProvider::new(vec![round_1, round_2]));
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         provider as Arc<dyn LlmProvider>,
@@ -16334,13 +16336,14 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
     let mut config = swage_config::ResolvedConfig::default();
     config.context.assembly = "default".into();
     config.instructions = "Task: {{task}}; owner: {{owner}}".into();
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::TopicStore>,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
         config.clone(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
+        swage_home.path().to_path_buf(),
     );
     let host_context =
         swage_tool::context::MockToolContext::new("delegate", session.id.to_string());
@@ -18305,7 +18308,7 @@ async fn an_image_attachment_is_recorded_and_reaches_the_provider_as_a_content_p
     )
     .await
     .expect("thread");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -19384,7 +19387,7 @@ async fn selected_responses_entry_sharing_an_upstream_id_is_served_by_its_own_pr
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
     );
     let runtime_provider = crate::startup::create_provider(&config, &secret_manager).await;
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         runtime_provider,
@@ -19696,7 +19699,7 @@ async fn turn_against_single_provider(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
     );
     let runtime_provider = crate::startup::create_provider(&config, &secret_manager).await;
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         runtime_provider,
