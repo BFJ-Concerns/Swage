@@ -174,38 +174,7 @@ mod tests {
     use tempfile::TempDir;
     // Shared crate-wide lock — prevents races with http.rs tests that also
     // manipulate XDG_RUNTIME_DIR during parallel test execution.
-    use crate::test_helpers::ENV_LOCK;
-
-    /// Run `f` with `XDG_RUNTIME_DIR` pointing at a temporary directory,
-    /// cleaning up the variable afterwards regardless of panics.
-    fn with_temp_xdg<F: FnOnce(&TempDir)>(f: F) {
-        let _guard = ENV_LOCK.lock().unwrap();
-        with_temp_xdg_locked(f);
-    }
-
-    fn with_temp_xdg_locked<F: FnOnce(&TempDir)>(f: F) {
-        let dir = TempDir::new().unwrap();
-        let original_runtime = std::env::var_os("XDG_RUNTIME_DIR");
-        let original_home = std::env::var_os("SWAGE_HOME");
-        // SAFETY: callers hold ENV_LOCK for the entire environment scope.
-        unsafe {
-            std::env::set_var("XDG_RUNTIME_DIR", dir.path());
-            std::env::remove_var("SWAGE_HOME");
-        }
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&dir)));
-        for (key, value) in [
-            ("SWAGE_HOME", original_home),
-            ("XDG_RUNTIME_DIR", original_runtime),
-        ] {
-            match value {
-                Some(value) => unsafe { std::env::set_var(key, value) },
-                None => unsafe { std::env::remove_var(key) },
-            }
-        }
-        if let Err(e) = result {
-            std::panic::resume_unwind(e);
-        }
-    }
+    use crate::test_helpers::{ENV_LOCK, with_temp_xdg, with_temp_xdg_locked};
 
     #[test]
     fn xdg_fixture_restores_present_and_absent_environment_even_after_panic() {

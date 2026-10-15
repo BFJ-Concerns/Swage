@@ -407,7 +407,7 @@ async fn browser_tools_run_through_dispatcher_storage_and_secret_hygiene() {
         swage_gateway::tool::browser::browser_tools(Arc::clone(&browser_host)),
     );
     let (router, addr) =
-        start_browser_tool_server(provider, dispatcher, Arc::clone(&storage)).await;
+        start_browser_tool_server(temp.path(), provider, dispatcher, Arc::clone(&storage)).await;
 
     let (_, body) = http(&router, "POST", "/api/conversations").await;
     let conv_id = body["id"].as_str().expect("conversation id").to_string();
@@ -664,7 +664,7 @@ fn browser_config_with_screenshots(
     screenshots: BrowserScreenshotPolicy,
 ) -> BrowserConfig {
     let tool_config = BrowserToolConfig {
-        binary_path: Some(binary.to_string()),
+        binary_path: Some(isolated_browser_binary(binary, root)),
         page_idle_secs: 30,
         process_idle_secs: 30,
         max_snapshot_bytes: 40_000,
@@ -680,6 +680,35 @@ fn browser_config_with_screenshots(
         screenshots: tool_config.screenshots,
         allow_hosts: tool_config.allow_hosts,
     }
+}
+
+/// Chromium keeps crash reports and certificate stores outside its profile.
+/// Give those child-process paths the same lifetime as the browser fixture.
+fn isolated_browser_binary(binary: &str, root: &std::path::Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+    let mut script = String::from("#!/bin/sh\n");
+    for key in [
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_RUNTIME_DIR",
+    ] {
+        let directory = root.join("browser-environment").join(key);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        script.push_str(&format!(
+            "export {key}={}\n",
+            quote(directory.to_str().unwrap())
+        ));
+    }
+    script.push_str(&format!("exec {} \"$@\"\n", quote(binary)));
+    let launcher = root.join("chromium-isolated");
+    std::fs::write(&launcher, script).unwrap();
+    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700)).unwrap();
+    launcher.to_str().unwrap().to_owned()
 }
 
 fn browser_binary_or_skip() -> Option<String> {
@@ -761,6 +790,7 @@ impl LlmProvider for ChannelProvider {
 }
 
 async fn start_browser_tool_server(
+    root: &std::path::Path,
     provider: impl LlmProvider + 'static,
     dispatcher: swage_gateway::tool::ToolDispatcher,
     storage: Arc<SqliteStorage>,
@@ -772,13 +802,14 @@ async fn start_browser_tool_server(
         vec![swage_config::model::RequireApprovalEntry::Simple(
             "browser_type".to_string(),
         )];
-    let state = AppState::for_test(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(provider),
         config,
         dispatcher,
         None,
+        root.to_path_buf(),
     );
     let router = build_router(state);
     let (addr, _server) = start_live_server(router.clone()).await;
@@ -963,7 +994,7 @@ async fn spawn_probe_browser(
         .await
         .expect("probe profile");
     let child = swage_gateway::browser::chromium_command(
-        std::path::Path::new(binary),
+        std::path::Path::new(&isolated_browser_binary(binary, root)),
         &profile,
         port,
         false,
