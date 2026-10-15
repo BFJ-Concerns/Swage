@@ -7,6 +7,7 @@
 pub mod assembly;
 pub mod briefing;
 pub mod compaction;
+pub mod current_time;
 pub mod delta_summarisation;
 pub mod element;
 pub mod history;

@@ -28,6 +28,8 @@ pub struct SessionEnvironment {
     pub topic_description: String,
     /// The directory tool paths resolve against and where that path came from.
     pub tool_root: ToolRoot,
+    /// Attached workspaces readable under the resolved turn policy.
+    pub workspaces: Vec<ReadableWorkspace>,
     /// Session start time. Rendered to the minute — stable across the
     /// session's turns, so the assembled prefix stays cache-friendly.
     pub started_at: DateTime<Utc>,
@@ -35,6 +37,14 @@ pub struct SessionEnvironment {
     /// the model should know whose voice it is using and what that surface
     /// can render.
     pub channel: Option<ChannelOrientation>,
+}
+
+/// A readable workspace and the access granted to this session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadableWorkspace {
+    pub path: String,
+    pub can_write: bool,
+    pub is_trusted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +158,22 @@ impl OrientationElement {
                 ));
             }
         }
+        for workspace in &self.environment.workspaces {
+            let access = if workspace.can_write {
+                "writable"
+            } else {
+                "read-only"
+            };
+            let trust = if workspace.is_trusted {
+                "trusted"
+            } else {
+                "untrusted"
+            };
+            place.push_str(&format!(
+                "Workspace: {} — {access}, {trust}\n",
+                workspace.path
+            ));
+        }
         place.push_str(&format!(
             "Session started: {}\n",
             self.environment.started_at.format("%Y-%m-%d %H:%M UTC")
@@ -225,6 +251,7 @@ mod tests {
             started_at: DateTime::parse_from_rfc3339("2026-08-09T18:30:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
+            workspaces: vec![],
             channel: None,
         }
     }
@@ -360,5 +387,61 @@ mod tests {
     fn source_names_function_not_mechanism() {
         let element = OrientationElement::new(bare_environment(), vec![]);
         assert_eq!(element.source(), "built-in identity");
+    }
+    #[test]
+    fn orientation_readable_workspaces_render_paths_access_and_trust() {
+        let mut environment = bare_environment();
+        environment.workspaces = vec![
+            ReadableWorkspace {
+                path: "/projects/source".into(),
+                can_write: true,
+                is_trusted: true,
+            },
+            ReadableWorkspace {
+                path: "/references/pack".into(),
+                can_write: false,
+                is_trusted: true,
+            },
+        ];
+        let text = OrientationElement::new(environment, vec![]).content()[0].text_content();
+        assert!(
+            text.contains("Workspace: /projects/source — writable, trusted"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Workspace: /references/pack — read-only, trusted"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn orientation_session_start_and_current_time_are_distinct() {
+        let environment = bare_environment();
+        let now = DateTime::parse_from_rfc3339("2026-10-15T13:42:57Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let elements: Vec<Box<dyn ContextElement>> = vec![
+            Box::new(OrientationElement::new(environment, vec![])),
+            Box::new(crate::current_time::CurrentTimeElement::new(now)),
+        ];
+        let output = crate::assembly::assemble(
+            &elements,
+            &swage_config::model::ContextConfig::default(),
+            &crate::tokeniser::TiktokenTokeniser::new("test"),
+        );
+        let text = output
+            .messages
+            .iter()
+            .map(ChatMessage::text_content)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("Session started: 2026-08-09 18:30 UTC"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Current time: 2026-10-15 13:42:57 UTC"),
+            "{text}"
+        );
     }
 }

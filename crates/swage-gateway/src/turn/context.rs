@@ -6,7 +6,8 @@ use super::{
 use swage_context::briefing::BriefingElement;
 use swage_context::named_element::discover_named_elements;
 use swage_context::orientation::{
-    AvailableSkill, ChannelOrientation, OrientationElement, SessionEnvironment, ToolRoot,
+    AvailableSkill, ChannelOrientation, OrientationElement, ReadableWorkspace, SessionEnvironment,
+    ToolRoot,
 };
 use swage_context::working_norms::{WorkingNormsElement, WorkingNormsScaffold};
 use swage_core::ScopeLocation;
@@ -68,6 +69,9 @@ pub(crate) fn build_assembly_elements(
 
     let mut elements: Vec<Box<dyn ContextElement>> = vec![
         Box::new(OrientationElement::new(environment, available_skills)),
+        Box::new(swage_context::current_time::CurrentTimeElement::new(
+            chrono::Utc::now(),
+        )),
         // Models arrive over the proxy bare: the norms their own harness
         // would have supplied come from the assembly, keyed by the coming
         // turn's model family.
@@ -144,6 +148,7 @@ pub(crate) fn build_session_environment(
     topic: &swage_storage::Topic,
     tool_root: &ResolvedToolRoot,
     session: &swage_storage::Session,
+    workspace_policy: &super::TrustedWorkspacePolicy,
 ) -> SessionEnvironment {
     let session_metadata = session.metadata.as_ref();
     // A channel session's origin was stamped at session creation; surface the
@@ -188,6 +193,30 @@ pub(crate) fn build_session_environment(
                 ToolRoot::ManagedScratch(tool_root.path.display().to_string())
             }
         },
+        workspaces: workspace_policy
+            .active_workspace
+            .iter()
+            .chain(&workspace_policy.attachments)
+            .filter(|workspace| {
+                workspace.can_read
+                    && (tool_root.source != ToolRootSource::WorkerPlacement
+                        || workspace.path.starts_with(&tool_root.path))
+            })
+            .map(|workspace| ReadableWorkspace {
+                path: workspace.path.display().to_string(),
+                // A placed worker is confined to its placement root and its
+                // current write grant, even within a writable topic workspace.
+                can_write: workspace.can_write
+                    && (tool_root.source != ToolRootSource::WorkerPlacement
+                        || session_metadata
+                            .and_then(|metadata| {
+                                metadata.get(super::WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY)
+                            })
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false)),
+                is_trusted: workspace.is_trusted,
+            })
+            .collect(),
         // The session row's creation time, not the turn's clock: the block
         // renders identically on every turn of the session, keeping the
         // assembled prefix stable.

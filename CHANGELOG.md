@@ -43,6 +43,9 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Session orientation lists every readable attached workspace with its path, access and trust state.
+- Each turn receives a current UTC time to the second, separately from the stable session-start orientation.
+
 - Session previews in the recent list, sidebar, conversation selector, delete controls and Operator deck show plain text without Markdown formatting or link destinations. Operator session summaries are limited to three lines.
 - The workflow-authoring skill states event-kind names as the gateway accepts them: segments are joined by `.`, `:` or `/` only, with `_` and `-` allowed inside a segment but never separating one.
 - Denying a tool approval identifies the user's denial in the tool card and the feedback sent to the model, distinct from an approval timeout.
