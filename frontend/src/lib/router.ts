@@ -222,16 +222,16 @@ export function createRouter(options?: RouterOptions): Router {
           // can show an appropriate notice.
           updateRoute(rootRoute("/", true));
           window.history.replaceState(null, "", "/");
+        } else if (isActiveConversation) {
+          // A transient existence-check failure must not evict a working
+          // conversation or reject from the asynchronous popstate listener.
+          return;
         } else if (options?.onNavigationError) {
           options.onNavigationError(error);
           const fallback = options.conversationStore.activeConversationId;
           const fallbackPath = fallback ? conversationPath(fallback) : "/";
           window.history.replaceState(null, "", fallbackPath);
           updateRoute(parseRoute(fallbackPath));
-        } else if (isActiveConversation) {
-          // A transient existence-check failure must not evict a working
-          // conversation or reject from the asynchronous popstate listener.
-          return;
         } else {
           throw error;
         }

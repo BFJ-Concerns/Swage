@@ -39,11 +39,11 @@ All notable changes to Swage are documented in this file.
 
 ### Removed
 
-- Unused persisted topic selection and recent-topic history; session selection still determines the live scope.
-
 - The terminal client (`swage chat`) and its `swage-tui` crate; the web UI and desktop shell are the conversation interfaces.
 
 ### Fixed
+
+- Conversation connections recover after a gateway restart, distinguish confirmed connection ownership from transport loss, preserve a running turn when another tab refuses a reconnect, and ignore late events from sockets replaced during navigation.
 
 - Switching session scope clears the sidebar immediately and ignores older list responses.
 - General sessions show “General” in the header; named topics retain their topic label.

@@ -1213,23 +1213,28 @@ describe("ambient conversation channel", () => {
 
 
 describe("scope labels and catalogue selection", () => {
+  let component: MountedComponent | undefined;
+  afterEach(async () => {
+    if (component) await unmount(component);
+    component = undefined;
+    document.body.replaceChildren();
+  });
   it("labels general scope without Topic and keeps the topic label", async () => {
-    const general = mountLayout({ hasCurrentTopic: false });
+    const general = component = mountLayout({ hasCurrentTopic: false });
     await Promise.resolve();
     flushSync();
     expect(document.querySelector('[aria-label="Session scope"]')?.textContent?.trim()).toBe("General");
-    unmount(general);
-    const topic = mountLayout();
+    await unmount(general);
+    component = mountLayout();
     flushSync();
     expect(document.querySelector('[aria-label="Session scope"]')?.textContent).toContain("Topic");
     expect(document.querySelector('[aria-label="Session scope"]')?.textContent).toContain("default");
-    unmount(topic);
   });
 
   it("searches all sixty start topics and starts with the chosen late topic", () => {
     const topics = Array.from({ length: 60 }, (_, i) => ({ id: `t-${i}`, name: `Topic ${i}`, slug: `t-${i}`, description: "", created_at: "" }));
     const onStart = vi.fn();
-    const start = mount(SessionStart, { target: document.body, props: { topics, onStart } });
+    component = mount(SessionStart, { target: document.body, props: { topics, onStart } });
     flushSync();
     const search = document.querySelector<HTMLInputElement>('input[aria-label="Search start topics"]');
     expect(search).not.toBeNull();
@@ -1240,6 +1245,5 @@ describe("scope labels and catalogue selection", () => {
     const button = Array.from(document.querySelectorAll("button")).find(button => button.textContent === "Start")!;
     flushSync(() => button.click());
     expect(onStart).toHaveBeenCalledWith({ topicId: "t-59", agentId: null });
-    unmount(start);
   });
 });
