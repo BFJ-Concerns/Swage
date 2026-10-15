@@ -39,7 +39,7 @@ export interface ConnectionStore {
 export interface ConnectionStoreOptions {
   // Injectable factory for testing — defaults to createWebSocketClient().
   wsClientFactory?: () => WebSocketClient;
-  // Called when a dropped connection successfully reconnects. The owner is
+  // Called when a dropped or refused connection successfully reconnects. The owner is
   // carried through so an off-screen conversation is reconciled rather than
   // whichever conversation happens to be selected at that moment.
   onReconnect?: (conversationId: string) => void;
@@ -81,10 +81,12 @@ export function createConnectionStore(
     client.onEvent((event) => {
       for (const handler of serverEventHandlers) handler(event, conversationId);
     });
+    let needsRecovery = false;
     client.onStatusChange((newStatus, message) => {
-      const wasReconnecting = statuses.get(conversationId) === "reconnecting";
+      if (newStatus === "reconnecting" || newStatus === "error") needsRecovery = true;
       statuses.set(conversationId, newStatus);
-      if (wasReconnecting && newStatus === "connected") {
+      if (needsRecovery && newStatus === "connected") {
+        needsRecovery = false;
         options?.onReconnect?.(conversationId);
       }
       if (conversationId !== selectedConversationId) return;

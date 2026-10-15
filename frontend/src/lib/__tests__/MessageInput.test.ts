@@ -37,6 +37,7 @@ function makeStreamingStore(isStreaming = false): StreamingStore {
     handleServerEvent: vi.fn(),
     startTurn: vi.fn(),
     cancelTurn: vi.fn(),
+    clearConnectionError: () => {},
     reconcileAfterReconnect: vi.fn(),
   };
 }

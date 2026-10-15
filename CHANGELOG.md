@@ -43,7 +43,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
-- Conversation connections recover after a gateway restart, explain when another tab owns the conversation and how to retry, distinguish that refusal from transport loss, preserve a running turn when another tab refuses a reconnect, and ignore late events from sockets replaced during navigation.
+- Conversation connections recover after a gateway restart, explain when another tab owns the conversation and how to retry, clear that warning once reconnected, distinguish that refusal from transport loss, preserve a running turn when another tab refuses a reconnect, and ignore late events from sockets replaced during navigation.
 
 - Switching session scope clears the sidebar immediately and ignores older list responses.
 - General sessions show “General” in the header; named topics retain their topic label.

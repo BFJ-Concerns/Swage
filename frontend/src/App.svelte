@@ -55,6 +55,7 @@
   let streamingStore: StreamingStore;
   const connectionStore = createConnectionStore({
     onReconnect: async (conversationId) => {
+      streamingStore.clearConnectionError(conversationId);
       const recoveredTurnGeneration = streamingStore.streamFor?.(conversationId)
         .activeTurnGeneration ?? 0;
       if (conversationStore.activeConversation?.id === conversationId) {
