@@ -168,6 +168,8 @@ fn resolve_layers(
     layers: &[(HierarchyLevel, PathBuf)],
 ) -> Result<ResolvedConfig, ConfigError> {
     let mut problems: Vec<ConfigProblem> = Vec::new();
+    let has_base = base.is_some();
+    let mut has_layer_config = false;
 
     // Instructions are text, not a configuration field: the partial never
     // carries them, so the base's are set aside before the conversion and
@@ -181,6 +183,7 @@ fn resolve_layers(
     };
     for (_, directory) in layers {
         if let Some(partial) = try_load_file(&directory.join("config.toml"), &mut problems) {
+            has_layer_config = true;
             config_chain.push(partial);
         }
     }
@@ -191,9 +194,14 @@ fn resolve_layers(
     }
 
     let mut resolved = merge::resolve(merge::merge_chain(config_chain));
-    let reference_problems = validation::validate_resolved_catalog_references(&resolved, root);
-    if !reference_problems.is_empty() {
-        return Err(ConfigError::new(reference_problems));
+    // A running base is already resolved, and can also be supplied directly
+    // by an in-process caller. Only a configuration file can change its
+    // catalogue: instruction-only overlays must take that base as given.
+    if !has_base || has_layer_config {
+        let reference_problems = validation::validate_resolved_catalog_references(&resolved, root);
+        if !reference_problems.is_empty() {
+            return Err(ConfigError::new(reference_problems));
+        }
     }
 
     // The base's instructions, then each layer's, in the shape a full load
@@ -645,6 +653,52 @@ api_key = "x"
                 "{scope:?}: the overlay of nothing is the running configuration itself"
             );
         }
+    }
+
+    #[test]
+    fn instruction_only_scopes_preserve_an_injected_running_catalogue() {
+        let tmp = TempDir::new().unwrap();
+        let scope = ScopeLocation::topic("proj");
+        let instruction_dir = scope.data_dir(tmp.path()).join("instructions");
+        fs::create_dir_all(&instruction_dir).unwrap();
+        fs::write(instruction_dir.join("01-rules.md"), "TOPIC_RULES").unwrap();
+        let mut running = ResolvedConfig::default();
+        running.providers.entries.insert(
+            "codex".into(),
+            crate::ProviderEndpointConfig {
+                protocol: crate::Protocol::Codex,
+                ..Default::default()
+            },
+        );
+        // In-process callers can inject catalogues that the file loader
+        // deliberately refuses. An instruction overlay does not load one.
+        fs::write(
+            tmp.path().join("config.toml"),
+            "[providers.entries.codex]\nprotocol = \"codex\"\n",
+        )
+        .unwrap();
+        let error = load_running_config_from(tmp.path(), &ScopeLocation::General)
+            .expect_err("file loading still refuses the built-in Codex protocol");
+        assert!(error.to_string().contains("temporarily disabled"));
+        let session = overlay_scope_layers(running.clone(), tmp.path(), &scope, "bot")
+            .expect("an unchanged running catalogue is taken as given");
+        assert_eq!(session.providers, running.providers);
+        assert!(session.instructions.contains("TOPIC_RULES"));
+
+        // File-based configuration still crosses the validation boundary.
+        fs::write(
+            scope.data_dir(tmp.path()).join("config.toml"),
+            "[models]\ndefault = \"missing\"\n",
+        )
+        .unwrap();
+        let error = overlay_scope_layers(running, tmp.path(), &scope, "bot")
+            .expect_err("a scope file cannot introduce a missing model reference");
+        assert!(
+            error
+                .problems
+                .iter()
+                .any(|problem| { problem.field_path.as_deref() == Some("models.default") })
+        );
     }
 
     #[test]

@@ -507,7 +507,11 @@ default_effort = "high"
         let (svc, storage) = make_definition_service();
         let response = svc
             .with_config(
-                swage_config::ResolvedConfig::default(),
+                swage_config::load_running_config_from(
+                    retained_root.path(),
+                    &swage_core::ScopeLocation::General,
+                )
+                .expect("load running global configuration"),
                 retained_root.path().to_path_buf(),
             )
             .create_conversation_from_request(CreateConversationRequest::default())
