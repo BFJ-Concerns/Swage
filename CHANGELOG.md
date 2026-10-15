@@ -43,6 +43,12 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Memory page reads and notice links keep the latest selection when responses arrive out of order, including reads overtaken by a curator edit.
+- Successful memory curation keeps its reply and updated page when the following listing refresh fails; the refresh error names its scope.
+- A general memory page open in Settings updates when an instruction sent to a topic changes it.
+- Memory listings remain visible when another scope fails to load, with failures shown beside the affected scope.
+- Opening a memory page selects that page's scope for curator instructions, including pages opened from notices.
+
 - Session previews in the recent list, sidebar, conversation selector, delete controls and Operator deck show plain text without Markdown formatting or link destinations. Operator session summaries are limited to three lines.
 - The workflow-authoring skill states event-kind names as the gateway accepts them: segments are joined by `.`, `:` or `/` only, with `_` and `-` allowed inside a segment but never separating one.
 - Denying a tool approval identifies the user's denial in the tool card and the feedback sent to the model, distinct from an approval timeout.
