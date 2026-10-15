@@ -258,6 +258,7 @@ pub async fn drain_queue(state: &AppState, session_id: Uuid) -> Result<Option<Uu
                 &ServerEvent::QueueDrained {
                     session_id,
                     turn_id: turn.id,
+                    thread_id: turn.thread_id,
                     queued_ids: drained.queued_ids.clone(),
                 },
             )
@@ -344,9 +345,7 @@ pub async fn drain_queue(state: &AppState, session_id: Uuid) -> Result<Option<Uu
         }
         let mut unique = Vec::new();
         for target in targets {
-            if !unique.contains(&target) {
-                unique.push(target);
-            }
+            crate::channel_gateway::push_unique_target(&mut unique, target);
         }
         if let Err(error) = crate::channel_gateway::deliver_to_targets(
             state,

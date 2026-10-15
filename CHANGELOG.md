@@ -44,6 +44,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Shared-session channel arrivals keep their order across chats, and queued branch replies stay on their own thread in the live conversation.
+
 - Developer channel messages join the durable session queue during a turn. Telegram polling continues while the assistant answers; queued inputs retain their thread destinations, replies are delivered once per target, and deleting a session settles its waiting scheduled work. Delayed queue acknowledgements cannot restore drained messages.
 - Telegram linking codes last 24 hours, survive application-state reconstruction, and remain readable through the channel onboarding API until successful single-use redemption. Invalid destinations leave their codes available.
 

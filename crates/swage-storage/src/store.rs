@@ -1128,6 +1128,11 @@ pub trait ChannelQueueStore: Send + Sync {
         account: &str,
     ) -> Result<Option<String>, StorageError>;
 
+    /// Pending inbox rows not yet transferred, in global arrival order.
+    async fn list_pending_channel_messages(
+        &self,
+    ) -> Result<Vec<ChannelInboundMessage>, StorageError>;
+
     async fn list_pending_channel_origins(&self)
     -> Result<Vec<PendingChannelOrigin>, StorageError>;
 
@@ -1929,6 +1934,12 @@ mod tests {
             _: &str,
             _: &str,
         ) -> Result<Option<String>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_pending_channel_messages(
+            &self,
+        ) -> Result<Vec<ChannelInboundMessage>, StorageError> {
             unimplemented!()
         }
 

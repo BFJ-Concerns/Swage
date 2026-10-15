@@ -5231,6 +5231,12 @@ impl swage_storage::store::ChannelQueueStore for MockStorage {
         Ok(None)
     }
 
+    async fn list_pending_channel_messages(
+        &self,
+    ) -> Result<Vec<swage_storage::ChannelInboundMessage>, StorageError> {
+        Ok(Vec::new())
+    }
+
     async fn list_pending_channel_origins(
         &self,
     ) -> Result<Vec<swage_storage::PendingChannelOrigin>, StorageError> {
