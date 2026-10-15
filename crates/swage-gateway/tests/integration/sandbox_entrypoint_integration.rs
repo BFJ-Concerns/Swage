@@ -243,12 +243,17 @@ async fn bubblewrap_sandbox_reads_broadly_masks_private_paths_and_reaches_the_ne
     let outside = home.path().join("outside");
     std::fs::create_dir(&outside).unwrap();
 
+    let granted = ssh.join("granted");
+    std::fs::create_dir(&granted).unwrap();
+    std::fs::write(granted.join("visible"), "granted subtree").unwrap();
+
     let (port, server) = host_http_server();
     let recorded = std::sync::Arc::new(Recorded::default());
     let config = SandboxConfig::builder()
         .working_directory(&workspace)
         .write_path(&workspace)
         .masked_path(&ssh)
+        .read_only_path(&granted)
         .masked_path(home.path().join(".netrc"))
         .tool_call_timeout(std::time::Duration::from_secs(15))
         .llm_request_timeout(std::time::Duration::from_secs(10))
@@ -282,7 +287,7 @@ async fn bubblewrap_sandbox_reads_broadly_masks_private_paths_and_reaches_the_ne
 
     // Reads are broad: a file beside the masks is readable; the masks are not.
     let reads = shell(format!(
-        "cat {notes}; echo; ls -A {ssh} | wc -l; cat {netrc} | wc -c; cat {ssh}/id_ed25519 2>&1 || true",
+        "cat {notes}; echo; find {ssh} -mindepth 1 -maxdepth 1 ! -name granted | wc -l; cat {netrc} | wc -c; cat {ssh}/id_ed25519 2>&1 || true",
         notes = home.path().join("notes.txt").display(),
         ssh = ssh.display(),
         netrc = home.path().join(".netrc").display(),
@@ -300,6 +305,23 @@ async fn bubblewrap_sandbox_reads_broadly_masks_private_paths_and_reaches_the_ne
     assert!(
         !reads.contains("secret"),
         "the token file must read as empty: {reads}"
+    );
+
+    let reopened = shell(format!("cat {}/visible", granted.display())).await;
+    assert_eq!(
+        reopened.trim(),
+        "granted subtree",
+        "grant beneath mask must reopen"
+    );
+    assert!(
+        shell(format!(
+            "cat {}/id_ed25519 2>/dev/null || true",
+            ssh.display()
+        ))
+        .await
+        .trim()
+        .is_empty(),
+        "the granted subtree must not reopen its private sibling"
     );
 
     // Writes: the workspace yes, the sibling outside the write set no.
