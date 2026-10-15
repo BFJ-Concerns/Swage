@@ -6,7 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
-- Schedules can skip, queue with a configurable pending fire cap, or allow overlapping runs; the form, API and scheduling tool expose the policy, and suppressed fires remain in run history.
+- Schedules can skip, queue with a configurable pending fire cap, or allow overlapping runs; the form, API and scheduling tool expose the policy, paused schedules retain their policy and cap display, and suppressed fires remain in run history.
 
 - Settings has a Memory tab listing every memory page, general and per topic, to read; a chat box there changes memory by instructing the curator, showing its reply and each page it changed. The curator's notice links open the page they name.
 - Settings edits the web search provider and applies saved changes to new turns.

@@ -126,6 +126,21 @@ describe("ScheduleAutomationPanel", () => {
     expect(pausedRow?.textContent).not.toContain("next");
   });
 
+  it("shows a paused schedule's overlap policy and pending cap", async () => {
+    vi.mocked(operatorApi.listSchedules).mockResolvedValue({
+      schedules: [makeSchedule({ status: "paused", overlap_policy: "queue", pending_cap: 3 })],
+    });
+    component = mount(ScheduleAutomationPanel, {
+      target: document.body,
+      props: { topicId: "topic-1", sessionId: "session-1" },
+    });
+    await flushUi();
+
+    const row = document.querySelector(".schedule-row");
+    expect(row?.textContent).toContain("While a run is active: queue (cap 3)");
+    expect(row?.textContent).toContain("Resume");
+  });
+
   it("lists schedules with their status and run history", async () => {
     component = mount(ScheduleAutomationPanel, {
       target: document.body,
