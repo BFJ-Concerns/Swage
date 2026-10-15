@@ -42,6 +42,7 @@ mod duration_millis {
 /// only when debug mode is enabled at dispatch time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolOutput {
+    pub execution: swage_protocol::client::conversation::ToolExecution,
     /// Tool output after leak-detection redaction applied by the dispatch pipeline.
     pub result: Value,
 
@@ -73,6 +74,7 @@ mod tests {
     #[test]
     fn tool_output_constructs_with_all_fields() {
         let output = ToolOutput {
+            execution: swage_protocol::client::conversation::ToolExecution::succeeded(),
             result: json!({"answer": 42}),
             cost: Some(0.01),
             duration: Duration::from_millis(150),
@@ -87,6 +89,7 @@ mod tests {
     fn tool_output_raw_is_none_by_default() {
         // Constructing without debug mode should leave raw as None.
         let output = ToolOutput {
+            execution: swage_protocol::client::conversation::ToolExecution::succeeded(),
             result: json!(null),
             cost: None,
             duration: Duration::from_secs(0),
@@ -98,6 +101,7 @@ mod tests {
     #[test]
     fn tool_output_serde_round_trip_no_raw() {
         let output = ToolOutput {
+            execution: swage_protocol::client::conversation::ToolExecution::succeeded(),
             result: json!({"key": "value"}),
             cost: Some(0.05),
             duration: Duration::from_millis(250),
@@ -114,6 +118,7 @@ mod tests {
     #[test]
     fn tool_output_serde_round_trip_with_raw() {
         let output = ToolOutput {
+            execution: swage_protocol::client::conversation::ToolExecution::succeeded(),
             result: json!({"redacted": "[REDACTED]"}),
             cost: None,
             duration: Duration::from_millis(100),
@@ -130,6 +135,7 @@ mod tests {
     fn tool_output_duration_serialises_as_millis() {
         // Duration must survive the serde round-trip with sub-second precision.
         let output = ToolOutput {
+            execution: swage_protocol::client::conversation::ToolExecution::succeeded(),
             result: json!({}),
             cost: None,
             duration: Duration::from_millis(1234),

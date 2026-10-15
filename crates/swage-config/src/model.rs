@@ -362,6 +362,8 @@ impl Default for BrowserToolConfig {
 /// Tool execution settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolConfig {
+    /// Identical failing calls permitted within one unattended turn.
+    pub max_identical_failures: u32,
     /// Maximum seconds a shell command may run before being killed.
     pub shell_timeout_secs: u64,
     /// Python execution settings shared by python-backed features.
@@ -385,6 +387,7 @@ pub struct ToolConfig {
 impl Default for ToolConfig {
     fn default() -> Self {
         Self {
+            max_identical_failures: 3,
             shell_timeout_secs: 30,
             python_execute: PythonExecuteToolConfig::default(),
             max_output_bytes: 100_000,
@@ -1519,6 +1522,7 @@ timeout_policy = "reject"
         bundles.insert("safe".to_string(), vec!["echo".into()]);
 
         let original = ToolConfig {
+            max_identical_failures: 3,
             shell_timeout_secs: 60,
             python_execute: PythonExecuteToolConfig::default(),
             max_output_bytes: 50_000,

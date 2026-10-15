@@ -2173,6 +2173,7 @@ pub(crate) struct MockStorage {
     fail_workflow_attempt_writes: AtomicBool,
     last_snapshot_list_limit: AtomicUsize,
     approval_read_barrier: std::sync::Mutex<Option<(Arc<tokio::sync::Barrier>, usize)>>,
+    fail_next_approval_write: AtomicBool,
     pause_approved_writes: AtomicBool,
     approved_write_release: Notify,
     approved_write_started: Notify,
@@ -2677,6 +2678,7 @@ impl MockStorage {
             fail_workflow_attempt_writes: AtomicBool::new(false),
             last_snapshot_list_limit: AtomicUsize::new(0),
             approval_read_barrier: std::sync::Mutex::new(None),
+            fail_next_approval_write: AtomicBool::new(false),
             pause_approved_writes: AtomicBool::new(false),
             approved_write_release: Notify::new(),
             approved_write_started: Notify::new(),
@@ -4872,6 +4874,23 @@ impl MessageStore for MockStorage {
 
 #[async_trait]
 impl ToolCallStore for MockStorage {
+    async fn record_tool_call_execution(
+        &self,
+        id: Uuid,
+        execution: swage_protocol::client::conversation::ToolExecution,
+    ) -> Result<(), StorageError> {
+        let mut db = self.db.lock().await;
+        db.tool_calls
+            .iter_mut()
+            .find(|record| record.id == id)
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "tool_call".into(),
+                id: id.to_string(),
+            })?
+            .execution = Some(execution);
+        Ok(())
+    }
+
     async fn create_tool_call(
         &self,
         tool_call: NewToolCall,
@@ -4882,6 +4901,7 @@ impl ToolCallStore for MockStorage {
             ));
         }
         let record = ToolCallRecord {
+            execution: None,
             id: Uuid::new_v4(),
             turn_id: tool_call.turn_id,
             agent_id: tool_call.agent_id,
@@ -5092,6 +5112,11 @@ impl ApprovalStore for MockStorage {
         state: ApprovalState,
         reason: Option<&str>,
     ) -> Result<bool, StorageError> {
+        if self.fail_next_approval_write.swap(false, Ordering::SeqCst) {
+            return Err(StorageError::QueryFailed(
+                "transient approval write failure".into(),
+            ));
+        }
         if state == ApprovalState::Approved && self.pause_approved_writes.load(Ordering::SeqCst) {
             self.approved_write_started.notify_one();
             self.approved_write_release.notified().await;
@@ -8529,7 +8554,46 @@ async fn cancelled_during_tool_dispatch_persists_partial_without_waiting() {
     let threads = state.storage.list_by_session(session_id).await.unwrap();
     let thread_id = threads[0].id;
     let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
-    assert_eq!(turns[0].state, TurnState::Interrupted);
+    let calls = state
+        .storage
+        .list_tool_calls_by_turn(turns[0].id)
+        .await
+        .unwrap();
+    assert_eq!(
+        calls[0].status.as_deref(),
+        Some("cancelled"),
+        "stored call status"
+    );
+    let replay = super::history::rebuild_thread_history_messages(&*state.storage, thread_id)
+        .await
+        .unwrap();
+    assert!(replay.iter().filter_map(ChatMessage::tool_replay).flatten().any(|part| matches!(part, swage_core::ToolReplayPart::ToolResult { content, .. } if content.contains("cancelled") && !content.contains("did not report"))), "next context must retain cancellation: {replay:?}");
+    let readback = crate::service::ConversationService::new(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.topic_store),
+    )
+    .get_conversation(session_id)
+    .await
+    .unwrap();
+    assert!(
+        readback
+            .messages
+            .iter()
+            .flat_map(|m| &m.tool_calls)
+            .any(|c| c.status.as_deref() == Some("cancelled")),
+        "conversation must retain cancelled status: {readback:?}"
+    );
+    println!("storage, conversation call readback and next-context cancellation assertions passed");
+    assert_eq!(
+        turns[0].state.to_string(),
+        "cancelled",
+        "Stop must cancel the turn"
+    );
+    let recorded = serde_json::to_value(&calls[0]).unwrap();
+    assert_eq!(recorded["execution"]["outcome"], "cancelled");
+    assert_eq!(recorded["execution"]["stage"], "started");
+    assert_eq!(recorded["execution"]["completion"], "unknown");
+
     assert_eq!(
         turns[0].assistant_response.as_deref(),
         Some(COMPLETED_ROUND_PARTIAL)
@@ -8546,8 +8610,8 @@ async fn cancelled_during_tool_dispatch_persists_partial_without_waiting() {
     assert_eq!(conversation.messages[1].role, "assistant");
     assert_eq!(conversation.messages[1].content, COMPLETED_ROUND_PARTIAL);
     assert_eq!(
-        conversation.messages[1].turn_state,
-        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+        serde_json::to_value(&conversation.messages[1].turn_state).unwrap(),
+        serde_json::json!("cancelled")
     );
 
     let thread = ThreadStore::get(&*state.storage, thread_id)
@@ -8660,6 +8724,16 @@ async fn cancelled_dispatch_with_failed_record_remains_cancelled_and_marks_turn_
         "record failure must remain visible on a cancelled turn"
     );
     assert!(events.iter().any(|event| matches!(event, ServerEvent::Error { message, .. } if message.contains("tool-call settlement refused"))), "record failure must reach the client: {events:?}");
+    assert!(
+        turns[0]
+            .failure_message
+            .as_ref()
+            .is_some_and(|reason| events.iter().any(
+                |event| matches!(event, ServerEvent::Error { message, .. } if message == reason)
+            )),
+        "the stored failure cause must be one the client actually received: {:?}",
+        turns[0].failure_message
+    );
     release.notify_waiters();
 }
 
@@ -9680,6 +9754,7 @@ fn compact_tool_replay_messages_includes_nested_compact_rows() {
     let top_level_call_id = "python_parent".to_string();
     let records = vec![
         ToolCallRecord {
+            execution: None,
             id: Uuid::new_v4(),
             turn_id,
             agent_id: "gateway".to_string(),
@@ -9705,6 +9780,7 @@ fn compact_tool_replay_messages_includes_nested_compact_rows() {
             display_summary: None,
         },
         ToolCallRecord {
+            execution: None,
             id: Uuid::new_v4(),
             turn_id,
             agent_id: "gateway".to_string(),
@@ -9775,6 +9851,7 @@ fn compact_tool_replay_messages_includes_nested_compact_rows() {
 
 fn complete_replay_record(call_id: &str) -> ToolCallRecord {
     ToolCallRecord {
+        execution: None,
         id: Uuid::new_v4(),
         turn_id: Uuid::new_v4(),
         agent_id: "gateway".into(),
@@ -20140,7 +20217,7 @@ async fn approval_scope_deadline_race_refuses_websocket_global_file_grant() {
     .unwrap();
 }
 
-async fn expired_live_waiter(check_turn: bool) {
+async fn expired_live_waiter(check_turn: bool, websocket: bool) {
     use crate::error::{Json, Path};
     use axum::extract::State;
     let storage = Arc::new(MockStorage::new());
@@ -20206,23 +20283,33 @@ async fn expired_live_waiter(check_turn: bool) {
         .get_mut(&approval_id)
         .unwrap()
         .timeout_at = chrono::Utc::now() - chrono::Duration::seconds(1);
-    let response = crate::handlers::decide_approval(
-        State(state),
-        Path(approval_id),
-        Json(crate::handlers::ApprovalDecisionRequest {
-            decision: swage_agent::approval::ApprovalDecisionValue::Approved,
-            scope: swage_agent::approval::ApprovalDecisionScope::Permanent,
-            reason: None,
-        }),
-    )
-    .await;
-    assert!(response.is_err());
+    let response_failed = if websocket {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        crate::websocket::dispatch_client_message(&serde_json::json!({"type":"approval_decision", "approval_id":approval_id, "decision":"approved", "scope":"permanent"}).to_string(), &state, session_id, tx, Arc::new(Mutex::new(SubscriptionState::new(true)))).await;
+        matches!(
+            rx.recv().await,
+            Some(ServerEvent::ApprovalDecisionError { .. })
+        )
+    } else {
+        crate::handlers::decide_approval(
+            State(state),
+            Path(approval_id),
+            Json(crate::handlers::ApprovalDecisionRequest {
+                decision: swage_agent::approval::ApprovalDecisionValue::Approved,
+                scope: swage_agent::approval::ApprovalDecisionScope::Permanent,
+                reason: None,
+            }),
+        )
+        .await
+        .is_err()
+    };
+    assert!(response_failed);
     let _ = task.await.unwrap();
     if check_turn {
         assert_eq!(
             storage.get_turn(turn_id).await.unwrap().unwrap().state,
-            TurnState::Interrupted,
-            "expiring a live Reject-policy waiter must interrupt its turn"
+            TurnState::Completed,
+            "expiring a live Reject-policy waiter must continue its turn"
         );
     } else {
         let calls = storage.list_tool_calls_by_turn(turn_id).await.unwrap();
@@ -20242,10 +20329,346 @@ async fn expired_live_waiter(check_turn: bool) {
 }
 
 #[tokio::test]
-async fn approval_scope_expired_live_waiter_interrupts_turn() {
-    expired_live_waiter(true).await;
+async fn approval_scope_expired_live_waiter_continues_turn() {
+    expired_live_waiter(true, false).await;
 }
 #[tokio::test]
 async fn approval_scope_expired_live_waiter_records_expired_feedback() {
-    expired_live_waiter(false).await;
+    expired_live_waiter(false, false).await;
+}
+
+#[tokio::test]
+async fn settlement_schema_exhaustion_keeps_reason_in_poll_and_history() {
+    let (state, session_id) = make_state_with_session(vec![
+        StreamChunk::Delta {
+            content: "not json".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ])
+    .await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Return JSON",
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        Some(serde_json::json!({"type":"object", "required":["answer"]})),
+    )
+    .await
+    .unwrap();
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ServerEvent::OutputSchemaFailed { .. })),
+        "real schema exhaustion: {events:?}"
+    );
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .remove(0);
+    let turn = state
+        .storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .unwrap()
+        .remove(0);
+    let reason = turn
+        .failure_message
+        .expect("schema exhaustion must persist its reason");
+    let live = events
+        .iter()
+        .find_map(|event| {
+            let value = serde_json::to_value(event).unwrap();
+            (value["type"] == "output_schema_failed").then_some(value)
+        })
+        .unwrap();
+    assert_eq!(
+        live["failure_message"], reason,
+        "live and stored schema causes must match"
+    );
+    let poll = crate::handlers::get_turn(
+        axum::extract::State(state.clone()),
+        crate::error::Path(turn.id),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(
+        serde_json::to_value(poll).unwrap()["failure_message"],
+        reason
+    );
+    let history = crate::service::ConversationService::new(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.topic_store),
+    )
+    .get_conversation(session_id)
+    .await
+    .unwrap();
+    assert!(
+        history
+            .messages
+            .iter()
+            .any(|m| m.failure_message.as_deref() == Some(reason.as_str())),
+        "history must keep the same cause"
+    );
+}
+
+#[tokio::test]
+async fn settlement_identical_failure_bound_ends_unattended_turn_with_cause() {
+    for limit in [1, 2] {
+        let _home = SwageHomeGuard::new();
+        let rounds = (0..4)
+            .map(|n| {
+                vec![
+                    StreamChunk::ToolUse {
+                        call_id: format!("failure-{n}"),
+                        name: "unavailable_tool".into(),
+                        arguments: serde_json::json!({"same":"arguments"}),
+                    },
+                    StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ]
+            })
+            .chain(std::iter::once(vec![
+                StreamChunk::Delta {
+                    content: "finished despite failures".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ]))
+            .collect();
+        let (provider, captured) = CapturingMultiRoundProvider::new(rounds);
+        let storage = Arc::new(MockStorage::new());
+        let (state, session_id) = make_state_with_provider_and_root(
+            Arc::new(provider),
+            storage.clone(),
+            Some(_home.path().to_path_buf()),
+        )
+        .await;
+        let mut config = serde_json::to_value(state.active_config()).unwrap();
+        config["tools"]["max_identical_failures"] = serde_json::json!(limit);
+        state.replace_runtime(
+            serde_json::from_value(config).unwrap(),
+            state.active_provider(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+        );
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let _ = process_turn_with_composition(
+            &state,
+            session_id,
+            None,
+            "Try the call".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+            None,
+            None,
+            None,
+            None,
+            TurnAttendance::Unattended,
+            DispatchContextComposition::default(),
+            None,
+        )
+        .await;
+        let thread = storage.list_by_session(session_id).await.unwrap().remove(0);
+        let turn = storage
+            .list_turns_by_thread(thread.id)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            turn.state,
+            TurnState::Failed,
+            "identical failures must end the turn at {limit}"
+        );
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            limit,
+            "no further provider round after the bound"
+        );
+        assert!(
+            turn.failure_message.unwrap().contains("unavailable_tool"),
+            "the underlying cause remains visible"
+        );
+        assert_eq!(
+            storage
+                .list_tool_calls_by_turn(turn.id)
+                .await
+                .unwrap()
+                .len(),
+            limit
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settlement_signal_termination_is_a_failed_operation() {
+    let (storage, turn_id, events, requests) = operation_outcome_turn(vec![(
+        "signal",
+        "shell",
+        serde_json::json!({"command": "kill -TERM $$"}),
+    )])
+    .await;
+    let calls = storage.list_tool_calls_by_turn(turn_id).await.unwrap();
+    assert_eq!(
+        calls[0].status.as_deref(),
+        Some("error"),
+        "a signalled process must fail"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ServerEvent::ToolEnd { status, .. } if status == "error"))
+    );
+    let results: Vec<_> = requests
+        .last()
+        .unwrap()
+        .messages
+        .iter()
+        .filter_map(ChatMessage::tool_replay)
+        .flatten()
+        .collect();
+    assert!(
+        results.iter().any(|part| matches!(
+            part,
+            swage_core::ToolReplayPart::ToolResult { is_error: true, .. }
+        )),
+        "the model must see failure: {results:?}"
+    );
+}
+
+#[tokio::test]
+async fn settlement_empty_optional_targets_are_validation_failures() {
+    let ctx = swage_tool::context::MockToolContext::new("agent", Uuid::new_v4().to_string());
+    let workflow = crate::tool::workflow_run::WorkflowRunTool;
+    for params in [
+        serde_json::json!({"name":""}),
+        serde_json::json!({"source":"  "}),
+    ] {
+        let error = workflow.execute(params, &ctx).await.unwrap_err();
+        assert!(
+            matches!(error, ToolError::InvalidParameters { ref message, .. } if message.contains("non-empty")),
+            "empty workflow target must be rejected before gateway access: {error}"
+        );
+    }
+    let host = crate::browser::BrowserHost::new(crate::browser::BrowserConfig::from_tool_config(
+        &Default::default(),
+        std::path::Path::new("/unused"),
+    ));
+    let scroll = crate::tool::browser::browser_tools(host)
+        .into_iter()
+        .find(|tool| tool.name() == "browser_scroll")
+        .unwrap();
+    let error = scroll
+        .execute(serde_json::json!({"ref":""}), &ctx)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, ToolError::InvalidParameters { ref message, .. } if message.contains("non-empty")),
+        "empty browser ref must be rejected before browser access: {error}"
+    );
+}
+
+#[tokio::test]
+async fn settlement_failed_approval_write_is_retryable_on_both_routes() {
+    use crate::error::{Json, Path};
+    use axum::extract::State;
+    use swage_agent::approval::{ApprovalDecisionScope, ApprovalDecisionValue};
+    async fn send(state: AppState, session_id: Uuid, approval_id: Uuid, websocket: bool) -> bool {
+        if websocket {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            crate::websocket::dispatch_client_message(&serde_json::json!({"type":"approval_decision","approval_id":approval_id,"decision":"approved"}).to_string(), &state, session_id, tx, Arc::new(Mutex::new(SubscriptionState::new(true)))).await;
+            matches!(
+                rx.recv().await.unwrap(),
+                ServerEvent::ApprovalConfirmed { .. }
+            )
+        } else {
+            crate::handlers::decide_approval(
+                State(state),
+                Path(approval_id),
+                Json(crate::handlers::ApprovalDecisionRequest {
+                    decision: ApprovalDecisionValue::Approved,
+                    scope: ApprovalDecisionScope::Once,
+                    reason: None,
+                }),
+            )
+            .await
+            .is_ok()
+        }
+    }
+    for websocket in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let storage = Arc::new(MockStorage::new());
+        let (state, session_id) = make_state_with_provider_and_root(
+            Arc::new(MockProvider::new(vec![])),
+            storage.clone(),
+            Some(root.path().to_path_buf()),
+        )
+        .await;
+        let thread = storage.list_by_session(session_id).await.unwrap().remove(0);
+        let turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "gateway".into(),
+                state: TurnState::AwaitingApproval,
+                user_input: None,
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let approval = storage
+            .create_approval(NewApprovalRequest {
+                turn_id: turn.id,
+                agent_id: "gateway".into(),
+                kind: swage_storage::ApprovalKind::Tool,
+                tool_name: Some("echo".into()),
+                tool_arguments: None,
+                hook_name: None,
+                prompt: "Allow echo?".into(),
+                context: None,
+                timeout_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+                timeout_policy: swage_core::ApprovalTimeoutPolicy::Reject,
+            })
+            .await
+            .unwrap();
+        let (sender, mut receiver) = tokio::sync::oneshot::channel();
+        state
+            .approval_channels
+            .lock()
+            .unwrap()
+            .insert(approval.id, sender.into());
+        storage
+            .fail_next_approval_write
+            .store(true, Ordering::SeqCst);
+        assert!(
+            !send(state.clone(), session_id, approval.id, websocket).await,
+            "failed write must not confirm"
+        );
+        assert!(
+            matches!(
+                receiver.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "failed settlement must keep the receiver open before its deadline"
+        );
+        assert!(
+            send(state.clone(), session_id, approval.id, websocket).await,
+            "retry must settle"
+        );
+        assert!(receiver.await.unwrap().is_approved());
+    }
+}
+
+#[tokio::test]
+async fn settlement_websocket_expiry_continues_a_reject_policy_turn() {
+    expired_live_waiter(true, true).await;
 }

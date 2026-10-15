@@ -47,6 +47,17 @@ impl Tool for ShellTool {
         "Execute a shell command in the workspace directory."
     }
 
+    fn execution_outcome(
+        &self,
+        result: &Value,
+    ) -> swage_protocol::client::conversation::ToolExecution {
+        if result["success"] == false {
+            swage_protocol::client::conversation::ToolExecution::failed()
+        } else {
+            swage_protocol::client::conversation::ToolExecution::succeeded()
+        }
+    }
+
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
@@ -181,6 +192,7 @@ impl Tool for ShellTool {
 
                 let mut output = truncated_output_value(&combined, self.max_output_bytes);
                 output["exit_code"] = json!(exit_status.code());
+                output["success"] = json!(exit_status.success());
                 if stdout.truncated {
                     output["stdout_truncated"] = json!(true);
                     output["stdout_total_bytes"] = json!(stdout.total_bytes);

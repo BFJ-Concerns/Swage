@@ -120,7 +120,9 @@ impl RetryProvider {
     /// The result is floored at `retry_after` extracted from a `RateLimited`
     /// error, ensuring the provider's hint is always respected.
     fn compute_backoff(&self, attempt: u32, error: &ProviderError) -> Duration {
-        let retry_after = if let ProviderError::RateLimited { retry_after, .. } = error {
+        let retry_after = if let ProviderError::RateLimited { retry_after, .. }
+        | ProviderError::Overloaded { retry_after, .. } = error
+        {
             *retry_after
         } else {
             None

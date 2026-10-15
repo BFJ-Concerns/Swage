@@ -83,7 +83,7 @@ const SESSION_ACTIVITY_COLUMNS: &str = "
     EXISTS (
         SELECT 1 FROM turns
         JOIN threads ON threads.id = turns.thread_id
-        WHERE threads.session_id = sessions.id AND turns.state = 'interrupted'
+        WHERE threads.session_id = sessions.id AND turns.state IN ('interrupted', 'cancelled')
     ) AS has_interrupted_turn";
 
 const SESSION_ACTIVITY_JOIN: &str = "

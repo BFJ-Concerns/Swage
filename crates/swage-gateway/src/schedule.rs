@@ -1346,7 +1346,9 @@ pub(crate) async fn settle_queued_run(
             state,
             &schedule,
             run_id,
-            format!("queued turn ended {}", turn.state),
+            turn.failure_message
+                .clone()
+                .unwrap_or_else(|| format!("queued turn ended {}", turn.state)),
             turn.assistant_response.clone(),
             false,
         )

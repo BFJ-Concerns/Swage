@@ -123,6 +123,125 @@ mod approval_tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn settlement_approval_feedback_keeps_post_execution_validation_truthful() {
+        use swage_tool::tool::Tool;
+        struct ReadThenReject;
+        #[async_trait::async_trait]
+        impl Tool for ReadThenReject {
+            fn name(&self) -> &str {
+                "read_then_reject"
+            }
+            fn description(&self) -> &str {
+                "Read a file."
+            }
+            fn parameters(&self) -> Value {
+                serde_json::json!({"type":"object", "properties":{"path":{"type":"string"}}, "required":["path"]})
+            }
+            async fn execute(
+                &self,
+                params: Value,
+                _ctx: &dyn swage_tool::context::ToolContext,
+            ) -> Result<Value, swage_core::ToolError> {
+                let content = std::fs::read_to_string(params["path"].as_str().unwrap()).unwrap();
+                assert_eq!(content, "read me");
+                Err(swage_core::ToolError::InvalidParameters {
+                    name: self.name().into(),
+                    message: "offset beyond the content read".into(),
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input");
+        std::fs::write(&path, "read me").unwrap();
+        let dispatcher = ToolDispatcher::allow_all(vec![Arc::new(ReadThenReject) as Arc<dyn Tool>]);
+        let ctx = AgentToolContext::new("agent", "session", dir.path());
+        let result = dispatcher
+            .dispatch(
+                "read_then_reject",
+                serde_json::json!({"path":path}),
+                &ctx,
+                "agent",
+            )
+            .await;
+        let result = tool_dispatch_result(result).unwrap();
+        let result = crate::approval::with_user_approval_note(
+            result,
+            crate::approval::ApprovalDecisionScope::Once,
+        );
+        let feedback = result.model_content(&result.content);
+        assert!(
+            !feedback.contains("did not run"),
+            "post-execution validation must not deny execution: {feedback}"
+        );
+        assert!(
+            feedback.contains("ran after approval"),
+            "execution must be confirmed: {feedback}"
+        );
+        assert!(result.is_error);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn settlement_delivered_approval_wins_an_already_ready_timer() {
+        for _ in 0..16 {
+            let registered = Arc::new(Mutex::new(None));
+            let slot = registered.clone();
+            let (agent, execution) = approval_fixture(Arc::new(move |id, sender| {
+                *slot.lock().unwrap() = Some((id, sender));
+                crate::approval::ApprovalChannelRegistration::default()
+            }))
+            .await;
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut scope = TurnApprovalScope::default();
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let gate = agent.handle_approval_gate(
+                &execution,
+                swage_storage::ApprovalKind::Tool,
+                Some("shell".into()),
+                None,
+                None,
+                "Allow shell?".into(),
+                None,
+                std::time::Duration::from_millis(250),
+                swage_core::ApprovalTimeoutPolicy::Reject,
+                &tx,
+                &cancel,
+                &mut scope,
+            );
+            tokio::pin!(gate);
+            loop {
+                tokio::select! {
+                    event = rx.recv() => if matches!(event, Some(AgentEvent::ApprovalRequired { .. })) { break; },
+                    result = &mut gate => panic!("gate completed without a decision: {result:?}"),
+                }
+            }
+            let (id, sender) = registered.lock().unwrap().take().unwrap();
+            agent
+                .storage
+                .update_approval_state(id, swage_storage::ApprovalState::Approved, None)
+                .await
+                .unwrap();
+            sender
+                .send(crate::approval::ApprovalDecision {
+                    decision: crate::approval::ApprovalDecisionValue::Approved,
+                    scope: crate::approval::ApprovalDecisionScope::Once,
+                    reason: None,
+                })
+                .unwrap();
+            // The gate itself is not polled during this wait: both its delivered
+            // decision and timer are ready when it next runs.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let outcome = gate.await.unwrap();
+            assert!(
+                matches!(
+                    outcome,
+                    crate::approval::ApprovalGateOutcome::Approved { .. }
+                ),
+                "a delivered accepted decision must beat the timer: {outcome:?}"
+            );
+        }
+    }
+
     async fn approval_fixture(
         registrar: ApprovalChannelRegistrar,
     ) -> (Agent, TurnExecutionContext) {
@@ -1070,6 +1189,8 @@ impl Agent {
         // zero, so a reader can tell "spent nothing" from "cannot say".
         let mut usage_reported = false;
         let mut total_tool_calls: u32 = 0;
+        let mut identical_failures: std::collections::HashMap<(String, String), u32> =
+            Default::default();
         let mut tool_position: i32 = 0;
         let mut round = 0usize;
         let mut incomplete_reason;
@@ -1084,7 +1205,7 @@ impl Agent {
                     .await;
                 let _ = self
                     .storage
-                    .update_turn_state(turn.id, TurnState::Interrupted)
+                    .update_turn_state(turn.id, TurnState::Cancelled)
                     .await;
                 let _ = self
                     .storage
@@ -1129,7 +1250,7 @@ impl Agent {
                     if cancel_token.is_cancelled() {
                         let _ = self
                             .storage
-                            .update_turn_state(turn.id, TurnState::Interrupted)
+                            .update_turn_state(turn.id, TurnState::Cancelled)
                             .await;
                         let _ = self
                             .storage
@@ -1173,6 +1294,9 @@ impl Agent {
                                 "tool call refused: its record could not be written: {error}"
                             );
                             let _ = event_tx.send(AgentEvent::ToolEnd {
+                                execution: Some(
+                                    swage_protocol::client::conversation::ToolExecution::refused(),
+                                ),
                                 call_id: call.call_id.clone(),
                                 tool_name: call.name.clone(),
                                 result: Value::String(refusal.clone()),
@@ -1292,21 +1416,7 @@ impl Agent {
                         .unwrap_or_else(|_| Value::String(result_content.clone()));
                     let result_metadata = extract_tool_result_metadata(&result_value);
 
-                    // These tools can return a structured result successfully even
-                    // when the operation failed. Keep that result and the model's
-                    // feedback intact, but record the operation's outcome.
-                    let status = if status == "success"
-                        && match call.name.as_str() {
-                            "shell" => result_value["exit_code"]
-                                .as_i64()
-                                .is_some_and(|code| code != 0),
-                            "workflow_run" => result_value["state"] == "failed",
-                            _ => false,
-                        } {
-                        "error".to_string()
-                    } else {
-                        status.clone()
-                    };
+                    let status = status.clone();
 
                     // PostToolUse hook — informational, fire-and-forget.
                     self.dispatch_post_tool_use(&call.name, &call.arguments, &result_value)
@@ -1332,19 +1442,24 @@ impl Agent {
                     let mut safe_result = safe_result;
                     let mut end_result = result_value;
                     let mut end_status = status.clone();
-                    if let Err(error) = self
-                        .storage
-                        .update_tool_call_result(
-                            record.id,
-                            result_content,
-                            &model_result,
-                            &status,
-                            duration_ms as i64,
-                            result_metadata.truncated,
-                            result_metadata.total_bytes,
-                        )
-                        .await
-                    {
+                    let settlement = async {
+                        self.storage
+                            .record_tool_call_execution(record.id, dispatch_result.execution)
+                            .await?;
+                        self.storage
+                            .update_tool_call_result(
+                                record.id,
+                                result_content,
+                                &model_result,
+                                &status,
+                                duration_ms as i64,
+                                result_metadata.truncated,
+                                result_metadata.total_bytes,
+                            )
+                            .await
+                    }
+                    .await;
+                    if let Err(error) = settlement {
                         let reason = format!(
                             "tool '{}' ran but its record could not be settled: {error}",
                             call.name
@@ -1359,6 +1474,7 @@ impl Agent {
                         end_status = "error".to_string();
                     }
                     let _ = event_tx.send(AgentEvent::ToolEnd {
+                        execution: Some(dispatch_result.execution),
                         call_id: call.call_id.clone(),
                         tool_name: call.name.clone(),
                         result: end_result,
@@ -1367,6 +1483,28 @@ impl Agent {
                     });
                     tool_position += 1;
                     total_tool_calls += 1;
+                    if !self.config.approval_prompts_enabled && is_error {
+                        let identity = (
+                            call.name.clone(),
+                            serde_json::to_string(&call.arguments).expect("JSON arguments"),
+                        );
+                        let failures = identical_failures.entry(identity).or_default();
+                        *failures += 1;
+                        if *failures >= self.config.max_identical_tool_failures.clamp(1, 100) {
+                            let reason = format!(
+                                "Repeated failing tool call '{}': {}",
+                                call.name, safe_result
+                            );
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: reason,
+                                provider_failure: false,
+                            });
+                            self.fail_turn_and_idle(turn.id, thread_id).await;
+                            return Err(AgentError::InvalidConfig(
+                                "repeated failing tool call limit reached".into(),
+                            ));
+                        }
+                    }
 
                     tool_results.push(ToolResult {
                         call_id: call.call_id.clone(),
@@ -1734,7 +1872,7 @@ impl Agent {
                         execution.turn_id,
                         &accumulated_partial,
                     ).await;
-                    let _ = self.storage.update_turn_state(execution.turn_id, TurnState::Interrupted).await;
+                    let _ = self.storage.update_turn_state(execution.turn_id, TurnState::Cancelled).await;
                     let _ = self.storage.update_state(execution.thread_id, ThreadState::Idle).await;
                     let _ = event_tx.send(AgentEvent::ProviderRoundSettled {
                         turn_id: execution.turn_id,
@@ -2013,24 +2151,25 @@ fn tool_dispatch_result(
     match result {
         Ok(output) => {
             let result_str = serde_json::to_string(&output.result).unwrap_or_default();
-            Ok((result_str, false, "success".to_string()).into())
+            let is_error = output.execution.outcome
+                != swage_protocol::client::conversation::ToolOutcome::Succeeded;
+            let mut result: ToolDispatchResult = (
+                result_str,
+                is_error,
+                if is_error { "error" } else { "success" }.to_owned(),
+            )
+                .into();
+            result.execution = output.execution;
+            Ok(result)
         }
         Err(error) => {
-            let execution_prevented = matches!(
-                error,
-                swage_core::ToolError::InvalidParameters { .. }
-                    | swage_core::ToolError::NotFound { .. }
-                    | swage_core::ToolError::PermissionDenied { .. }
-                    | swage_core::ToolError::RequiresApproval { .. }
-                    | swage_core::ToolError::RequiresLocationApproval { .. }
-            );
             let mut result: ToolDispatchResult = (
                 format_tool_error_for_model(&error),
                 true,
                 "error".to_string(),
             )
                 .into();
-            result.execution_prevented = execution_prevented;
+            result.execution = error.execution();
             Ok(result)
         }
     }
@@ -2044,6 +2183,7 @@ pub fn format_tool_error_for_model(error: &swage_core::ToolError) -> String {
     use swage_core::ToolError;
 
     match error {
+        ToolError::AfterExecution { source } => format_tool_error_for_model(source),
         ToolError::NotFound { name } => format!(
             "Tool error: `{name}` is not available. Use one of the advertised tools or continue without it."
         ),
@@ -2120,6 +2260,7 @@ impl Agent {
         event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
         cancel_token: &tokio_util::sync::CancellationToken,
         dispatch_started_at: std::time::Instant,
+        ctx: &AgentToolContext,
     ) -> Result<Result<ToolOutput, swage_core::ToolError>, AgentError>
     where
         F: Future<Output = Result<ToolOutput, swage_core::ToolError>>,
@@ -2131,13 +2272,18 @@ impl Agent {
             _ = cancel_token.cancelled() => {
                 let _ = self
                     .storage
-                    .update_turn_state(execution.turn_id, TurnState::Interrupted)
+                    .update_turn_state(execution.turn_id, TurnState::Cancelled)
                     .await;
                 let _ = self
                     .storage
                     .update_state(execution.thread_id, ThreadState::Idle)
                     .await;
+                let execution_outcome = swage_protocol::client::conversation::ToolExecution::cancelled(ctx.execution_started.load(std::sync::atomic::Ordering::SeqCst));
+                if let Some(record) = self.storage.get_tool_call_by_turn_and_call_id(execution.turn_id, &call.call_id).await? {
+                    self.storage.record_tool_call_execution(record.id, execution_outcome).await?;
+                }
                 let _ = event_tx.send(AgentEvent::ToolEnd {
+                    execution: Some(execution_outcome),
                     call_id: call.call_id.clone(),
                     tool_name: call.name.clone(),
                     result: Value::Null,
@@ -2196,6 +2342,7 @@ impl Agent {
                     event_tx,
                     cancel_token,
                     dispatch_started_at,
+                    &ctx,
                 )
                 .await?
             } else {
@@ -2211,6 +2358,7 @@ impl Agent {
                     event_tx,
                     cancel_token,
                     dispatch_started_at,
+                    &ctx,
                 )
                 .await?
             };
@@ -2248,6 +2396,7 @@ impl Agent {
                         event_tx,
                         cancel_token,
                         dispatch_started_at,
+                        &ctx,
                     )
                     .await?
                 } else {
@@ -2263,6 +2412,7 @@ impl Agent {
                         event_tx,
                         cancel_token,
                         dispatch_started_at,
+                        &ctx,
                     )
                     .await?
                 };
@@ -2347,13 +2497,11 @@ impl Agent {
                 event_tx,
                 cancel_token,
                 dispatch_started_at,
+                &ctx,
             )
             .await?
         {
-            Ok(output) => {
-                let result_str = serde_json::to_string(&output.result).unwrap_or_default();
-                Ok((result_str, false, "success".to_string()).into())
-            }
+            Ok(output) => tool_dispatch_result(Ok(output)),
             Err(swage_core::ToolError::RequiresApproval {
                 name: _,
                 timeout_secs,
@@ -2381,6 +2529,7 @@ impl Agent {
                             event_tx,
                             cancel_token,
                             dispatch_started_at,
+                            &ctx,
                         )
                         .await?
                     {
@@ -2452,14 +2601,11 @@ impl Agent {
                                 event_tx,
                                 cancel_token,
                                 dispatch_started_at,
+                                &ctx,
                             )
                             .await?
                         {
-                            Ok(output) => {
-                                let result_str =
-                                    serde_json::to_string(&output.result).unwrap_or_default();
-                                Ok((result_str, false, "success".to_string()).into())
-                            }
+                            Ok(output) => tool_dispatch_result(Ok(output)),
                             Err(swage_core::ToolError::RequiresLocationApproval {
                                 path,
                                 access,
@@ -2678,12 +2824,11 @@ impl Agent {
         {
             // The gateway settles human decisions before delivering them.
             // A timeout or conflicting decision must never resume the gate.
-            let matches_decision = state != swage_storage::ApprovalState::Expired
-                && self
-                    .storage
-                    .get_approval(approval_id)
-                    .await?
-                    .is_some_and(|approval| approval.state == state);
+            let matches_decision = self
+                .storage
+                .get_approval(approval_id)
+                .await?
+                .is_some_and(|approval| approval.state == state);
             let awaiting = self
                 .storage
                 .get_turn(turn_id)
@@ -2705,6 +2850,7 @@ impl Agent {
         turn_id: Uuid,
         thread_id: Uuid,
         reason: &str,
+        cancelled: bool,
     ) -> Result<crate::approval::ApprovalGateOutcome, AgentError> {
         self.storage
             .update_approval_state(
@@ -2714,7 +2860,14 @@ impl Agent {
             )
             .await?;
         self.storage
-            .update_turn_state(turn_id, TurnState::Interrupted)
+            .update_turn_state(
+                turn_id,
+                if cancelled {
+                    TurnState::Cancelled
+                } else {
+                    TurnState::Interrupted
+                },
+            )
             .await?;
         if self
             .storage
@@ -2802,7 +2955,7 @@ impl Agent {
             });
         };
 
-        let (tx, rx) = tokio::sync::oneshot::channel::<crate::approval::ApprovalDecision>();
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<crate::approval::ApprovalDecision>();
         let _registration = registrar(approval.id, tx);
 
         // 4. Emit ApprovalRequired only once a decision can be received.
@@ -2830,7 +2983,9 @@ impl Agent {
         }
 
         let gate_result = tokio::select! {
-            result = rx => {
+            biased;
+            _ = cancel_token.cancelled() => GateResult::Cancelled,
+            result = &mut rx => {
                 match result {
                     Ok(d) => GateResult::Decision(d),
                     // Sender dropped — treat as timeout (request abandoned).
@@ -2838,7 +2993,6 @@ impl Agent {
                 }
             }
             _ = tokio::time::sleep(timeout) => GateResult::Timeout,
-            _ = cancel_token.cancelled() => GateResult::Cancelled,
         };
 
         match gate_result {
@@ -2850,6 +3004,7 @@ impl Agent {
                     execution.turn_id,
                     execution.thread_id,
                     "cancelled by inter-agent message",
+                    true,
                 )
                 .await
             }
@@ -2943,6 +3098,7 @@ impl Agent {
                             execution.turn_id,
                             execution.thread_id,
                             "approval timed out",
+                            false,
                         )
                         .await
                     }

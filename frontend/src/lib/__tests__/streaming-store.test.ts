@@ -696,7 +696,7 @@ describe("error events", () => {
 
   const offscreenTerminalEvents: ServerEvent[] = [
     { type: "error", code: "provider_error", message: "stopped" },
-    { type: "output_schema_failed", turn_id: "turn-a", attempts: 1, errors: [] },
+    { type: "output_schema_failed", failure_message: "Structured output validation failed after 3 attempts: /answer: is required", turn_id: "turn-a", attempts: 1, errors: [] },
     { type: "shutdown", reason: "stopped" },
   ];
 
@@ -780,6 +780,7 @@ describe("cancelled events", () => {
       .filter((m) => m.role === "assistant");
     expect(assistantMessages).toHaveLength(1);
     expect(assistantMessages[0].content).toBe("begun answer");
+    expect(assistantMessages[0].turn_state).toBe("cancelled");
   });
 
   it("does not push when cancelled with no content accumulated", () => {
@@ -1079,6 +1080,9 @@ describe("cancelled preserves activeToolCalls", () => {
 
     expect(store.activeToolCalls).toHaveLength(1);
     expect(store.activeToolCalls[0].call_id).toBe("c1");
+    expect(store.activeToolCalls[0].status).toBe("cancelled");
+    expect(store.activeToolCalls[0].result).toContain("cancelled");
+    expect(store.activeToolCalls[0].result).not.toContain("did not report");
   });
 });
 
@@ -1139,7 +1143,7 @@ describe("output_schema_failed events", () => {
     store.startTurn("question");
 
     store.handleServerEvent({
-      type: "output_schema_failed",
+      type: "output_schema_failed", failure_message: "Structured output validation failed after 3 attempts: /answer: is required",
       turn_id: "t-1",
       attempts: 3,
       errors: [{ path: "/answer", message: "is required" }],
@@ -1160,7 +1164,7 @@ describe("output_schema_failed events", () => {
     store.startTurn("question");
     store.handleServerEvent({ type: "token", content: "partial" });
     store.handleServerEvent({
-      type: "output_schema_failed",
+      type: "output_schema_failed", failure_message: "Structured output validation failed after 3 attempts: /answer: is required",
       turn_id: "t-1",
       attempts: 2,
       errors: [{ path: "", message: "response was not valid JSON" }],

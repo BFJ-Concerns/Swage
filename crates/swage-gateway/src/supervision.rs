@@ -288,6 +288,7 @@ fn classify_turn_status(state: TurnState, created_at: DateTime<Utc>, now: DateTi
         TurnState::Incomplete => "incomplete".to_string(),
         TurnState::Failed => "failed".to_string(),
         TurnState::Interrupted => "interrupted".to_string(),
+        TurnState::Cancelled => "cancelled".to_string(),
     }
 }
 

@@ -94,6 +94,7 @@ impl swage_python::NestedToolHost for NestedToolRuntime {
                 // constitutive write (record_durability.rs, class 1).
                 let failure = error.to_string();
                 let _ = self.ws_tx.send(ServerEvent::ToolEnd {
+                    execution: Some(swage_protocol::client::conversation::ToolExecution::refused()),
                     call_id: call_id.clone(),
                     tool: tool_name.to_string(),
                     result: Value::String(failure.clone()),
@@ -153,8 +154,15 @@ impl swage_python::NestedToolHost for NestedToolRuntime {
                         &call_id,
                         tool_name,
                         &output.result,
-                        "success",
+                        if output.execution.outcome
+                            == swage_protocol::client::conversation::ToolOutcome::Succeeded
+                        {
+                            "success"
+                        } else {
+                            "error"
+                        },
                         duration_ms,
+                        output.execution,
                     )
                     .await
                 {
@@ -165,7 +173,16 @@ impl swage_python::NestedToolHost for NestedToolRuntime {
                         result: None,
                     });
                 }
-                Ok(output.result)
+                if output.execution.outcome
+                    == swage_protocol::client::conversation::ToolOutcome::Succeeded
+                {
+                    Ok(output.result)
+                } else {
+                    Err(WorkerToolError {
+                        message: output.result.to_string(),
+                        result: Some(output.result),
+                    })
+                }
             }
             Err(error) => {
                 let failure = Value::String(error.to_string());
@@ -177,6 +194,7 @@ impl swage_python::NestedToolHost for NestedToolRuntime {
                         &failure,
                         "error",
                         duration_ms,
+                        error.execution(),
                     )
                     .await
                 {
@@ -206,6 +224,7 @@ impl NestedToolRuntime {
         result: &Value,
         status: &str,
         duration_ms: u64,
+        execution: swage_protocol::client::conversation::ToolExecution,
     ) -> Result<(), swage_core::StorageError> {
         let result_text = serde_json::to_string(result).unwrap_or_else(|_| result.to_string());
         // History can replay this result to the provider. Scan it before
@@ -220,6 +239,9 @@ impl NestedToolRuntime {
         let event_total_bytes = metadata
             .total_bytes
             .and_then(|total| u64::try_from(total).ok());
+        self.storage
+            .record_tool_call_execution(record_id, execution)
+            .await?;
         let settled = self
             .storage
             .update_tool_call_result(
@@ -234,6 +256,7 @@ impl NestedToolRuntime {
             .await;
 
         let _ = self.ws_tx.send(ServerEvent::ToolEnd {
+            execution: Some(execution),
             call_id: call_id.to_string(),
             tool: tool_name.to_string(),
             result: result.clone(),
@@ -722,6 +745,7 @@ mod tests {
                 &json!({"token": "sk-abcdefghijklmnopqrstuvwxyz123456"}),
                 "success",
                 1,
+                swage_protocol::client::conversation::ToolExecution::succeeded(),
             )
             .await
             .unwrap();

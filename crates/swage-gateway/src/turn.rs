@@ -862,9 +862,17 @@ pub(super) async fn process_turn_with_composition_and_focus(
         {
             tracing::error!(error = %error, "failed to mark record-degraded turn as failed");
         }
+        let message = format!("The turn's audit record is incomplete: {reason}");
+        projection::record_failure_explanation(
+            state,
+            session_id,
+            turn_id.unwrap_or(prepared_turn_id),
+            &message,
+        )
+        .await;
         let _ = ws_tx.send(ServerEvent::Error {
             code: "turn_record_lost".to_string(),
-            message: format!("The turn's audit record is incomplete: {reason}"),
+            message,
         });
     }
 

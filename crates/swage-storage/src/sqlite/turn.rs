@@ -232,13 +232,13 @@ impl TurnStore for SqliteStorage {
                 let now_str = Utc::now().to_rfc3339();
                 conn.execute(
                     "UPDATE turns SET state = ?1, completed_at = ?2
-                     WHERE id = ?3 AND state NOT IN ('completed', 'refused', 'incomplete', 'failed', 'interrupted')",
+                     WHERE id = ?3 AND state NOT IN ('completed', 'refused', 'incomplete', 'failed', 'interrupted', 'cancelled')",
                     params![&state_str, &now_str, id.to_string()],
                 )?;
             } else {
                 conn.execute(
                     "UPDATE turns SET state = ?1
-                     WHERE id = ?2 AND state NOT IN ('completed', 'refused', 'incomplete', 'failed', 'interrupted')",
+                     WHERE id = ?2 AND state NOT IN ('completed', 'refused', 'incomplete', 'failed', 'interrupted', 'cancelled')",
                     params![&state_str, id.to_string()],
                 )?;
             }

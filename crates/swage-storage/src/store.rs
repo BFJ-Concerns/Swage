@@ -706,6 +706,12 @@ pub trait ToolCallStore: Send + Sync {
         total_bytes: Option<i64>,
     ) -> Result<(), StorageError>;
 
+    async fn record_tool_call_execution(
+        &self,
+        id: Uuid,
+        execution: swage_protocol::client::conversation::ToolExecution,
+    ) -> Result<(), StorageError>;
+
     /// Fetch all tool calls for a turn, ordered by position ascending.
     async fn list_tool_calls_by_turn(
         &self,
@@ -736,6 +742,15 @@ pub trait ToolCallStore: Send + Sync {
             );
             self.update_tool_call_result(record.id, result, &model_result, status, 0, false, None)
                 .await?;
+            if status == CANCELLED_TOOL_STATUS {
+                self.record_tool_call_execution(
+                    record.id,
+                    record.execution.unwrap_or(
+                        swage_protocol::client::conversation::ToolExecution::cancelled(false),
+                    ),
+                )
+                .await?;
+            }
             settled += 1;
         }
         Ok(settled)
@@ -2703,6 +2718,14 @@ mod tests {
 
     #[async_trait]
     impl ToolCallStore for StubStorage {
+        async fn record_tool_call_execution(
+            &self,
+            _id: Uuid,
+            _execution: swage_protocol::client::conversation::ToolExecution,
+        ) -> Result<(), StorageError> {
+            unimplemented!("stub")
+        }
+
         async fn create_tool_call(&self, _: NewToolCall) -> Result<ToolCallRecord, StorageError> {
             unimplemented!()
         }

@@ -1565,6 +1565,7 @@ pub async fn get_turn(
 
     Ok(Json(TurnPollResponse {
         turn_id: turn.id,
+        failure_message: turn.failure_message,
         state: turn.state.to_string(),
         assistant_response: turn.assistant_response,
         structured_output: turn.structured_output,
@@ -2070,6 +2071,7 @@ pub async fn list_turns(
         .into_iter()
         .map(|t| TurnPollResponse {
             turn_id: t.id,
+            failure_message: t.failure_message,
             state: t.state.to_string(),
             assistant_response: t.assistant_response,
             structured_output: t.structured_output,

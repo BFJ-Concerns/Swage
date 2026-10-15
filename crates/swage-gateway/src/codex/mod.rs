@@ -816,16 +816,24 @@ async fn handle_tool_call(
         .dispatch(&tool, arguments.clone(), &context, &request.agent_id)
         .await;
     let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
-    let (response, result_json, status) = match result {
+    let (response, result_json, status, execution) = match result {
         Ok(output) => {
             let text = serde_json::to_string(&output.result).unwrap_or_else(|_| "null".to_string());
             (
                 ToolCallResponse {
-                    success: true,
+                    success: output.execution.outcome
+                        == swage_protocol::client::conversation::ToolOutcome::Succeeded,
                     content_items: vec![ContentItem::text(text)],
                 },
                 output.result,
-                "success",
+                if output.execution.outcome
+                    == swage_protocol::client::conversation::ToolOutcome::Succeeded
+                {
+                    "success"
+                } else {
+                    "error"
+                },
+                output.execution,
             )
         }
         Err(error) => {
@@ -837,10 +845,11 @@ async fn handle_tool_call(
                 },
                 Value::String(text),
                 "error",
+                error.execution(),
             )
         }
     };
-    let _ = state
+    let record = state
         .storage
         .create_tool_call(NewToolCall {
             turn_id: request.turn_id,
@@ -861,7 +870,14 @@ async fn handle_tool_call(
             display_summary,
         })
         .await;
+    if let Ok(record) = record {
+        let _ = state
+            .storage
+            .record_tool_call_execution(record.id, execution)
+            .await;
+    }
     let _ = request.event_tx.send(AgentEvent::ToolEnd {
+        execution: Some(execution),
         call_id,
         tool_name: tool,
         result: result_json,

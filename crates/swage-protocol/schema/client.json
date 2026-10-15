@@ -4678,6 +4678,16 @@
               "format": "uint64",
               "minimum": 0
             },
+            "execution": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ToolExecution"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "parent_call_id": {
               "description": "call_id of the enclosing tool if this is a sub-tool invocation.\n\nOmitted from the serialised JSON when None.",
               "type": [
@@ -5065,6 +5075,9 @@
                 "$ref": "#/$defs/SchemaValidationError"
               }
             },
+            "failure_message": {
+              "type": "string"
+            },
             "turn_id": {
               "type": "string",
               "format": "uuid"
@@ -5076,6 +5089,7 @@
           },
           "required": [
             "type",
+            "failure_message",
             "turn_id",
             "attempts",
             "errors"
@@ -6258,6 +6272,16 @@
           "format": "uint64",
           "minimum": 0
         },
+        "execution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolExecution"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "parent_call_id": {
           "type": [
             "string",
@@ -6298,6 +6322,53 @@
         "tool",
         "arguments",
         "truncated"
+      ]
+    },
+    "ToolCompletion": {
+      "type": "string",
+      "enum": [
+        "not_run",
+        "confirmed",
+        "unknown"
+      ]
+    },
+    "ToolExecution": {
+      "type": "object",
+      "properties": {
+        "completion": {
+          "$ref": "#/$defs/ToolCompletion"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ToolOutcome"
+        },
+        "stage": {
+          "$ref": "#/$defs/ToolExecutionStage"
+        }
+      },
+      "required": [
+        "outcome",
+        "stage",
+        "completion"
+      ]
+    },
+    "ToolExecutionStage": {
+      "type": "string",
+      "enum": [
+        "not_started",
+        "started",
+        "finished",
+        "unknown"
+      ]
+    },
+    "ToolOutcome": {
+      "description": "What the dispatcher established about a call, independently of its payload.",
+      "type": "string",
+      "enum": [
+        "succeeded",
+        "failed",
+        "refused",
+        "rejected",
+        "cancelled"
       ]
     },
     "ToolPermissionConfig": {
@@ -6586,6 +6657,12 @@
             }
           ]
         },
+        "failure_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "input_tokens": {
           "type": [
             "integer",
@@ -6631,6 +6708,7 @@
         "incomplete",
         "failed",
         "interrupted",
+        "cancelled",
         "awaiting_approval",
         "delegating"
       ]

@@ -143,6 +143,7 @@ fn server_event_tool_start_includes_parent_call_id_when_some() {
 #[test]
 fn server_event_tool_end_serialises() {
     let event = ServerEvent::ToolEnd {
+        execution: None,
         call_id: "toolu_01abc".to_string(),
         tool: "shell".to_string(),
         result: serde_json::json!("file1\nfile2\nfile3"),
@@ -166,6 +167,7 @@ fn server_event_tool_end_serialises() {
 #[test]
 fn server_event_tool_end_omits_parent_call_id_when_none() {
     let event = ServerEvent::ToolEnd {
+        execution: None,
         call_id: "toolu_native".to_string(),
         tool: "shell".to_string(),
         result: serde_json::json!("ok"),
@@ -185,6 +187,7 @@ fn server_event_tool_end_omits_parent_call_id_when_none() {
 #[test]
 fn server_event_tool_end_includes_parent_call_id_when_some() {
     let event = ServerEvent::ToolEnd {
+        execution: None,
         call_id: "sub_01".to_string(),
         tool: "shell".to_string(),
         result: serde_json::json!("output"),
@@ -201,6 +204,7 @@ fn server_event_tool_end_includes_parent_call_id_when_some() {
 #[test]
 fn server_event_tool_end_serialises_without_total_bytes() {
     let event = ServerEvent::ToolEnd {
+        execution: None,
         call_id: "toolu_02".to_string(),
         tool: "file_read".to_string(),
         result: serde_json::json!({"content": "hello"}),
@@ -220,6 +224,7 @@ fn server_event_tool_end_serialises_without_total_bytes() {
 #[test]
 fn server_event_tool_end_truncated() {
     let event = ServerEvent::ToolEnd {
+        execution: None,
         call_id: "toolu_03".to_string(),
         tool: "shell".to_string(),
         result: serde_json::json!("partial output..."),
@@ -816,6 +821,7 @@ fn provider_retry_settled_serialises() {
 fn output_schema_failed_serialises() {
     let turn_id = Uuid::new_v4();
     let event = ServerEvent::OutputSchemaFailed {
+        failure_message: "required name".into(),
         turn_id,
         attempts: 3,
         errors: vec![SchemaValidationError {

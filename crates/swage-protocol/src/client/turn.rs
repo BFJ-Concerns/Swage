@@ -60,6 +60,7 @@ pub struct SubmitTurnResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[ts(optional_fields = nullable)]
 pub struct TurnPollResponse {
+    pub failure_message: Option<String>,
     pub turn_id: Uuid,
     pub state: String,
     pub assistant_response: Option<String>,

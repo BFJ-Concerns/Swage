@@ -49,7 +49,7 @@ export interface ConversationStore {
     timestamp: string;
     turn_state: Extract<
       MessageView["turn_state"],
-      "completed" | "refused" | "incomplete" | "failed" | "interrupted"
+      "completed" | "refused" | "incomplete" | "failed" | "interrupted" | "cancelled"
     >;
     /** The thread the reply belongs to; absent means the thread in view. */
     thread_id?: string;
@@ -73,7 +73,7 @@ export interface ConversationStore {
    */
   settleUnansweredRequest?(
     settlement: {
-      turn_state: Extract<MessageView["turn_state"], "failed" | "interrupted">;
+      turn_state: Extract<MessageView["turn_state"], "failed" | "interrupted" | "cancelled">;
       tool_calls: MessageView["tool_calls"];
     },
     conversationId?: string | null,
@@ -175,7 +175,7 @@ export function createConversationStore(): ConversationStore {
       last_activity: message.origin === "platform" ? updatedSummary.last_activity : message.timestamp,
       ...(message.content && message.origin !== "platform" ? { message_preview: message.content } : {}),
       has_interrupted_turn:
-        updatedSummary.has_interrupted_turn || message.turn_state === "interrupted",
+        updatedSummary.has_interrupted_turn || (message.turn_state === "interrupted" || message.turn_state === "cancelled"),
     };
 
     conversationsStore.set(

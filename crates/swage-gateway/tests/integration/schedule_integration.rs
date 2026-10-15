@@ -2957,7 +2957,7 @@ async fn queued_schedule_failures_settle_the_run_and_preserve_completed_output()
                 settled
                     .error_message
                     .unwrap()
-                    .contains("queued turn ended failed")
+                    .contains("queued provider unavailable")
             );
         }
     }

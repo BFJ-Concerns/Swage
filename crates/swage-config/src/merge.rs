@@ -136,6 +136,7 @@ pub struct PartialExperimentLocationConfig {
 /// partial overrides that would silently inherit unexpected approval gates.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialToolConfig {
+    pub max_identical_failures: Option<u32>,
     pub shell_timeout_secs: Option<u64>,
     pub python_execute: Option<PartialPythonExecuteToolConfig>,
     pub max_output_bytes: Option<usize>,
@@ -350,6 +351,7 @@ impl From<ResolvedConfig> for PartialConfig {
                 },
             }),
             tools: Some(PartialToolConfig {
+                max_identical_failures: Some(r.tools.max_identical_failures),
                 shell_timeout_secs: Some(r.tools.shell_timeout_secs),
                 python_execute: Some(PartialPythonExecuteToolConfig {
                     enabled: Some(r.tools.python_execute.enabled),
@@ -653,6 +655,7 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                 (base_b, overlay_b) => overlay_b.or(base_b),
             };
             PartialToolConfig {
+                max_identical_failures: o.max_identical_failures.or(b.max_identical_failures),
                 shell_timeout_secs: o.shell_timeout_secs.or(b.shell_timeout_secs),
                 python_execute: merge_overlay_section(b.python_execute, o.python_execute),
                 max_output_bytes: o.max_output_bytes.or(b.max_output_bytes),
@@ -809,6 +812,10 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             let py = t.python_execute.unwrap_or_default();
             let browser = t.browser.unwrap_or_default();
             ToolConfig {
+                max_identical_failures: t
+                    .max_identical_failures
+                    .unwrap_or(dt.max_identical_failures)
+                    .clamp(1, 100),
                 shell_timeout_secs: t.shell_timeout_secs.unwrap_or(dt.shell_timeout_secs),
                 python_execute: PythonExecuteToolConfig {
                     enabled: py.enabled.unwrap_or(dpy.enabled),

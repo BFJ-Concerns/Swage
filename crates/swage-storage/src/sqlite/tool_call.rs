@@ -55,6 +55,18 @@ fn row_to_tool_call(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolCallRecord>
         created_at: parse_dt(&created)?,
         parent_call_id: row.get(16)?,
         display_summary: row.get(17)?,
+        execution: row
+            .get::<_, Option<String>>(18)?
+            .map(|encoded| {
+                serde_json::from_str(&encoded).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        18,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
+            .transpose()?,
     })
 }
 
@@ -88,6 +100,28 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
 
 #[async_trait]
 impl ToolCallStore for SqliteStorage {
+    async fn record_tool_call_execution(
+        &self,
+        id: Uuid,
+        execution: swage_protocol::client::conversation::ToolExecution,
+    ) -> Result<(), StorageError> {
+        let encoded =
+            serde_json::to_string(&execution).map_err(|error| StorageError::Corruption {
+                message: error.to_string(),
+            })?;
+        self.with_conn(move |conn| {
+            let updated = conn.execute(
+                "UPDATE tool_calls SET execution=?1 WHERE id=?2",
+                params![encoded, id.to_string()],
+            )?;
+            if updated != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            Ok(())
+        })
+        .await
+    }
+
     async fn create_tool_call(
         &self,
         tool_call: NewToolCall,
@@ -127,6 +161,7 @@ impl ToolCallStore for SqliteStorage {
             )?;
 
             Ok(ToolCallRecord {
+                execution: None,
                 id,
                 turn_id: tool_call.turn_id,
                 agent_id: tool_call.agent_id,
@@ -156,7 +191,7 @@ impl ToolCallStore for SqliteStorage {
                 "SELECT id, turn_id, agent_id, call_id, tool, arguments, model_arguments,
                         result, model_result, status, duration_ms, truncated, total_bytes,
                         provider_round, position, created_at, parent_call_id,
-                        display_summary
+                        display_summary, execution
                  FROM tool_calls WHERE id = ?1",
                 params![id.to_string()],
                 row_to_tool_call,
@@ -177,7 +212,7 @@ impl ToolCallStore for SqliteStorage {
                 "SELECT id, turn_id, agent_id, call_id, tool, arguments, model_arguments,
                         result, model_result, status, duration_ms, truncated, total_bytes,
                         provider_round, position, created_at, parent_call_id,
-                        display_summary
+                        display_summary, execution
                  FROM tool_calls WHERE turn_id = ?1 AND call_id = ?2",
                 params![turn_id.to_string(), call_id],
                 row_to_tool_call,
@@ -235,7 +270,7 @@ impl ToolCallStore for SqliteStorage {
                 "SELECT id, turn_id, agent_id, call_id, tool, arguments, model_arguments,
                         result, model_result, status, duration_ms, truncated, total_bytes,
                         provider_round, position, created_at,
-                        parent_call_id, display_summary
+                        parent_call_id, display_summary, execution
                  FROM tool_calls
                  WHERE turn_id = ?1
                  ORDER BY provider_round ASC, position ASC",

@@ -293,14 +293,14 @@ describe("server event dispatch", () => {
     client.connect("conv-abc");
     latestWs().simulateOpen();
     latestWs().simulateMessage({
-      type: "output_schema_failed",
+      type: "output_schema_failed", failure_message: "Structured output validation failed after 3 attempts: /answer: is required",
       turn_id: "t-42",
       attempts: 3,
       errors: [{ path: "/answer", message: "is required" }],
     });
 
     expect(received[0]).toEqual({
-      type: "output_schema_failed",
+      type: "output_schema_failed", failure_message: "Structured output validation failed after 3 attempts: /answer: is required",
       turn_id: "t-42",
       attempts: 3,
       errors: [{ path: "/answer", message: "is required" }],

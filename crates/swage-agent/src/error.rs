@@ -6,6 +6,8 @@ use thiserror::Error;
 /// Errors produced by the agent runtime.
 #[derive(Debug, Error)]
 pub enum AgentError {
+    #[error("{0}")]
+    RepeatedToolFailure(String),
     #[error("LLM provider failed: {0}")]
     ProviderFailed(#[from] ProviderError),
 
@@ -69,7 +71,7 @@ impl AgentError {
             AgentError::SessionNotFound(_) => false,
             AgentError::SessionAccessDenied { .. } => false,
             AgentError::ThreadNotFound(_) => false,
-            AgentError::InvalidConfig(_) => false,
+            AgentError::InvalidConfig(_) | AgentError::RepeatedToolFailure(_) => false,
             AgentError::ContextTooLong => false,
             // Schema validation exhausted all retries — not transient.
             AgentError::OutputSchemaFailed { .. } => false,

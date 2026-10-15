@@ -3,6 +3,7 @@ import type { AssemblyReport } from "./AssemblyReport";
 import type { MessageView } from "./MessageView";
 import type { QueuedMessageView } from "./QueuedMessageView";
 import type { SchemaValidationError } from "./SchemaValidationError";
+import type { ToolExecution } from "./ToolExecution";
 import type { WorkflowEntryEvent } from "./WorkflowEntryEvent";
 import type { WorkflowRunCompletedEvent } from "./WorkflowRunCompletedEvent";
 import type { WorkflowRunStartedEvent } from "./WorkflowRunStartedEvent";
@@ -22,7 +23,7 @@ parent_call_id?: string | null,
  * One-line headline for the call, from the tool's declared display
  * hints. Omitted when the tool declares none.
  */
-summary?: string | null, } | { "type": "tool_end", call_id: string, tool: string, result: string | Record<string, unknown>,
+summary?: string | null, } | { "type": "tool_end", execution?: ToolExecution, call_id: string, tool: string, result: string | Record<string, unknown>,
 /**
  * "success" or "error".
  */
@@ -58,7 +59,7 @@ max_retries: number,
 /**
  * Validation errors from this attempt.
  */
-errors: Array<SchemaValidationError>, } | { "type": "provider_retry_started", turn_id: string, attempt: number, max_retries: number, provider: string, wait_ms: number, } | { "type": "provider_retry_settled", turn_id: string, attempt: number, max_retries: number, provider: string, success: boolean, } | { "type": "output_schema_failed", turn_id: string,
+errors: Array<SchemaValidationError>, } | { "type": "provider_retry_started", turn_id: string, attempt: number, max_retries: number, provider: string, wait_ms: number, } | { "type": "provider_retry_settled", turn_id: string, attempt: number, max_retries: number, provider: string, success: boolean, } | { "type": "output_schema_failed", failure_message: string, turn_id: string,
 /**
  * Total number of attempts made (including the initial attempt).
  */

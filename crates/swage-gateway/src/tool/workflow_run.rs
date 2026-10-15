@@ -24,6 +24,17 @@ impl Tool for WorkflowRunTool {
     fn description(&self) -> &str {
         "Start either an available workflow by name or a newly authored workflow from JavaScript source. A request that an available workflow already serves — an unattended research sweep, say — is started here, by name, in the same turn it is asked for, rather than carried out conversationally first. Provide exactly one of name or source. Inline source inherits this session's dispatch bounds and cannot deliver outside the run; use wait=true only when this turn needs the final result. Before authoring source, activate the Workflow Authoring skill: it documents the whole script surface — agent, agentStart, wait, parallel, pipeline, workflow, gate, postEvent, awaitEvent, budget, the meta/defaults headers, and the determinism rules."
     }
+    fn execution_outcome(
+        &self,
+        result: &Value,
+    ) -> swage_protocol::client::conversation::ToolExecution {
+        if result["state"] == "failed" {
+            swage_protocol::client::conversation::ToolExecution::failed()
+        } else {
+            swage_protocol::client::conversation::ToolExecution::succeeded()
+        }
+    }
+
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
@@ -63,6 +74,17 @@ impl Tool for WorkflowRunTool {
         true
     }
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+        for key in ["name", "source"] {
+            if params
+                .get(key)
+                .is_some_and(|value| value.as_str().is_none_or(|text| text.trim().is_empty()))
+            {
+                return Err(ToolError::InvalidParameters {
+                    name: self.name().into(),
+                    message: format!("{key} must be a non-empty string"),
+                });
+            }
+        }
         let name = params.get("name").and_then(Value::as_str);
         let source = params.get("source").and_then(Value::as_str);
         if matches!((name, source), (Some(_), Some(_)) | (None, None)) {

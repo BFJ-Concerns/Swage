@@ -57,7 +57,10 @@ impl ToolExecutionStrategy for DefaultExecutionStrategy {
         params: &Value,
         ctx: &dyn ToolContext,
     ) -> Result<Value, ToolError> {
-        tool.execute(params.clone(), ctx).await
+        ctx.mark_execution_started();
+        tool.execute(params.clone(), ctx)
+            .await
+            .map_err(ToolError::after_execution)
     }
 }
 
@@ -306,10 +309,16 @@ impl ToolDispatcher {
             Some(strategy) => {
                 strategy
                     .execute(tool.as_ref(), tool_name, &params, ctx)
-                    .await?
+                    .await
             }
-            None => tool.execute(params, ctx).await?,
-        };
+            None => {
+                ctx.mark_execution_started();
+                tool.execute(params, ctx)
+                    .await
+                    .map_err(ToolError::after_execution)
+            }
+        }?;
+        let execution = tool.execution_outcome(&raw_output);
         let duration = start.elapsed();
 
         // Step 7: Leak detection — serialise, scan, parse back.
@@ -324,6 +333,7 @@ impl ToolDispatcher {
 
         // Step 8: Assemble ToolOutput.
         Ok(ToolOutput {
+            execution,
             result,
             cost: None,
             duration,
@@ -388,10 +398,16 @@ impl ToolDispatcher {
             Some(strategy) => {
                 strategy
                     .execute(tool.as_ref(), tool_name, &params, ctx)
-                    .await?
+                    .await
             }
-            None => tool.execute(params, ctx).await?,
-        };
+            None => {
+                ctx.mark_execution_started();
+                tool.execute(params, ctx)
+                    .await
+                    .map_err(ToolError::after_execution)
+            }
+        }?;
+        let execution = tool.execution_outcome(&raw_output);
         let duration = start.elapsed();
 
         // Step 7: Leak detection.
@@ -402,6 +418,7 @@ impl ToolDispatcher {
 
         // Step 8: Assemble output.
         Ok(ToolOutput {
+            execution,
             result,
             cost: None,
             duration,
@@ -905,7 +922,10 @@ mod tests {
                 ctx: &dyn ToolContext,
             ) -> Result<Value, ToolError> {
                 self.called.store(true, Ordering::SeqCst);
-                tool.execute(params.clone(), ctx).await
+                ctx.mark_execution_started();
+                tool.execute(params.clone(), ctx)
+                    .await
+                    .map_err(ToolError::after_execution)
             }
         }
 
@@ -975,9 +995,10 @@ mod tests {
             .await
             .expect_err("strategy error should propagate");
 
-        assert!(
-            matches!(err, ToolError::ExecutionFailed { .. }),
-            "expected ExecutionFailed from strategy, got: {err:?}"
+        assert_eq!(
+            err.execution(),
+            swage_protocol::client::conversation::ToolExecution::failed(),
+            "execution strategy errors must retain their execution stage"
         );
         assert!(err.to_string().contains("strategy rejected"));
     }

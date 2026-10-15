@@ -87,10 +87,8 @@ export interface StreamingStore {
   cancelTurn(): void;
 }
 
-// The outcome an interrupted call shows: the result recovery records for a
-// started call (swage-storage `INTERRUPTED_TOOL_RESULT`), so a stopped row
-// reads the same live as it does after a reload.
-const INTERRUPTED_TOOL_RESULT = "tool call did not report a result; its outcome is unknown";
+// Cancellation records the stop decision without asserting completed effects.
+const CANCELLED_TOOL_RESULT = "tool call was cancelled when its turn was stopped";
 
 // ---------------------------------------------------------------------------
 // Injected dependencies
@@ -117,7 +115,7 @@ export interface StreamingStoreOptions {
       timestamp: string;
       turn_state: Extract<
         MessageView["turn_state"],
-        "completed" | "refused" | "incomplete" | "failed" | "interrupted"
+        "completed" | "refused" | "incomplete" | "failed" | "interrupted" | "cancelled"
       >;
       thread_id?: string;
       turn_id?: string;
@@ -129,7 +127,7 @@ export interface StreamingStoreOptions {
      */
     settleUnansweredRequest?(
       settlement: {
-        turn_state: Extract<MessageView["turn_state"], "failed" | "interrupted">;
+        turn_state: Extract<MessageView["turn_state"], "failed" | "interrupted" | "cancelled">;
         tool_calls: ToolCallView[];
       },
       conversationId?: string | null,
@@ -271,7 +269,7 @@ export function createStreamingStore(
     content: string,
     turn_state: Extract<
       MessageView["turn_state"],
-      "completed" | "refused" | "incomplete" | "failed" | "interrupted"
+      "completed" | "refused" | "incomplete" | "failed" | "interrupted" | "cancelled"
     >,
     turn_id?: string,
     tool_calls?: ToolCallView[],
@@ -293,7 +291,7 @@ export function createStreamingStore(
   function settleResponse(
     conversationId: string | null,
     stream: InternalStreamState,
-    turnState: Extract<MessageView["turn_state"], "completed" | "refused" | "incomplete" | "failed" | "interrupted">,
+    turnState: Extract<MessageView["turn_state"], "completed" | "refused" | "incomplete" | "failed" | "interrupted" | "cancelled">,
     turnId?: string,
     toolCalls?: ToolCallView[],
   ): void {
@@ -401,6 +399,7 @@ export function createStreamingStore(
                               ...sub,
                               result: event.result,
                               status: event.status,
+                              execution: event.execution,
                               duration_ms: event.duration_ms,
                               truncated: event.truncated,
                               total_bytes: event.total_bytes ?? null,
@@ -420,6 +419,7 @@ export function createStreamingStore(
                       ...call,
                       result: event.result,
                       status: event.status,
+                              execution: event.execution,
                       duration_ms: event.duration_ms,
                       truncated: event.truncated,
                       total_bytes: event.total_bytes ?? null,
@@ -461,18 +461,9 @@ export function createStreamingStore(
 
         case "output_schema_failed": {
           settleResponse(ownerId, stream, "failed");
-          const details = event.errors
-            .map((error) =>
-              error.path
-                ? `${error.path}: ${error.message}`
-                : error.message,
-            )
-            .join("; ");
           stream.turnErrorStore.set({
             code: "output_schema_failed",
-            message: details
-              ? `Structured output validation failed after ${event.attempts} attempts: ${details}`
-              : `Structured output validation failed after ${event.attempts} attempts.`,
+            message: event.failure_message,
           });
           setStreamActive(ownerId, stream, false);
           stream.turnStartedAtStore.set(null);
@@ -481,26 +472,21 @@ export function createStreamingStore(
         }
 
         case "cancelled": {
-          // User-initiated cancel. A call still running when the turn
-          // stopped has no result — whether it is still pending or the
-          // gateway already ended it as cancelled — so its outcome is
-          // interrupted, as recovery records it. Calls that finished keep
-          // the outcome they reported.
           const settledCalls = get(stream.activeToolCallsStore).map((call) =>
             call.status === null || (call.status === "cancelled" && call.result == null)
-              ? { ...call, status: "interrupted", result: INTERRUPTED_TOOL_RESULT }
+              ? { ...call, status: "cancelled", result: CANCELLED_TOOL_RESULT }
               : call,
           );
           if (get(stream.streamedContentStore)) {
             // Preserve partial content (they may want to read what was
             // generated before they stopped it); the calls stay beside it.
-            settleResponse(ownerId, stream, "interrupted");
+            settleResponse(ownerId, stream, "cancelled");
             stream.activeToolCallsStore.set(settledCalls);
           } else if (options?.conversationStore?.settleUnansweredRequest) {
             // No reply: the turn's account rides on its request, where the
             // conversation shows it after a reload too.
             options.conversationStore.settleUnansweredRequest(
-              { turn_state: "interrupted", tool_calls: settledCalls },
+              { turn_state: "cancelled", tool_calls: settledCalls },
               ownerId,
             );
             stream.activeToolCallsStore.set([]);
@@ -639,7 +625,7 @@ export function createStreamingStore(
         !get(stream.isStreamingStore) ||
         stream.activeTurnGeneration !== recoveredTurnGeneration ||
         (lastMessage?.role !== "assistant" && lastMessage?.origin !== "platform") ||
-        !["completed", "refused", "failed", "interrupted"].includes(lastMessage?.turn_state ?? "")
+        !["completed", "refused", "failed", "interrupted", "cancelled"].includes(lastMessage?.turn_state ?? "")
       ) return;
 
       // The HTTP refresh recovered the terminal reply or platform account that the

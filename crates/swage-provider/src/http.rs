@@ -229,10 +229,15 @@ pub(crate) fn parse_sse_block(block: &str) -> Option<SseEvent> {
 pub(crate) fn map_http_error(status: u16, body: String, retry_after: Option<u64>) -> ProviderError {
     match status {
         401 => ProviderError::Auth { provider: body },
-        // 429 (Too Many Requests) and 529 (Anthropic overloaded) are both rate limits.
-        429 | 529 => ProviderError::RateLimited {
+        // Rate limiting and upstream overload have different causes.
+        429 => ProviderError::RateLimited {
             provider: "anthropic".to_string(),
             // Convert seconds (u64) to Duration; None stays None.
+            retry_after: retry_after.map(Duration::from_secs),
+        },
+        529 => ProviderError::Overloaded {
+            provider: "anthropic".into(),
+            message: body,
             retry_after: retry_after.map(Duration::from_secs),
         },
         // Server errors are transient — the upstream may recover on retry.
@@ -405,10 +410,14 @@ mod tests {
     }
 
     #[test]
-    fn map_529_to_rate_limited() {
-        // 529 is Anthropic's overloaded status — treated as rate limit.
+    fn map_529_to_overload() {
+        // Exhausted overload must retain its category and explanation.
         let err = map_http_error(529, "overloaded".into(), None);
-        assert!(matches!(err, ProviderError::RateLimited { .. }));
+        assert!(
+            matches!(err, ProviderError::Overloaded { .. }),
+            "overload must keep its own category: {err}"
+        );
+        assert!(err.is_retriable());
     }
 
     // --- 5xx → Network (transient, retriable) ---

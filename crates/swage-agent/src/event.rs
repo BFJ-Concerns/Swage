@@ -100,6 +100,7 @@ pub enum AgentEvent {
 
     /// A tool call has finished.
     ToolEnd {
+        execution: Option<swage_protocol::client::conversation::ToolExecution>,
         call_id: String,
         tool_name: String,
         result: serde_json::Value,
@@ -294,6 +295,7 @@ mod tests {
     #[test]
     fn test_tool_end_constructible() {
         let event = AgentEvent::ToolEnd {
+            execution: None,
             call_id: "call-1".to_string(),
             tool_name: "bash".to_string(),
             result: serde_json::json!({"output": "file.txt"}),
@@ -306,6 +308,7 @@ mod tests {
             result,
             status,
             duration_ms,
+            ..
         } = event
         {
             assert_eq!(call_id, "call-1");
@@ -321,6 +324,7 @@ mod tests {
     #[test]
     fn test_tool_end_no_duration() {
         let event = AgentEvent::ToolEnd {
+            execution: None,
             call_id: "call-2".to_string(),
             tool_name: "read_file".to_string(),
             result: serde_json::Value::Null,
@@ -402,6 +406,7 @@ mod tests {
         })
         .unwrap();
         tx.send(AgentEvent::ToolEnd {
+            execution: None,
             call_id: "c".to_string(),
             tool_name: "t".to_string(),
             result: serde_json::Value::Null,

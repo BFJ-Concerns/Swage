@@ -107,6 +107,9 @@ pub enum ServerEvent {
     },
     /// A tool call has finished. Contains the result and execution metadata.
     ToolEnd {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        execution: Option<super::conversation::ToolExecution>,
         call_id: String,
         tool: String,
         #[ts(type = "string | Record<string, unknown>")]
@@ -244,6 +247,7 @@ pub enum ServerEvent {
     /// Always delivered regardless of subscription state — this is an error
     /// condition that the client must surface to the user.
     OutputSchemaFailed {
+        failure_message: String,
         turn_id: Uuid,
         /// Total number of attempts made (including the initial attempt).
         attempts: u32,

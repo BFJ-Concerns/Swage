@@ -114,6 +114,14 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// Classify a structured response whose transport succeeded.
+    fn execution_outcome(
+        &self,
+        _result: &Value,
+    ) -> swage_protocol::client::conversation::ToolExecution {
+        swage_protocol::client::conversation::ToolExecution::succeeded()
+    }
+
     /// Execute the tool with already-validated parameters.
     ///
     /// Returns the raw output `Value`; the framework wraps it into a

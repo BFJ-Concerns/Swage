@@ -147,6 +147,7 @@ pub(crate) fn turn_state_to_wire(state: &TurnState) -> WireTurnState {
         TurnState::Incomplete => WireTurnState::Incomplete,
         TurnState::Failed => WireTurnState::Failed,
         TurnState::Interrupted => WireTurnState::Interrupted,
+        TurnState::Cancelled => WireTurnState::Cancelled,
         TurnState::AwaitingApproval => WireTurnState::AwaitingApproval,
         TurnState::Delegating => WireTurnState::Delegating,
     }
@@ -840,6 +841,7 @@ fn tool_call_record_to_view(record: swage_storage::model::ToolCallRecord) -> Too
         .map(|text| serde_json::from_str(&text).unwrap_or(JsonValue::String(text)));
 
     ToolCallView {
+        execution: record.execution,
         call_id: record.call_id,
         tool: record.tool,
         arguments,

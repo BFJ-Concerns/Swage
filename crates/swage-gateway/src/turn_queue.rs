@@ -143,7 +143,7 @@ pub async fn has_queued_input(state: &AppState, session_id: Uuid) -> Result<bool
 /// failed turn does; a cancelled one does not — stopping a turn leaves the
 /// queue standing for the person to look at.
 pub fn drains_queue_after(turn_state: TurnState) -> bool {
-    !matches!(turn_state, TurnState::Interrupted)
+    !matches!(turn_state, TurnState::Interrupted | TurnState::Cancelled)
 }
 
 /// Run the queue's drain on its own task, so the ending turn's own path is
