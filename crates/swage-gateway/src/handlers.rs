@@ -704,6 +704,15 @@ pub async fn create_channel_link_code(
     ))
 }
 
+/// `GET /api/onboarding/channels/link-codes` — read valid unredeemed codes.
+pub async fn list_channel_link_codes(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<channel_wire::ChannelLinkCodeResponse>>, ApiError> {
+    Ok(Json(
+        crate::onboarding::list_channel_link_codes(&state).await?,
+    ))
+}
+
 /// `POST /api/onboarding/devices/pairing-codes` — issue a one-time device pairing code.
 pub async fn create_device_pairing_code(
     State(state): State<AppState>,
