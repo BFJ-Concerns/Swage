@@ -3,10 +3,11 @@
 //! Every JavaScript program Swage runs — a workflow, a context assembly, a
 //! plugin — gets an isolate of its own, built here. The isolate has no ambient
 //! capability: the cage removes what the engine ships that could reach outside
-//! the program or make its runs differ (`eval`, `Date`, `Math.random`, `Intl`,
-//! WebAssembly, shared memory, the engine's own host object), and the only door
-//! out is the host-call pair that a [`HostCalls`] implementation answers. A
-//! program with no host has no door at all.
+//! the program or make its runs differ (`eval`, the clocks `Date` and
+//! `Temporal`, `Math.random`, `Intl`, WebAssembly, shared memory, the engine's
+//! own host object and its `console`), and the only door out is the host-call
+//! pair that a [`HostCalls`] implementation answers. A program with no host
+//! has no door at all.
 //!
 //! Two limits bound every program: a heap ceiling, and a ceiling on how long it
 //! may execute without yielding to the host. Crossing either terminates the
@@ -199,8 +200,11 @@ extension!(
 
 /// Runs before any program source is compiled. It captures the host-call ops
 /// into a frozen `__swageHost` door (only when a host registered them), then
-/// removes every global that reaches outside the program or makes runs differ,
-/// and replaces `Math.random` with a loud failure.
+/// removes every global that reaches outside the program or makes runs differ
+/// — the engine's host object and the `console` it built on a print op, the
+/// clocks, the locale tables, WebAssembly, shared memory and the GC observers
+/// — and replaces `Math.random` with a loud failure. A program that needs
+/// output or a clock gets a host call; the cage never polyfills.
 const CAGE: &str = r#"
 (() => {
     const core = globalThis.Deno && globalThis.Deno.core;
@@ -219,8 +223,9 @@ const CAGE: &str = r#"
         });
     }
     for (const name of [
-        "Deno", "__bootstrap", "eval", "Date", "Intl", "WebAssembly",
-        "SharedArrayBuffer", "Atomics", "WeakRef", "FinalizationRegistry",
+        "Deno", "__bootstrap", "console", "eval", "Date", "Temporal", "Intl",
+        "WebAssembly", "SharedArrayBuffer", "Atomics", "WeakRef",
+        "FinalizationRegistry",
     ]) {
         delete globalThis[name];
     }
@@ -296,6 +301,9 @@ pub struct Program {
     runtime: Option<JsRuntime>,
     watch: Arc<Watch>,
     watchdog: Option<JoinHandle<()>>,
+    /// Read by the watchdog (to end running JavaScript) and by
+    /// [`Self::settle_to_string`] (to stop waiting on a host call).
+    cancellation: Option<CancellationToken>,
     /// The engine posts housekeeping to the current tokio runtime, so a
     /// program built with none current gets one of its own, entered for
     /// every call into the engine.
@@ -345,6 +353,7 @@ impl Program {
         });
         let watchdog = {
             let watch = Arc::clone(&watch);
+            let cancellation = cancellation.clone();
             std::thread::Builder::new()
                 .name("swage-isolate-watch".into())
                 .spawn(move || watch.watch(limits, cancellation.as_ref()))
@@ -356,6 +365,7 @@ impl Program {
             runtime: Some(runtime),
             watch,
             watchdog: Some(watchdog),
+            cancellation,
             runtime_context,
         };
         program.execute("swage:cage", CAGE.to_owned())?;
@@ -387,26 +397,39 @@ impl Program {
         result.map_err(|error| self.script_failure(CoreErrorKind::Js(error).into()))
     }
 
-    /// [`Self::execute`] for a source that evaluates to a string.
+    /// [`Self::execute`] for a source that evaluates to a string; any other
+    /// value is an engine error, never coerced (coercion would run the
+    /// program's own code outside the watch).
     pub fn execute_for_string(
         &mut self,
         name: &'static str,
         source: String,
     ) -> Result<String, IsolateError> {
         let value = self.execute(name, source)?;
-        Ok(self.string_of(&value))
+        self.string_of(&value)
     }
 
     /// Drive the event loop — host calls included — until `value` settles,
-    /// and return the settled value as a string.
+    /// and return the settled value, which must be a string. Cancellation
+    /// ends the wait even while a host call is still pending.
     pub async fn settle_to_string(
         &mut self,
         value: v8::Global<v8::Value>,
     ) -> Result<String, IsolateError> {
         let _entered = self.entered();
         let mut settled = self.runtime().resolve(value);
+        let mut cancelled = self
+            .cancellation
+            .clone()
+            .map(|cancellation| Box::pin(async move { cancellation.cancelled().await }));
         let options = PollEventLoopOptions::default();
         let outcome = poll_fn(|cx| {
+            if let Some(cancelled) = cancelled.as_mut()
+                && cancelled.poll_unpin(cx).is_ready()
+            {
+                self.watch.terminate(Termination::Cancelled);
+                return Poll::Ready(Err(CoreErrorKind::ExecutionTerminated.into()));
+            }
             self.watch.busy();
             let outcome = match settled.poll_unpin(cx) {
                 Poll::Ready(settled) => {
@@ -430,7 +453,7 @@ impl Program {
         })
         .await;
         match outcome {
-            Ok(value) => Ok(self.string_of(&value)),
+            Ok(value) => self.string_of(&value),
             Err(error) => Err(self.script_failure(error)),
         }
     }
@@ -440,12 +463,20 @@ impl Program {
         self.watch.termination()
     }
 
-    fn string_of(&mut self, value: &v8::Global<v8::Value>) -> String {
+    /// Read a string value without running any of the program's code: a
+    /// non-string is refused rather than coerced through its `toString`.
+    fn string_of(&mut self, value: &v8::Global<v8::Value>) -> Result<String, IsolateError> {
         let _entered = self.entered();
         let runtime = self.runtime.as_mut().expect("the isolate lives until drop");
         deno_core::scope!(scope, runtime);
-        let value = value.open(scope);
-        value.to_rust_string_lossy(scope)
+        let value = v8::Local::new(scope, value);
+        let string = v8::Local::<v8::String>::try_from(value).map_err(|_| {
+            IsolateError::Engine(format!(
+                "the program produced {} where a string was required",
+                value.type_repr()
+            ))
+        })?;
+        Ok(string.to_rust_string_lossy(scope))
     }
 
     fn runtime(&mut self) -> &mut JsRuntime {
@@ -523,9 +554,9 @@ mod tests {
         let absent = program
             .execute_for_string(
                 "test",
-                r#"["Deno", "__bootstrap", "eval", "Date", "Intl", "WebAssembly",
-                    "SharedArrayBuffer", "Atomics", "WeakRef", "FinalizationRegistry",
-                    "__swageHost"]
+                r#"["Deno", "__bootstrap", "console", "eval", "Date", "Temporal", "Intl",
+                    "WebAssembly", "SharedArrayBuffer", "Atomics", "WeakRef",
+                    "FinalizationRegistry", "__swageHost"]
                     .filter((name) => typeof globalThis[name] !== "undefined").join(",")"#
                     .to_owned(),
             )
@@ -698,6 +729,55 @@ mod tests {
         assert_eq!(
             settled,
             r#"{"asyncReply":{"name":"agent","payload":"[\"hi\",2]"},"syncReply":{"sync":"log","payload":"\"note\""},"deno":"undefined"}"#
+        );
+    }
+
+    #[test]
+    fn a_result_that_is_not_a_string_is_refused_not_coerced() {
+        let mut program = program();
+        let error = program
+            .execute_for_string("test", "({ toString() { for (;;) {} } })".to_owned())
+            .expect_err("refused");
+        assert!(
+            matches!(&error, IsolateError::Engine(message) if message.contains("where a string was required")),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_releases_a_program_waiting_on_a_host_call_that_never_answers() {
+        struct Silent;
+        #[async_trait]
+        impl HostCalls for Silent {
+            async fn call(&self, _: &str, _: String) -> String {
+                std::future::pending().await
+            }
+            fn call_sync(&self, _: &str, _: String) -> String {
+                "null".into()
+            }
+        }
+        let cancellation = CancellationToken::new();
+        let mut program =
+            Program::new(limits(), Some(Arc::new(Silent)), Some(cancellation.clone()))
+                .expect("isolate");
+        let pending = program
+            .execute("test", r#"__swageHost.call("wait", "null")"#.to_owned())
+            .expect("starts");
+        let canceller = {
+            let cancellation = cancellation.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                cancellation.cancel();
+            })
+        };
+        let error = program
+            .settle_to_string(pending)
+            .await
+            .expect_err("cancelled");
+        canceller.await.expect("canceller");
+        assert!(
+            matches!(error, IsolateError::Terminated(Termination::Cancelled)),
+            "{error:?}"
         );
     }
 

@@ -1365,26 +1365,24 @@ mod tests {
     }
 
     #[test]
-    fn an_add_record_counting_past_the_output_is_an_error_not_a_panic() {
+    fn the_hosts_output_list_has_no_name_a_script_can_reach() {
         let elements = baseline_bearing_elements();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            assemble_source(
-                r#"
-                const byName = Object.fromEntries(elements.map(e => [e.name, e]));
-                add(byName.orientation);
-                add(byName.prompts);
-                add(byName.history);
-                globalThis.__output.pop();
-                "#,
-                &elements,
-            )
-        }));
-
-        let output = result.expect("a malformed message account must not panic");
+        let output = assemble_source(
+            r#"
+            const byName = Object.fromEntries(elements.map(e => [e.name, e]));
+            add(byName.orientation);
+            add(byName.prompts);
+            add(byName.history);
+            throw new Error("__output is " + typeof globalThis.__output);
+            "#,
+            &elements,
+        );
         assert_eq!(output.report.errors.len(), 1, "the run fails open");
         assert!(
-            output.report.errors[0].message.contains("failed"),
-            "the malformed run is reported as a script failure, got {:?}",
+            output.report.errors[0]
+                .message
+                .contains("__output is undefined"),
+            "the script's reach for the host's list is the reported failure, got {:?}",
             output.report.errors[0].message
         );
     }

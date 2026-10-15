@@ -519,16 +519,9 @@ impl WorkflowEngine {
                 "(async () => {{ try {{ const value = await (async () => {{ {source} }})(); return JSON.stringify({{ result: JSON.stringify(value === undefined ? null : value) }}); }} catch (error) {{ if (error && typeof error.__swageAgentCallReference === 'string') return JSON.stringify({{ agent_call: {{ host_reference: error.__swageAgentCallReference, message: String(error.name) + ': ' + String(error.message), stack: typeof error.stack === 'string' ? error.stack : null }} }}); throw error; }} }})()",
             ),
         )?;
-        let execution = program.settle_to_string(pending);
-        tokio::pin!(execution);
-        let result = tokio::select! {
-            result = &mut execution => result,
-            () = cancellation.cancelled() => return Err(WorkflowEngineError::Cancelled),
-        };
-        if cancellation.is_cancelled() {
-            return Err(WorkflowEngineError::Cancelled);
-        }
-        let output = result?;
+        // The program holds the cancellation token: it ends running JavaScript
+        // and a wait on a host call alike, surfacing as `Cancelled`.
+        let output = program.settle_to_string(pending).await?;
         let envelope: serde_json::Value = serde_json::from_str(&output)
             .map_err(|error| WorkflowEngineError::Script(error.to_string()))?;
         if let Some(failure) = envelope.get("agent_call") {

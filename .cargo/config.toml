@@ -8,4 +8,4 @@
 # Machine-local cargo settings belong in $CARGO_HOME/config.toml, which cargo
 # merges with this file.
 [env]
-RUSTY_V8_ARCHIVE = { value = "vendor/v8/librusty_v8.a.gz", relative = true }
+RUSTY_V8_ARCHIVE = { value = "vendor/v8/librusty_v8.a.gz", relative = true, force = true }
