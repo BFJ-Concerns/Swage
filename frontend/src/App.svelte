@@ -138,15 +138,17 @@
   // is left alone so nothing reloads needlessly.
   async function bringScopeIntoView(topicId: string | null): Promise<void> {
     const inView = topicStore.currentTopic?.id ?? null;
-    if (topicId && inView !== topicId) {
-      await topicStore.selectTopic(topicId);
-    } else if (!topicId && inView) {
-      topicStore.closeTopic();
-    } else if (inView === topicId && scopeLoadedFor === topicId) {
-      return;
-    }
+    if (inView === topicId && scopeLoadedFor === topicId) return;
     scopeLoadedFor = topicId;
-    await conversationStore.loadConversations(topicId);
+    // Clear the old rows before publishing the new scope. Awaiting even a
+    // local topic selection can yield a rendered frame beneath its header.
+    const loading = conversationStore.loadConversations(topicId);
+    if (topicId && inView !== topicId) {
+      await Promise.all([loading, topicStore.selectTopic(topicId)]);
+    } else {
+      if (!topicId && inView) topicStore.closeTopic();
+      await loading;
+    }
     try {
       agentDefinitions = await listEffectiveAgentDefinitions(topicId);
     } catch (error) {

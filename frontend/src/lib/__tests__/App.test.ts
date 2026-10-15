@@ -12,7 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
 import App from "../../App.svelte";
-import { createConversation, getConversation } from "../api/conversations";
+import { createConversation, getConversation, listConversations } from "../api/conversations";
 import { listTopics } from "../api/topics";
 import { ApiError } from "../api/error";
 import type { WebSocketClient } from "../api/websocket";
@@ -244,6 +244,38 @@ describe("ambient channel control path", () => {
     ) as HTMLSelectElement).value).toBe("conv-new");
     expect(document.body.textContent).not.toContain("History of conv-1");
     expect(surfaceButton("Surfaces").getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it.each([
+    { id: "empty-topic", name: "Empty" },
+    { id: null, name: "General" },
+  ])("never renders previous rows beneath the newly selected $name scope header", async (choice) => {
+    const empty = { ...topic, id: "empty-topic", name: "Empty", slug: "empty" };
+    vi.mocked(listTopics).mockResolvedValue([topic, empty]);
+    component = await mountAppOnConversation();
+    (document.querySelector('button.sessions-btn') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(document.querySelector('select[aria-label="Topic"]')).not.toBeNull());
+    const select = document.querySelector<HTMLSelectElement>('select[aria-label="Topic"]')!;
+    select.value = choice.id ?? "";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    let release: ((rows: typeof summaries) => void) | undefined;
+    vi.mocked(listConversations).mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    const frames: string[] = [];
+    const observer = new MutationObserver(() => {
+      if (document.querySelector('.scope-name')?.textContent === choice.name) {
+        frames.push(document.querySelector('.conversation-list')?.textContent ?? "");
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    try {
+      (document.querySelector('button.start-btn') as HTMLButtonElement).click();
+      await vi.waitFor(() => expect(listConversations).toHaveBeenLastCalledWith(choice.id));
+      await vi.waitFor(() => expect(frames.length).toBeGreaterThan(0));
+      for (const rows of frames) expect(rows).not.toContain("Release checklist review");
+    } finally {
+      observer.disconnect();
+      release?.([]);
+    }
   });
 
   it("does not install a delayed creation after selecting a session in another topic", async () => {
