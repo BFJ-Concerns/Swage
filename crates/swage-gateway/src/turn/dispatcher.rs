@@ -152,25 +152,95 @@ pub(super) fn sandbox_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// The operator's home and the gateway's data root, as the policy needs them:
+/// the private paths to mask and the shared caches to open hang off both.
+pub(crate) struct PolicyRoots {
+    pub(crate) home: Option<PathBuf>,
+    pub(crate) data_root: PathBuf,
+}
+
+impl PolicyRoots {
+    pub(crate) fn from_environment(data_root: &Path) -> Self {
+        Self {
+            home: std::env::var_os("HOME").map(PathBuf::from),
+            data_root: sandbox_path(data_root),
+        }
+    }
+}
+
+/// Under the home, what a sandboxed command never sees: key material, cloud
+/// and cluster credentials, plaintext token files. Forge and registry
+/// authentication goes through the operator's credential helper, so none of
+/// these is needed to build, commit, push or fetch.
+const MASKED_HOME_PATHS: &[&str] = &[
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".azure",
+    ".config/gcloud",
+    ".kube",
+    ".netrc",
+    ".git-credentials",
+];
+
+/// Under the home, the shared build and package caches a sandboxed command
+/// may write, so a dependency fetched once is fetched once.
+const SHARED_CACHE_PATHS: &[&str] = &[".cache", ".cargo", ".npm", ".local/share/pnpm", "go/pkg"];
+
+/// Where a workspace's git metadata lives when it is not under the
+/// workspace: a linked worktree's `.git` is a file naming its gitdir, whose
+/// `commondir` names the repository the worktree belongs to. Both must be
+/// writable for the worktree to commit.
+pub(crate) fn git_metadata_outside(workspace: &Path) -> Vec<PathBuf> {
+    let dot_git = workspace.join(".git");
+    let Ok(pointer) = std::fs::read_to_string(&dot_git) else {
+        return Vec::new();
+    };
+    let Some(gitdir) = pointer.trim().strip_prefix("gitdir:") else {
+        return Vec::new();
+    };
+    let gitdir = sandbox_path(&workspace.join(gitdir.trim()));
+    let mut paths = Vec::new();
+    if !gitdir.starts_with(workspace) {
+        paths.push(gitdir.clone());
+    }
+    if let Ok(common) = std::fs::read_to_string(gitdir.join("commondir")) {
+        let common = sandbox_path(&gitdir.join(common.trim()));
+        if !common.starts_with(workspace) && !paths.contains(&common) {
+            paths.push(common);
+        }
+    }
+    paths
+}
+
+/// The policy a turn's sandbox runs under: reads everywhere but the masked
+/// private paths and the gateway's data root (unless a grant names it),
+/// writes the workspace as its grant allows, the workspace's git metadata,
+/// the shared caches, temporary space and any attachment granted write.
 pub(crate) fn build_sandbox_config(
     agent_config: &AgentConfig,
     workspace_policy: Option<&TrustedWorkspacePolicy>,
+    roots: &PolicyRoots,
 ) -> Result<swage_sandbox::SandboxConfig, swage_sandbox::SandboxConfigError> {
     let working_directory = sandbox_path(&agent_config.working_directory);
     let mut builder = swage_sandbox::SandboxConfig::builder().working_directory(&working_directory);
+    let mut granted: Vec<PathBuf> = Vec::new();
 
     let active_grant = workspace_policy
         .and_then(|policy| policy.active_workspace.as_ref())
         .filter(|grant| sandbox_path(&grant.path) == working_directory);
     let active_can_write = active_grant.is_none_or(|grant| grant.can_write);
+    granted.push(working_directory.clone());
     if active_can_write {
-        builder = builder
-            .read_write_mount(&working_directory)
-            .landlock_write_path(&working_directory);
+        builder = builder.write_path(&working_directory);
+        for path in git_metadata_outside(&working_directory) {
+            if path.exists() {
+                builder = builder.write_path(&path);
+                granted.push(path);
+            }
+        }
     } else {
-        builder = builder
-            .read_only_mount(&working_directory)
-            .landlock_read_path(&working_directory);
+        builder = builder.read_only_path(&working_directory);
     }
 
     if let Some(policy) = workspace_policy {
@@ -195,11 +265,37 @@ pub(crate) fn build_sandbox_config(
                 }
             }
             if grant.can_write {
-                builder = builder.read_write_mount(&path).landlock_write_path(&path);
+                builder = builder.write_path(&path);
+                granted.push(path);
             } else if grant.can_read {
-                builder = builder.read_only_mount(&path).landlock_read_path(&path);
+                builder = builder.read_only_path(&path);
+                granted.push(path);
             }
         }
+    }
+
+    if let Some(home) = &roots.home {
+        for cache in SHARED_CACHE_PATHS {
+            let path = home.join(cache);
+            if path.is_dir() {
+                builder = builder.write_path(sandbox_path(&path));
+            }
+        }
+        for private in MASKED_HOME_PATHS {
+            let path = home.join(private);
+            if path.exists() {
+                builder = builder.masked_path(sandbox_path(&path));
+            }
+        }
+    }
+    // The gateway's own data root — its store, secrets and token — is masked
+    // unless a grant reaches into it, in which case the grant decides.
+    if roots.data_root.exists()
+        && !granted
+            .iter()
+            .any(|path| path.starts_with(&roots.data_root) || roots.data_root.starts_with(path))
+    {
+        builder = builder.masked_path(&roots.data_root);
     }
 
     builder.build()
@@ -231,6 +327,7 @@ pub(super) async fn build_turn_sandbox(
     config: &swage_config::ResolvedConfig,
     agent_config: &AgentConfig,
     workspace_policy: Option<&TrustedWorkspacePolicy>,
+    egress: swage_sandbox::EgressSetup,
 ) -> Result<TurnSandboxBuild, swage_core::SandboxError> {
     // An install that declares its boundary (a container image, for one)
     // runs every turn inside it: no per-turn sandbox is built, the host
@@ -256,11 +353,13 @@ pub(super) async fn build_turn_sandbox(
     }
     #[cfg(test)]
     if state.test_sandbox_enabled() {
-        let config = build_sandbox_config(agent_config, workspace_policy).map_err(|error| {
-            swage_core::SandboxError::SpawnFailed {
-                message: format!("failed to build test sandbox config: {error}"),
-            }
-        })?;
+        let roots = PolicyRoots::from_environment(&state.config_root);
+        let config =
+            build_sandbox_config(agent_config, workspace_policy, &roots).map_err(|error| {
+                swage_core::SandboxError::SpawnFailed {
+                    message: format!("failed to build test sandbox config: {error}"),
+                }
+            })?;
         return Ok(TurnSandboxBuild {
             sandbox: Some(Arc::new(PolicyEnforcingTestSandbox { config })),
             isolation: ExecutionIsolation::Isolated,
@@ -293,6 +392,7 @@ pub(super) async fn build_turn_sandbox(
         config,
         agent_config,
         workspace_policy,
+        egress,
         swage_sandbox::find_bwrap().is_ok(),
         true,
     )
@@ -325,11 +425,7 @@ impl Sandbox for PolicyEnforcingTestSandbox {
                 .map(|content| serde_json::json!({"output": content}))
                 .map_err(|error| error.to_string()),
             ("file_write", Some(path)) => {
-                if !self
-                    .config
-                    .read_write_mounts
-                    .contains(&self.config.working_directory)
-                {
+                if !self.config.working_directory_is_writable() {
                     Err("write refused by read-only sandbox mount".into())
                 } else {
                     let content = params
@@ -367,14 +463,17 @@ async fn build_turn_sandbox_for_backend_selection(
     config: &swage_config::ResolvedConfig,
     agent_config: &AgentConfig,
     workspace_policy: Option<&TrustedWorkspacePolicy>,
+    egress: swage_sandbox::EgressSetup,
     bubblewrap_available: bool,
     spawn_fallback: bool,
 ) -> Result<TurnSandboxBuild, swage_core::SandboxError> {
-    let sandbox_config = build_sandbox_config(agent_config, workspace_policy).map_err(|error| {
-        swage_core::SandboxError::SpawnFailed {
-            message: format!("failed to build sandbox config: {error}"),
-        }
-    })?;
+    let roots = PolicyRoots::from_environment(&state.config_root);
+    let sandbox_config =
+        build_sandbox_config(agent_config, workspace_policy, &roots).map_err(|error| {
+            swage_core::SandboxError::SpawnFailed {
+                message: format!("failed to build sandbox config: {error}"),
+            }
+        })?;
 
     let provider = state.active_provider();
     let make_llm_handler = || {
@@ -395,7 +494,8 @@ async fn build_turn_sandbox_for_backend_selection(
     let degradation_reason;
     if bubblewrap_available {
         let mut sandbox =
-            swage_sandbox::BubblewrapSandbox::new(sandbox_config.clone(), make_llm_handler());
+            swage_sandbox::BubblewrapSandbox::new(sandbox_config.clone(), make_llm_handler())
+                .with_egress(egress.clone());
         match sandbox.spawn_agent().await {
             Ok(()) => {
                 return Ok(TurnSandboxBuild {
@@ -428,7 +528,8 @@ async fn build_turn_sandbox_for_backend_selection(
         degradation_reason = "bubblewrap_unavailable".into();
     }
 
-    let mut fallback = swage_sandbox::FallbackSandbox::new(sandbox_config, make_llm_handler());
+    let mut fallback =
+        swage_sandbox::FallbackSandbox::new(sandbox_config, make_llm_handler()).with_egress(egress);
     if spawn_fallback {
         fallback.spawn_agent().await?;
     }
@@ -453,7 +554,7 @@ pub(crate) async fn build_gateway_dispatcher(
         active_workspace_attachment_id,
         ws_tx,
         session_id,
-        turn_id: _,
+        turn_id,
     } = request;
     #[cfg(test)]
     if state.take_dispatcher_build_failure() {
@@ -497,8 +598,27 @@ pub(crate) async fn build_gateway_dispatcher(
         false,
     );
 
-    let sandbox_build =
-        build_turn_sandbox(state, config, agent_config, workspace_policy.as_ref()).await?;
+    // What this turn's sandboxed commands may reach, and the record of it:
+    // the install's hosts, then the judge, every attempt an audit event of
+    // this session and turn.
+    let egress = crate::egress::turn_egress_setup(
+        &config.sandbox.egress_hosts,
+        Some(Arc::new(crate::request_judge::GatewayRequestJudge::new(
+            state.clone(),
+        ))),
+        state.storage.clone(),
+        session_id,
+        turn_id,
+        &agent_config.agent_id,
+    );
+    let sandbox_build = build_turn_sandbox(
+        state,
+        config,
+        agent_config,
+        workspace_policy.as_ref(),
+        egress,
+    )
+    .await?;
     tracing::debug!(backend = ?sandbox_build.backend, "selected turn sandbox backend");
     let sandbox = sandbox_build.sandbox;
     let sandbox_guard = sandbox
@@ -598,6 +718,32 @@ mod tests {
     use super::*;
     use crate::turn::tests::{MockStorage, make_state_with_session, make_state_with_storage};
 
+    /// An egress setup for tests of backend selection: nothing is reachable
+    /// and nothing is recorded, since no command runs.
+    fn test_egress() -> swage_sandbox::EgressSetup {
+        struct Closed;
+        #[async_trait::async_trait]
+        impl swage_sandbox::EgressPolicy for Closed {
+            async fn decide(
+                &self,
+                _: &swage_sandbox::EgressRequest,
+            ) -> swage_sandbox::EgressVerdict {
+                swage_sandbox::EgressVerdict::Refused {
+                    reason: "test".into(),
+                }
+            }
+        }
+        struct Dropped;
+        #[async_trait::async_trait]
+        impl swage_sandbox::EgressRecorder for Dropped {
+            async fn record(&self, _: swage_sandbox::EgressConnection) {}
+        }
+        swage_sandbox::EgressSetup {
+            policy: Arc::new(Closed),
+            recorder: Arc::new(Dropped),
+        }
+    }
+
     fn codex_config() -> swage_config::ResolvedConfig {
         let mut config = swage_config::ResolvedConfig::default();
         config.providers.entries.insert(
@@ -674,7 +820,7 @@ mod tests {
         let mut config = swage_config::ResolvedConfig::default();
         config.sandbox.enabled = false;
 
-        let build = build_turn_sandbox(&state, &config, &agent_config, None)
+        let build = build_turn_sandbox(&state, &config, &agent_config, None, test_egress())
             .await
             .expect("a declared boundary needs no sandbox of its own");
         assert_eq!(
@@ -716,7 +862,7 @@ mod tests {
         config.sandbox.enabled = false;
         config.sandbox.allow_degraded_execution = true;
 
-        let build = build_turn_sandbox(&state, &config, &agent_config, None)
+        let build = build_turn_sandbox(&state, &config, &agent_config, None, test_egress())
             .await
             .expect("explicitly opted-in non-Codex execution should remain available");
 
@@ -746,6 +892,7 @@ mod tests {
             &config,
             &agent_config,
             None,
+            test_egress(),
             false,
             false,
         )

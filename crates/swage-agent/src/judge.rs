@@ -34,6 +34,46 @@ pub enum RequestedReach {
         /// `read` or `write`, as the tool reported it.
         access: String,
     },
+    /// A network host a sandboxed command asked to reach that no standing
+    /// list allows.
+    NetworkHost { host: String, port: u16 },
+}
+
+impl RequestedReach {
+    /// The reach in a few words for an audit summary: `read /srv/data`,
+    /// `connect example.org:443`.
+    pub fn summary(&self) -> String {
+        match self {
+            RequestedReach::Location { path, access } => format!("{access} {path}"),
+            RequestedReach::NetworkHost { host, port } => format!("connect {host}:{port}"),
+        }
+    }
+
+    /// The reach as the audit record keeps it.
+    pub fn record(&self) -> Value {
+        match self {
+            RequestedReach::Location { path, access } => {
+                serde_json::json!({ "kind": "location", "path": path, "access": access })
+            }
+            RequestedReach::NetworkHost { host, port } => {
+                serde_json::json!({ "kind": "network_host", "host": host, "port": port })
+            }
+        }
+    }
+
+    /// The reach in one clause, as the judge and the record read it.
+    pub fn describe(&self) -> String {
+        match self {
+            RequestedReach::Location { path, access } => format!(
+                "{access} access to the location `{path}`, which is outside the session's \
+                 granted locations"
+            ),
+            RequestedReach::NetworkHost { host, port } => format!(
+                "a network connection to `{host}` on port {port}, which no standing list of \
+                 reachable hosts allows"
+            ),
+        }
+    }
 }
 
 /// Everything the judge is given about one request.
@@ -117,28 +157,42 @@ pub(crate) fn refused_feedback(
     reach: &RequestedReach,
     judgement: &Judgement,
 ) -> String {
-    let RequestedReach::Location { path, access } = reach;
     let decision = match judgement.verdict {
         JudgeVerdict::Refused => "the judge refused it",
         JudgeVerdict::Allowed | JudgeVerdict::Unavailable => "no judge could allow it",
     };
-    format!(
-        "Tool error: `{tool_name}` may not {access} `{path}`: the location lies outside this \
-         session's granted locations and {decision} ({}). The call did not run. Work within \
-         the session's granted locations, or state in `{JUSTIFICATION_PARAMETER}` why this one \
-         is needed.",
-        judgement.reason
-    )
+    match reach {
+        RequestedReach::Location { path, access } => format!(
+            "Tool error: `{tool_name}` may not {access} `{path}`: the location lies outside this \
+             session's granted locations and {decision} ({}). The call did not run. Work within \
+             the session's granted locations, or state in `{JUSTIFICATION_PARAMETER}` why this \
+             one is needed.",
+            judgement.reason
+        ),
+        RequestedReach::NetworkHost { host, port } => format!(
+            "Tool error: `{tool_name}` may not reach `{host}:{port}`: the host is on no standing \
+             list of reachable hosts and {decision} ({}). The connection was refused. Reach the \
+             hosts the session may, or state in `{JUSTIFICATION_PARAMETER}` why this one is \
+             needed.",
+            judgement.reason
+        ),
+    }
 }
 
 /// What the model reads above a result the judge let through.
 pub(crate) fn allowed_note(reach: &RequestedReach, judgement: &Judgement) -> String {
-    let RequestedReach::Location { path, access } = reach;
-    format!(
-        "[The judge allowed this call to {access} `{path}` ({}). This one request ran; the \
-         session's granted locations are unchanged.]",
-        judgement.reason
-    )
+    match reach {
+        RequestedReach::Location { path, access } => format!(
+            "[The judge allowed this call to {access} `{path}` ({}). This one request ran; the \
+             session's granted locations are unchanged.]",
+            judgement.reason
+        ),
+        RequestedReach::NetworkHost { host, port } => format!(
+            "[The judge allowed this connection to `{host}:{port}` ({}). This one connection \
+             was made; the session's reachable hosts are unchanged.]",
+            judgement.reason
+        ),
+    }
 }
 
 #[cfg(test)]

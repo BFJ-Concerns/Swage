@@ -2411,7 +2411,6 @@ impl Agent {
             }
             None => Judgement::unavailable("no judge is configured for this session"),
         };
-        let crate::judge::RequestedReach::Location { path, access } = reach;
         // The judgement is part of the local record (C15, C68): it is written
         // before the request can run, and a failed write refuses the request.
         let recorded = self
@@ -2423,9 +2422,9 @@ impl Agent {
                 entity_id: execution.turn_id.to_string(),
                 event_kind: "request_judged".into(),
                 summary: format!(
-                    "{} {} {path} for {}: {}",
+                    "{} {} for {}: {}",
                     judgement.verdict.as_str(),
-                    access,
+                    reach.summary(),
                     call.name,
                     judgement.reason
                 ),
@@ -2433,7 +2432,7 @@ impl Agent {
                     "tool": call.name,
                     "call_id": call.call_id,
                     "arguments": call.arguments,
-                    "reach": { "kind": "location", "path": path, "access": access },
+                    "reach": reach.record(),
                     "justification": justification,
                     "verdict": judgement.verdict.as_str(),
                     "reason": judgement.reason,

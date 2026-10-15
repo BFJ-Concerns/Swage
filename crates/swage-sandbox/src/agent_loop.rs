@@ -260,6 +260,19 @@ async fn execute_until_cancelled(
 pub async fn run_agent_loop(tools: Vec<Box<dyn Tool>>) -> Result<(), SandboxError> {
     apply_child_landlock_from_env()?;
 
+    // The one route to the network: a bridge on this namespace's loopback to
+    // the host's proxy socket, named in the environment every command this
+    // process starts inherits. Set before any other task runs, so nothing
+    // reads the environment while it changes.
+    if let Some(bridge) = crate::egress::start_egress_bridge() {
+        for (name, value) in bridge.environment() {
+            // Safety: the loop's own tasks are not yet spawned, and the
+            // runtime's workers read no environment variable concurrently.
+            unsafe { std::env::set_var(name, value) };
+        }
+        tracing::debug!(address = %bridge.address, "egress bridge listening");
+    }
+
     let socket_path = std::env::var("SWAGE_IPC_SOCKET").map_err(|_| SandboxError::IpcError {
         message: "SWAGE_IPC_SOCKET environment variable not set".into(),
     })?;

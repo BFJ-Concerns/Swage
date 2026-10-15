@@ -934,6 +934,7 @@ fn apply_runtime_settings_to_partial(
         partial.sandbox = Some(swage_config::merge::PartialSandboxConfig {
             enabled: Some(sandbox.enabled),
             allow_degraded_execution: Some(sandbox.allow_degraded_execution),
+            egress_hosts: Some(sandbox.egress_hosts.clone()),
         });
     }
     if let Some(context) = context {
@@ -1935,6 +1936,7 @@ mod tests {
             sandbox: Some(swage_protocol::client::settings::SandboxConfig {
                 enabled: false,
                 allow_degraded_execution: true,
+                egress_hosts: vec!["github.com".into()],
             }),
             context: Some(swage_protocol::client::settings::ContextConfig {
                 assembly: "default".to_string(),
@@ -2727,6 +2729,7 @@ mod tests {
                 sandbox: Some(swage_config::SandboxConfig {
                     enabled: false,
                     allow_degraded_execution: true,
+                    egress_hosts: vec!["github.com".into()],
                 }),
                 context: Some(swage_config::ContextConfig {
                     assembly: "compact".into(),

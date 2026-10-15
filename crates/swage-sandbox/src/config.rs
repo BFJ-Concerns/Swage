@@ -1,4 +1,16 @@
-//! Per-agent sandbox configuration.
+//! Per-turn sandbox policy: what the sandboxed process may read, write and
+//! never see.
+//!
+//! The policy reads broadly and writes narrowly. Everything the host can see
+//! is readable inside the sandbox except the private paths the policy masks
+//! — key material, cloud credentials, the gateway's own data root — which
+//! read as empty. Writes are limited to a declared set: the workspace when
+//! its grant allows, the workspace's git metadata where it lies outside the
+//! tree, the shared build and package caches, and any attachment granted
+//! write. A path inside that set can still be held read-only. The result is
+//! that ordinary development work — build, commit, push, fetch — needs no
+//! per-topic configuration, and the things worth protecting are protected by
+//! default.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -22,22 +34,26 @@ pub enum SandboxConfigError {
 // Config
 // ---------------------------------------------------------------------------
 
-/// Per-agent sandbox configuration.
+/// Per-turn sandbox policy and timeouts.
 ///
-/// Configures isolation boundaries, mount points, Landlock filesystem rules,
-/// and timeout parameters for a sandboxed agent process.
+/// Serialised to the sandboxed child, which applies the write set and the
+/// broad read through Landlock; the host applies the same policy through
+/// bubblewrap's mounts, where the masks and the read-only paths are enforced.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
-    /// The agent's working directory — read-write inside the sandbox.
+    /// The directory the agent's commands run in. Writable only when it is
+    /// also in `write_paths`.
     pub working_directory: PathBuf,
-    /// Additional read-only bind mounts (e.g., topic source, shared libraries).
-    pub read_only_mounts: Vec<PathBuf>,
-    /// Additional read-write bind mounts (e.g., output directory).
-    pub read_write_mounts: Vec<PathBuf>,
-    /// Landlock-enforced read paths (kernel-level filesystem access control).
-    pub landlock_read_paths: Vec<PathBuf>,
-    /// Landlock-enforced write paths (kernel-level filesystem access control).
-    pub landlock_write_paths: Vec<PathBuf>,
+    /// Paths the sandboxed process may write. Everything else it can see is
+    /// read-only.
+    pub write_paths: Vec<PathBuf>,
+    /// Paths kept read-only even where a write path above them would allow
+    /// writing: a read-only attachment inside a writable tree, say.
+    pub read_only_paths: Vec<PathBuf>,
+    /// Private paths hidden from the sandbox altogether. A directory reads as
+    /// empty; a file reads as empty. Enforced by the mount layer, so the
+    /// fallback backend cannot honour them.
+    pub masked_paths: Vec<PathBuf>,
     /// Time to wait for graceful shutdown before SIGKILL.
     pub shutdown_grace_period: Duration,
     /// Per-tool-call IPC timeout.
@@ -51,6 +67,13 @@ impl SandboxConfig {
     pub fn builder() -> SandboxConfigBuilder {
         SandboxConfigBuilder::new()
     }
+
+    /// Whether the working directory is in the write set.
+    pub fn working_directory_is_writable(&self) -> bool {
+        self.write_paths
+            .iter()
+            .any(|path| path == &self.working_directory)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -60,13 +83,13 @@ impl SandboxConfig {
 /// Builder for [`SandboxConfig`].
 ///
 /// Provides sensible defaults for optional fields. The `working_directory`
-/// must be set explicitly — there is no safe default for where the agent runs.
+/// must be set explicitly — there is no safe default for where the agent runs
+/// — and is read-only until `write_path` names it.
 pub struct SandboxConfigBuilder {
     working_directory: Option<PathBuf>,
-    read_only_mounts: Vec<PathBuf>,
-    read_write_mounts: Vec<PathBuf>,
-    landlock_read_paths: Vec<PathBuf>,
-    landlock_write_paths: Vec<PathBuf>,
+    write_paths: Vec<PathBuf>,
+    read_only_paths: Vec<PathBuf>,
+    masked_paths: Vec<PathBuf>,
     // 5 second default — long enough for a clean shutdown, short enough not
     // to stall the host on a hung agent.
     shutdown_grace_period: Duration,
@@ -81,10 +104,9 @@ impl SandboxConfigBuilder {
     pub fn new() -> Self {
         Self {
             working_directory: None,
-            read_only_mounts: Vec::new(),
-            read_write_mounts: Vec::new(),
-            landlock_read_paths: Vec::new(),
-            landlock_write_paths: Vec::new(),
+            write_paths: Vec::new(),
+            read_only_paths: Vec::new(),
+            masked_paths: Vec::new(),
             shutdown_grace_period: Duration::from_secs(5),
             tool_call_timeout: Duration::from_secs(30),
             llm_request_timeout: Duration::from_secs(60),
@@ -97,27 +119,30 @@ impl SandboxConfigBuilder {
         self
     }
 
-    /// Adds a read-only bind mount into the sandbox.
-    pub fn read_only_mount(mut self, path: impl Into<PathBuf>) -> Self {
-        self.read_only_mounts.push(path.into());
+    /// Adds a path the sandboxed process may write. Duplicates are kept once.
+    pub fn write_path(mut self, path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        if !self.write_paths.contains(&path) {
+            self.write_paths.push(path);
+        }
         self
     }
 
-    /// Adds a read-write bind mount into the sandbox.
-    pub fn read_write_mount(mut self, path: impl Into<PathBuf>) -> Self {
-        self.read_write_mounts.push(path.into());
+    /// Adds a path held read-only even inside a writable tree.
+    pub fn read_only_path(mut self, path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        if !self.read_only_paths.contains(&path) {
+            self.read_only_paths.push(path);
+        }
         self
     }
 
-    /// Adds a Landlock-enforced read path (kernel filesystem access control).
-    pub fn landlock_read_path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.landlock_read_paths.push(path.into());
-        self
-    }
-
-    /// Adds a Landlock-enforced write path (kernel filesystem access control).
-    pub fn landlock_write_path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.landlock_write_paths.push(path.into());
+    /// Adds a private path the sandbox never sees.
+    pub fn masked_path(mut self, path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        if !self.masked_paths.contains(&path) {
+            self.masked_paths.push(path);
+        }
         self
     }
 
@@ -151,10 +176,9 @@ impl SandboxConfigBuilder {
 
         Ok(SandboxConfig {
             working_directory,
-            read_only_mounts: self.read_only_mounts,
-            read_write_mounts: self.read_write_mounts,
-            landlock_read_paths: self.landlock_read_paths,
-            landlock_write_paths: self.landlock_write_paths,
+            write_paths: self.write_paths,
+            read_only_paths: self.read_only_paths,
+            masked_paths: self.masked_paths,
             shutdown_grace_period: self.shutdown_grace_period,
             tool_call_timeout: self.tool_call_timeout,
             llm_request_timeout: self.llm_request_timeout,
@@ -178,8 +202,6 @@ mod tests {
 
     use super::*;
 
-    // -- Build succeeds -------------------------------------------------------
-
     #[test]
     fn build_with_working_directory_succeeds() {
         let config = SandboxConfig::builder()
@@ -190,7 +212,24 @@ mod tests {
         assert_eq!(config.working_directory, Path::new("/tmp/agent-workspace"));
     }
 
-    // -- Default values -------------------------------------------------------
+    #[test]
+    fn the_working_directory_is_read_only_until_named_as_a_write_path() {
+        let read_only = SandboxConfig::builder()
+            .working_directory("/tmp/agent")
+            .build()
+            .unwrap();
+        assert!(!read_only.working_directory_is_writable());
+        assert!(read_only.write_paths.is_empty());
+        assert!(read_only.read_only_paths.is_empty());
+        assert!(read_only.masked_paths.is_empty());
+
+        let writable = SandboxConfig::builder()
+            .working_directory("/tmp/agent")
+            .write_path("/tmp/agent")
+            .build()
+            .unwrap();
+        assert!(writable.working_directory_is_writable());
+    }
 
     #[test]
     fn defaults_are_sensible() {
@@ -202,98 +241,50 @@ mod tests {
         assert_eq!(config.shutdown_grace_period, Duration::from_secs(5));
         assert_eq!(config.tool_call_timeout, Duration::from_secs(30));
         assert_eq!(config.llm_request_timeout, Duration::from_secs(60));
-        assert!(config.read_only_mounts.is_empty());
-        assert!(config.read_write_mounts.is_empty());
-        assert!(config.landlock_read_paths.is_empty());
-        assert!(config.landlock_write_paths.is_empty());
     }
 
-    // -- Override fields -------------------------------------------------------
-
     #[test]
-    fn override_shutdown_grace_period() {
+    fn timeouts_can_be_overridden() {
         let config = SandboxConfig::builder()
             .working_directory("/tmp/agent")
             .shutdown_grace_period(Duration::from_secs(10))
-            .build()
-            .unwrap();
-
-        assert_eq!(config.shutdown_grace_period, Duration::from_secs(10));
-    }
-
-    #[test]
-    fn override_tool_call_timeout() {
-        let config = SandboxConfig::builder()
-            .working_directory("/tmp/agent")
             .tool_call_timeout(Duration::from_secs(15))
-            .build()
-            .unwrap();
-
-        assert_eq!(config.tool_call_timeout, Duration::from_secs(15));
-    }
-
-    #[test]
-    fn override_llm_request_timeout() {
-        let config = SandboxConfig::builder()
-            .working_directory("/tmp/agent")
             .llm_request_timeout(Duration::from_secs(120))
             .build()
             .unwrap();
 
+        assert_eq!(config.shutdown_grace_period, Duration::from_secs(10));
+        assert_eq!(config.tool_call_timeout, Duration::from_secs(15));
         assert_eq!(config.llm_request_timeout, Duration::from_secs(120));
     }
 
     #[test]
-    fn add_read_only_mounts() {
+    fn each_path_set_is_kept_in_order_without_duplicates() {
         let config = SandboxConfig::builder()
             .working_directory("/tmp/agent")
-            .read_only_mount("/usr/lib")
-            .read_only_mount("/etc/ssl")
+            .write_path("/tmp/agent")
+            .write_path("/home/u/.cache")
+            .write_path("/tmp/agent")
+            .read_only_path("/tmp/agent/vendored")
+            .masked_path("/home/u/.ssh")
+            .masked_path("/home/u/.ssh")
             .build()
             .unwrap();
 
-        assert_eq!(config.read_only_mounts.len(), 2);
-        assert!(config.read_only_mounts.contains(&PathBuf::from("/usr/lib")));
-        assert!(config.read_only_mounts.contains(&PathBuf::from("/etc/ssl")));
-    }
-
-    #[test]
-    fn add_read_write_mounts() {
-        let config = SandboxConfig::builder()
-            .working_directory("/tmp/agent")
-            .read_write_mount("/tmp/output")
-            .build()
-            .unwrap();
-
-        assert_eq!(config.read_write_mounts.len(), 1);
-        assert_eq!(config.read_write_mounts[0], PathBuf::from("/tmp/output"));
-    }
-
-    #[test]
-    fn add_landlock_paths() {
-        let config = SandboxConfig::builder()
-            .working_directory("/tmp/agent")
-            .landlock_read_path("/home/user/topic")
-            .landlock_write_path("/tmp/output")
-            .build()
-            .unwrap();
-
-        assert_eq!(config.landlock_read_paths.len(), 1);
         assert_eq!(
-            config.landlock_read_paths[0],
-            PathBuf::from("/home/user/topic")
+            config.write_paths,
+            vec![PathBuf::from("/tmp/agent"), PathBuf::from("/home/u/.cache")]
         );
-        assert_eq!(config.landlock_write_paths.len(), 1);
-        assert_eq!(config.landlock_write_paths[0], PathBuf::from("/tmp/output"));
+        assert_eq!(
+            config.read_only_paths,
+            vec![PathBuf::from("/tmp/agent/vendored")]
+        );
+        assert_eq!(config.masked_paths, vec![PathBuf::from("/home/u/.ssh")]);
     }
-
-    // -- Validation -----------------------------------------------------------
 
     #[test]
     fn build_fails_without_working_directory() {
-        let result = SandboxConfig::builder().build();
-
-        match result {
+        match SandboxConfig::builder().build() {
             Err(SandboxConfigError::MissingField { field }) => {
                 assert_eq!(field, "working_directory");
             }
@@ -301,30 +292,19 @@ mod tests {
         }
     }
 
-    // -- Clone + Debug --------------------------------------------------------
-
     #[test]
-    fn config_is_clone() {
+    fn config_round_trips_through_json_for_the_child() {
         let config = SandboxConfig::builder()
             .working_directory("/tmp/agent")
-            .read_only_mount("/usr/lib")
+            .write_path("/tmp/agent")
+            .masked_path("/home/u/.ssh")
             .build()
             .unwrap();
 
-        let clone = config.clone();
-        assert_eq!(clone.working_directory, config.working_directory);
-        assert_eq!(clone.read_only_mounts, config.read_only_mounts);
-    }
-
-    #[test]
-    fn config_is_debug() {
-        let config = SandboxConfig::builder()
-            .working_directory("/tmp/agent")
-            .build()
-            .unwrap();
-
-        let debug = format!("{config:?}");
-        assert!(debug.contains("SandboxConfig"));
-        assert!(debug.contains("agent"));
+        let json = serde_json::to_string(&config).unwrap();
+        let decoded: SandboxConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.working_directory, config.working_directory);
+        assert_eq!(decoded.write_paths, config.write_paths);
+        assert_eq!(decoded.masked_paths, config.masked_paths);
     }
 }

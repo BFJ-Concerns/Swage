@@ -334,14 +334,45 @@ pub struct HitlConfig {
 pub struct SandboxConfig {
     pub enabled: bool,
     pub allow_degraded_execution: bool,
+    /// Hosts a sandboxed command may reach through the egress proxy without
+    /// anyone being asked: an exact host, or `*.suffix` for a host and every
+    /// name beneath it. Any other host goes to the request judge and fails
+    /// closed without its yes. Shipped with the forges and package registries
+    /// ordinary development reaches.
+    pub egress_hosts: Vec<String>,
 }
-/// Every turn is sandboxed unless configuration turns it off, and running
-/// without isolation after a failed sandbox setup needs its own opt-in.
+
+/// The forges and package registries a sandboxed command reaches without
+/// anyone being asked: what building, committing, pushing and fetching
+/// dependencies needs on an ordinary day.
+pub const DEFAULT_EGRESS_HOSTS: &[&str] = &[
+    "github.com",
+    "*.github.com",
+    "*.githubusercontent.com",
+    "gitlab.com",
+    "codeberg.org",
+    "crates.io",
+    "*.crates.io",
+    "static.rust-lang.org",
+    "registry.npmjs.org",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "proxy.golang.org",
+    "sum.golang.org",
+];
+
+/// Every turn is sandboxed unless configuration turns it off, running
+/// without isolation after a failed sandbox setup needs its own opt-in, and
+/// the network is reachable at the shipped forges and registries.
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             allow_degraded_execution: false,
+            egress_hosts: DEFAULT_EGRESS_HOSTS
+                .iter()
+                .map(|host| (*host).to_owned())
+                .collect(),
         }
     }
 }

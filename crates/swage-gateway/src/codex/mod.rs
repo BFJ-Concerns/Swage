@@ -1929,12 +1929,14 @@ mod tests {
         ]});
         let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
 
-        let (result, _, _, _) = run_scripted_turn_with_audit_failure(
+        // Boxed: the turn's future carries the dispatcher build, which has
+        // grown past the stack budget clippy holds async blocks to.
+        let (result, _, _, _) = Box::pin(run_scripted_turn_with_audit_failure(
             scenario,
             dispatcher,
             permissions(&["shell"], &[]),
             true,
-        )
+        ))
         .await;
         assert_eq!(
             result

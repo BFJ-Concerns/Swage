@@ -3545,13 +3545,21 @@
           "allow_degraded_execution": {
             "type": "boolean"
           },
+          "egress_hosts": {
+            "description": "Hosts a sandboxed command may reach through the egress proxy without\nanyone being asked: an exact host, or `*.suffix` for a host and every\nname beneath it. Any other host goes to the request judge and fails\nclosed without its yes. Shipped with the forges and package registries\nordinary development reaches.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "enabled": {
             "type": "boolean"
           }
         },
         "required": [
           "enabled",
-          "allow_degraded_execution"
+          "allow_degraded_execution",
+          "egress_hosts"
         ],
         "type": "object"
       },

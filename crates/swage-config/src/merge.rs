@@ -47,6 +47,7 @@ pub struct PartialModelCatalogConfig {
 pub struct PartialSandboxConfig {
     pub enabled: Option<bool>,
     pub allow_degraded_execution: Option<bool>,
+    pub egress_hosts: Option<Vec<String>>,
 }
 
 /// Partial mirror of `LoggingConfig`.
@@ -303,6 +304,7 @@ impl From<ResolvedConfig> for PartialConfig {
             sandbox: Some(PartialSandboxConfig {
                 enabled: Some(r.sandbox.enabled),
                 allow_degraded_execution: Some(r.sandbox.allow_degraded_execution),
+                egress_hosts: Some(r.sandbox.egress_hosts.clone()),
             }),
             logging: Some(PartialLoggingConfig {
                 level: Some(r.logging.level),
@@ -492,6 +494,7 @@ impl_merge_overlay!(PartialServerConfig { host, port });
 impl_merge_overlay!(PartialSandboxConfig {
     enabled,
     allow_degraded_execution,
+    egress_hosts,
 });
 impl_merge_overlay!(PartialLoggingConfig { level });
 impl_merge_overlay!(PartialContextConfig {
@@ -801,6 +804,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             allow_degraded_execution: sb
                 .allow_degraded_execution
                 .unwrap_or(dsb.allow_degraded_execution),
+            egress_hosts: sb.egress_hosts.unwrap_or(dsb.egress_hosts),
         },
         logging: LoggingConfig {
             level: lg.level.unwrap_or(dlg.level),

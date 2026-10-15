@@ -55,6 +55,7 @@ pub mod codex;
 pub mod config_change;
 pub mod context;
 pub mod device;
+pub mod egress;
 pub mod error;
 pub mod experimentation;
 pub mod handlers;

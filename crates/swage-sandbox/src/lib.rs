@@ -12,6 +12,7 @@ use swage_core::SandboxError;
 mod agent_loop;
 mod bubblewrap;
 mod config;
+pub mod egress;
 mod fallback;
 pub mod ipc;
 mod landlock;
@@ -40,6 +41,9 @@ pub use agent_loop::run_agent_loop;
 pub use bubblewrap::BubblewrapSandbox;
 pub use bubblewrap::find_bwrap;
 pub use config::{SandboxConfig, SandboxConfigError};
+pub use egress::{
+    EgressConnection, EgressPolicy, EgressRecorder, EgressRequest, EgressSetup, EgressVerdict,
+};
 pub use fallback::FallbackSandbox;
 pub use process::{ChildProcessManager, cleanup_failed_startup_process};
 pub use provider::IpcCompletionProvider;
