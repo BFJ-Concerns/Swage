@@ -442,13 +442,20 @@ export function createStreamingStore(
           break;
 
         case "error": {
-          // Turn failed mid-stream. Preserve whatever the user saw so the
-          // conversation history reflects the partial response.
+          // Preserve the terminal reason beside whatever the user saw.
+          const approvalTimedOut = event.code === "approval_timeout";
           const refused = event.code === "provider_refused";
-          settleResponse(
-            ownerId, stream, refused ? "refused" : "failed", undefined,
-            refused ? get(stream.activeToolCallsStore) : undefined,
-          );
+          if (approvalTimedOut && !get(stream.streamedContentStore) && options?.conversationStore?.settleUnansweredRequest) {
+            options.conversationStore.settleUnansweredRequest(
+              { turn_state: "interrupted", tool_calls: get(stream.activeToolCallsStore) }, ownerId,
+            );
+            stream.activeToolCallsStore.set([]);
+          } else {
+            settleResponse(
+              ownerId, stream, approvalTimedOut ? "interrupted" : refused ? "refused" : "failed", undefined,
+              refused ? get(stream.activeToolCallsStore) : undefined,
+            );
+          }
           stream.turnErrorStore.set({ code: event.code, message: event.message });
           setStreamActive(ownerId, stream, false);
           stream.turnStartedAtStore.set(null);

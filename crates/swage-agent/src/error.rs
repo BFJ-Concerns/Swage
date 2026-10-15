@@ -48,6 +48,10 @@ pub enum AgentError {
     #[error("output schema validation failed after {attempts} attempt(s)")]
     OutputSchemaFailed { attempts: u32 },
 
+    /// Approval expired before execution under the interrupt policy.
+    #[error("approval timed out before tool execution; turn interrupted")]
+    ApprovalTimedOut,
+
     /// The turn was cancelled by the caller via the cancellation token.
     #[error("turn cancelled")]
     Cancelled,
@@ -76,7 +80,9 @@ impl AgentError {
             // Schema validation exhausted all retries — not transient.
             AgentError::OutputSchemaFailed { .. } => false,
             // Cancellation is not a transient failure — the caller chose to stop.
-            AgentError::Cancelled | AgentError::ProviderRefused => false,
+            AgentError::Cancelled | AgentError::ProviderRefused | AgentError::ApprovalTimedOut => {
+                false
+            }
         }
     }
 }

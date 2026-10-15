@@ -20788,3 +20788,117 @@ async fn settlement_integrity_failure_keeps_the_live_cause_on_readback() {
         "history must keep the recording failure cause"
     );
 }
+
+async fn approval_settlement_round_state(root: &std::path::Path) -> (AppState, Uuid) {
+    let (provider, _) = CapturingMultiRoundProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "approval-call".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({"text":"approved output"}),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "Finished".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]);
+    let (state, session_id) = make_state_with_provider_and_root(
+        Arc::new(provider),
+        Arc::new(MockStorage::new()),
+        Some(root.to_path_buf()),
+    )
+    .await;
+    let mut config = state.active_config();
+    config.hitl.timeout = 1;
+    config.hitl.timeout_policy = swage_core::ApprovalTimeoutPolicy::Interrupt;
+    config.tools.permissions.require_approval =
+        vec![swage_config::model::RequireApprovalEntry::Simple(
+            "echo".into(),
+        )];
+    state.replace_runtime(
+        config,
+        state.active_provider(),
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>
+        ]),
+    );
+    (state, session_id)
+}
+
+#[tokio::test]
+async fn interrupt_policy_expiry_records_unexecuted_call_and_timeout_terminal_event() {
+    let home = SwageHomeGuard::new();
+    let (state, session_id) = approval_settlement_round_state(home.path()).await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Use echo",
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .unwrap();
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .remove(0);
+    let turn = state
+        .storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .unwrap()
+        .remove(0);
+    let calls = state
+        .storage
+        .list_tool_calls_by_turn(turn.id)
+        .await
+        .unwrap();
+    let call = serde_json::to_value(&calls[0]).unwrap();
+    let replay = super::history::rebuild_thread_history_messages(&*state.storage, thread.id)
+        .await
+        .unwrap();
+    let mut failures = vec![];
+    if turn.state.to_string() != "interrupted" {
+        failures.push("turn must remain interrupted");
+    }
+    if call["status"] != "expired"
+        || call["execution"]["stage"] != "not_started"
+        || call["execution"]["completion"] != "not_run"
+        || call["execution"]["outcome"] != "refused"
+        || !calls[0]
+            .result
+            .as_deref()
+            .unwrap_or("")
+            .contains("approval timed out")
+    {
+        failures.push("stored call must be expired and known not executed");
+    }
+    if !events.iter().any(|e| matches!(e, ServerEvent::ToolEnd { status, result, .. } if status == "expired" && result.to_string().contains("approval timed out"))) {
+        failures.push("live ToolEnd must report approval timeout expiry");
+    }
+    if events.iter().any(|e| matches!(e, ServerEvent::Cancelled {})) || !events.iter().any(|e| matches!(e, ServerEvent::Error { message, .. } if message.contains("approval timed out"))) {
+        failures.push("live terminal event must name approval timeout, never Stop");
+    }
+    if !replay.iter().filter_map(ChatMessage::tool_replay).flatten().any(|part| matches!(part,
+        swage_core::ToolReplayPart::ToolResult { content, is_error: true, .. } if content.contains("approval timed out") && !content.contains("stopped"))) {
+        failures.push("replayed result must name expiry before execution");
+    }
+    assert!(
+        failures.is_empty(),
+        "{failures:?}\nstored={call}\nevents={events:?}\nreplay={replay:?}"
+    );
+}

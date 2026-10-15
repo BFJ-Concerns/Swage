@@ -789,6 +789,23 @@ pub(super) async fn process_turn_with_composition_and_focus(
             // TurnState::Cancelled and ThreadState::Idle in storage.
             let _ = ws_tx.send(ServerEvent::Cancelled {});
         }
+        Ok(Err(error @ AgentError::ApprovalTimedOut)) => {
+            let message = error.to_string();
+            if let Some(reason) = projection::record_failure_explanation(
+                state,
+                session_id,
+                turn_id.unwrap_or(prepared_turn_id),
+                &message,
+            )
+            .await
+            {
+                record_integrity_lost.get_or_insert(reason);
+            }
+            let _ = ws_tx.send(ServerEvent::Error {
+                code: "approval_timeout".to_string(),
+                message,
+            });
+        }
         Ok(Err(AgentError::OutputSchemaFailed { .. })) => {
             // The agent already emitted AgentEvent::OutputSchemaFailed through
             // the event channel (forwarded above). Log for server visibility but

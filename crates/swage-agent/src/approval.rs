@@ -72,7 +72,9 @@ pub(crate) enum ApprovalGateOutcome {
     /// Human rejected — deliver this
     /// feedback string as the tool result.
     Rejected { feedback: String },
-    /// Timeout with interrupt policy — the turn must be interrupted.
+    /// Approval expired before execution and the policy interrupts the turn.
+    TimedOut,
+    /// The gate was interrupted without a timeout decision.
     Interrupted,
 }
 

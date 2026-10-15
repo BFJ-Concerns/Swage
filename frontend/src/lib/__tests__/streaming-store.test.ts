@@ -1426,3 +1426,21 @@ describe("output-limit completion", () => {
     expect(store.isStreaming).toBe(false);
   });
 });
+
+describe("approval timeout interruption", () => {
+  it.each(["partial answer", ""])("keeps the interrupted state for partial content %j", (content) => {
+    const conv = createMockConversationStore();
+    const settleUnansweredRequest = vi.fn();
+    const store = createStreamingStore({ conversationStore: { ...conv, settleUnansweredRequest } });
+    store.startTurn("Use echo");
+    if (content) store.handleServerEvent({ type: "token", content });
+    store.handleServerEvent({ type: "error", code: "approval_timeout", message: "approval timed out before tool execution; turn interrupted" });
+    if (content) {
+      expect(conv.getMessages().find((m) => m.role === "assistant")?.turn_state).toBe("interrupted");
+    } else {
+      expect(settleUnansweredRequest).toHaveBeenCalledWith({ turn_state: "interrupted", tool_calls: [] }, "test-conversation");
+    }
+    expect(store.turnError?.message).toContain("approval timed out");
+    expect(store.isStreaming).toBe(false);
+  });
+});

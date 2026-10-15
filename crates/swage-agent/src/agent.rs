@@ -1384,97 +1384,119 @@ impl Agent {
                     let start = std::time::Instant::now();
 
                     // PreToolUse hook — may block, request approval, or proceed.
-                    let dispatch_result = match self
-                        .dispatch_pre_tool_use(&call.name, &call.arguments)
-                        .await
-                    {
-                        Err(AgentError::HookBlocked { reason, .. }) => {
-                            (reason, true, "blocked".to_string()).into()
-                        }
-                        Err(e) => (format!("hook error: {e}"), true, "error".to_string()).into(),
-                        Ok(PreToolUseOutcome::RequestApproval {
-                            prompt,
-                            context,
-                            timeout,
-                        }) => {
-                            if approval_scope.should_skip_gate() {
-                                // A broader approval decision covers later gates
-                                // within this still-running turn.
-                                self.dispatch_tool_call(
-                                    call,
-                                    &execution,
-                                    &llm_request.messages,
-                                    &event_tx,
-                                    &cancel_token,
-                                    &mut approval_scope,
-                                    Some(record.id),
-                                )
-                                .await?
-                            } else {
-                                // Hook-driven approval gate.
-                                use crate::approval::{
-                                    ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS,
-                                };
-                                let gate_timeout = timeout.unwrap_or(
-                                    std::time::Duration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS),
-                                );
-                                match self
-                                    .handle_approval_gate(
-                                        &execution,
-                                        swage_storage::model::ApprovalKind::Hook,
-                                        Some(call.name.clone()),
-                                        Some(call.arguments.clone()),
-                                        None,
-                                        prompt,
-                                        context,
-                                        gate_timeout,
-                                        swage_core::ApprovalTimeoutPolicy::default(),
-                                        &event_tx,
-                                        &cancel_token,
-                                        &mut approval_scope,
-                                    )
-                                    .await?
-                                {
-                                    ApprovalGateOutcome::Approved { scope } => {
-                                        // Approved — proceed with normal dispatch.
-                                        crate::approval::with_user_approval_note(
-                                            self.dispatch_tool_call(
-                                                call,
+                    let dispatch_result = async {
+                        Ok(
+                            match self
+                                .dispatch_pre_tool_use(&call.name, &call.arguments)
+                                .await
+                            {
+                                Err(AgentError::HookBlocked { reason, .. }) => {
+                                    (reason, true, "blocked".to_string()).into()
+                                }
+                                Err(e) => {
+                                    (format!("hook error: {e}"), true, "error".to_string()).into()
+                                }
+                                Ok(PreToolUseOutcome::RequestApproval {
+                                    prompt,
+                                    context,
+                                    timeout,
+                                }) => {
+                                    if approval_scope.should_skip_gate() {
+                                        // A broader approval decision covers later gates
+                                        // within this still-running turn.
+                                        self.dispatch_tool_call(
+                                            call,
+                                            &execution,
+                                            &llm_request.messages,
+                                            &event_tx,
+                                            &cancel_token,
+                                            &mut approval_scope,
+                                            Some(record.id),
+                                        )
+                                        .await?
+                                    } else {
+                                        // Hook-driven approval gate.
+                                        use crate::approval::{
+                                            ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS,
+                                        };
+                                        let gate_timeout =
+                                            timeout.unwrap_or(std::time::Duration::from_secs(
+                                                DEFAULT_APPROVAL_TIMEOUT_SECS,
+                                            ));
+                                        match self
+                                            .handle_approval_gate(
                                                 &execution,
-                                                &llm_request.messages,
+                                                swage_storage::model::ApprovalKind::Hook,
+                                                Some(call.name.clone()),
+                                                Some(call.arguments.clone()),
+                                                None,
+                                                prompt,
+                                                context,
+                                                gate_timeout,
+                                                swage_core::ApprovalTimeoutPolicy::default(),
                                                 &event_tx,
                                                 &cancel_token,
                                                 &mut approval_scope,
-                                                Some(record.id),
                                             )
-                                            .await?,
-                                            scope,
-                                        )
-                                    }
-                                    ApprovalGateOutcome::Rejected { feedback } => {
-                                        (feedback, true, "rejected".to_string()).into()
-                                    }
-                                    ApprovalGateOutcome::Expired { feedback } => {
-                                        (feedback, true, "expired".to_string()).into()
-                                    }
-                                    ApprovalGateOutcome::Interrupted => {
-                                        return Err(AgentError::Cancelled);
+                                            .await?
+                                        {
+                                            ApprovalGateOutcome::Approved { scope } => {
+                                                // Approved — proceed with normal dispatch.
+                                                crate::approval::with_user_approval_note(
+                                                    self.dispatch_tool_call(
+                                                        call,
+                                                        &execution,
+                                                        &llm_request.messages,
+                                                        &event_tx,
+                                                        &cancel_token,
+                                                        &mut approval_scope,
+                                                        Some(record.id),
+                                                    )
+                                                    .await?,
+                                                    scope,
+                                                )
+                                            }
+                                            ApprovalGateOutcome::Rejected { feedback } => {
+                                                (feedback, true, "rejected".to_string()).into()
+                                            }
+                                            ApprovalGateOutcome::Expired { feedback } => {
+                                                (feedback, true, "expired".to_string()).into()
+                                            }
+                                            ApprovalGateOutcome::TimedOut => {
+                                                return Err(AgentError::ApprovalTimedOut);
+                                            }
+                                            ApprovalGateOutcome::Interrupted => {
+                                                return Err(AgentError::Cancelled);
+                                            }
+                                        }
                                     }
                                 }
-                            }
-                        }
-                        Ok(PreToolUseOutcome::Proceed) => {
-                            self.dispatch_tool_call(
-                                call,
-                                &execution,
-                                &llm_request.messages,
-                                &event_tx,
-                                &cancel_token,
-                                &mut approval_scope,
-                                Some(record.id),
-                            )
-                            .await?
-                        }
+                                Ok(PreToolUseOutcome::Proceed) => {
+                                    self.dispatch_tool_call(
+                                        call,
+                                        &execution,
+                                        &llm_request.messages,
+                                        &event_tx,
+                                        &cancel_token,
+                                        &mut approval_scope,
+                                        Some(record.id),
+                                    )
+                                    .await?
+                                }
+                            },
+                        )
+                    }
+                    .await;
+                    let approval_timed_out =
+                        matches!(&dispatch_result, Err(AgentError::ApprovalTimedOut));
+                    let dispatch_result = match dispatch_result {
+                        Err(AgentError::ApprovalTimedOut) => (
+                            "Tool call rejected: approval timed out before execution".to_string(),
+                            true,
+                            "expired".to_string(),
+                        )
+                            .into(),
+                        result => result?,
                     };
 
                     let duration_ms = start.elapsed().as_millis() as u64;
@@ -1547,6 +1569,10 @@ impl Agent {
                     });
                     tool_position += 1;
                     total_tool_calls += 1;
+                    if approval_timed_out {
+                        return Err(AgentError::ApprovalTimedOut);
+                    }
+
                     if !self.config.approval_prompts_enabled && is_error {
                         let identity = (
                             call.name.clone(),
@@ -1580,6 +1606,11 @@ impl Agent {
             .await;
             let tool_results = match tool_dispatch_result {
                 Ok(tool_results) => tool_results,
+                Err(AgentError::ApprovalTimedOut) => {
+                    self.persist_terminal_response(&execution, &accumulated)
+                        .await?;
+                    return Err(AgentError::ApprovalTimedOut);
+                }
                 Err(AgentError::Cancelled) => {
                     // This function owns the accumulated partial: no cancellation
                     // from tool dispatch may leave without persisting it here.
@@ -2501,6 +2532,7 @@ impl Agent {
             ApprovalGateOutcome::Expired { feedback } => {
                 Ok((feedback, true, "expired".to_string()).into())
             }
+            ApprovalGateOutcome::TimedOut => Err(AgentError::ApprovalTimedOut),
             ApprovalGateOutcome::Interrupted => Err(AgentError::Cancelled),
         }
     }
@@ -2718,6 +2750,7 @@ impl Agent {
                     ApprovalGateOutcome::Expired { feedback } => {
                         Ok((feedback, true, "expired".to_string()).into())
                     }
+                    ApprovalGateOutcome::TimedOut => Err(AgentError::ApprovalTimedOut),
                     ApprovalGateOutcome::Interrupted => {
                         // State transitions already done by handle_approval_gate.
                         Err(AgentError::Cancelled)
@@ -2957,7 +2990,11 @@ impl Agent {
                 .update_state(thread_id, ThreadState::Idle)
                 .await?;
         }
-        Ok(crate::approval::ApprovalGateOutcome::Interrupted)
+        Ok(if cancelled {
+            crate::approval::ApprovalGateOutcome::Interrupted
+        } else {
+            crate::approval::ApprovalGateOutcome::TimedOut
+        })
     }
 
     /// Execute the approval gate: create an approval request, transition the
