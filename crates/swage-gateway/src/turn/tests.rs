@@ -11682,6 +11682,33 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
         .expect("list child sessions");
     assert_eq!(sessions_after_first.len(), 1);
     let child_session_id = sessions_after_first[0].id;
+    let creation_draws = storage
+        .list_audit_events_by_session(child_session_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.entity_id == crate::experimentation::LOCATION_TASK_PROMPT)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        creation_draws.len(),
+        1,
+        "the creation draw belongs to the child session"
+    );
+    let creation_turn =
+        Uuid::parse_str(creation_draws[0].metadata["turn_id"].as_str().unwrap()).unwrap();
+    assert_ne!(
+        creation_turn, parent_turn.id,
+        "the child's draw must not activate its parent turn"
+    );
+    let recorded_turn = storage.get_turn(creation_turn).await.unwrap().unwrap();
+    let recorded_thread = ThreadStore::get(&*storage, recorded_turn.thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        recorded_thread.session_id, child_session_id,
+        "selection attribution uses an actual child turn"
+    );
     let child_thread = storage
         .list_by_session(child_session_id)
         .await
@@ -11771,13 +11798,18 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
         .list_audit_events_by_session(child_session_id)
         .await
         .unwrap();
+    let continued_draws = attributed
+        .iter()
+        .filter(|event| event.entity_id == crate::experimentation::LOCATION_TASK_PROMPT)
+        .collect::<Vec<_>>();
     assert_eq!(
-        attributed
-            .iter()
-            .filter(|event| event.entity_id == crate::experimentation::LOCATION_TASK_PROMPT)
-            .count(),
+        continued_draws.len(),
         1,
-        "the delegation to a known child must attribute its task draw to that child"
+        "continuation does not redraw the task prompt"
+    );
+    assert_eq!(
+        continued_draws[0].id, creation_draws[0].id,
+        "continuation reuses the creation decision instead of recording a parent turn as child activity"
     );
     let sessions_after_second = storage
         .list_sessions_by_agent_id("agent-b")
@@ -20248,4 +20280,595 @@ async fn approval_scope_expired_live_waiter_interrupts_turn() {
 #[tokio::test]
 async fn approval_scope_expired_live_waiter_records_expired_feedback() {
     expired_live_waiter(false).await;
+}
+
+struct DelegationBoundsFixture {
+    state: AppState,
+    storage: Arc<swage_storage::SqliteStorage>,
+    topic: Uuid,
+    parent_turn: Uuid,
+    captured: Arc<std::sync::Mutex<Vec<CompletionRequest>>>,
+}
+
+async fn delegation_bounds_state(
+    rounds: Vec<Vec<StreamChunk>>,
+    config: swage_config::ResolvedConfig,
+) -> DelegationBoundsFixture {
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage
+        .create_session(NewSession {
+            agent_id: "root".into(),
+            ..new_session(topic.id)
+        })
+        .await
+        .unwrap();
+    let thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "root".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let turn = storage
+        .create_turn(NewTurn {
+            thread_id: thread.id,
+            agent_id: "root".into(),
+            state: TurnState::Processing,
+            user_input: Some("delegate".into()),
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+    for id in [
+        "a", "b", "child-1", "child-2", "child-3", "child-4", "child-5",
+    ] {
+        storage.upsert_agent_definition(swage_storage::NewAgentDefinition {
+            id: id.into(), topic_id: Some(topic.id), display_name: id.into(), description: String::new(),
+            instructions: String::new(), model_id: None,
+            tool_permissions: Some(serde_json::json!({"allow": ["delegate"], "deny": [], "bundles": {}, "require_approval": []})),
+            skills: vec![], output_schema: None, output_max_retries: None,
+        }).await.unwrap();
+    }
+    storage
+        .upsert_task_definition(swage_storage::NewTaskDefinition {
+            id: "retained".into(),
+            instructions: "Report the findings.".into(),
+            model_id: None,
+            tool_permissions: None,
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .unwrap();
+    let (provider, captured) = CapturingMultiRoundProvider::new(rounds);
+    let state = AppState::new(
+        storage.clone(),
+        storage.clone(),
+        Arc::new(provider),
+        config,
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn Tool>
+        ]),
+        None,
+    );
+    DelegationBoundsFixture {
+        state,
+        storage,
+        topic: topic.id,
+        parent_turn: turn.id,
+        captured,
+    }
+}
+
+fn delegation_answer() -> Vec<StreamChunk> {
+    vec![
+        StreamChunk::Delta {
+            content: "finished".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]
+}
+
+async fn continue_child_after_selection_change(invalid_pin: bool) {
+    let _home = SwageHomeGuard::isolate();
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    config.models.default = "original-route".into();
+    config.providers.entries.insert(
+        "test".into(),
+        swage_config::ProviderEndpointConfig::default(),
+    );
+    for id in ["original", "changed"] {
+        config.models.entries.insert(
+            format!("{id}-route"),
+            swage_config::ModelEndpointConfig {
+                provider_id: "test".into(),
+                model_id: id.into(),
+                default_effort: Some(swage_core::Effort::Low),
+                capabilities: swage_config::ModelCapabilitiesConfig {
+                    effort: Some(swage_core::EffortCapability::Levels {
+                        levels: vec![swage_core::Effort::Low, swage_core::Effort::High],
+                        can_disable: false,
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+    }
+    let DelegationBoundsFixture {
+        state,
+        storage,
+        topic,
+        parent_turn,
+        captured,
+    } = delegation_bounds_state(vec![delegation_answer(), delegation_answer()], config).await;
+    let handler = GatewayDelegationHandler::new(state.clone());
+    handler
+        .handle_delegation(
+            "a",
+            "first",
+            Some("retained"),
+            None,
+            None,
+            None,
+            None,
+            Some("held"),
+            DispatchContextComposition::default(),
+            "first",
+            "root",
+            parent_turn,
+            topic,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+        .unwrap();
+    {
+        let mut changed = state.runtime_config.write().unwrap();
+        changed.models.default = "changed-route".into();
+        changed
+            .models
+            .entries
+            .get_mut("original-route")
+            .unwrap()
+            .default_effort = Some(swage_core::Effort::High);
+        if invalid_pin {
+            changed.experimentation.enabled = true;
+            changed.experimentation.locations.insert(
+                crate::experimentation::LOCATION_TASK_PROMPT.into(),
+                swage_config::model::ExperimentLocationConfig {
+                    enabled: true,
+                    forced_variant: Some("unregistered".into()),
+                },
+            );
+        }
+    }
+    let result = handler
+        .handle_delegation(
+            "a",
+            "continue",
+            Some("retained"),
+            None,
+            None,
+            None,
+            None,
+            Some("held"),
+            DispatchContextComposition::default(),
+            "second",
+            "root",
+            parent_turn,
+            topic,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "an existing child ignores new forced pins: {:?}",
+        result.err()
+    );
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 2, "both child turns reached the provider");
+    assert_eq!(
+        requests[1].model, requests[0].model,
+        "continuation retains its creation model"
+    );
+    assert_eq!(
+        requests[0].effort.as_ref().map(|effort| effort.requested),
+        Some(swage_core::Effort::Low),
+        "creation applies the configured effort"
+    );
+    assert_eq!(
+        requests[1].effort, requests[0].effort,
+        "continuation retains its creation effort"
+    );
+    drop(requests);
+    let child = storage
+        .list_sessions_by_agent_id("a")
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let turns = storage.list_by_session(child.id).await.unwrap();
+    let turns = storage.list_turns_by_thread(turns[0].id).await.unwrap();
+    assert_eq!(turns.len(), 2);
+    for turn in turns {
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&storage.get_snapshot(turn.id).await.unwrap().unwrap()).unwrap();
+        assert_eq!(
+            snapshot["selection"]["model_id"], "original",
+            "the actual child snapshot carries its fixed selection"
+        );
+        assert_eq!(snapshot["selection"]["effort"]["requested"], "low");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn named_child_retains_model_and_effort_after_configuration_changes() {
+    continue_child_after_selection_change(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn named_child_continues_under_an_invalid_new_prompt_pin() {
+    continue_child_after_selection_change(true).await;
+}
+
+async fn exercise_delegation_bound(
+    limit: Option<u64>,
+    cycle: bool,
+    completion: DelegateCompletionMode,
+) {
+    let _home = SwageHomeGuard::isolate();
+    let expected_limit = limit.unwrap_or(4);
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    config.tools.permissions.allow = vec!["delegate".into()];
+    config.tools.permissions.require_approval = vec![];
+    if let Some(limit) = limit {
+        config.sessions = serde_json::from_value(
+            serde_json::json!({"archive_after_days": 7, "max_delegation_depth": limit}),
+        )
+        .unwrap();
+    }
+    let mut rounds = vec![];
+    // Supply one more callable level than the bound permits. Without the
+    // product's refusal the script completes normally with an extra child.
+    for depth in 1..=expected_limit {
+        let target = if cycle {
+            if depth % 2 == 1 {
+                "b".into()
+            } else {
+                "a".into()
+            }
+        } else {
+            format!("child-{}", depth + 1)
+        };
+        rounds.push(vec![StreamChunk::ToolUse {
+            call_id: format!("depth-{depth}"), name: "delegate".into(),
+            arguments: serde_json::json!({"target_agent": target, "task": "continue the chain"}),
+        }, StreamChunk::Done { finish_reason: Some(FinishReason::ToolUse) }]);
+    }
+    for _ in 0..=expected_limit {
+        rounds.push(delegation_answer());
+    }
+    let DelegationBoundsFixture {
+        state,
+        storage,
+        topic,
+        parent_turn,
+        captured,
+    } = delegation_bounds_state(rounds, config).await;
+    let root_session = storage
+        .list_by_topic(topic)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|session| session.agent_id == "root")
+        .unwrap()
+        .id;
+    let result = GatewayDelegationHandler::new(state.clone())
+        .handle_delegation(
+            if cycle { "a" } else { "child-1" },
+            "start chain",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            DispatchContextComposition::default(),
+            "root-call",
+            "root",
+            parent_turn,
+            topic,
+            CancellationToken::new(),
+            completion,
+        )
+        .await
+        .unwrap();
+    if let DelegationOutcome::Detached(child) = result {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let turns = storage
+                    .list_turns_by_thread(child.child_thread_id)
+                    .await
+                    .unwrap();
+                if !turns.is_empty() && turns.iter().all(|turn| turn.state.is_terminal()) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached chain settles");
+    }
+    let sessions = storage.list_by_topic(topic).await.unwrap();
+    assert_eq!(
+        sessions.len() as u64 - 1,
+        expected_limit,
+        "no child session exists past the configured depth"
+    );
+    let mut refusals = vec![];
+    for session in sessions {
+        refusals.extend(
+            storage
+                .list_audit_events_by_session(session.id)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.event_kind == "delegation_refused"),
+        );
+    }
+    assert_eq!(
+        refusals.len(),
+        1,
+        "the refused dispatch leaves exactly one durable record"
+    );
+    let refusal = &refusals[0];
+    assert_eq!(refusal.metadata["depth"], expected_limit + 1);
+    assert_eq!(refusal.metadata["limit"], expected_limit);
+    assert_ne!(
+        refusal.session_id,
+        Some(root_session),
+        "refusal belongs to the actual delegating child"
+    );
+    let refusal_turn = Uuid::parse_str(refusal.metadata["turn_id"].as_str().unwrap()).unwrap();
+    let turn = storage.get_turn(refusal_turn).await.unwrap().unwrap();
+    assert_eq!(
+        ThreadStore::get(&*storage, turn.thread_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .session_id,
+        refusal.session_id.unwrap()
+    );
+    let reason = format!(
+        "delegation depth {} exceeds the limit {expected_limit}",
+        expected_limit + 1
+    );
+    assert!(
+        captured
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.messages.iter().any(|message| message
+                .tool_replay()
+                .is_some_and(|parts| {
+                    parts.iter().any(|part| matches!(part,
+                ToolReplayPart::ToolResult { call_id, content, is_error: true }
+                    if call_id == &format!("depth-{expected_limit}") && content.contains(&reason)
+            ))
+                }))),
+        "the delegating model consumes the depth refusal reason"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delegation_chain_refuses_the_fifth_child_by_default() {
+    exercise_delegation_bound(None, false, DelegateCompletionMode::Wait).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delegation_chain_honours_a_configured_depth() {
+    exercise_delegation_bound(Some(2), false, DelegateCompletionMode::Wait).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delegation_cycle_stops_at_the_same_depth_bound() {
+    exercise_delegation_bound(None, true, DelegateCompletionMode::Wait).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn detached_delegation_cycle_honours_the_depth_bound() {
+    exercise_delegation_bound(Some(2), true, DelegateCompletionMode::Detach).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delegated_child_effort_uses_selected_provider() {
+    let _home = SwageHomeGuard::isolate();
+    let (url, bodies) = spawn_rejecting_capture_endpoint("/v1/chat/completions").await;
+    let agent_dir = swage_core::ScopeLocation::General.agent_dir(_home.path(), "a");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("config.toml"),
+        format!("[providers.entries.second]\nprotocol = \"openai\"\nbase_url = {url:?}\n"),
+    )
+    .unwrap();
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    config.models.default = "parent".into();
+    for id in ["parent", "second"] {
+        config.providers.entries.insert(
+            id.into(),
+            swage_config::ProviderEndpointConfig {
+                protocol: swage_config::Protocol::OpenAi,
+                base_url: Some(if id == "second" {
+                    format!("{url}/runtime")
+                } else {
+                    url.clone()
+                }),
+                ..Default::default()
+            },
+        );
+        config.models.entries.insert(
+            id.into(),
+            swage_config::ModelEndpointConfig {
+                provider_id: id.into(),
+                model_id: if id == "second" {
+                    "gpt-5.6-terra"
+                } else {
+                    "parent-model"
+                }
+                .into(),
+                default_effort: Some(swage_core::Effort::High),
+                ..Default::default()
+            },
+        );
+    }
+    config.providers.default = "parent".into();
+    std::fs::write(
+        _home.path().join("config.toml"),
+        toml::to_string(&swage_config::PartialConfig::from(config.clone())).unwrap(),
+    )
+    .unwrap();
+    let DelegationBoundsFixture {
+        state,
+        storage,
+        topic,
+        parent_turn,
+        ..
+    } = delegation_bounds_state(vec![], config).await;
+    storage
+        .upsert_task_definition(swage_storage::NewTaskDefinition {
+            id: "second-provider".into(),
+            instructions: "Report the findings.".into(),
+            model_id: Some("second".into()),
+            tool_permissions: None,
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .unwrap();
+    // The endpoint deliberately rejects after capturing the actual child request.
+    let result = GatewayDelegationHandler::new(state)
+        .handle_delegation(
+            "a",
+            "first",
+            Some("second-provider"),
+            None,
+            None,
+            None,
+            None,
+            Some("held"),
+            DispatchContextComposition::default(),
+            "first",
+            "root",
+            parent_turn,
+            topic,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await;
+    let child = storage
+        .list_sessions_by_agent_id("a")
+        .await
+        .unwrap()
+        .pop()
+        .unwrap_or_else(|| panic!("child did not start: {:?}", result.err()));
+    let metadata = child.metadata.unwrap();
+    let expected = swage_core::resolve_effort(
+        swage_core::Effort::High,
+        &swage_provider::openai::OpenAiProvider::from_config(
+            swage_provider::ProviderConfig::keyless("gpt-5.6-terra", "http://127.0.0.1"),
+        )
+        .effort_capability("gpt-5.6-terra")
+        .unwrap(),
+    );
+    assert_eq!(
+        metadata["delegated_child_selection"]["effort"],
+        serde_json::to_value(expected).unwrap(),
+        "retained effort must use the selected child provider adapter"
+    );
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["reasoning_effort"], "high");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delegated_prompt_audit_failure_still_runs_child() {
+    let _home = SwageHomeGuard::isolate();
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    let DelegationBoundsFixture {
+        state,
+        storage,
+        topic,
+        parent_turn,
+        captured,
+    } = delegation_bounds_state(vec![delegation_answer()], config).await;
+    storage
+        .with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER reject_task_prompt BEFORE INSERT ON audit_events
+            WHEN NEW.entity_kind = 'experiment_location' AND NEW.entity_id = 'task.prompt'
+            BEGIN SELECT RAISE(FAIL, 'injected task-prompt audit insert failure'); END;",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let result = GatewayDelegationHandler::new(state)
+        .handle_delegation(
+            "a",
+            "first",
+            Some("retained"),
+            None,
+            None,
+            None,
+            None,
+            Some("held"),
+            DispatchContextComposition::default(),
+            "first",
+            "root",
+            parent_turn,
+            topic,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "task-prompt audit insert failure must not abort the child: {:?}",
+        result.err()
+    );
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 1, "the child actually runs");
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.text_content().contains("Report the findings.")),
+        "the child serves the definition default prompt"
+    );
+    drop(requests);
+    let child = storage
+        .list_sessions_by_agent_id("a")
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(
+        storage
+            .list_audit_events_by_session(child.id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|event| event.entity_id != "task.prompt")
+    );
 }

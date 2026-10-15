@@ -1728,6 +1728,16 @@ async fn execute_external_delegate_message(
         &mut session_metadata,
         &bound_task_definition_ids,
     );
+    let delegation_handler = crate::turn::GatewayDelegationHandler::for_external_child(
+        state.clone(),
+        &topic.location(),
+        &delegate_msg.sender_agent_id,
+        sender_turn_id,
+    )
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))?;
+    delegation_handler.record_bound(&mut session_metadata);
+
     let active_workspace_attachment_id =
         active_workspace_attachment_for_sender_turn(&state, sender_turn_id).await?;
     let (mut target_agent_config, tool_root) = crate::turn::build_agent_config_for_topic_workspace(
@@ -1776,9 +1786,7 @@ async fn execute_external_delegate_message(
         approval_registrar: Some(crate::turn::build_approval_registrar(
             state.approval_channels.clone(),
         )),
-        delegation_handler: Some(Arc::new(crate::turn::GatewayDelegationHandler::new(
-            state.clone(),
-        ))),
+        delegation_handler: Some(Arc::new(delegation_handler)),
         router: router.clone(),
         active_delegations: swage_agent::active_delegations(),
         context_assembler: crate::turn::delegated_context_assembler(
@@ -1807,6 +1815,7 @@ async fn execute_external_delegate_message(
             Some(dispatcher_build.dispatcher),
             session_metadata,
             tokio_util::sync::CancellationToken::new(),
+            None,
             None,
             None,
             None,
@@ -2876,6 +2885,133 @@ mod tests {
         assert!(
             storage.list_approvals().await.unwrap().is_empty(),
             "an external unattended delegate must not create approval rows"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn external_delegate_cannot_exceed_root_limit() {
+        use swage_agent::MessageRouter;
+        use swage_core::{MessageKind, StreamChunk};
+        use swage_storage::store::{AgentDefinitionStore, AuditStore};
+        let _home = SwageHomeGuard::new();
+        let child_dir = swage_core::ScopeLocation::General.agent_dir(_home.path(), "child");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        std::fs::write(
+            child_dir.join("config.toml"),
+            "[sessions]\nmax_delegation_depth = 3\n",
+        )
+        .unwrap();
+        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let topic = storage.general_scope().await.unwrap();
+        for id in ["child", "grandchild"] {
+            storage
+                .upsert_agent_definition(swage_storage::NewAgentDefinition {
+                    id: id.into(),
+                    topic_id: Some(topic.id),
+                    display_name: id.into(),
+                    description: String::new(),
+                    instructions: String::new(),
+                    model_id: None,
+                    tool_permissions: None,
+                    skills: vec![],
+                    output_schema: None,
+                    output_max_retries: None,
+                })
+                .await
+                .unwrap();
+        }
+        let (provider, captured) = CapturingMultiRoundProvider::new(vec![
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "too-deep".into(),
+                    name: "delegate".into(),
+                    arguments: serde_json::json!({"target_agent": "grandchild", "task": "continue"}),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(swage_core::FinishReason::ToolUse),
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "finished".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "finished".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+        ]);
+        let mut config = swage_config::ResolvedConfig::default();
+        config.sandbox.enabled = false;
+        config.sessions.max_delegation_depth = 1;
+        config.tools.permissions.allow = vec!["delegate".into()];
+        config.tools.permissions.require_approval = vec![];
+        let state = AppState::new(
+            storage.clone(),
+            storage.clone(),
+            Arc::new(provider),
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn crate::tool::Tool>,
+            ]),
+            None,
+        );
+        let message = MessageRouter::new(storage.clone(), None)
+            .send_message(swage_storage::NewAgentMessage {
+                sender_agent_id: "root".into(),
+                recipient_agent_id: "child".into(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({"task": "start"}),
+            })
+            .await
+            .unwrap();
+        Box::pin(execute_external_delegate_message(
+            state, message, topic.id, None,
+        ))
+        .await
+        .unwrap();
+        assert!(
+            storage
+                .list_sessions_by_agent_id("grandchild")
+                .await
+                .unwrap()
+                .is_empty(),
+            "an externally started child at depth one cannot create a grandchild with limit one"
+        );
+        let child = storage
+            .list_sessions_by_agent_id("child")
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let refusals = storage
+            .list_audit_events_by_session(child.id)
+            .await
+            .unwrap();
+        let refusal = refusals
+            .iter()
+            .find(|event| event.event_kind == "delegation_refused")
+            .unwrap();
+        assert_eq!(refusal.metadata["depth"], 2);
+        assert_eq!(refusal.metadata["limit"], 1);
+        assert!(
+            captured
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.messages.iter().any(|message| message
+                    .tool_replay()
+                    .is_some_and(|parts| parts.iter().any(|part| matches!(part,
+                swage_core::ToolReplayPart::ToolResult { content, is_error: true, .. }
+                    if content.contains("delegation depth 2 exceeds the limit 1"))))))
         );
     }
 
