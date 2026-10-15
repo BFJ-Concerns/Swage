@@ -6,8 +6,8 @@ description: How Swage runs workflow scripts — lifecycle, journalling, budget 
 
 Swage's workflow engine runs front-loaded JavaScript scripts that orchestrate
 agent work. A script defines a run's entire plan — which agents to call, in
-what order, with what structure — and the engine executes it inside a sandboxed
-QuickJS runtime on a dedicated OS thread. Every non-deterministic host call is journalled, so a crashed or
+what order, with what structure — and the engine executes it inside a caged V8
+isolate of its own on a dedicated OS thread. Every non-deterministic host call is journalled, so a crashed or
 restarted run replays from its journal and picks up where it left off.
 The one deliberate exception is the synchronous budget accessors
 `budget.spent()` and `budget.remaining()` — these are live reads against
@@ -40,16 +40,21 @@ and concurrent `start_run` calls race the async mutex without serialisation.
 The launch path (`launch_existing_run`) is shared between new and resumed runs.
 It loads the journal replay, computes initial token and call counts from
 completed entries, spawns the host-command loop, and starts a dedicated OS
-thread running the QuickJS engine. When the engine finishes, the spawned
+thread running the V8 isolate. When the engine finishes, the spawned
 completion task resolves the terminal state — recording the output, the error,
 or the handover depending on the outcome.
 
 ## Scripts
 
-Scripts run in a stripped-down QuickJS sandbox. The runtime provides JSON, promises,
-Map/Set, and regular expressions, but no `Date`, `setTimeout`, `fetch`, or
-`process`. `Math.random` throws to prevent non-deterministic branching, since
-replay depends on the script producing the same host-call sequence.
+Scripts run in a caged V8 isolate. The language is all there — JSON,
+promises, Map/Set, regular expressions, BigInt — but the isolate has no
+ambient capability: `Date`, `eval`, `Intl`, WebAssembly, shared memory,
+`setTimeout`, `fetch` and `process` are absent, and `Math.random` throws to
+prevent non-deterministic branching, since replay depends on the script
+producing the same host-call sequence. Each isolate carries a heap limit and
+a limit on how long the script may execute without yielding to the host; a
+script that crosses either is terminated, the run fails with the reason, and
+the audit trail records an `engine_terminated` event naming it.
 
 A script may open with a `export const meta = { ... };` header declaring
 portable metadata: `name`, `description`, `task` (an opaque identity for
@@ -401,9 +406,9 @@ hash would change and replay would fail with a non-deterministic-call error.
 
 ## Cancellation
 
-Cancellation propagates through a `CancellationToken` installed as the QuickJS
-interrupt handler (checked between JS opcodes) and raced against the execution
-future. The engine returns `Cancelled` and the run transitions to `cancelled`.
+Cancellation propagates through a `CancellationToken` the isolate's watchdog
+reads — it terminates even a loop that never yields — and that is raced
+against the execution future. The engine returns `Cancelled` and the run transitions to `cancelled`.
 
 For parked runs, which have no engine to signal, `cancel_run` directly sets
 the state to `cancelled` in storage.

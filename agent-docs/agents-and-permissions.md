@@ -662,7 +662,7 @@ assembly = "default"
 alternatives = ["my-variant"]
 ```
 
-The script runs in a caged QuickJS runtime (no IO, no network, no timers)
+The script runs in a caged V8 isolate (no IO, no network, no timers, no clock)
 with four globals:
 
 - `elements` — the turn's context elements, read-only:

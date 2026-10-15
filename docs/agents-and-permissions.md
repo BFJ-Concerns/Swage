@@ -626,8 +626,8 @@ assembly = "default"
 alternatives = ["my-variant"]
 ```
 
-The assembly script runs in a caged QuickJS runtime (no IO, no network, no
-timers) and composes the turn's context from the elements the gateway built.
+The assembly script runs in a caged V8 isolate (no IO, no network, no
+timers, no clock) and composes the turn's context from the elements the gateway built.
 The script receives four globals:
 
 - `elements` — the turn's context elements, read-only:

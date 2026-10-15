@@ -1,0 +1,14 @@
+# The prebuilt V8 static library the `v8` crate links, pinned by version and
+# checksum. `version` must equal the `v8` package in Cargo.lock: a deno_core
+# upgrade that moves it fails `just fetch-v8` until this file is updated on
+# purpose — open the rusty_v8 release for the new version, download the asset
+# named below for the target, and record its sha256 here.
+#
+# The asset is `librusty_v8_simdutf_release_<target>.a.gz`: deno_core enables
+# the v8 crate's `simdutf` feature, and the release build of V8 serves debug
+# builds of Swage too.
+version = "150.4.0"
+
+[archive.x86_64-unknown-linux-gnu]
+name = "librusty_v8_simdutf_release_x86_64-unknown-linux-gnu.a.gz"
+sha256 = "f48762ca10d1f1fc605a441c5ae430ec8ce1e9e80f14d78fbc42cb878c30b476"

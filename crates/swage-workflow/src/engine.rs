@@ -1,21 +1,15 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::Value;
-
-use rquickjs::{
-    AsyncContext, AsyncRuntime, CatchResultExt, CaughtError, Context, Function, Promise, Runtime,
-    context::intrinsic::{Eval, Json, MapSet, Promise as PromiseIntrinsic, RegExp, RegExpCompiler},
-    prelude::{Async, Coerced},
-};
+use swage_isolate::{HostCalls, IsolateError, IsolateLimits, Program, Termination};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    AgentCallRequest, AwaitEventRequest, EffectPayload, EventDelivery, GateRequest, HeldWorkerOpen,
-    HoldRequest, RunEventPost, WorkflowCallRequest, WorkflowHost, WorkflowHostError,
-};
+use crate::WorkflowHost;
+use crate::host_calls::WorkflowHostCalls;
 
-fn named_host_error(error: &str, fallback: &str) -> (String, String) {
+pub(crate) fn named_host_error(error: &str, fallback: &str) -> (String, String) {
     const NAMES: [(&str, &str); 19] = [
         ("AgentCallError", "AgentCallError"),
         ("AgentCallTimeoutError", "AgentCallTimeoutError"),
@@ -50,7 +44,7 @@ fn named_host_error(error: &str, fallback: &str) -> (String, String) {
         .unwrap_or_else(|| (fallback.to_string(), error.to_string()))
 }
 
-fn is_pre_spawn_author_error(error: &str) -> bool {
+pub(crate) fn is_pre_spawn_author_error(error: &str) -> bool {
     [
         "InvalidAgentOptionError",
         "InvalidAgentPromptError",
@@ -62,11 +56,22 @@ fn is_pre_spawn_author_error(error: &str) -> bool {
     .any(|prefix| error.starts_with(prefix))
 }
 
-/// Hard limits applied by the host to each fresh JavaScript runtime.
+/// Hard limits applied by the host to each fresh JavaScript isolate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EngineLimits {
     pub memory_bytes: usize,
-    pub stack_bytes: usize,
+    /// The longest a script may execute without yielding to the host: a
+    /// script awaiting an agent is not executing, a loop that never awaits is.
+    pub continuous_execution: Duration,
+}
+
+impl EngineLimits {
+    const fn isolate(self) -> IsolateLimits {
+        IsolateLimits {
+            heap_bytes: self.memory_bytes,
+            continuous_execution: self.continuous_execution,
+        }
+    }
 }
 
 /// What the host grants this script instance. Capability comes from the host,
@@ -379,8 +384,8 @@ fn find_balanced_object_end(source: &str) -> Result<usize, String> {
 impl Default for EngineLimits {
     fn default() -> Self {
         Self {
-            memory_bytes: 32 * 1024 * 1024,
-            stack_bytes: 512 * 1024,
+            memory_bytes: 64 * 1024 * 1024,
+            continuous_execution: Duration::from_secs(30),
         }
     }
 }
@@ -388,10 +393,15 @@ impl Default for EngineLimits {
 #[derive(Debug, Error)]
 pub enum WorkflowEngineError {
     #[error("failed to initialise the JavaScript runtime: {0}")]
-    Runtime(#[from] rquickjs::Error),
+    Runtime(String),
 
     #[error("workflow execution was cancelled")]
     Cancelled,
+
+    /// The isolate ended the script for crossing a limit; the reason is
+    /// recorded by the caller.
+    #[error("workflow execution was terminated: {0}")]
+    Terminated(Termination),
 
     #[error("workflow script failed: {0}")]
     Script(String),
@@ -413,16 +423,27 @@ pub struct WorkflowEngine {
 /// grammar that execution uses, without evaluating its body.
 pub fn parse_workflow(source: &str) -> Result<(), String> {
     let (_, source) = extract_defaults(source)?;
-    let runtime = Runtime::new().map_err(|error| error.to_string())?;
-    let context = Context::full(&runtime).map_err(|error| error.to_string())?;
+    let mut program = Program::new(EngineLimits::default().isolate(), None, None)
+        .map_err(|error| error.to_string())?;
     let source = serde_json::to_string(source).expect("workflow source serialises");
-    context.with(|ctx| {
-        ctx.eval::<(), _>(format!(
-            "Object.getPrototypeOf(async function() {{}}).constructor({source});"
-        ))
-        .catch(&ctx)
+    program
+        .execute(
+            "swage:workflow-parse",
+            format!("Object.getPrototypeOf(async function() {{}}).constructor({source});"),
+        )
+        .map(drop)
         .map_err(|error| error.to_string())
-    })
+}
+
+impl From<IsolateError> for WorkflowEngineError {
+    fn from(error: IsolateError) -> Self {
+        match error {
+            IsolateError::Terminated(Termination::Cancelled) => Self::Cancelled,
+            IsolateError::Terminated(reason) => Self::Terminated(reason),
+            IsolateError::Script(exception) => Self::Script(exception.to_string()),
+            IsolateError::Engine(message) => Self::Runtime(message),
+        }
+    }
 }
 
 impl WorkflowEngine {
@@ -455,591 +476,132 @@ impl WorkflowEngine {
     ) -> Result<String, WorkflowEngineError> {
         let (defaults_json, source) =
             extract_defaults(source).map_err(WorkflowEngineError::Script)?;
-        let runtime = AsyncRuntime::new()?;
-        runtime.set_memory_limit(self.limits.memory_bytes).await;
-        runtime.set_max_stack_size(self.limits.stack_bytes).await;
+        let host_calls = host.map(|host| {
+            Arc::new(WorkflowHostCalls::new(
+                host,
+                cancellation.clone(),
+                capabilities,
+            )) as Arc<dyn HostCalls>
+        });
+        let hosted = host_calls.is_some();
+        let mut program = Program::new(
+            self.limits.isolate(),
+            host_calls,
+            Some(cancellation.clone()),
+        )?;
+        program.set_global_json("args", args_json)?;
+        // The defaults header is a JavaScript object literal, evaluated as one.
+        program.execute(
+            "swage:workflow-defaults",
+            format!(
+                "globalThis.__defaults = {};",
+                defaults_json.as_deref().unwrap_or("{}")
+            ),
+        )?;
+        if hosted {
+            // The shim defines a host global only for a granted capability;
+            // the host refuses the call as well (host_calls.rs).
+            program.set_global_json(
+                "__capabilities",
+                &serde_json::json!({
+                    "delivery": capabilities.delivery,
+                    "composition": capabilities.composition,
+                    "capturedSources": capabilities.captured_sources,
+                })
+                .to_string(),
+            )?;
+            program.execute("swage:workflow-host", HOST_SHIM.to_owned())?;
+        }
 
-        let cancellation = Arc::new(cancellation);
-        let interrupt_cancellation = Arc::clone(&cancellation);
-        runtime
-            .set_interrupt_handler(Some(Box::new(move || {
-                interrupt_cancellation.is_cancelled()
-            })))
-            .await;
+        let pending = program.execute(
+            "swage:workflow",
+            format!(
+                "(async () => {{ try {{ const value = await (async () => {{ {source} }})(); return JSON.stringify({{ result: JSON.stringify(value === undefined ? null : value) }}); }} catch (error) {{ if (error && typeof error.__swageAgentCallReference === 'string') return JSON.stringify({{ agent_call: {{ host_reference: error.__swageAgentCallReference, message: String(error.name) + ': ' + String(error.message), stack: typeof error.stack === 'string' ? error.stack : null }} }}); throw error; }} }})()",
+            ),
+        )?;
+        let execution = program.settle_to_string(pending);
+        tokio::pin!(execution);
+        let result = tokio::select! {
+            result = &mut execution => result,
+            () = cancellation.cancelled() => return Err(WorkflowEngineError::Cancelled),
+        };
+        if cancellation.is_cancelled() {
+            return Err(WorkflowEngineError::Cancelled);
+        }
+        let output = result?;
+        let envelope: serde_json::Value = serde_json::from_str(&output)
+            .map_err(|error| WorkflowEngineError::Script(error.to_string()))?;
+        if let Some(failure) = envelope.get("agent_call") {
+            return Err(WorkflowEngineError::AgentCall {
+                host_reference: failure
+                    .get("host_reference")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                message: failure
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("AgentCallError: agent call failed")
+                    .to_owned(),
+                stack: failure
+                    .get("stack")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+            });
+        }
+        envelope
+            .get("result")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                WorkflowEngineError::Script("workflow result envelope is malformed".into())
+            })
+    }
+}
 
-        // QuickJS requires the Eval intrinsic for host-side source evaluation too. The
-        // JavaScript-visible global is removed before untrusted workflow code runs.
-        type WorkflowIntrinsics = (Eval, Json, PromiseIntrinsic, MapSet, RegExpCompiler, RegExp);
-        let context = AsyncContext::custom::<WorkflowIntrinsics>(&runtime).await?;
-        let source = format!(
-            "(async () => {{ try {{ const value = await (async () => {{ {source} }})(); return JSON.stringify({{ result: JSON.stringify(value === undefined ? null : value) }}); }} catch (error) {{ if (error && typeof error.__swageAgentCallReference === 'string') return JSON.stringify({{ agent_call: {{ host_reference: error.__swageAgentCallReference, message: String(error.name) + ': ' + String(error.message), stack: typeof error.stack === 'string' ? error.stack : null }} }}); throw error; }} }})()",
-        );
-        let args_json = args_json.to_string();
-        let host_cancellation = (*cancellation).clone();
-
-        let execution = context.async_with(async move |ctx| {
-                // QuickJS installs Math as a base object and seeds random from ambient time.
-                // Replacing the function makes the nondeterministic surface fail explicitly.
-                ctx.eval::<(), _>(
-                    r#"
-                    delete globalThis.eval;
-                    if (typeof Math !== "undefined") {
-                        Math.random = () => {
-                            const error = new Error(
-                                "Math.random is not available in workflow scripts; randomness would break resume"
-                            );
-                            error.name = "NondeterministicCallError";
-                            throw error;
+/// The script-facing surface, evaluated before the workflow source once a
+/// host is present. The first block binds each `__name` host function to a
+/// named call through the isolate's door — a granted capability's function is
+/// defined, an ungranted one is left `undefined` — and the rest builds the
+/// public globals (`agent`, `agentStart`, `wait`, `pipeline`, `parallel`,
+/// `budget`, `log`, …) on them.
+const HOST_SHIM: &str = r#"
+                        const __host = globalThis.__swageHost;
+                        delete globalThis.__swageHost;
+                        const __call = (name, ...args) => __host.call(name, JSON.stringify(args));
+                        const __callSync = (name, ...args) => __host.callSync(name, JSON.stringify(args));
+                        const __agent = (prompt, optionsJson) => __call("agent", prompt, optionsJson);
+                        const __workerPlacements = () => __call("workerPlacements");
+                        const __workerOpen = (optionsJson) => __call("workerOpen", optionsJson);
+                        const __workerClose = (workerId) => __call("workerClose", workerId);
+                        const __workerStaleness = (workerId) => __call("workerStaleness", workerId);
+                        const __timer = (timerMs, timerId) => __call("timer", timerMs, timerId);
+                        const __confirmTimer = (timerId) => __call("confirmTimer", timerId);
+                        const __postEvent = (kind, payloadJson) => __call("postEvent", kind, payloadJson);
+                        const __awaitEvent = (requestJson) => __call("awaitEvent", requestJson);
+                        const __hold = (requestJson) => __call("hold", requestJson);
+                        const __gate = (requestJson) => __call("gate", requestJson);
+                        const __deliverEvents = (selectionJson) => __call("deliverEvents", selectionJson);
+                        const __budgetSnapshot = () => __call("budgetSnapshot");
+                        const __log = (message) => { __callSync("log", message); };
+                        const __phase = (title) => { __callSync("phase", title); };
+                        const __abandonTimer = (timerId) => { __callSync("abandonTimer", timerId); };
+                        const __budgetSpent = () => JSON.parse(__callSync("budgetSpent"));
+                        const __budgetRemaining = () => {
+                            const remaining = JSON.parse(__callSync("budgetRemaining"));
+                            return remaining === null ? undefined : remaining;
                         };
-                    }
-                    "#,
-                )
-                .catch(&ctx)
-                .map_err(|error| error.to_string())?;
-
-                ctx.globals().set(
-                    "args",
-                    ctx.json_parse(args_json.as_bytes())
-                        .map_err(|error| error.to_string())?,
-                ).map_err(|error| error.to_string())?;
-
-                ctx.eval::<(), _>(format!(
-                    "globalThis.__defaults = {};",
-                    defaults_json.as_deref().unwrap_or("{}")
-                ))
-                .catch(&ctx)
-                .map_err(|error| error.to_string())?;
-
-                if let Some(host) = host {
-                    let agent_host = Arc::clone(&host);
-                    let agent_cancellation = host_cancellation.clone();
-                    let agent = Function::new(
-                        ctx.clone(),
-                        Async(move |prompt: String, options_json: String| {
-                            let host = Arc::clone(&agent_host);
-                            let cancellation = agent_cancellation.clone();
-                            async move {
-                                let request: AgentCallRequest = match serde_json::from_str(&options_json) {
-                                    Ok(request) => request,
-                                    Err(error) => return serde_json::json!({
-                                        "ok": false,
-                                        "error": {"name": "InvalidAgentOptionError", "message": error.to_string(), "pre_spawn": true}
-                                    }).to_string(),
-                                };
-                                let mut request = request;
-                                request.prompt = prompt;
-                                match host.dispatch_agent_call(request.clone(), cancellation).await {
-                                    Ok(result) => {
-                                        if request.schema.is_none()
-                                            && result.output.as_str().is_some_and(|value| value.trim().is_empty())
-                                        {
-                                            return serde_json::json!({
-                                                "ok": false,
-                                                "error": {
-                                                    "name": "EmptyAgentOutputError",
-                                                    "message": "agent returned empty output",
-                                                    "agent_call_admitted": true,
-                                                }
-                                            }).to_string();
-                                        }
-                                        // Worker metadata rides beside the output so
-                                        // `agentStart` handles can expose it without
-                                        // touching agent()'s bare-value contract.
-                                        let session = result
-                                            .session_id
-                                            .zip(result.thread_id)
-                                            .map(|(session_id, thread_id)| serde_json::json!({
-                                                "session_id": session_id,
-                                                "thread_id": thread_id,
-                                            }));
-                                        let value = if request.identity == Some(true) {
-                                            serde_json::json!({
-                                                "label": request.label,
-                                                "phase": request.phase,
-                                                "output": result.output,
-                                                "failure": null,
-                                            })
-                                        } else {
-                                            result.output
-                                        };
-                                        serde_json::json!({
-                                            "ok": true,
-                                            "value": value,
-                                            "session": session,
-                                            "working_directory": result.working_directory,
-                                        }).to_string()
-                                    }
-                                    Err(WorkflowHostError::SchemaExhausted { message, .. }) => {
-                                        // Exhausting a schema's validation attempts is a
-                                        // script-visible absence, not an ordinary agent
-                                        // failure. Identified calls retain that distinction
-                                        // for a fan-in; unmarked calls keep the bare-null
-                                        // contract.
-                                        let value = if request.identity == Some(true) {
-                                            serde_json::json!({
-                                                "label": request.label,
-                                                "phase": request.phase,
-                                                "output": null,
-                                                "failure": {"message": message},
-                                            })
-                                        } else {
-                                            Value::Null
-                                        };
-                                        serde_json::json!({"ok": true, "value": value, "session": null}).to_string()
-                                    }
-                                    Err(error) => {
-                                        let (host_reference, error) = match error {
-                                            WorkflowHostError::AgentCall { host_reference, message } => (Some(host_reference), message),
-                                            WorkflowHostError::Message(message) => (None, message),
-                                            WorkflowHostError::SchemaExhausted { .. } => unreachable!("schema exhaustion is handled above"),
-                                        };
-                                        let (name, message) = named_host_error(&error, "AgentCallError");
-                                        serde_json::json!({
-                                            "ok": false,
-                                            "error": {
-                                                "name": name,
-                                                "message": message,
-                                                "host_reference": host_reference,
-                                                "agent_call_admitted": true,
-                                                "pre_spawn": is_pre_spawn_author_error(&error),
-                                            }
-                                        }).to_string()
-                                    }
-                                }
-                            }
-                        }),
-                    ).map_err(|error| error.to_string())?;
-                    ctx.globals().set("__agent", agent).map_err(|error| error.to_string())?;
-
-                    let placement_host = Arc::clone(&host);
-                    let placement_cancellation = host_cancellation.clone();
-                    let placements = Function::new(
-                        ctx.clone(),
-                        Async(move || {
-                            let host = Arc::clone(&placement_host);
-                            let cancellation = placement_cancellation.clone();
-                            async move {
-                                match host.list_worker_placements(cancellation).await {
-                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
-                                    Err(error) => serde_json::json!({"ok": false, "error": error}).to_string(),
-                                }
-                            }
-                        }),
-                    ).map_err(|error| error.to_string())?;
-                    ctx.globals().set("__workerPlacements", placements).map_err(|error| error.to_string())?;
-
-                    if capabilities.captured_sources {
-                        let captured_sources_host = Arc::clone(&host);
-                        let captured_sources_cancellation = host_cancellation.clone();
-                        let captured_sources = Function::new(
-                            ctx.clone(),
-                            Async(move || {
-                                let host = Arc::clone(&captured_sources_host);
-                                let cancellation = captured_sources_cancellation.clone();
-                                async move {
-                                    match host.captured_sources(cancellation).await {
-                                        Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
-                                        Err(error) => {
-                                            let (name, message) = named_host_error(&error, "KnowledgeStoreError");
-                                            serde_json::json!({"ok": false, "error": {"name": name, "message": message}}).to_string()
-                                        }
-                                    }
-                                }
-                            }),
-                        ).map_err(|error| error.to_string())?;
-                        ctx.globals().set("__capturedSources", captured_sources).map_err(|error| error.to_string())?;
-                    }
-
-                    let log_host = Arc::clone(&host);
-                    let log = Function::new(ctx.clone(), move |message: String| log_host.record("log", message)).map_err(|error| error.to_string())?;
-                    ctx.globals().set("__log", log).map_err(|error| error.to_string())?;
-                    let phase_host = Arc::clone(&host);
-                    let phase = Function::new(ctx.clone(), move |message: String| phase_host.record("phase", message)).map_err(|error| error.to_string())?;
-                    ctx.globals().set("__phase", phase).map_err(|error| error.to_string())?;
-
-                    if capabilities.composition {
-                        let workflow_host = Arc::clone(&host);
-                        let workflow_cancellation = host_cancellation.clone();
-                        let workflow = Function::new(
-                            ctx.clone(),
-                            Async(move |name: String, args_json: String| {
-                                let host = Arc::clone(&workflow_host);
-                                let cancellation = workflow_cancellation.clone();
-                                async move {
-                                    let args: serde_json::Value = match serde_json::from_str(&args_json) {
-                                        Ok(args) => args,
-                                        Err(error) => return serde_json::json!({
-                                            "ok": false,
-                                            "error": {"name": "WorkflowArgumentsError", "message": error.to_string(), "pre_spawn": true}
-                                        }).to_string(),
-                                    };
-                                    match host
-                                        .run_workflow_call(WorkflowCallRequest { name, args }, cancellation)
-                                        .await
-                                    {
-                                        Ok(output) => serde_json::json!({"ok": true, "value": output}).to_string(),
-                                        Err(error) => {
-                                            let (name, message) = named_host_error(&error, "WorkflowCompositionError");
-                                            serde_json::json!({
-                                                "ok": false,
-                                                "error": {"name": name, "message": message, "pre_spawn": is_pre_spawn_author_error(&error)}
-                                            }).to_string()
-                                        }
-                                    }
-                                }
-                            }),
-                        ).map_err(|error| error.to_string())?;
-                        ctx.globals().set("__workflow", workflow).map_err(|error| error.to_string())?;
-                    }
-
-                    let open_worker_host = Arc::clone(&host);
-                    let open_worker_cancellation = host_cancellation.clone();
-                    let open_worker = Function::new(
-                        ctx.clone(),
-                        Async(move |options_json: String| {
-                            let host = Arc::clone(&open_worker_host);
-                            let cancellation = open_worker_cancellation.clone();
-                            async move {
-                                let worker: HeldWorkerOpen = match serde_json::from_str(&options_json) {
-                                    Ok(worker) => worker,
-                                    Err(error) => return serde_json::json!({
-                                        "ok": false,
-                                        "error": {"name": "HeldWorkerError", "message": error.to_string()}
-                                    }).to_string(),
-                                };
-                                match host.open_held_worker(worker, cancellation).await {
-                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
-                                    Err(error) => {
-                                        let (name, message) = named_host_error(&error, "HeldWorkerError");
-                                        serde_json::json!({
-                                            "ok": false,
-                                            "error": {"name": name, "message": message}
-                                        }).to_string()
-                                    }
-                                }
-                            }
-                        }),
-                    ).map_err(|error| error.to_string())?;
-                    ctx.globals().set("__workerOpen", open_worker).map_err(|error| error.to_string())?;
-
-                    let close_worker_host = Arc::clone(&host);
-                    let close_worker_cancellation = host_cancellation.clone();
-                    let close_worker = Function::new(
-                        ctx.clone(),
-                        Async(move |worker_id: String| {
-                            let host = Arc::clone(&close_worker_host);
-                            let cancellation = close_worker_cancellation.clone();
-                            async move {
-                                let worker_id = match worker_id.parse::<uuid::Uuid>() {
-                                    Ok(worker_id) => worker_id,
-                                    Err(error) => return serde_json::json!({
-                                        "ok": false,
-                                        "error": {"name": "HeldWorkerError", "message": error.to_string()}
-                                    }).to_string(),
-                                };
-                                match host.close_held_worker(worker_id, cancellation).await {
-                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
-                                    Err(error) => {
-                                        let (name, message) = named_host_error(&error, "HeldWorkerError");
-                                        serde_json::json!({
-                                            "ok": false,
-                                            "error": {"name": name, "message": message}
-                                        }).to_string()
-                                    }
-                                }
-                            }
-                        }),
-                    ).map_err(|error| error.to_string())?;
-                    ctx.globals().set("__workerClose", close_worker).map_err(|error| error.to_string())?;
-
-                    let staleness_host = Arc::clone(&host);
-                    let staleness_cancellation = host_cancellation.clone();
-                    let staleness = Function::new(
-                        ctx.clone(),
-                        Async(move |worker_id: String| {
-                            let host = Arc::clone(&staleness_host);
-                            let cancellation = staleness_cancellation.clone();
-                            async move {
-                                let worker_id = match worker_id.parse::<uuid::Uuid>() {
-                                    Ok(worker_id) => worker_id,
-                                    Err(error) => return serde_json::json!({
-                                        "ok": false,
-                                        "error": {"name": "HeldWorkerError", "message": error.to_string()}
-                                    }).to_string(),
-                                };
-                                match host.held_worker_staleness(worker_id, cancellation).await {
-                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
-                                    Err(error) => {
-                                        let (name, message) = named_host_error(&error, "HeldWorkerError");
-                                        serde_json::json!({
-                                            "ok": false,
-                                            "error": {"name": name, "message": message}
-                                        }).to_string()
-                                    }
-                                }
-                            }
-                        }),
-                    ).map_err(|error| error.to_string())?;
-                    ctx.globals().set("__workerStaleness", staleness).map_err(|error| error.to_string())?;
-
-                    let timer_host = Arc::clone(&host);
-                    let timer_cancellation = host_cancellation.clone();
-                    let timer = Function::new(
-                        ctx.clone(),
-                        Async(move |ms: f64, timer_id: f64| {
-                            let host = Arc::clone(&timer_host);
-                            let cancellation = timer_cancellation.clone();
-                            async move {
-                                if !ms.is_finite() || ms < 0.0 {
-                                    return serde_json::json!({
-                                        "ok": false,
-                                        "error": {"name": "WaitTimerError", "message": "timerMs must be a non-negative finite number"}
-                                    }).to_string();
-                                }
-                                match host.timer(ms as u64, timer_id as u64, cancellation).await {
-                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
-                                    Err(error) => {
-                                        let (name, message) = named_host_error(&error, "WaitTimerError");
-                                        serde_json::json!({
-                                            "ok": false,
-                                            "error": {"name": name, "message": message}
-                                        }).to_string()
-                                    }
-                                }
-                            }
-                        }),
-                    ).map_err(|error| error.to_string())?;
-                    ctx.globals().set("__timer", timer).map_err(|error| error.to_string())?;
-                    let abandon_host = Arc::clone(&host);
-                    let abandon = Function::new(ctx.clone(), move |timer_id: f64| {
-                        abandon_host.abandon_timer(timer_id as u64);
-                    })
-                    .map_err(|error| error.to_string())?;
-                    ctx.globals().set("__abandonTimer", abandon).map_err(|error| error.to_string())?;
-                    let confirm_host = Arc::clone(&host);
-                    let confirm = Function::new(
-                        ctx.clone(),
-                        Async(move |timer_id: f64| {
-                            let host = Arc::clone(&confirm_host);
-                            async move {
-                                match host.confirm_timer(timer_id as u64).await {
-                                    Ok(()) => serde_json::json!({"ok": true, "value": null}).to_string(),
-                                    Err(error) => {
-                                        let (name, message) = named_host_error(&error, "WaitTimerError");
-                                        serde_json::json!({
-                                            "ok": false,
-                                            "error": {"name": name, "message": message}
-                                        }).to_string()
-                                    }
-                                }
-                            }
-                        }),
-                    ).map_err(|error| error.to_string())?;
-                    ctx.globals().set("__confirmTimer", confirm).map_err(|error| error.to_string())?;
-
-                    let post_event_host = Arc::clone(&host);
-                    let post_event_cancellation = host_cancellation.clone();
-                    let post_event = Function::new(
-                        ctx.clone(),
-                        Async(move |kind: String, payload_json: String| {
-                            let host = Arc::clone(&post_event_host);
-                            let cancellation = post_event_cancellation.clone();
-                            async move {
-                                let payload: serde_json::Value = match serde_json::from_str(&payload_json) {
-                                    Ok(payload) => payload,
-                                    Err(error) => return serde_json::json!({
-                                        "ok": false,
-                                        "error": {"name": "RunEventError", "message": error.to_string()}
-                                    }).to_string(),
-                                };
-                                match host.post_run_event(RunEventPost { kind, payload }, cancellation).await {
-                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
-                                    Err(error) => {
-                                        let (name, message) = named_host_error(&error, "RunEventError");
-                                        serde_json::json!({
-                                            "ok": false,
-                                            "error": {"name": name, "message": message}
-                                        }).to_string()
-                                    }
-                                }
-                            }
-                        }),
-                    ).map_err(|error| error.to_string())?;
-                    ctx.globals().set("__postEvent", post_event).map_err(|error| error.to_string())?;
-
-                    let await_event_host = Arc::clone(&host);
-                    let await_event_cancellation = host_cancellation.clone();
-                    let await_event = Function::new(
-                        ctx.clone(),
-                        Async(move |request_json: String| {
-                            let host = Arc::clone(&await_event_host);
-                            let cancellation = await_event_cancellation.clone();
-                            async move {
-                                let request: AwaitEventRequest = match serde_json::from_str(&request_json) {
-                                    Ok(request) => request,
-                                    Err(error) => return serde_json::json!({"ok": false, "error": {"name": "RunEventError", "message": error.to_string()}}).to_string(),
-                                };
-                                match host.await_run_event(request, cancellation).await {
-                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
-                                    Err(error) => {
-                                        let (name, message) = named_host_error(&error, "RunEventError");
-                                        serde_json::json!({"ok": false, "error": {"name": name, "message": message}}).to_string()
-                                    }
-                                }
-                            }
-                        }),
-                    ).map_err(|error| error.to_string())?;
-                    ctx.globals().set("__awaitEvent", await_event).map_err(|error| error.to_string())?;
-
-                    let hold_host = Arc::clone(&host);
-                    let hold_cancellation = host_cancellation.clone();
-                    let hold = Function::new(
-                        ctx.clone(),
-                        Async(move |request_json: String| {
-                            let host = Arc::clone(&hold_host);
-                            let cancellation = hold_cancellation.clone();
-                            async move {
-                                let request: HoldRequest = match serde_json::from_str(&request_json) {
-                                    Ok(request) => request,
-                                    Err(error) => return serde_json::json!({"ok": false, "error": {"name": "HoldError", "message": error.to_string()}}).to_string(),
-                                };
-                                match host.raise_hold(request, cancellation).await {
-                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
-                                    Err(error) => {
-                                        let (name, message) = named_host_error(&error, "HoldError");
-                                        serde_json::json!({"ok": false, "error": {"name": name, "message": message}}).to_string()
-                                    }
-                                }
-                            }
-                        }),
-                    ).map_err(|error| error.to_string())?;
-                    ctx.globals().set("__hold", hold).map_err(|error| error.to_string())?;
-
-                    let gate_host = Arc::clone(&host);
-                    let gate_cancellation = host_cancellation.clone();
-                    let gate = Function::new(
-                        ctx.clone(),
-                        Async(move |request_json: String| {
-                            let host = Arc::clone(&gate_host);
-                            let cancellation = gate_cancellation.clone();
-                            async move {
-                                let request: GateRequest = match serde_json::from_str(&request_json) {
-                                    Ok(request) => request,
-                                    Err(error) => return serde_json::json!({
-                                        "ok": false,
-                                        "error": {"name": "RunEventError", "message": error.to_string()}
-                                    }).to_string(),
-                                };
-                                match host.evaluate_wake_gate(request, cancellation).await {
-                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
-                                    Err(error) => {
-                                        let (name, message) = named_host_error(&error, "RunEventError");
-                                        serde_json::json!({
-                                            "ok": false,
-                                            "error": {"name": name, "message": message}
-                                        }).to_string()
-                                    }
-                                }
-                            }
-                        }),
-                    ).map_err(|error| error.to_string())?;
-                    ctx.globals().set("__gate", gate).map_err(|error| error.to_string())?;
-
-                    let deliver_events_host = Arc::clone(&host);
-                    let deliver_events_cancellation = host_cancellation.clone();
-                    let deliver_events = Function::new(
-                        ctx.clone(),
-                        Async(move |selection_json: String| {
-                            let host = Arc::clone(&deliver_events_host);
-                            let cancellation = deliver_events_cancellation.clone();
-                            async move {
-                                let selection: EventDelivery = match serde_json::from_str(&selection_json) {
-                                    Ok(selection) => selection,
-                                    Err(error) => return serde_json::json!({
-                                        "ok": false,
-                                        "error": {"name": "RunEventError", "message": format!("invalid event selection: {error}")}
-                                    }).to_string(),
-                                };
-                                match host.deliver_run_events(selection, cancellation).await {
-                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
-                                    Err(error) => {
-                                        let (name, message) = named_host_error(&error, "RunEventError");
-                                        serde_json::json!({
-                                            "ok": false,
-                                            "error": {"name": name, "message": message}
-                                        }).to_string()
-                                    }
-                                }
-                            }
-                        }),
-                    ).map_err(|error| error.to_string())?;
-                    ctx.globals().set("__deliverEvents", deliver_events).map_err(|error| error.to_string())?;
-
-                    if capabilities.delivery {
-                        let delivery_host = Arc::clone(&host);
-                        let delivery_cancellation = host_cancellation.clone();
-                        let deliver = Function::new(
-                            ctx.clone(),
-                            Async(move |payload_json: String| {
-                                let host = Arc::clone(&delivery_host);
-                                let cancellation = delivery_cancellation.clone();
-                                async move {
-                                    let payload: EffectPayload = match serde_json::from_str(&payload_json) {
-                                        Ok(payload) => payload,
-                                        Err(error) => return serde_json::json!({
-                                            "ok": false,
-                                            "error": {"name": "DeliveryError", "message": error.to_string()}
-                                        }).to_string(),
-                                    };
-                                    match host.deliver(payload, cancellation).await {
-                                        Ok(receipt) => serde_json::json!({"ok": true, "value": receipt}).to_string(),
-                                        Err(error) => {
-                                            let (name, message) = named_host_error(&error, "DeliveryError");
-                                            serde_json::json!({
-                                                "ok": false,
-                                                "error": {"name": name, "message": message}
-                                            }).to_string()
-                                        }
-                                    }
-                                }
-                            }),
-                        ).map_err(|error| error.to_string())?;
-                        ctx.globals().set("__deliver", deliver).map_err(|error| error.to_string())?;
-                    }
-
-                    let budget_snapshot_host = Arc::clone(&host);
-                    let budget_snapshot_cancellation = host_cancellation.clone();
-                    let budget_snapshot = Function::new(
-                        ctx.clone(),
-                        Async(move || {
-                            let host = Arc::clone(&budget_snapshot_host);
-                            let cancellation = budget_snapshot_cancellation.clone();
-                            async move {
-                                match host.budget_snapshot(cancellation).await {
-                                    Ok(value) => serde_json::json!({"ok": true, "value": value}).to_string(),
-                                    Err(error) => {
-                                        let (name, message) = named_host_error(&error, "BudgetSnapshotError");
-                                        serde_json::json!({
-                                            "ok": false,
-                                            "error": {"name": name, "message": message}
-                                        }).to_string()
-                                    }
-                                }
-                            }
-                        }),
-                    ).map_err(|error| error.to_string())?;
-                    ctx.globals().set("__budgetSnapshot", budget_snapshot).map_err(|error| error.to_string())?;
-
-                    let spent_host = Arc::clone(&host);
-                    let spent = Function::new(ctx.clone(), move || spent_host.budget_spent())
-                        .map_err(|error| error.to_string())?;
-                    ctx.globals().set("__budgetSpent", spent).map_err(|error| error.to_string())?;
-                    let remaining_host = Arc::clone(&host);
-                    let remaining = Function::new(ctx.clone(), move || remaining_host.budget_remaining())
-                        .map_err(|error| error.to_string())?;
-                    ctx.globals().set("__budgetRemaining", remaining).map_err(|error| error.to_string())?;
-
-                    ctx.eval::<(), _>(r#"
+                        let __workflow, __deliver, __capturedSources;
+                        if (__capabilities.composition) {
+                            __workflow = (name, argsJson) => __call("workflow", name, argsJson);
+                        }
+                        if (__capabilities.delivery) {
+                            __deliver = (payloadJson) => __call("deliver", payloadJson);
+                        }
+                        if (__capabilities.capturedSources) {
+                            __capturedSources = () => __call("capturedSources");
+                        }
+                        delete globalThis.__capabilities;
                         const unwrapHostResponse = (json) => {
                             const response = JSON.parse(json);
                             if (!response.ok) {
@@ -1636,89 +1198,7 @@ impl WorkflowEngine {
                         globalThis.log = (message) => __log(String(message));
                         globalThis.phase = (title) => __phase(String(title));
                         globalThis.console = { log, warn: log, error: log };
-                    "#).catch(&ctx).map_err(|error| error.to_string())?;
-                }
-
-                let promise: Promise<'_> = ctx
-                    .eval(source)
-                    .catch(&ctx)
-                    .map_err(|error| error.to_string())?;
-                promise
-                    .into_future::<String>()
-                    .await
-                    .catch(&ctx)
-                    .map_err(|error| {
-                        // rquickjs's exception display hard-codes "Error" rather
-                        // than recording the thrown value's own classification.
-                        let exception = match &error {
-                            CaughtError::Exception(exception) => Some(exception.as_object()),
-                            CaughtError::Value(value) => value.as_object(),
-                            CaughtError::Error(_) => return error.to_string(),
-                        };
-                        let Some(exception) = exception else {
-                            return format!("Error: {error}");
-                        };
-                        let name = exception
-                            .get::<_, Option<Coerced<String>>>("name")
-                            .ok()
-                            .flatten()
-                            .map(|name| name.0)
-                            .unwrap_or_else(|| "Error".into());
-                        let mut message = format!("{name}:");
-                        if let Ok(Some(detail)) = exception.get::<_, Option<Coerced<String>>>("message") {
-                            message.push(' ');
-                            message.push_str(&detail.0);
-                        }
-                        if let Ok(Some(stack)) = exception.get::<_, Option<Coerced<String>>>("stack") {
-                            message.push('\n');
-                            message.push_str(&stack.0);
-                        }
-                        message
-                    })
-            });
-        tokio::pin!(execution);
-        let result = tokio::select! {
-            result = &mut execution => result,
-            () = cancellation.cancelled() => return Err(WorkflowEngineError::Cancelled),
-        };
-
-        if cancellation.is_cancelled() {
-            return Err(WorkflowEngineError::Cancelled);
-        }
-        match result {
-            Ok(output) => {
-                let envelope: serde_json::Value = serde_json::from_str(&output)
-                    .map_err(|error| WorkflowEngineError::Script(error.to_string()))?;
-                if let Some(failure) = envelope.get("agent_call") {
-                    return Err(WorkflowEngineError::AgentCall {
-                        host_reference: failure
-                            .get("host_reference")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or_default()
-                            .to_owned(),
-                        message: failure
-                            .get("message")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("AgentCallError: agent call failed")
-                            .to_owned(),
-                        stack: failure
-                            .get("stack")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_owned),
-                    });
-                }
-                envelope
-                    .get("result")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-                    .ok_or_else(|| {
-                        WorkflowEngineError::Script("workflow result envelope is malformed".into())
-                    })
-            }
-            Err(error) => Err(WorkflowEngineError::Script(error)),
-        }
-    }
-}
+"#;
 
 #[cfg(test)]
 mod tests {
@@ -1734,7 +1214,11 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::{AgentCallResult, EffectReceipt};
+    use crate::{
+        AgentCallRequest, AgentCallResult, AwaitEventRequest, EffectPayload, EffectReceipt,
+        EventDelivery, GateRequest, HeldWorkerOpen, HoldRequest, RunEventPost, WorkflowCallRequest,
+        WorkflowHostError,
+    };
     use swage_protocol::client::workflow::WorkflowCallUsage;
 
     struct FakeHost {
@@ -2902,7 +2386,7 @@ mod tests {
             ),
             (
                 r#"Math.random();"#,
-                "NondeterministicCallError: Math.random is not available in workflow scripts",
+                "NondeterministicCallError: Math.random is not available: a Swage script must be deterministic",
             ),
             (
                 r#"const error = new Error("unnamed failure"); error.name = undefined; throw error;"#,
@@ -4266,8 +3750,8 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn memory_limit_stops_an_allocation_bomb() {
         let engine = WorkflowEngine::new(EngineLimits {
-            memory_bytes: 2 * 1024 * 1024,
-            stack_bytes: 512 * 1024,
+            memory_bytes: 8 * 1024 * 1024,
+            continuous_execution: Duration::from_secs(30),
         });
         let result = engine
             .execute(
@@ -4275,10 +3759,13 @@ mod tests {
                 CancellationToken::new(),
             )
             .await;
-        assert!(matches!(
-            result,
-            Err(WorkflowEngineError::Script(_)) | Err(WorkflowEngineError::Runtime(_))
-        ));
+        assert!(
+            matches!(
+                result,
+                Err(WorkflowEngineError::Terminated(Termination::HeapLimit))
+            ),
+            "{result:?}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4529,7 +4016,7 @@ return review.content;
                         "Reference:forged: hostile failure"
                     )
                 );
-                assert!(stack.is_some_and(|stack| stack.contains("eval_script")));
+                assert!(stack.is_some_and(|stack| stack.contains("swage:workflow")));
             }
             other => panic!("typed failed agent call: {other:?}"),
         }

@@ -1650,7 +1650,7 @@ mod tests {
                 source: None,
                 source_hash: "hash".into(),
                 args: serde_json::json!({}),
-                engine_version: "rquickjs-0.12.0".into(),
+                engine_version: "engine-under-test".into(),
                 ..crate::fixtures::new_workflow_run(topic.id)
             })
             .await
@@ -1668,7 +1668,7 @@ mod tests {
                 source: Some("return 3".into()),
                 source_hash: "inline-hash".into(),
                 args: serde_json::json!({}),
-                engine_version: "rquickjs-0.12.0".into(),
+                engine_version: "engine-under-test".into(),
                 ..crate::fixtures::new_workflow_run(topic.id)
             })
             .await
@@ -1774,7 +1774,7 @@ mod tests {
             .create_workflow_run(NewWorkflowRun {
                 source_hash: "hash".into(),
                 args: serde_json::json!({}),
-                engine_version: "rquickjs-0.12.0".into(),
+                engine_version: "engine-under-test".into(),
                 ..crate::fixtures::new_workflow_run(topic.id)
             })
             .await

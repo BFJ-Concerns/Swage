@@ -1,0 +1,15 @@
+[package]
+name = "fetch-v8"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Fetches and verifies the pinned V8 static library before the workspace builds"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+sha2 = { workspace = true }
+toml = { workspace = true }

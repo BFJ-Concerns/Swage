@@ -61,7 +61,7 @@ things those tend to leave out:
 | **Providers** | Anthropic, OpenAI Chat Completions and Responses, Google, OpenRouter, and the built-in Codex app server (temporarily disabled); retries, circuit breaking and failover between routes; per-model reasoning effort |
 | **Tools** | File read/write/edit/search, shell, URL fetch, web search¹, a Chromium browser¹, Python execution¹, memory, a knowledge base with citations, schedules, workflows, and agent-built *surfaces* |
 | **Safety** | Per-tool permissions with interactive approvals, grants that narrow as work is delegated, per-turn bubblewrap + Landlock sandboxing, and credential leak detection with redaction |
-| **Workflows** | A JavaScript workflow engine (QuickJS) whose runs are journalled: a run interrupted by a crash or restart replays and carries on. Token budgets per provider route, durable parking on long timers, and runs that pause for a human decision |
+| **Workflows** | A JavaScript workflow engine (V8, one isolate per run) whose runs are journalled: a run interrupted by a crash or restart replays and carries on. Token budgets per provider route, durable parking on long timers, and runs that pause for a human decision |
 | **Automation** | Schedules that start or continue sessions, external channels (Telegram¹), delivery targets, and remote *devices* that dial in and execute tools on other machines |
 | **Context** | Scriptable context assembly, compaction, and recovery for sessions that keep failing: separate readers diagnose what went wrong and the session continues from their notes |
 | **Interfaces** | Web UI, desktop shell and CLI; a wire contract defined once in Rust and projected to TypeScript, JSON Schema and OpenAPI |
@@ -71,14 +71,20 @@ things those tend to leave out:
 ## Quick start
 
 Swage targets Linux. You need the Rust toolchain (pinned by
-`rust-toolchain.toml`), Node 24, and
+`rust-toolchain.toml`), Node 24, [just](https://just.systems), and
 [bubblewrap](https://github.com/containers/bubblewrap), which the per-turn
 sandbox runs on.
 
 ```bash
 git clone https://github.com/BFJ-Concerns/Swage.git && cd Swage
+just fetch-v8
 cargo build --bin swage
 ```
+
+`just fetch-v8` downloads the prebuilt V8 library the embedded JavaScript
+engine links and checks it against the version and checksum pinned in
+`v8-archive.toml`; every `just` build and gate recipe runs it first, and a
+bare `cargo build` before it fails in the `v8` crate's build script.
 
 No turn can complete until a model provider is configured, and the gateway
 reads its configuration when it starts, so write `~/.swage/config.toml`
@@ -137,7 +143,7 @@ flowchart LR
         Context[Context assembly]
         Agent[Agent runtime]
         Tools[Tool dispatch<br/>permissions · approvals]
-        Workflow[Workflow engine<br/>QuickJS · journal]
+        Workflow[Workflow engine<br/>V8 isolate · journal]
         Schedule[Schedules]
     end
     Store[(SQLite<br/>audit trail)]
@@ -332,6 +338,7 @@ The repository's `just` recipes are the supported entry points:
 
 | Command | What it runs |
 |---|---|
+| `just fetch-v8` | Download and verify the pinned V8 library; the recipes below run it first |
 | `just check` | Workspace and frontend type checks |
 | `just check-gate` | The fast static gate: formatting, type checks, design-token checks, clippy |
 | `just test` | Rust (nextest), frontend (Vitest) and desktop smoke tests |

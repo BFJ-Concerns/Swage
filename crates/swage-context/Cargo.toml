@@ -13,9 +13,9 @@ swage-core = { path = "../swage-core" }
 swage-config = { path = "../swage-config" }
 swage-provider = { path = "../swage-provider" }
 swage-protocol = { path = "../swage-protocol" }
+swage-isolate = { path = "../swage-isolate" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-rquickjs = { workspace = true }
 tiktoken-rs = "0.12"
 chrono = { workspace = true }
 uuid = { workspace = true }

@@ -1,0 +1,19 @@
+[package]
+name = "swage-isolate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "One V8 isolate per program, with limits, for Swage's embedded JavaScript"
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+deno_core = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }

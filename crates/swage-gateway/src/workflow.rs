@@ -39,9 +39,8 @@ use swage_storage::{
 use swage_workflow::{
     AgentCallRequest, AgentCallResult, AwaitEventRequest, EffectPayload, EffectReceipt,
     EffectRecoveryHost, EngineLimits, EventDelivery, GateRequest, HeldWorkerOpen, HoldRequest,
-    QUICKJS_ENGINE_VERSION, ResolvedWorkerPlacement, RunEventPost, ScriptCapabilities,
-    WorkflowCallRequest, WorkflowEngine, WorkflowHost, WorkflowHostError, journal_args_hash,
-    recover_started_effect,
+    ResolvedWorkerPlacement, RunEventPost, ScriptCapabilities, WorkflowCallRequest, WorkflowEngine,
+    WorkflowHost, WorkflowHostError, engine_version, journal_args_hash, recover_started_effect,
 };
 use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
 
@@ -7702,7 +7701,7 @@ async fn complete_workflow_call_entry(
                     // pool — but confinement flows down, which is what the
                     // budget contract promises.
                     budget: parent_budget,
-                    engine_version: QUICKJS_ENGINE_VERSION.into(),
+                    engine_version: engine_version(),
                     // Confinement flows down here too: the child's workers
                     // stay bounded by whatever context dispatched the parent.
                     dispatch_bound_agent_ids: parent
@@ -8147,7 +8146,7 @@ async fn start_run(
 ) -> Result<WorkflowRun, ApiError> {
     validate_budget(&budget)?;
     validate_workflow_arguments(argument_schema.as_ref(), &args)?;
-    // Each run owns a QuickJS runtime and an OS thread. Keep the default bound
+    // Each run owns a V8 isolate and an OS thread. Keep the default bound
     // explicit until workflow settings join the resolved configuration model.
     if state.active_workflow_runs.lock().await.len() >= 4 {
         return Err(ApiError::conflict(
@@ -8173,7 +8172,7 @@ async fn start_run(
             source_hash: source_hash(&source),
             args,
             budget: serde_json::to_value(budget).map_err(internal)?,
-            engine_version: QUICKJS_ENGINE_VERSION.into(),
+            engine_version: engine_version(),
             dispatch_bound_agent_ids,
             dispatch_bound_task_definition_ids,
             workflow_call_tools,
@@ -8324,6 +8323,26 @@ async fn captured_sources_grant_for_run(
         .await
         .map_err(internal)?
         .is_some_and(|workflow| workflow.captured_sources_grant))
+}
+
+/// A limit crossed inside the isolate is the engine's doing, not the
+/// script's: the record names the reason beside the failed run.
+async fn record_engine_termination(
+    storage: &dyn Storage,
+    run_id: Uuid,
+    reason: swage_workflow::Termination,
+) {
+    let _ = storage
+        .create_audit_event(NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: None,
+            entity_kind: "workflow_run".into(),
+            entity_id: run_id.to_string(),
+            event_kind: "engine_terminated".into(),
+            summary: reason.to_string(),
+            metadata: serde_json::json!({"reason": reason.reason()}),
+        })
+        .await;
 }
 
 async fn launch_existing_run(
@@ -8498,6 +8517,9 @@ async fn launch_existing_run(
                 .await;
             remove_active_workflow_generation(&active, run_id, &cancellation).await;
             return;
+        }
+        if let Ok(Err(swage_workflow::WorkflowEngineError::Terminated(reason))) = &engine_result {
+            record_engine_termination(storage.as_ref(), run_id, *reason).await;
         }
         let terminal_failed_call_reference = match &engine_result {
             Ok(Err(swage_workflow::WorkflowEngineError::AgentCall { host_reference, .. })) => {

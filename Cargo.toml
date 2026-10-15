@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "xtask",
+    "fetch-v8",
     "crates/swage",
     "crates/swage-core",
     "crates/swage-safety",
@@ -18,6 +19,7 @@ members = [
     "crates/swage-protocol",
     "crates/swage-python",
     "crates/swage-workflow",
+    "crates/swage-isolate",
     "crates/swage-client",
     "crates/swage-device",
 ]
@@ -141,9 +143,10 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 async-trait = "=0.1.91"
 futures = "=0.3.33"
-rquickjs = { version = "=0.12.2", features = ["futures"] }
-rquickjs-core = "=0.12.2"
-rquickjs-sys = "=0.12.2"
+# The embedded JavaScript engine: V8 through deno_core, one isolate per
+# program. The V8 static library it links is pinned by version and checksum in
+# v8-archive.toml and fetched by `cargo xtask fetch-v8`.
+deno_core = "0.412"
 
 # Identifiers and time
 uuid = { version = "1", features = ["v4", "serde"] }

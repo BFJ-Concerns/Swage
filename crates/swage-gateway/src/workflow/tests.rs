@@ -429,6 +429,55 @@ async fn invalid_carried_workflow_metadata_does_not_hide_valid_workflows() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_run_terminated_at_the_isolate_heap_limit_fails_with_the_reason_recorded() {
+    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+    let topic = storage.general_scope().await.expect("topic");
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn Storage>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
+        Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let Json(started) = start_inline_run(
+        State(state.clone()),
+        Path(topic.id),
+        Json(StartInlineWorkflowRunRequest {
+            source: "const held = []; for (;;) { held.push(new Array(100000).fill('x')); }".into(),
+            args: Value::Null,
+            budget: None,
+        }),
+    )
+    .await
+    .expect("start");
+    wait_for_terminal(&state, started.id).await;
+    let run = storage
+        .get_workflow_run(started.id)
+        .await
+        .expect("run query")
+        .expect("run");
+    assert_eq!(run.state, "failed");
+    assert!(
+        run.error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("heap limit")),
+        "{:?}",
+        run.error_message
+    );
+    let audit = storage.list_audit_events().await.expect("audit");
+    assert!(
+        audit.iter().any(|event| {
+            event.entity_kind == "workflow_run"
+                && event.entity_id == started.id.to_string()
+                && event.event_kind == "engine_terminated"
+                && event.metadata["reason"] == "heap_limit"
+        }),
+        "no termination record: {audit:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn saved_run_rejects_invalid_arguments_before_creating_a_run() {
     let (state, storage) = workflow_test_state();
     let topic = storage.general_scope().await.expect("topic");
@@ -520,7 +569,7 @@ async fn shipped_research_sweep_can_be_read_and_started_but_not_updated() {
         .expect("run query")
         .expect("run");
     let embedded = research_sweep_source();
-    assert_eq!(run.engine_version, "rquickjs-0.12.2");
+    assert_eq!(run.engine_version, swage_workflow::engine_version());
     assert_eq!(run.state, "failed");
     assert_eq!(run.script_version_id, None);
     assert_eq!(run.script_id, Some(listed.id));
@@ -706,7 +755,7 @@ async fn workflow_composition_resolves_a_shipped_carried_child() {
         .into_iter()
         .find(|run| run.parent_run_id == Some(started.id))
         .expect("shipped child run");
-    assert_eq!(child.engine_version, "rquickjs-0.12.2");
+    assert_eq!(child.engine_version, swage_workflow::engine_version());
     assert_eq!(child.script_id, Some(research_sweep_id(topic.id)));
     assert_eq!(child.script_name.as_deref(), Some("research-sweep"));
     assert_eq!(child.script_version, Some(1));
@@ -12282,7 +12331,10 @@ async fn ordinary_failed_agent_call_keeps_interrupted_handover_event_accounting(
     assert!(call_error.starts_with("AgentCallError:"));
     let terminal_error = run.error_message.as_deref().expect("terminal error");
     assert!(terminal_error.contains(call_error));
-    assert!(terminal_error.contains("at <anonymous> (eval_script:"));
+    assert!(
+        terminal_error.contains("swage:workflow:"),
+        "{terminal_error}"
+    );
     assert!(!terminal_error.contains("AgentCallError: AgentCallError:"));
 
     let journal = storage

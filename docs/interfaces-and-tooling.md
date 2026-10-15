@@ -743,8 +743,17 @@ disposable state under the system temporary directory. Set
 `SWAGE_TEST_SCRATCH_DIR` to another directory when the temporary filesystem
 is too small for that state.
 
+Every recipe that compiles the workspace first runs `just fetch-v8`, which
+downloads the prebuilt V8 static library the embedded JavaScript engine
+links and verifies it against the version and checksum pinned in
+`v8-archive.toml` before placing it where `.cargo/config.toml` points the
+`v8` crate's build script. The pin must match the `v8` package Cargo.lock
+resolves, so a dependency upgrade that moves V8 fails the fetch until the
+pin is updated on purpose.
+
 Other useful recipes:
 
+- `just fetch-v8` — the V8 archive fetch and check alone.
 - `just check-gate` — the first six static stages above, before any tests.
 - `just check` — the narrower Rust and frontend type check only.
 - `just test` — the test suite alone, with the same failure-aggregation

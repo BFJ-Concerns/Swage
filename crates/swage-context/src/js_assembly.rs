@@ -3,8 +3,8 @@
 //!
 //! A named assembly is a `<name>.js` file in the config hierarchy
 //! (`assemblies/` under global, topic, or agent — the most specific wins).
-//! The script runs in a caged QuickJS runtime — no IO, no network, no
-//! timers, no randomness — and composes the turn's context from the typed
+//! The script runs in a caged V8 isolate — no IO, no network, no
+//! timers, no clock, no randomness — and composes the turn's context from the typed
 //! elements the gateway built. Assemblies compose context; they never call
 //! models.
 //!
@@ -54,13 +54,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use rquickjs::{
-    Context, Runtime,
-    context::intrinsic::{Eval, Json, MapSet, RegExp, RegExpCompiler},
-};
 use swage_config::HierarchyLevel;
 use swage_config::model::ContextConfig;
 use swage_core::{ChatMessage, Role};
+use swage_isolate::{IsolateLimits, Program};
 
 use crate::assembly::{
     default_assembly_carries, default_assembly_with_variables, safe_metadata_preview,
@@ -70,10 +67,9 @@ use crate::element::ContextElement;
 use crate::report::{AssemblyError, AssemblyOutput, DeclaredOmission, ElementReport};
 use crate::tokeniser::Tokeniser;
 
-/// Memory and stack caps for assembly scripts. Assemblies transform message
-/// lists; they get a fraction of the workflow engine's room.
-const MEMORY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
-const STACK_LIMIT_BYTES: usize = 256 * 1024;
+/// Heap cap for assembly scripts. Assemblies transform message lists; they
+/// get a fraction of the workflow engine's room.
+const MEMORY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
 /// Locate `<name>.js` in the hierarchy's `assemblies/` directories, most
 /// specific level first.
@@ -391,22 +387,14 @@ struct ScriptBookkeeping {
 /// The host side of every assembly run, evaluated before the script source is
 /// parsed.
 ///
-/// It cages the runtime, turns the supplied element projection into frozen
-/// objects with an identity the host alone can attribute, and evaluates to a
-/// runner function. The runner holds the run's bookkeeping — the output list,
+/// It turns the supplied element projection into frozen objects with an
+/// identity the host alone can attribute, and evaluates to a runner function. The runner holds the run's bookkeeping — the output list,
 /// the `add()` records, the `omit()` declarations and the session values — in
 /// its own closure and takes the script as an argument, so the script's scope
 /// chain reaches the globals and nothing else. Builtins the host depends on
 /// are captured here, while they are still the originals.
 const HOST_PRELUDE: &str = r#"
 (() => {
-    delete globalThis.eval;
-    if (typeof Math !== "undefined") {
-        Math.random = () => {
-            throw new Error("Math.random is not available in assemblies; composition must be deterministic");
-        };
-    }
-
     const freeze = Object.freeze;
     const isArray = Array.isArray;
     const quote = JSON.stringify;
@@ -560,21 +548,19 @@ fn run_script(
     variables: &BTreeMap<String, String>,
     timeout: Duration,
 ) -> Result<ScriptOutcome, String> {
-    let runtime = Runtime::new().map_err(|error| error.to_string())?;
-    runtime.set_memory_limit(MEMORY_LIMIT_BYTES);
-    runtime.set_max_stack_size(STACK_LIMIT_BYTES);
-    // The deadline is the fail-open boundary a runaway script hits: the
-    // interrupt handler fires periodically during evaluation, and past the
-    // deadline the script is aborted so the default assembly can serve.
-    let deadline = Instant::now() + timeout;
-    runtime.set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)));
-    // Explicit intrinsics, the workflow engine's idiom: no Date, so
-    // wall-clock time is constructively absent rather than policed. Eval is
-    // required for host-side source evaluation; the JS-visible global is
-    // deleted in the cage below before script code runs.
-    type AssemblyIntrinsics = (Eval, Json, MapSet, RegExpCompiler, RegExp);
-    let context =
-        Context::custom::<AssemblyIntrinsics>(&runtime).map_err(|error| error.to_string())?;
+    // The isolate cages the engine (no `Date`, `eval` or `Math.random`, so
+    // wall-clock time and randomness are constructively absent) and bounds
+    // the script: `timeout` is the fail-open boundary a runaway script hits,
+    // terminated so the default assembly can serve.
+    let mut program = Program::new(
+        IsolateLimits {
+            heap_bytes: MEMORY_LIMIT_BYTES,
+            continuous_execution: timeout,
+        },
+        None,
+        None,
+    )
+    .map_err(|error| error.to_string())?;
 
     let elements_json = serde_json::to_string(
         &elements
@@ -602,93 +588,90 @@ fn run_script(
     )
     .map_err(|error| error.to_string())?;
     let variables_json = serde_json::to_string(variables).map_err(|error| error.to_string())?;
+    program
+        .set_global_json("elements", &elements_json)
+        .map_err(|error| error.to_string())?;
+    program
+        .set_global_json("__variables", &variables_json)
+        .map_err(|error| error.to_string())?;
 
-    context.with(|ctx| -> Result<ScriptOutcome, String> {
-        let globals = ctx.globals();
-        globals
-            .set(
-                "elements",
-                ctx.json_parse(elements_json.as_bytes())
-                    .map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| error.to_string())?;
-        globals
-            .set(
-                "__variables",
-                ctx.json_parse(variables_json.as_bytes())
-                    .map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| error.to_string())?;
+    // The host prelude runs before the script source is even parsed: it
+    // freezes the element projection and returns the runner that owns the
+    // run's bookkeeping.
+    program
+        .execute(
+            "swage:assembly-host",
+            format!("globalThis.__assemblyRunner = {HOST_PRELUDE};"),
+        )
+        .map_err(|error| format!("cage setup failed: {error}"))?;
 
-        // The host prelude runs before the script source is even parsed: it
-        // cages the runtime, freezes the element projection, and returns the
-        // runner that owns the run's bookkeeping.
-        let runner: rquickjs::Function = ctx
-            .eval(HOST_PRELUDE)
-            .map_err(|error| format!("cage setup failed: {}", script_error(&ctx, error)))?;
+    // The script body becomes a function of its own, defined at global
+    // scope. Nothing the host keeps is in that scope chain, so `added`,
+    // `omitted`, the output list and the session values have no name the
+    // script can reach: `add`, `omit`, `ctx` and `elements` are the whole
+    // surface.
+    program
+        .execute(
+            "swage:assembly",
+            format!("globalThis.__assemblyScript = function () {{\n{source}\n}};"),
+        )
+        .map_err(|error| error.to_string())?;
+    let bookkeeping_json = program
+        .execute_for_string(
+            "swage:assembly-run",
+            "(() => {
+                const runner = globalThis.__assemblyRunner;
+                const script = globalThis.__assemblyScript;
+                delete globalThis.__assemblyRunner;
+                delete globalThis.__assemblyScript;
+                return runner(script);
+            })()"
+                .to_owned(),
+        )
+        .map_err(|error| error.to_string())?;
+    let ScriptBookkeeping {
+        output,
+        added,
+        omitted: declared,
+    } = serde_json::from_str(&bookkeeping_json).map_err(|error| error.to_string())?;
 
-        // The script body becomes a function of its own, defined at global
-        // scope. Nothing the host keeps is in that scope chain, so `added`,
-        // `omitted`, the output list and the session values have no name the
-        // script can reach: `add`, `omit`, `ctx` and `elements` are the whole
-        // surface.
-        ctx.eval::<(), _>(format!(
-            "globalThis.__assemblyScript = function () {{\n{source}\n}};"
-        ))
-        .map_err(|error| script_error(&ctx, error))?;
-        let script: rquickjs::Function = globals
-            .get("__assemblyScript")
-            .map_err(|error| error.to_string())?;
-        ctx.eval::<(), _>("delete globalThis.__assemblyScript;")
-            .map_err(|error| error.to_string())?;
+    let messages = output
+        .into_iter()
+        .map(|message| Ok(ChatMessage::new(parse_role(&message.role)?, &message.text)))
+        .collect::<Result<Vec<_>, String>>()?;
 
-        let bookkeeping_json: String = runner
-            .call((script,))
-            .map_err(|error| script_error(&ctx, error))?;
-        let ScriptBookkeeping {
-            output,
-            added,
-            omitted: declared,
-        } = serde_json::from_str(&bookkeeping_json).map_err(|error| error.to_string())?;
-
-        let messages = output
-            .into_iter()
-            .map(|message| Ok(ChatMessage::new(parse_role(&message.role)?, &message.text)))
-            .collect::<Result<Vec<_>, String>>()?;
-
-        // The host wrote these records, but they still cross a JSON boundary,
-        // so composition's assumptions about them are checked here rather
-        // than trusted: the per-block counts must partition the output
-        // exactly, and an attributed element index must name a real element.
-        let counted = added
-            .iter()
-            .try_fold(0usize, |total, block| {
-                total.checked_add(block.message_count)
-            })
-            .ok_or_else(|| "assembly bookkeeping overflowed its message count".to_owned())?;
-        if counted != messages.len() {
-            return Err(format!(
-                "assembly bookkeeping accounts for {counted} messages but the \
-                 composition produced {}",
-                messages.len()
-            ));
-        }
-        if let Some(block) = added.iter().find(|block| {
-            block
-                .element_index
-                .is_some_and(|index| index >= elements.len())
-        }) {
-            return Err(format!(
-                "assembly bookkeeping attributed '{}' to an element outside the turn",
-                block.name
-            ));
-        }
-
-        Ok(ScriptOutcome {
-            messages,
-            added,
-            declared,
+    // The host wrote these records, but they still cross a JSON boundary,
+    // so composition's assumptions about them are checked here rather
+    // than trusted: the per-block counts must partition the output
+    // exactly, and an attributed element index must name a real element.
+    let counted = added
+        .iter()
+        .try_fold(0usize, |total, block| {
+            total.checked_add(block.message_count)
         })
+        .ok_or_else(|| "assembly bookkeeping overflowed its message count".to_owned())?;
+    if counted != messages.len() {
+        return Err(format!(
+            "assembly bookkeeping accounts for {counted} messages but the \
+             composition produced {}",
+            messages.len()
+        ));
+    }
+    if let Some(block) = added.iter().find(|block| {
+        block
+            .element_index
+            .is_some_and(|index| index >= elements.len())
+    }) {
+        return Err(format!(
+            "assembly bookkeeping attributed '{}' to an element outside the turn",
+            block.name
+        ));
+    }
+
+    Ok(ScriptOutcome {
+        messages,
+        added,
+        declared,
     })
 }
 
@@ -723,18 +706,6 @@ fn parse_role(role: &str) -> Result<Role, String> {
         "tool" => Ok(Role::Tool),
         other => Err(format!("unknown message role '{other}'")),
     }
-}
-
-fn script_error(ctx: &rquickjs::Ctx<'_>, error: rquickjs::Error) -> String {
-    if let rquickjs::Error::Exception = error {
-        let exception = ctx.catch();
-        if let Some(exception) = exception.as_exception() {
-            return exception
-                .message()
-                .unwrap_or_else(|| "script exception".to_owned());
-        }
-    }
-    error.to_string()
 }
 
 #[cfg(test)]

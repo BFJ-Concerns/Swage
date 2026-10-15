@@ -1,0 +1,11 @@
+# The v8 crate links the prebuilt static library at this path rather than
+# downloading one unverified while it builds. `just fetch-v8` — which every
+# `just` recipe that compiles the workspace runs first — downloads the release
+# archive pinned in v8-archive.toml, verifies its checksum, and places it here.
+# A build started before that has run fails in the v8 crate's build script
+# with this path in the message; run `just fetch-v8` and build again.
+#
+# Machine-local cargo settings belong in $CARGO_HOME/config.toml, which cargo
+# merges with this file.
+[env]
+RUSTY_V8_ARCHIVE = { value = "vendor/v8/librusty_v8.a.gz", relative = true }

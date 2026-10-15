@@ -20,6 +20,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- Workflow scripts and context assemblies run on V8 through deno_core, one isolate per program, with a heap limit and a limit on how long a script may execute without yielding to the host; a run the isolate terminates fails with the reason, recorded in the audit trail as an `engine_terminated` event. The engine has no ambient capability: `eval`, `Date`, `Intl`, WebAssembly, shared memory and `Math.random` are absent or fail, so a run can be replayed. Durable runs record the engine as `v8-<version>`. The QuickJS engine is gone. The V8 static library the build links is pinned by version and checksum in `v8-archive.toml` and fetched by `just fetch-v8`, which every build and gate recipe runs first.
 - Swage is licensed under the GNU Affero General Public License, version 3 or any later version (`AGPL-3.0-or-later`), with the full text in `LICENSE` and the licence recorded in every crate and npm package manifest. Pull requests are welcome, contributed under the same licence.
 - A continuation schedule firing during a running turn queues its brief for the next turn, and channel messages for a busy session wait in the same durable queue. The web UI shows queued inputs once, labels them queued, and displays recorded inputs and the drained reply live.
 - A message, channel message or continuation brief reaching an idle session that still has queued messages, as a Stop leaves them, joins the queue and runs after them in the same turn.
