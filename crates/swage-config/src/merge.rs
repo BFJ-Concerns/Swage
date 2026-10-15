@@ -994,6 +994,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
         },
         // Instructions are assembled separately by the instructions module
         instructions: String::new(),
+        instruction_sources: Vec::new(),
         dangerously_skip_permissions: partial.dangerously_skip_permissions.unwrap_or(false),
     }
 }

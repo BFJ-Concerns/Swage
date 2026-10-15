@@ -307,6 +307,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         );
         let elements = build_assembly_elements(
             &self.config.instructions,
+            &self.config.instruction_sources,
             operator_guidance,
             active_skills,
             delegated_history,

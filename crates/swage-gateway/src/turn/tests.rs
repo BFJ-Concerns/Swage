@@ -16145,6 +16145,7 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
 
     let elements = build_assembly_elements(
         instructions,
+        &[],
         vec![],
         vec![],
         history,
@@ -16181,6 +16182,7 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
 fn elements_built_without_memory_omit_the_memory_element() {
     let elements = build_assembly_elements(
         "",
+        &[],
         vec![],
         vec![],
         vec![ChatMessage::new(Role::User, "Hello")],
@@ -16235,6 +16237,7 @@ async fn named_assembly_composes_the_memory_element_like_any_other() {
     let memory = MemoryIndexElement::new(Some("Important topic context".to_string()), Vec::new());
     let elements = build_assembly_elements(
         "Be helpful.",
+        &[],
         vec![],
         vec![],
         vec![],
@@ -16447,6 +16450,7 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
 fn build_assembly_elements_memory_element_contains_provided_content() {
     let elements = build_assembly_elements(
         "Be helpful.",
+        &[],
         vec![],
         vec![],
         vec![],
@@ -16684,6 +16688,114 @@ async fn active_workspace_file_access_tracks_trust_and_revocation() {
     }
 }
 
+/// File provenance survives resolution and overlays without parsing attribution
+/// comments from operator-authored text or changing the supplied system message.
+#[test]
+fn instruction_provenance_counts_configured_files_at_their_own_levels() {
+    let root = tempfile::tempdir().unwrap();
+    let scope = swage_core::ScopeLocation::topic("provenance");
+    let topic = scope.data_dir(root.path());
+    std::fs::create_dir_all(root.path().join("instructions")).unwrap();
+    std::fs::create_dir_all(topic.join("instructions")).unwrap();
+    // An attribution-shaped comment in file content is not another source.
+    let global = "Global file.\n<!-- level: Topic -->\nStill the global file.";
+    std::fs::write(root.path().join("instructions/01-global.md"), global).unwrap();
+    std::fs::write(topic.join("instructions/01-topic.md"), "Topic file.").unwrap();
+
+    for extra_global in [false, true] {
+        if extra_global {
+            std::fs::write(
+                root.path().join("instructions/02-global.md"),
+                "Second global.",
+            )
+            .unwrap();
+        }
+        let config =
+            swage_config::load_resolved_config_from(root.path(), &scope, "test-agent").unwrap();
+        let config = swage_config::apply_overlay(config, Default::default());
+        let mut expected = if extra_global {
+            format!(
+                "<!-- level: Global -->\n\n{global}\n\nSecond global.\n\n<!-- level: Topic -->\n\nTopic file."
+            )
+        } else {
+            format!("<!-- level: Global -->\n\n{global}\n\n<!-- level: Topic -->\n\nTopic file.")
+        };
+        let config = if extra_global {
+            let config = super::configuration::apply_agent_definition(
+                config,
+                &swage_storage::NewAgentDefinition {
+                    id: "test-agent".into(),
+                    topic_id: None,
+                    display_name: "Test agent".into(),
+                    description: String::new(),
+                    instructions: "Agent file.".into(),
+                    model_id: None,
+                    tool_permissions: None,
+                    skills: vec![],
+                    output_schema: None,
+                    output_max_retries: None,
+                },
+            );
+            expected.push_str("\n\nAgent file.\n\nTask file.");
+            super::configuration::apply_task_definition(
+                config,
+                &swage_storage::TaskDefinition {
+                    id: "test-task".into(),
+                    instructions: "Task file.".into(),
+                    model_id: None,
+                    tool_permissions: None,
+                    output_schema: None,
+                    output_max_retries: None,
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                },
+            )
+            .unwrap()
+        } else {
+            config
+        };
+        let elements = build_assembly_elements(
+            &config.instructions,
+            &config.instruction_sources,
+            vec![],
+            vec![],
+            vec![],
+            None,
+            test_environment(),
+            vec![],
+            "gpt-test-model",
+            swage_context::working_norms::WorkingNormsScaffold::Native,
+            &[],
+            None,
+        );
+        let output = swage_context::assembly::assemble(
+            &elements,
+            &config.context,
+            &swage_context::tokeniser::TiktokenTokeniser::new("gpt-test-model"),
+        );
+        let prompts = output
+            .report
+            .elements
+            .iter()
+            .find(|e| e.name == "prompts")
+            .unwrap();
+        assert_eq!(
+            prompts.full_text.as_deref(),
+            Some(expected.as_str()),
+            "provenance must not change the provider-visible instruction bytes"
+        );
+        assert_eq!(
+            prompts.source,
+            if extra_global {
+                "prompt rules (5 total: 2 Global, 1 Topic, 2 Agent)"
+            } else {
+                "prompt rules (2 total: 1 Global, 1 Topic)"
+            },
+            "count the files actually loaded, not the single merged string or comments in content"
+        );
+    }
+}
+
 /// Guidance rules extend the resolved instruction baseline rather than
 /// replacing it: the prompts element carries the resolved instructions
 /// first, then the guidance content, in one system message.
@@ -16696,6 +16808,7 @@ fn assembly_elements_layer_operator_guidance_after_instructions() {
 
     let elements = build_assembly_elements(
         "BASELINE INSTRUCTIONS",
+        &[],
         guidance,
         vec![],
         vec![],

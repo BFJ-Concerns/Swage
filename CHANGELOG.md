@@ -45,6 +45,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Turn inspector instruction summaries count each configured file at its original hierarchy level, including topic instructions.
+
 - Turn records retain every provider stream attempt, including the initial request and retries, with start and end times and redacted failure details.
 
 - Session previews in the recent list, sidebar, conversation selector, delete controls and Operator deck show plain text without Markdown formatting or link destinations. Operator session summaries are limited to three lines.

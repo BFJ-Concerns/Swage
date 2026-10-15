@@ -571,6 +571,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
 
     let elements = build_assembly_elements(
         &config.instructions,
+        &config.instruction_sources,
         operator_guidance,
         active_skills,
         history_messages,
