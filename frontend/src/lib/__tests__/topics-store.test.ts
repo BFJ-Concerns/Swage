@@ -92,42 +92,6 @@ describe("loadTopics", () => {
     expect(store.topics[0].id).toBe("proj-a");
   });
 
-  it("restores the active topic after the available topics load", async () => {
-    const store = createTopicStore();
-    localStorage.setItem("swage:active-topic", "proj-b");
-    vi.mocked(api.listTopics).mockResolvedValueOnce([
-      topicA,
-      defaultTopic,
-      topicB,
-    ]);
-
-    await store.loadTopics();
-
-    expect(store.currentTopic?.id).toBe("proj-b");
-  });
-
-  it("clears a stale stored topic and leaves the picker open", async () => {
-    const store = createTopicStore();
-    localStorage.setItem("swage:active-topic", "proj-missing");
-    vi.mocked(api.listTopics).mockResolvedValueOnce([topicA, topicB]);
-
-    await store.loadTopics();
-
-    expect(store.currentTopic).toBeNull();
-    expect(localStorage.getItem("swage:active-topic")).toBeNull();
-  });
-
-  it("ignores and clears an empty stored topic id", async () => {
-    const store = createTopicStore();
-    localStorage.setItem("swage:active-topic", "   ");
-    vi.mocked(api.listTopics).mockResolvedValueOnce([topicA]);
-
-    await store.loadTopics();
-
-    expect(store.currentTopic).toBeNull();
-    expect(localStorage.getItem("swage:active-topic")).toBeNull();
-  });
-
   it("sets isLoading true during fetch and false after", async () => {
     const store = createTopicStore();
     let loadingDuringFetch = false;
@@ -168,7 +132,6 @@ describe("selectTopic", () => {
 
     expect(store.currentTopic?.id).toBe("proj-b");
     expect(store.currentTopic?.name).toBe("Topic B");
-    expect(localStorage.getItem("swage:active-topic")).toBe("proj-b");
   });
 
   it("does not call the API — selection is from the local list", async () => {
@@ -211,7 +174,6 @@ describe("createTopic", () => {
     });
     expect(store.topics).toHaveLength(2);
     expect(store.currentTopic?.id).toBe("proj-new");
-    expect(localStorage.getItem("swage:active-topic")).toBe("proj-new");
   });
 
   it("adds the new topic to an existing list", async () => {
@@ -257,7 +219,6 @@ describe("deleteTopic", () => {
     // Should automatically move to proj-b (the remaining topic).
     expect(store.currentTopic?.id).toBe("proj-b");
     expect(store.topics.map((p) => p.id)).toEqual(["proj-b"]);
-    expect(localStorage.getItem("swage:active-topic")).toBe("proj-b");
   });
 
   it("sets currentTopic to null when the last topic is deleted", async () => {
@@ -272,7 +233,6 @@ describe("deleteTopic", () => {
 
     expect(store.currentTopic).toBeNull();
     expect(store.topics).toHaveLength(0);
-    expect(localStorage.getItem("swage:active-topic")).toBeNull();
   });
 
   it("leaves currentTopic unchanged when a non-current topic is deleted", async () => {
@@ -291,7 +251,7 @@ describe("deleteTopic", () => {
 });
 
 describe("closeTopic", () => {
-  it("clears the persisted selection so reload returns to the picker", async () => {
+  it("clears the live selection", async () => {
     const store = createTopicStore();
     vi.mocked(api.listTopics).mockResolvedValueOnce([topicA]);
     await store.loadTopics();
@@ -300,6 +260,34 @@ describe("closeTopic", () => {
     store.closeTopic();
 
     expect(store.currentTopic).toBeNull();
-    expect(localStorage.getItem("swage:active-topic")).toBeNull();
+  });
+});
+
+
+describe("selection is local to this visit", () => {
+  it("never reads or writes retired persistence through load, select, create, delete or close", async () => {
+    localStorage.setItem("swage:active-topic", topicB.id);
+    localStorage.setItem("swage:recent-topics", JSON.stringify([topicB.id]));
+    const read = vi.spyOn(localStorage, "getItem");
+    const write = vi.spyOn(localStorage, "setItem");
+    const remove = vi.spyOn(localStorage, "removeItem");
+    try {
+      const store = createTopicStore();
+      vi.mocked(api.listTopics).mockResolvedValue([topicA, topicB]);
+      await store.loadTopics();
+      expect(store.currentTopic).toBeNull();
+      await store.selectTopic(topicB.id);
+      expect(store.currentTopic?.id).toBe(topicB.id);
+      vi.mocked(api.createTopic).mockResolvedValue(makeTopic("created", "Created"));
+      await store.createTopic("Created");
+      await store.deleteTopic("created");
+      store.closeTopic();
+      expect(store.currentTopic).toBeNull();
+      expect(read).not.toHaveBeenCalled();
+      expect(write).not.toHaveBeenCalled();
+      expect(remove).not.toHaveBeenCalled();
+    } finally {
+      read.mockRestore(); write.mockRestore(); remove.mockRestore();
+    }
   });
 });
