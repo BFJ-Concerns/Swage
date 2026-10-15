@@ -417,6 +417,33 @@ impl LlmProvider for RetryProvider {
 // Tests
 // ---------------------------------------------------------------------------
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn settle_attempt(
+    tx: &tokio::sync::mpsc::UnboundedSender<StreamChunk>,
+    record: &mut ProviderAttemptRecord,
+    error: Option<String>,
+) {
+    if record.ended_at_ms.is_some() {
+        return;
+    }
+    record.ended_at_ms = Some(now_ms());
+    record.outcome = if error.is_some() {
+        ProviderAttemptOutcome::Failed
+    } else {
+        ProviderAttemptOutcome::Succeeded
+    };
+    record.error = error;
+    let _ = tx.send(StreamChunk::ProviderAttempt(record.clone()));
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -1541,31 +1568,4 @@ mod tests {
             serde_json::json!({"provider": "probe", "stream": true})
         );
     }
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
-
-fn settle_attempt(
-    tx: &tokio::sync::mpsc::UnboundedSender<StreamChunk>,
-    record: &mut ProviderAttemptRecord,
-    error: Option<String>,
-) {
-    if record.ended_at_ms.is_some() {
-        return;
-    }
-    record.ended_at_ms = Some(now_ms());
-    record.outcome = if error.is_some() {
-        ProviderAttemptOutcome::Failed
-    } else {
-        ProviderAttemptOutcome::Succeeded
-    };
-    record.error = error;
-    let _ = tx.send(StreamChunk::ProviderAttempt(record.clone()));
 }

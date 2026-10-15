@@ -53,13 +53,14 @@
     return Array.isArray(value) ? value : [];
   }
 
-  // Assignment metadata is not part of the live inspector's reading surface.
+  // Exclude assignment metadata from the snapshot, while preserving the
+  // provider body verbatim: schema property names are part of the request.
   function blind(value: unknown): unknown {
     if (Array.isArray(value)) return value.map(blind);
     if (value !== null && typeof value === "object") {
       return Object.fromEntries(Object.entries(value).filter(([key]) =>
         !/^(variant(_id|_name)?|experiment_assignment|selected_variant)$/i.test(key),
-      ).map(([key, child]) => [key, blind(child)]));
+      ));
     }
     return value;
   }

@@ -3371,7 +3371,8 @@
       "enum": [
         "outstanding",
         "succeeded",
-        "failed"
+        "failed",
+        "interrupted"
       ]
     },
     "ProviderAttemptRecord": {

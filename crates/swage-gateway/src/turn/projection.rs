@@ -243,10 +243,16 @@ pub(super) async fn project_agent_events(
             event @ (AgentEvent::ProviderReasoningCaptured { .. }
             | AgentEvent::ProviderResponseCaptured { .. }
             | AgentEvent::ProviderAttempt { .. }) => {
-                let snapshot_turn_id = match &event {
-                    AgentEvent::ProviderReasoningCaptured { turn_id, .. }
-                    | AgentEvent::ProviderResponseCaptured { turn_id, .. }
-                    | AgentEvent::ProviderAttempt { turn_id, .. } => *turn_id,
+                let (snapshot_turn_id, record_kind) = match &event {
+                    AgentEvent::ProviderReasoningCaptured { turn_id, .. } => {
+                        (*turn_id, "provider_reasoning_snapshot")
+                    }
+                    AgentEvent::ProviderResponseCaptured { turn_id, .. } => {
+                        (*turn_id, "provider_response_witness")
+                    }
+                    AgentEvent::ProviderAttempt { turn_id, .. } => {
+                        (*turn_id, "provider_attempt_snapshot")
+                    }
                     _ => unreachable!(),
                 };
                 apply_provider_snapshot_event(
@@ -261,11 +267,12 @@ pub(super) async fn project_agent_events(
                     .store_snapshot(snapshot_turn_id, &report_json.to_string())
                     .await
                 {
+                    tracing::warn!(%error, "failed to persist provider context snapshot");
                     if let Err(audit_error) = record_durability::record_reconstruction_gap(
                         state.storage.as_ref(),
                         Some(session_id),
                         snapshot_turn_id,
-                        "provider_snapshot",
+                        record_kind,
                         &error,
                     )
                     .await

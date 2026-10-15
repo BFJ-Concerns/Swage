@@ -20455,16 +20455,31 @@ async fn inspector_snapshot_keeps_attempts_across_provider_failover() {
 #[tokio::test]
 async fn inspector_snapshot_settles_an_attempt_when_the_turn_is_cancelled() {
     let provider = swage_provider::retry::RetryProvider::new(
-        PendingFinalRoundProvider::new(vec![vec![StreamChunk::Delta { content: "partial".into() }]]),
-        swage_provider::retry::RetryConfig { max_retries: 1, initial_backoff: Duration::ZERO, max_backoff: Duration::ZERO },
+        PendingFinalRoundProvider::new(vec![vec![StreamChunk::Delta {
+            content: "partial".into(),
+        }]]),
+        swage_provider::retry::RetryConfig {
+            max_retries: 1,
+            initial_backoff: Duration::ZERO,
+            max_backoff: Duration::ZERO,
+        },
     );
-    let (state, session_id, storage) = make_state_with_tool_provider_and_storage(Arc::new(provider)).await;
+    let (state, session_id, storage) =
+        make_state_with_tool_provider_and_storage(Arc::new(provider)).await;
     let state = Arc::new(state);
     let (tx, mut rx) = mpsc::unbounded_channel();
     let running_state = Arc::clone(&state);
     let running = tokio::spawn(async move {
-        process_turn(&running_state, session_id, None, TurnInput::from("begin"), tx,
-            Arc::new(Mutex::new(SubscriptionState::new(true))), None).await
+        process_turn(
+            &running_state,
+            session_id,
+            None,
+            TurnInput::from("begin"),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
     });
     let mut turn_id = None;
     loop {
@@ -20476,10 +20491,24 @@ async fn inspector_snapshot_settles_an_attempt_when_the_turn_is_cancelled() {
     }
     cancel_turn(&state, session_id).await.unwrap();
     running.await.unwrap().unwrap();
-    let snapshot = storage.get_snapshot(turn_id.unwrap()).await.unwrap().unwrap();
+    let snapshot = storage
+        .get_snapshot(turn_id.unwrap())
+        .await
+        .unwrap()
+        .unwrap();
     let report: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
-    let attempts = report["provider_attempts"].as_array().cloned().unwrap_or_default();
-    assert_eq!(attempts.len(), 1, "the interrupted request remains in the turn's record");
+    let attempts = report["provider_attempts"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        attempts.len(),
+        1,
+        "the interrupted request remains in the turn's record"
+    );
     assert_eq!(attempts[0]["outcome"], "interrupted");
-    assert!(attempts[0]["ended_at_ms"].as_u64().unwrap() >= attempts[0]["started_at_ms"].as_u64().unwrap());
+    assert!(
+        attempts[0]["ended_at_ms"].as_u64().unwrap()
+            >= attempts[0]["started_at_ms"].as_u64().unwrap()
+    );
 }

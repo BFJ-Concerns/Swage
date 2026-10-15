@@ -195,6 +195,30 @@ pub struct TurnContextResponse {
     pub report: AssemblyReport,
 }
 
+/// One actual stream attempt, including the initial request and any retries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
+pub struct ProviderAttemptRecord {
+    pub id: String,
+    pub round: usize,
+    pub attempt: u32,
+    #[ts(type = "number")]
+    pub started_at_ms: u64,
+    #[ts(optional, type = "number | null")]
+    pub ended_at_ms: Option<u64>,
+    pub outcome: ProviderAttemptOutcome,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAttemptOutcome {
+    Outstanding,
+    Succeeded,
+    Failed,
+    Interrupted,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AssemblyReport, DeclaredOmission};
@@ -239,28 +263,4 @@ mod tests {
 
         assert!(parsed.declared_omissions.is_empty());
     }
-}
-
-/// One actual stream attempt, including the initial request and any retries.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
-#[ts(optional_fields = nullable)]
-pub struct ProviderAttemptRecord {
-    pub id: String,
-    pub round: usize,
-    pub attempt: u32,
-    #[ts(type = "number")]
-    pub started_at_ms: u64,
-    #[ts(optional, type = "number | null")]
-    pub ended_at_ms: Option<u64>,
-    pub outcome: ProviderAttemptOutcome,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderAttemptOutcome {
-    Outstanding,
-    Succeeded,
-    Failed,
-    Interrupted,
 }

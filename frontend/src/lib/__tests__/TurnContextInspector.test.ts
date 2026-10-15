@@ -123,7 +123,7 @@ function recordedRequest() {
       effort: { requested: "xhigh", clamped_to: "high", control: { kind: "level", level: "high" } },
       requests: [{ round: 1, request: { body: {
         messages: [{ role: "system", content: "Complete provider context" }],
-        tools: [{ type: "function", function: { name: "read_workspace", parameters: { type: "object" } } }],
+        tools: [{ type: "function", function: { name: "read_workspace", parameters: { type: "object", properties: { variant: { type: "string", description: "ordinary-schema-field" } } } } }],
       }, divergences: [{ kind: "protocol_difference", text: "Uses Chat Completions" }],
       variant_id: "private-draw-identifier", variant_name: "private-draw-name" } }],
     },
@@ -133,7 +133,7 @@ function recordedRequest() {
 }
 
 it.each([
-  ["full provider request", ["Complete provider context", "read_workspace"]],
+  ["full provider request", ["Complete provider context", "read_workspace", "ordinary-schema-field"]],
   ["complete element text", ["Distinctive second paragraph."]],
   ["effective request facts", ["serving-model", "serving-provider", "xhigh → high (clamped)", "Sent effort: high", "Configured budget: 2000", "Remaining: 1650"]],
   ["request divergences", ["Request divergences", "protocol_difference", "Uses Chat Completions"]],

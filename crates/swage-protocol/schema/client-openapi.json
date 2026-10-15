@@ -2999,7 +2999,8 @@
         "enum": [
           "outstanding",
           "succeeded",
-          "failed"
+          "failed",
+          "interrupted"
         ],
         "type": "string"
       },

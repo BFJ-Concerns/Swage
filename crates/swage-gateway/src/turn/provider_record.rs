@@ -83,16 +83,17 @@ pub(crate) async fn apply_provider_snapshot_event(
         _ => return,
     };
     match event {
-        AgentEvent::ProviderAttempt { record, .. } => {
-            let mut value = serde_json::to_value(&record).expect("attempt serialises");
-            match known_secret_values(state).await {
-                Ok(secrets) => redact_secret_values(&mut value, &secrets),
-                Err(_) => {
-                    value["error"] = serde_json::json!(
-                        "Error detail omitted because secret redaction was unavailable"
-                    );
+        AgentEvent::ProviderAttempt { mut record, .. } => {
+            if let Some(error) = &mut record.error {
+                match known_secret_values(state).await {
+                    Ok(secrets) => redact_text(error, &secrets),
+                    Err(_) => {
+                        *error =
+                            "Error detail omitted because secret redaction was unavailable".into();
+                    }
                 }
             }
+            let value = serde_json::to_value(&record).expect("attempt serialises");
             let attempts = report_json
                 .as_object_mut()
                 .expect("context report is an object")
