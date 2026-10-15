@@ -40,6 +40,7 @@ export interface ConversationStore {
   // as the target of the composer.
   clearActiveConversation(): void;
   appendOptimisticUserMessage(message: {
+    attachments?: MessageView["attachments"];
     client_id?: string;
     content: string;
     timestamp: string;
@@ -195,6 +196,7 @@ export function createConversationStore(): ConversationStore {
 
   function appendMessage(
     message: {
+      attachments?: MessageView["attachments"];
       id?: string;
       client_id?: string;
       role: MessageView["role"];
@@ -221,6 +223,7 @@ export function createConversationStore(): ConversationStore {
     const belongsToView =
       message.thread_id === undefined || threadInView === undefined || message.thread_id === threadInView;
     const appendedMessage: MessageView = {
+      ...(message.attachments?.length ? { attachments: message.attachments } : {}),
       role: message.role,
       content: message.content,
       timestamp: message.timestamp,
@@ -365,6 +368,7 @@ export function createConversationStore(): ConversationStore {
 
     appendOptimisticUserMessage(message) {
       appendMessage({
+        ...(message.attachments?.length ? { attachments: message.attachments } : {}),
         client_id: message.client_id,
         role: "user",
         content: message.content,
@@ -436,6 +440,7 @@ export function createConversationStore(): ConversationStore {
       // identity (so it can be branched from), its origin (so it is labelled
       // by its author), and the thread it belongs to.
       appendMessage({
+        ...(message.attachments?.length ? { attachments: message.attachments } : {}),
         id: message.id,
         role: message.role === "assistant" ? "assistant" : "user",
         origin: message.origin,

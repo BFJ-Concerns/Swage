@@ -201,30 +201,37 @@
 
   // Queue inputs retain the recorded order and the gateway's separator.
   // Before the request is recorded, the optimistic input has no turn id.
-  function turnRequestContent(message: (typeof messages)[number]): string | null {
+  function turnRequest(message: (typeof messages)[number]): Pick<(typeof messages)[number], "content" | "attachments"> | null {
     const requests = message.turn_id
       ? messages.filter((candidate) => isPersonsMessage(candidate) && candidate.turn_id === message.turn_id)
       : [];
-    if (requests.length > 0) return requests.map((request) => request.content).join("\n\n");
+    if (requests.length > 0) return {
+      content: requests.map((request) => request.content).join("\n\n"),
+      attachments: requests.flatMap((request) => request.attachments ?? []),
+    };
     return messages.slice(0, messages.indexOf(message)).reverse()
-      .find((candidate) => isPersonsMessage(candidate) && !candidate.turn_id)?.content ?? null;
+      .find((candidate) => isPersonsMessage(candidate) && !candidate.turn_id) ?? null;
   }
 
   // What Retry resends for a failed turn, shown on the message holding the
   // turn's account: the request itself when no reply came, or — under a
   // partial reply — the request that partial reply answered.
-  function retryContent(message: (typeof messages)[number]): string | null {
+  function retryRequest(message: (typeof messages)[number]): ReturnType<typeof turnRequest> {
     if (message.turn_state !== "failed") return null;
-    if (endedWithoutReply(message)) return message.content;
+    if (endedWithoutReply(message)) return message;
     if ((message.role !== "assistant" && message.origin !== "platform") || !message.turn_id) return null;
     const turnMessages = messages.filter((other) => other.turn_id === message.turn_id);
     if (turnMessages[turnMessages.length - 1] !== message) return null;
-    return turnRequestContent(message);
+    return turnRequest(message);
   }
 
   // Retry resends the request through the ordinary send path.
-  function retry(content: string): void {
-    streamingStore?.startTurn(content);
+  function retry(request: NonNullable<ReturnType<typeof turnRequest>>): void {
+    if (request.attachments?.length) {
+      streamingStore?.startTurn(request.content, undefined, undefined, undefined, request.attachments);
+    } else {
+      streamingStore?.startTurn(request.content);
+    }
   }
 
   // The request a live failure answered: the latest message the person sent.
@@ -328,6 +335,11 @@
           <!-- The person's own messages render as plain text (no markdown injection). -->
           <div class="message-content user-content">
             {message.content}
+            {#each message.attachments ?? [] as attachment}
+              {#if attachment.kind === "image_url"}
+                <span class="image-attachment">Image attached</span>
+              {/if}
+            {/each}
           </div>
         {:else}
           <!-- Assistant messages render as markdown. -->
@@ -355,9 +367,9 @@
           </div>
         {/if}
         {#if message.origin === "platform" && message.turn_state === "refused" && streamingStore}
-          {@const input = turnRequestContent(message)}
+          {@const input = turnRequest(message)}
           {#if input !== null}
-            <button class="branch-link" disabled={isStreaming} onclick={() => streamingStore?.startTurn(input)}>Retry request</button>
+            <button class="branch-link" disabled={isStreaming} onclick={() => retry(input)}>Retry request</button>
           {/if}
         {/if}
         {#if endedWithoutReply(message)}
@@ -378,8 +390,8 @@
             <span class="error-message">{message.failure_message}</span>
           </div>
         {/if}
-        {#if retryContent(message) !== null && !isStreaming}
-          <button class="branch-link" onclick={() => retry(retryContent(message)!)}>Retry</button>
+        {#if retryRequest(message) !== null && !isStreaming}
+          <button class="branch-link" onclick={() => retry(retryRequest(message)!)}>Retry</button>
         {/if}
         {#if shouldShowModel(message.role) && message.model}
           <div class="message-model">{message.model}</div>
@@ -472,7 +484,7 @@
         <span class="error-message">{turnError.message}</span>
       </div>
       {#if lastPersonsMessage && !isStreaming}
-        <button class="branch-link" onclick={() => retry(lastPersonsMessage.content)}>Retry</button>
+        <button class="branch-link" onclick={() => retry(lastPersonsMessage)}>Retry</button>
       {/if}
     {/if}
   {/if}
@@ -482,6 +494,14 @@
 
 
 <style>
+  .image-attachment {
+    display: inline-block;
+    margin: 0.25rem;
+    padding: 0.25rem 0.5rem;
+    border: 1px solid var(--rule-soft);
+    font-size: 0.8rem;
+  }
+
   /* The branch action reads like the context link beside it: a dotted
      underline in soft ink, no button chrome, so it never competes with the
      message. */

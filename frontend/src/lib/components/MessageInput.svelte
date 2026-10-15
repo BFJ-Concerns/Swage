@@ -1,8 +1,11 @@
 <!--
   Message input with send/stop toggle — handles text entry and submission.
-  Pure renderer — delegates to streaming store for send/cancel actions.
+  Delegates sends to the streaming store and registers session files through the materials API.
 -->
 <script lang="ts">
+  import { tick } from "svelte";
+  import { createMaterial } from "../api/materials";
+  import type { MessageAttachment } from "../protocol/MessageAttachment";
   import type { StreamingStore } from "../stores/streaming";
   import type { EffectiveAgentDefinitionResponse } from "../protocol/EffectiveAgentDefinitionResponse";
   import type { Effort } from "../protocol/Effort";
@@ -40,6 +43,93 @@
 
   // Local draft content — cleared after every successful send.
   let content = $state("");
+  let images = $state<{ name: string; url: string }[]>([]);
+  let materials = $state<{ id: string; title: string }[]>([]);
+  let attachmentError = $state<string | null>(null);
+  let pendingReads = $state(0);
+  let sending = $state(false);
+  let fileInput: HTMLInputElement | undefined = $state();
+  let attachmentScope = $state<string | null | undefined>(undefined);
+  let attachmentGeneration = 0;
+
+  $effect(() => {
+    if (attachmentScope !== sessionId) {
+      attachmentScope = sessionId;
+      attachmentGeneration += 1;
+      images = [];
+      materials = [];
+      attachmentError = null;
+    }
+  });
+
+  function readFile(file: File, image: boolean): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(new Error(`Could not read ${file.name}.`));
+      if (image) reader.readAsDataURL(file);
+      else reader.readAsText(file);
+    });
+  }
+
+  async function attachFiles(files: File[]): Promise<void> {
+    let generation = attachmentGeneration;
+    attachmentError = null;
+    pendingReads += 1;
+    try {
+      for (const file of files) {
+        const image = ["image/png", "image/jpeg"].includes(file.type);
+        const text = file.type.startsWith("text/") || /\.(md|markdown|txt)$/i.test(file.name);
+        if (!image && !text) throw new Error("Choose a PNG, JPEG, text or Markdown file.");
+        const body = await readFile(file, image);
+        if (generation !== attachmentGeneration) return;
+        if (image) {
+          images = [...images, { name: file.name || "Pasted image", url: body }];
+        } else {
+          const creatingSession = !sessionId;
+          const pendingImages = images;
+          const target = sessionId ?? await store?.ensureConversation?.(selectedModel || null, selectedAgentId || null, selectedEffort || null);
+          await tick();
+          if (!target) throw new Error("Could not create a session for the file. Please try again.");
+          // Session creation can change the composer from an empty start to
+          // its new session. A switch to a different session cancels intake.
+          if (sessionId && sessionId !== target) return;
+          // Only the session this creation returned can inherit its draft.
+          // Any intervening switch beyond that one transition cancels it.
+          if (creatingSession && sessionId === target && attachmentGeneration === generation + 1) {
+            images = pendingImages;
+            generation = attachmentGeneration;
+          } else if (attachmentGeneration !== generation) return;
+          const registered = await createMaterial({
+            scope_kind: "session",
+            session_id: target,
+            title: file.name,
+            relative_path: `composer/${Array.from(crypto.getRandomValues(new Uint32Array(4))).join("-")}-${file.name.replace(/[^a-zA-Z0-9._-]/g, "-")}`,
+            mime_type: /\.(md|markdown)$/i.test(file.name) ? "text/markdown" : (file.type || "text/plain"),
+            content_text: body,
+          });
+          if (generation !== attachmentGeneration || (sessionId && sessionId !== target)) return;
+          materials = [...materials, { id: registered.id, title: registered.title }];
+        }
+      }
+    } catch (error) {
+      if (generation === attachmentGeneration) attachmentError = error instanceof Error ? error.message : "Could not attach the file.";
+    } finally {
+      pendingReads -= 1;
+    }
+  }
+
+  function handlePaste(event: ClipboardEvent): void {
+    const files = Array.from(event.clipboardData?.items ?? [])
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    if (files.length) {
+      event.preventDefault();
+      void attachFiles(files);
+    }
+  }
+
   let selectedModel = $state("");
   let selectedEffort = $state<"" | Effort>("");
   let effortSessionId = $state<string | null | undefined>(undefined);
@@ -79,13 +169,25 @@
     const trimmed = content.trim();
     // Guard: no-op when there is nothing to send. A turn in progress is not
     // a reason to refuse: the gateway queues the message for the next turn.
-    if (!store || !trimmed || hasNoConfiguredModels) return;
+    if (!store || (!trimmed && images.length === 0) || hasNoConfiguredModels || pendingReads > 0 || sending) return;
 
-    store.startTurn(trimmed, selectedModel || null, selectedAgentId || null, selectedEffort || null);
-
-    // Clear draft and return focus to the textarea so the user can keep typing.
-    content = "";
-    textarea?.focus();
+    const generation = attachmentGeneration;
+    const sentImages = images;
+    const clearSentDraft = () => {
+      if (attachmentGeneration === generation) images = images.filter((image) => !sentImages.includes(image));
+      if (content.trim() === trimmed) content = "";
+      textarea?.focus();
+    };
+    const result = images.length
+      ? store.startTurn(trimmed, selectedModel || null, selectedAgentId || null, selectedEffort || null,
+          images.map(({ url }): MessageAttachment => ({ kind: "image_url", url })))
+      : store.startTurn(trimmed, selectedModel || null, selectedAgentId || null, selectedEffort || null);
+    if (result) {
+      sending = true;
+      void result.then((sent) => { if (sent) clearSentDraft(); }).finally(() => { sending = false; });
+    } else {
+      clearSentDraft();
+    }
   }
 
   function handleKeydown(event: KeyboardEvent) {
@@ -114,8 +216,38 @@
       placeholder="Send a message — Shift+Enter for a new line"
       rows="3"
       onkeydown={handleKeydown}
+      onpaste={handlePaste}
       aria-label="Message"
     ></textarea>
+    <div class="attachment-controls">
+      <input
+        bind:this={fileInput}
+        type="file"
+        accept="image/png,image/jpeg,text/*,.md,.markdown,.txt"
+        multiple
+        aria-label="Attach images or files"
+        hidden
+        onchange={(event) => {
+          const files = Array.from(event.currentTarget.files ?? []);
+          event.currentTarget.value = "";
+          void attachFiles(files);
+        }}
+      />
+      <button type="button" disabled={!store || pendingReads > 0 || hasNoConfiguredModels} onclick={() => fileInput?.click()}>Attach</button>
+      <span>Images with next message · Files for this session, reference only</span>
+    </div>
+    {#if pendingReads > 0}<p class="attachment-feedback" role="status">Attaching…</p>{/if}
+    {#each images as image, index}
+      <div class="attached-image">
+        <img src={image.url} alt={image.name} />
+        <span>{image.name} · This session · Will be sent with your message</span>
+        <button type="button" aria-label={`Remove ${image.name}`} onclick={() => { images = images.filter((_, i) => i !== index); }}>Remove</button>
+      </div>
+    {/each}
+    {#each materials as material (material.id)}
+      <p class="attachment-feedback">{material.title} · Attached to this session · Reference only</p>
+    {/each}
+    {#if attachmentError}<p class="attachment-feedback" role="alert">{attachmentError}</p>{/if}
     {#if modelOptions.length > 0 || canSelectAgent}
       <div class="field-toolbar">
         {#if canSelectAgent}
@@ -161,7 +293,7 @@
     <button
       class="action send"
       onclick={send}
-      disabled={!content.trim() || !store || hasNoConfiguredModels}
+      disabled={(!content.trim() && images.length === 0) || !store || hasNoConfiguredModels || pendingReads > 0 || sending}
     >
       Send
     </button>
@@ -169,6 +301,27 @@
 </div>
 
 <style>
+  .attachment-controls, .attached-image {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 6px 14px;
+    font-size: 0.8rem;
+    flex-wrap: wrap;
+  }
+
+  .attached-image img {
+    width: 64px;
+    height: 64px;
+    object-fit: contain;
+  }
+
+  .attachment-feedback {
+    margin: 0;
+    padding: 6px 14px;
+    font-size: 0.8rem;
+  }
+
   .message-input {
     /* Padding lives on the conversation pane — the bar itself sits flush. */
     margin: 12px 22px 18px;
