@@ -903,7 +903,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -1000,7 +1000,7 @@ mod tests {
     async fn an_unlinked_channel_opens_with_a_root_thread_in_the_general_scope() {
         let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
         let general = storage.general_scope().await.unwrap();
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),

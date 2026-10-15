@@ -91,7 +91,7 @@ async fn start_server(
             },
         );
     }
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         provider as Arc<dyn LlmProvider>,

@@ -2990,6 +2990,7 @@ dependencies = [
  "swage-context",
  "swage-core",
  "swage-device",
+ "swage-gateway",
  "swage-hook",
  "swage-protocol",
  "swage-provider",

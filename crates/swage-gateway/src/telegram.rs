@@ -989,7 +989,7 @@ mod tests {
         provider: impl LlmProvider + 'static,
         client: Arc<TelegramClient>,
     ) -> AppState {
-        let mut state = AppState::new(
+        let mut state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
             Arc::new(provider),

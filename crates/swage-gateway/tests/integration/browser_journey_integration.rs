@@ -772,7 +772,7 @@ async fn start_browser_tool_server(
         vec![swage_config::model::RequireApprovalEntry::Simple(
             "browser_type".to_string(),
         )];
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(provider),

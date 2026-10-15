@@ -77,6 +77,8 @@ impl ApprovalWaiter {
 /// concurrent modification from multiple handler tasks.
 #[derive(Clone)]
 pub struct AppState {
+    #[cfg(feature = "test-fixtures")]
+    pub(crate) test_root: Option<Arc<tempfile::TempDir>>,
     /// Configuration root selected when this gateway instance was constructed.
     pub config_root: PathBuf,
     /// Persistent storage backend (sessions, threads, turns, messages, tool calls).
@@ -365,6 +367,8 @@ impl AppState {
             });
         }
         Self {
+            #[cfg(feature = "test-fixtures")]
+            test_root: None,
             config_root,
             storage: storage.clone(),
             topic_store,
@@ -761,7 +765,7 @@ mod tests {
 
     fn make_minimal_state() -> AppState {
         let storage = Arc::new(MockStorage::new());
-        AppState::new(
+        AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
             Arc::new(MockProvider::new(vec![])) as Arc<dyn swage_provider::LlmProvider>,
@@ -819,7 +823,7 @@ mod tests {
     #[test]
     fn appstate_new_initialises_approval_channels() {
         let storage = Arc::new(MockStorage::new());
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
             Arc::new(MockProvider::new(vec![])) as Arc<dyn swage_provider::LlmProvider>,

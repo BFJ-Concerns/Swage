@@ -1788,7 +1788,7 @@ mod tests {
     #[test]
     fn settings_response_from_saved_config_echoes_secret_refs_without_raw_keys() {
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
@@ -1857,7 +1857,7 @@ mod tests {
                 },
             },
         );
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
@@ -2050,7 +2050,7 @@ mod tests {
     async fn save_settings_hot_applies_a_declared_section_and_refuses_by_its_own_rule() {
         let swage_home = SwageHomeGuard::new();
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
@@ -2102,7 +2102,7 @@ mod tests {
     async fn save_settings_hot_applies_voice_model_routes() {
         let swage_home = SwageHomeGuard::new();
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
@@ -2185,7 +2185,7 @@ mod tests {
                 },
             );
         }
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
@@ -2324,7 +2324,7 @@ mod tests {
             provider_type: "searxng".to_string(),
             base_url: "http://127.0.0.1:8080".to_string(),
         });
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
@@ -2492,7 +2492,7 @@ mod tests {
         let _swage_home = SwageHomeGuard::new();
 
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))

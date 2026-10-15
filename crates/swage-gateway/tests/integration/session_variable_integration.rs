@@ -144,7 +144,7 @@ async fn wait_for_message_delivery(
 #[tokio::test(flavor = "multi_thread")]
 async fn real_tool_audits_whole_state_and_updated_values_recompose() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         storage.clone() as Arc<dyn Storage>,
         storage.clone(),
         Arc::new(UnusedProvider),
@@ -383,7 +383,7 @@ async fn live_listener_turns_set_and_update_the_values_used_by_composition() {
     let mut config = swage_config::ResolvedConfig::default();
     config.context.assembly = "briefing".into();
     config.instructions = "Task: {{task}}; owner: {{owner}}".into();
-    let state = AppState::new(
+    let state = AppState::for_test(
         storage.clone() as Arc<dyn Storage>,
         storage.clone(),
         Arc::new(provider),
@@ -588,7 +588,7 @@ async fn live_listener_default_assembly_delivers_working_norms_to_the_provider()
         instructions: "Default-route prompt".into(),
         ..Default::default()
     };
-    let state = AppState::new(
+    let state = AppState::for_test(
         storage.clone() as Arc<dyn Storage>,
         storage.clone(),
         Arc::new(provider),
@@ -722,7 +722,7 @@ async fn live_http_delegations_apply_call_scoped_context_composition() {
 
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let topic = storage.general_scope().await.unwrap();
-    let state = AppState::new(
+    let state = AppState::for_test(
         storage.clone() as Arc<dyn Storage>,
         storage.clone(),
         Arc::new(provider),
