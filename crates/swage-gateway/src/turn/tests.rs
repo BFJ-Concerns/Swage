@@ -496,6 +496,58 @@ async fn seed_history(storage: &MockStorage, session_id: Uuid, count: usize) -> 
 }
 
 #[tokio::test]
+async fn continuity_messages_route_summary_produces_succession_instead_of_fallback() {
+    use axum::{Json, Router, response::IntoResponse, routing::post};
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let requests = Arc::clone(&captured);
+    let app = Router::new().route("/v1/messages", post(move |Json(body): Json<serde_json::Value>| {
+        requests.lock().unwrap().push(body.clone());
+        async move {
+            if body["stream"] == true {
+                ([("content-type", "text/event-stream")], concat!(
+                    "event: message_start\ndata: {\"message\":{\"id\":\"msg_test\",\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n",
+                    "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                    "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Continued.\"}}\n\n",
+                    "event: content_block_stop\ndata: {\"index\":0}\n\n",
+                    "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
+                    "event: message_stop\ndata: {}\n\n"
+                )).into_response()
+            } else {
+                ([("content-type", "application/json")], include_str!("../../../swage-provider/tests/fixtures/claude-succession-response.json")).into_response()
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let storage = Arc::new(MockStorage::new());
+    let provider = swage_provider::anthropic::AnthropicProvider::from_config(
+        swage_provider::ProviderConfig::new(
+            "test-key",
+            "claude-sonnet-5-5",
+            format!("http://{address}"),
+        ),
+    );
+    let (state, session_id) =
+        make_state_with_provider_and_root(Arc::new(provider), Arc::clone(&storage), None).await;
+    seed_history_over_threshold(&storage, session_id).await;
+    run_continue_turn(&state, session_id).await;
+    server.abort();
+    let records = only_snapshot_records(&*storage.db.lock().await);
+    assert_eq!(
+        records.len(),
+        1,
+        "one succession without fallback: {records:?}"
+    );
+    assert_eq!(records[0]["actual_strategy"], "succession", "{records:?}");
+    let requests = captured.lock().unwrap();
+    assert!(requests.iter().any(|request| request["stream"] != true));
+    assert!(requests.iter().any(|request| request["stream"] == true));
+}
+
+#[tokio::test]
 async fn an_over_threshold_context_runs_on_a_successor_assembled_from_its_elements() {
     let storage = Arc::new(MockStorage::new());
     let (state, session_id) =
@@ -957,8 +1009,8 @@ async fn a_turn_whose_walls_are_unchanged_carries_the_previous_diagnosis_again()
 
     assert_eq!(
         provider.completions.load(Ordering::SeqCst),
-        0,
-        "no reader or synthesis runs"
+        1,
+        "only the established-work summary runs; the diagnosis is reused"
     );
     let records = records_of_the_turn_after(&*storage.db.lock().await, diagnosed);
     assert_eq!(records.len(), 1, "{records:?}");
@@ -1124,6 +1176,161 @@ async fn a_turn_whose_window_no_longer_shows_a_wall_gets_its_full_history() {
     assert!(
         !text.contains(PRIOR_DIAGNOSIS),
         "without the diagnosis: {text}"
+    );
+}
+
+/// The summary is derived from the actual transcript sent by the product;
+/// readers and synthesis deliberately return no established facts.
+#[derive(Default)]
+struct TranscriptSummarisingProvider(SummarisingCapturingProvider);
+
+#[async_trait]
+impl LlmProvider for TranscriptSummarisingProvider {
+    fn model_id(&self) -> &str {
+        "transcript-summary"
+    }
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let material = request
+            .messages
+            .iter()
+            .map(ChatMessage::text_content)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let summary = material
+            .split_once("## Conversation to summarise\n\n")
+            .map(|(_, history)| history.to_owned())
+            .unwrap_or_else(|| "The missing-file reads failed repeatedly.".into());
+        Ok(CompletionResponse {
+            content: summary,
+            input_tokens: 10,
+            output_tokens: 10,
+            finish_reason: FinishReason::Stop,
+            cost: None,
+        })
+    }
+    async fn complete_with_tools(
+        &self,
+        _: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unreachable!("turns stream")
+    }
+    fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        self.0.stream(request)
+    }
+}
+
+#[tokio::test]
+async fn continuity_degradation_successor_keeps_established_facts_beside_the_diagnosis() {
+    let storage = Arc::new(MockStorage::new());
+    let provider = Arc::new(TranscriptSummarisingProvider::default());
+    let (state, session_id) = make_state_with_provider_and_root(
+        Arc::clone(&provider) as Arc<dyn LlmProvider>,
+        Arc::clone(&storage),
+        None,
+    )
+    .await;
+    let thread_id = seed_history(&storage, session_id, 8).await;
+    storage
+        .append_message(AppendMessage {
+            thread_id,
+            attachments: vec![],
+            turn_id: None,
+            role: swage_core::Role::User,
+            origin: swage_storage::MessageOrigin::User,
+            content:
+                "CHECKS: compile passed; render passed; fixture validated. Current work: dashboard."
+                    .into(),
+            agent_id: "gateway".into(),
+        })
+        .await
+        .unwrap();
+    let (validated_turn, calls) = seed_finished_turn(
+        &storage,
+        thread_id,
+        TurnState::Completed,
+        &[(
+            "file_write",
+            serde_json::json!({"path": "fixture"}),
+            "success",
+        )],
+        false,
+    )
+    .await;
+    storage
+        .update_tool_call_result(
+            calls[0],
+            "FIXTURE_WRITTEN_AND_VALIDATED",
+            "FIXTURE_WRITTEN_AND_VALIDATED",
+            "success",
+            1,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+    storage
+        .append_message(AppendMessage {
+            thread_id,
+            attachments: vec![],
+            turn_id: Some(validated_turn),
+            role: swage_core::Role::Assistant,
+            origin: swage_storage::MessageOrigin::Assistant,
+            content: "Fixture work completed.".into(),
+            agent_id: "gateway".into(),
+        })
+        .await
+        .unwrap();
+    for index in 0..5 {
+        seed_finished_turn(
+            &storage,
+            thread_id,
+            TurnState::Completed,
+            &[(
+                "file_read",
+                serde_json::json!({"path": format!("missing-{index}")}),
+                "error",
+            )],
+            false,
+        )
+        .await;
+    }
+    run_continue_turn(&state, session_id).await;
+    let records = only_snapshot_records(&*storage.db.lock().await);
+    assert_eq!(records[0]["requested_strategy"], "succession-degradation");
+    assert_eq!(records[0]["actual_strategy"], "succession");
+    let text = streamed_text(&provider.0);
+    assert!(
+        text.contains(
+            "CHECKS: compile passed; render passed; fixture validated. Current work: dashboard."
+        ),
+        "established work must reach the successor independently of its diagnosis: {text}"
+    );
+    assert!(text.contains("The missing-file reads failed repeatedly."));
+    assert!(
+        text.contains("FIXTURE_WRITTEN_AND_VALIDATED"),
+        "completed tool outcome: {text}"
+    );
+    run_continue_turn(&state, session_id).await;
+    let requests = provider.0.streamed.lock().unwrap();
+    let next = requests[1]
+        .messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        next.contains("CHECKS: compile passed; render passed; fixture validated."),
+        "reused diagnosis must retain established work: {next}"
+    );
+    assert!(
+        next.contains("FIXTURE_WRITTEN_AND_VALIDATED"),
+        "reused diagnosis must retain completed tool outcomes: {next}"
     );
 }
 

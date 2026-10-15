@@ -157,14 +157,31 @@ pub async fn succeed(
     tokeniser: &dyn Tokeniser,
 ) -> Result<Succession, SuccessionError> {
     let summarised = split_point(&request)?;
+    let summary = summarise(
+        request.carried,
+        &request.history[..summarised],
+        request.focus,
+        provider,
+    )
+    .await?;
+    successor(&request, summary, THRESHOLD_STRATEGY, tokeniser)
+}
+
+/// Summarise established conversation state against the context the successor
+/// carries. A diagnosis can accompany these notes without replacing them.
+pub async fn summarise(
+    carried: &[ChatMessage],
+    history: &[ChatMessage],
+    focus: Option<&str>,
+    provider: &dyn LlmProvider,
+) -> Result<String, SuccessionError> {
     let response = provider
-        .complete(summary_request(
-            request.carried,
-            &request.history[..summarised],
-            request.focus,
-        ))
+        .complete(summary_request(carried, history, focus))
         .await?;
-    successor(&request, response.content, THRESHOLD_STRATEGY, tokeniser)
+    if response.content.trim().is_empty() {
+        return Err(SuccessionError::EmptySummary);
+    }
+    Ok(response.content)
 }
 
 /// Where `request`'s history splits into the summarised part and the part
