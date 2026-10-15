@@ -1402,14 +1402,16 @@ async fn the_successor_s_briefing_carries_a_session_variable_from_the_store() {
     )
     .await;
     let mut config = state.active_config();
+    // Leave room for the baseline, briefing, summary and retained input.
+    // A six-message limit is smaller than that minimum once the clock is present.
     config.context.compaction_threshold =
-        Some(swage_protocol::client::settings::CompactionThresholdConfig::Messages(6));
+        Some(swage_protocol::client::settings::CompactionThresholdConfig::Messages(16));
     state.replace_runtime(
         config,
         state.active_provider(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
     );
-    seed_history(&storage, session_id, 12).await;
+    seed_history(&storage, session_id, 32).await;
     storage
         .db
         .lock()
