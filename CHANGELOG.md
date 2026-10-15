@@ -43,12 +43,10 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Supervised gateway restart bounds complete health probes by its readiness deadline while preserving service-manager ownership.
 - Gateway start reports the daemon’s startup error promptly, and CLI help lists commands with one product summary.
-
 - Saving an agent definition refuses `require_approval` in its tool-permission overlay instead of accepting an ignored approval requirement.
-
 - The web UI serves Bebas Neue, Hanken Grotesk and DM Mono from bundled font files without contacting Google Fonts.
-
 - LAN installation accepts a host and port, saves valid gateway defaults, and finds release artefacts under a custom Cargo target directory.
 
 - Session previews in the recent list, sidebar, conversation selector, delete controls and Operator deck show plain text without Markdown formatting or link destinations. Operator session summaries are limited to three lines.
