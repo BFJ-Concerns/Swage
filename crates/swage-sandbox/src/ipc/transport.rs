@@ -27,6 +27,8 @@ const MAX_IPC_MESSAGE_BYTES: usize = 1024 * 1024;
 pub struct IpcTransport {
     reader: BufReader<OwnedReadHalf>,
     writer: BufWriter<OwnedWriteHalf>,
+    /// Bytes consumed from the socket for the frame not yet returned.
+    incoming_frame: Vec<u8>,
     /// Tool calls the host stopped waiting for. Their results may still
     /// arrive, and are recognised by request ID rather than mistaken for the
     /// answer to a later call.
@@ -40,6 +42,7 @@ impl IpcTransport {
         Self {
             reader: BufReader::new(read_half),
             writer: BufWriter::new(write_half),
+            incoming_frame: Vec::new(),
             abandoned_tool_calls: HashSet::new(),
         }
     }
@@ -86,31 +89,33 @@ impl IpcTransport {
     /// Returns `SandboxError::IpcError` if the connection closes before a
     /// complete line is received.
     pub async fn receive(&mut self) -> Result<IpcMessage, SandboxError> {
-        let mut line = Vec::new();
+        let remaining = (MAX_IPC_MESSAGE_BYTES + 1).saturating_sub(self.incoming_frame.len());
         let bytes = (&mut self.reader)
-            .take((MAX_IPC_MESSAGE_BYTES + 1) as u64)
-            .read_until(b'\n', &mut line)
+            .take(remaining as u64)
+            .read_until(b'\n', &mut self.incoming_frame)
             .await
             .map_err(|e| SandboxError::IpcError {
                 message: format!("read failed: {e}"),
             })?;
 
-        if bytes == 0 {
+        if bytes == 0 && self.incoming_frame.is_empty() {
             // EOF — remote end closed the connection.
             return Err(SandboxError::IpcError {
                 message: "connection closed".into(),
             });
         }
 
-        let ended_with_newline = line.last() == Some(&b'\n');
-        if line.len() > MAX_IPC_MESSAGE_BYTES || !ended_with_newline {
+        let ended_with_newline = self.incoming_frame.last() == Some(&b'\n');
+        if self.incoming_frame.len() > MAX_IPC_MESSAGE_BYTES || !ended_with_newline {
             return Err(SandboxError::IpcError {
                 message: format!("IPC message exceeds {MAX_IPC_MESSAGE_BYTES} byte limit"),
             });
         }
 
-        let line = String::from_utf8(line).map_err(|e| SandboxError::IpcError {
-            message: format!("invalid UTF-8 in IPC message: {e}"),
+        let line = String::from_utf8(std::mem::take(&mut self.incoming_frame)).map_err(|e| {
+            SandboxError::IpcError {
+                message: format!("invalid UTF-8 in IPC message: {e}"),
+            }
         })?;
 
         serde_json::from_str(line.trim_end()).map_err(|e| SandboxError::IpcError {
@@ -121,8 +126,8 @@ impl IpcTransport {
     /// Receive a message, returning `SandboxError::IpcError` if `timeout`
     /// elapses before a complete line arrives.
     ///
-    /// `read_until` is cancellation-safe: partial bytes remain in the internal
-    /// buffer for the next receive instead of being committed to shared state.
+    /// Partial bytes live on the transport, so dropping this receive leaves
+    /// the next receive able to complete the same frame.
     pub async fn receive_timeout(&mut self, timeout: Duration) -> Result<IpcMessage, SandboxError> {
         tokio::time::timeout(timeout, self.receive())
             .await
@@ -146,6 +151,49 @@ mod tests {
 
     use super::{IpcTransport, MAX_IPC_MESSAGE_BYTES};
     use crate::ipc::message::IpcMessage;
+
+    #[tokio::test]
+    async fn cancelled_receive_retains_partial_frame_and_its_size_limit() {
+        for prefix in [1, 8, 16] {
+            let (socket, mut peer) = UnixStream::pair().unwrap();
+            let mut transport = IpcTransport::new(socket);
+            let frame = b"{\"kind\":\"ready\"}\n";
+            peer.write_all(&frame[..prefix]).await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), transport.receive())
+                    .await
+                    .is_err()
+            );
+            peer.write_all(&frame[prefix..]).await.unwrap();
+            peer.write_all(b"{\"kind\":\"shutdown\"}\n").await.unwrap();
+            assert!(
+                matches!(transport.receive().await, Ok(IpcMessage::Ready)),
+                "the next receive must complete the interrupted frame at byte {prefix}"
+            );
+            assert!(matches!(
+                transport.receive().await,
+                Ok(IpcMessage::Shutdown)
+            ));
+        }
+
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        let mut transport = IpcTransport::new(socket);
+        peer.write_all(b"{").await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), transport.receive())
+                .await
+                .is_err()
+        );
+        let writer = tokio::spawn(async move {
+            peer.write_all(&vec![b' '; MAX_IPC_MESSAGE_BYTES - 1])
+                .await
+                .unwrap();
+            peer.write_all(b"\n").await.unwrap();
+        });
+        let error = transport.receive().await.unwrap_err();
+        assert!(error.to_string().contains("byte limit"), "{error}");
+        writer.await.unwrap();
+    }
 
     // --- Roundtrip: single message across connected socket pair ---
 

@@ -206,6 +206,27 @@ mod tests {
     use crate::ipc::message::{ErrorCategory, IpcMessage, TokenUsage};
     use crate::ipc::transport::IpcTransport;
 
+    #[tokio::test]
+    async fn cancelled_receive_keeps_partial_frame_for_agent_connection() {
+        use tokio::io::AsyncWriteExt;
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        let mut agent = AgentConnection::new(IpcTransport::new(socket));
+        peer.write_all(b"{\"kind\":").await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                agent.receive_message()
+            )
+            .await
+            .is_err()
+        );
+        peer.write_all(b"\"shutdown\"}\n").await.unwrap();
+        assert!(
+            matches!(agent.receive_message().await, Ok(IpcMessage::Shutdown)),
+            "the agent must receive the whole interrupted frame"
+        );
+    }
+
     // -- send_ready -----------------------------------------------------------
 
     #[tokio::test]
