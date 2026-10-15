@@ -28,6 +28,8 @@ fn typescript_bindings_are_regenerated() {
     // Exporting the top-level types pulls in every dependency they
     // reference, so the full surface lands in one pass.
     client::workflow::WorkflowRunEndingNotice::export_all(&cfg).expect("export ending notice");
+    client::workflow::AnswerWorkflowRunHoldResponse::export_all(&cfg)
+        .expect("export hold answer response");
     client::workflow::WorkflowRunStatusRequest::export_all(&cfg).expect("export status request");
     client::workflow::WorkflowRunStartResult::export_all(&cfg).expect("export run start result");
     client::channel::CreateChannelLinkCodeRequest::export_all(&cfg)

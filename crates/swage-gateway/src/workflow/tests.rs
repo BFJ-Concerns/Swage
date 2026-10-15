@@ -8364,7 +8364,23 @@ async fn an_answer_that_loses_to_a_cancellation_launches_no_engine() {
     let pause = workflow_pause_test_hook::install(PAUSE_AFTER_HOLD_SETTLEMENT, hold_id);
     let answering = tokio::spawn({
         let state = state.clone();
-        async move { answer_open_hold(&state, hold_id).await }
+        async move {
+            answer_run_hold(
+                &state,
+                AnswerWorkflowRunHoldRequest {
+                    hold_id,
+                    verdict: "ship".into(),
+                },
+                None,
+                RunEventSource {
+                    surface: "agent",
+                    agent_id: None,
+                    session_id: None,
+                    turn_id: None,
+                },
+            )
+            .await
+        }
     });
     pause
         .entered
@@ -8391,7 +8407,15 @@ async fn an_answer_that_loses_to_a_cancellation_launches_no_engine() {
     assert_eq!(cancelled.state, WorkflowRunState::Cancelled);
 
     pause.release.add_permits(1);
-    answering.await.expect("the answering call finishes");
+    let response = answering
+        .await
+        .expect("the answering call finishes")
+        .expect("answer response");
+    assert_eq!(
+        serde_json::to_value(response).expect("response JSON")["run_state"],
+        "cancelled",
+        "an answer whose wake lost to cancellation must name the settled state"
+    );
 
     assert_eq!(
         resume_owed_workflow_runs(&state).await,

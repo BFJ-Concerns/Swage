@@ -4,6 +4,9 @@
   "description": "Anchor type for the client surface's schema document.\n\nEvery wire type on the surface is reachable from here, so a single\n`schema_for!` call produces one document with the full type graph in\n`$defs`. The struct itself never crosses the wire — it exists only so\nthe schema generator has a root to walk from.",
   "type": "object",
   "properties": {
+    "answer_workflow_run_hold_response": {
+      "$ref": "#/$defs/AnswerWorkflowRunHoldResponse"
+    },
     "api_error": {
       "$ref": "#/$defs/ApiErrorBody"
     },
@@ -388,6 +391,7 @@
     "workflow_run_detail",
     "workflow_run_list",
     "workflow_run_ending_notice",
+    "answer_workflow_run_hold_response",
     "workflow_run_status_request",
     "workflow_run_start_result",
     "workflow_run_started_event",
@@ -396,6 +400,26 @@
     "worker_isolation"
   ],
   "$defs": {
+    "AnswerWorkflowRunHoldResponse": {
+      "type": "object",
+      "properties": {
+        "hold": {
+          "$ref": "#/$defs/WorkflowRunHold"
+        },
+        "run_state": {
+          "$ref": "#/$defs/WorkflowRunState"
+        },
+        "wake_provisioned": {
+          "description": "Whether answering made a parked run due again. False when the run was\nstill holding its engine and will take the answer directly.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "hold",
+        "wake_provisioned",
+        "run_state"
+      ]
+    },
     "ApiErrorBody": {
       "description": "The body of every failed client-surface HTTP response.",
       "type": "object",
@@ -9076,7 +9100,10 @@
           "format": "uuid"
         },
         "workers_dispatched": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint32",
           "minimum": 0
         }
@@ -9089,8 +9116,7 @@
         "args",
         "budget",
         "created_at",
-        "status_as_of",
-        "workers_dispatched"
+        "status_as_of"
       ]
     },
     "WorkflowRunStartedEvent": {

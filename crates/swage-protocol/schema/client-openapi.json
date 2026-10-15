@@ -13,6 +13,26 @@
       }
     },
     "schemas": {
+      "AnswerWorkflowRunHoldResponse": {
+        "properties": {
+          "hold": {
+            "$ref": "#/components/schemas/WorkflowRunHold"
+          },
+          "run_state": {
+            "$ref": "#/components/schemas/WorkflowRunState"
+          },
+          "wake_provisioned": {
+            "description": "Whether answering made a parked run due again. False when the run was\nstill holding its engine and will take the answer directly.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "hold",
+          "wake_provisioned",
+          "run_state"
+        ],
+        "type": "object"
+      },
       "ApiErrorBody": {
         "description": "The body of every failed client-surface HTTP response.",
         "properties": {
@@ -8694,7 +8714,10 @@
           "workers_dispatched": {
             "format": "uint32",
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -8705,8 +8728,7 @@
           "args",
           "budget",
           "created_at",
-          "status_as_of",
-          "workers_dispatched"
+          "status_as_of"
         ],
         "type": "object"
       },

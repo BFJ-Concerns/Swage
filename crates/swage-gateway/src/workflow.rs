@@ -1688,60 +1688,46 @@ impl GatewayWorkflowLauncher {
         )
         .await
         .map_err(|error| error.message().to_owned())?;
-        if !wait {
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            let record = self
-                .state
-                .storage
-                .get_workflow_run(run.id)
-                .await
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| "workflow run disappeared".to_string())?;
-            return serde_json::to_value(
-                swage_protocol::client::workflow::WorkflowRunStartResult {
-                    run: run_wire(record).map_err(|error| error.message().to_owned())?,
-                    workers_dispatched: self
+        if wait {
+            tokio::time::timeout(std::time::Duration::from_secs(600), async {
+                loop {
+                    let record = self
                         .state
                         .storage
-                        .list_workflow_journal(run.id)
+                        .get_workflow_run(run.id)
                         .await
                         .map_err(|error| error.to_string())?
-                        .iter()
-                        .filter(|entry| entry.kind == "agent_call")
-                        .count() as u32,
-                    status_as_of: chrono::Utc::now(),
-                },
-            )
-            .map_err(|error| error.to_string());
-        }
-        let record = tokio::time::timeout(std::time::Duration::from_secs(600), async {
-            loop {
-                let record = self
-                    .state
-                    .storage
-                    .get_workflow_run(run.id)
-                    .await
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| "workflow run disappeared".to_string())?;
-                if record.state != "running" {
-                    return Ok::<_, String>(record);
+                        .ok_or_else(|| "workflow run disappeared".to_string())?;
+                    if record.state != "running" {
+                        return Ok::<_, String>(());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .map_err(|_| "workflow wait timed out".to_string())??;
+            })
+            .await
+            .map_err(|_| "workflow wait timed out".to_string())??;
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        // The returned state and its worker count share one recorded account.
+        let record = self
+            .state
+            .storage
+            .get_workflow_run(run.id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "workflow run disappeared".to_string())?;
+        let run = run_wire(record).map_err(|error| error.message().to_owned())?;
+        let workers_dispatched = run.terminal_account.as_ref().map(|account| {
+            let workers = &account.workers;
+            (workers.done.len()
+                + workers.failed.len()
+                + workers.cut_short.len()
+                + workers.unsettled.len()) as u32
+        });
         serde_json::to_value(swage_protocol::client::workflow::WorkflowRunStartResult {
-            run: run_wire(record).map_err(|error| error.message().to_owned())?,
-            workers_dispatched: self
-                .state
-                .storage
-                .list_workflow_journal(run.id)
-                .await
-                .map_err(|error| error.to_string())?
-                .iter()
-                .filter(|entry| entry.kind == "agent_call")
-                .count() as u32,
+            run,
+            workers_dispatched,
             status_as_of: chrono::Utc::now(),
         })
         .map_err(|error| error.to_string())
@@ -7312,9 +7298,16 @@ pub(crate) async fn answer_run_hold(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow run hold", hold.id))?;
+    let settled_run = state
+        .storage
+        .get_workflow_run(hold.run_id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| ApiError::not_found("workflow run", hold.run_id))?;
     Ok(AnswerWorkflowRunHoldResponse {
         hold: hold_projection(state, answered).await?,
         wake_provisioned,
+        run_state: run_wire(settled_run)?.state,
     })
 }
 

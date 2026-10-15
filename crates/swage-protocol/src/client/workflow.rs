@@ -232,6 +232,7 @@ pub struct AnswerWorkflowRunHoldResponse {
     /// Whether answering made a parked run due again. False when the run was
     /// still holding its engine and will take the answer directly.
     pub wake_provisioned: bool,
+    pub run_state: WorkflowRunState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -971,7 +972,7 @@ pub struct WorkflowRunStartResult {
     #[serde(flatten)]
     pub run: WorkflowRun,
     pub status_as_of: DateTime<Utc>,
-    pub workers_dispatched: u32,
+    pub workers_dispatched: Option<u32>,
 }
 
 /// The recorded request which cancelled a run.
