@@ -321,6 +321,7 @@ pub async fn save_settings(
         &runtime_config,
         state.storage.clone(),
         &state.config_root,
+        &state.browser_host,
     );
     let voice_provider =
         crate::startup::create_voice_provider(&runtime_config, &state.secret_manager).await;

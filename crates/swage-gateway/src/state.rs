@@ -113,6 +113,8 @@ pub struct AppState {
     /// Dispatch pipeline: resolves tool lookups, permission checks, rate limiting,
     /// schema validation, execution, and leak detection for every tool call.
     pub tool_dispatcher: Arc<ToolDispatcher>,
+    /// The browser process and profile outlive replaceable tool dispatchers.
+    pub(crate) browser_host: Arc<std::sync::OnceLock<Arc<crate::browser::BrowserHost>>>,
     /// Records the timestamp of the last significant gateway activity.
     ///
     /// Used by operator and presence surfaces to report how recently the
@@ -404,6 +406,7 @@ impl AppState {
             runtime_config: Arc::new(RwLock::new(config)),
             runtime_provider: Arc::new(RwLock::new(provider)),
             runtime_tool_dispatcher: Arc::new(RwLock::new(tool_dispatcher)),
+            browser_host: Arc::default(),
             codex_supervisor,
             worktree_host: Arc::new(crate::worktree::WorktreeHost::new(
                 crate::worktree::WorktreeConfig {

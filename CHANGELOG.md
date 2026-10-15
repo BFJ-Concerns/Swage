@@ -43,6 +43,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Browser navigation keeps working after settings or grant changes, retaining the logged-in profile; startup timeouts explain how to recover.
+
 - Oversized browser snapshots retain the opening paragraph of main article content instead of eliding it.
 
 - Session previews in the recent list, sidebar, conversation selector, delete controls and Operator deck show plain text without Markdown formatting or link destinations. Operator session summaries are limited to three lines.
