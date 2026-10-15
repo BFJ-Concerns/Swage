@@ -650,6 +650,25 @@ describe("App", () => {
     expect(websocketHarness.client.connect).toHaveBeenCalledWith(first.id);
   });
 
+  it("connects the shown deep link even when its scope list fails", async () => {
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([makeTopic()]);
+    vi.mocked(conversationsApi.getConversation).mockResolvedValue(
+      makeConversationDetail({ id: "conv-linked", messages: [{
+        role: "assistant", content: "Visible linked conversation",
+        timestamp: "2026-04-07T12:01:00Z", turn_state: "completed",
+      }] }),
+    );
+    vi.mocked(conversationsApi.listConversations).mockRejectedValueOnce(new Error("Scope list unavailable"));
+    setPath("/conversations/conv-linked");
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    expect(document.querySelector(".message-display")?.textContent).toContain("Visible linked conversation");
+    expect(websocketHarness.clientFor("conv-linked")).toBeDefined();
+    expect(websocketHarness.clientFor("conv-linked")!.connect).toHaveBeenCalledWith("conv-linked");
+    expect(document.body.textContent).toContain("Scope list unavailable");
+  });
+
   it("restores a deep-linked conversation on startup and opens its WebSocket", async () => {
     const defaultTopic = makeTopic();
     const linkedConversation = makeConversationSummary({
