@@ -39,13 +39,17 @@ All notable changes to Swage are documented in this file.
 
 ### Removed
 
-- Unused persisted topic selection and recent-topic history; session selection still determines the live scope.
-
 - The terminal client (`swage chat`) and its `swage-tui` crate; the web UI and desktop shell are the conversation interfaces.
 
 ### Fixed
 
+- Missing or invalid conversations stop connection retries with an explanation and Retry, while gateway transport failures continue to reconnect.
+
 - Deep-linked conversations stay connected when their scope’s session list fails to load.
+
+- Messages sent while a conversation connection opens report a delivery failure if another tab refuses ownership, ending the local waiting turn.
+
+- Conversation connections recover after a gateway restart, distinguish confirmed connection ownership from transport loss, preserve a running turn when another tab refuses a reconnect, and ignore late events from sockets replaced during navigation.
 
 - Switching session scope clears the sidebar immediately and ignores older list responses.
 - General sessions show “General” in the header; named topics retain their topic label.

@@ -13,13 +13,16 @@
  *   - event payloads forwarded without a hard-coded allow-list
  *   - disconnect() closes cleanly, no reconnect
  *   - unexpected close after open → "reconnecting" + backoff retry
- *   - close before open (handshake rejection / 409) → "error", no retry
+ *   - opening transport failure retries; a confirmed duplicate owner waits for Retry
  *   - exponential backoff between reconnect attempts
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+import { createConnectionStore } from "../stores/connection";
 import type { ServerEvent } from "../types";
 import { createWebSocketClient } from "../api/websocket";
+import * as conversationsApi from "../api/conversations";
+import { ApiError } from "../api/error";
 
 // ---------------------------------------------------------------------------
 // Mock WebSocket
@@ -102,6 +105,7 @@ beforeEach(() => {
   // Replace the global WebSocket with the mock before each test.
   vi.stubGlobal("WebSocket", MockWebSocket);
   MockWebSocket.reset();
+  vi.spyOn(conversationsApi, "getConversation").mockRejectedValue(new TypeError("Network unavailable"));
   vi.useFakeTimers();
 });
 
@@ -339,7 +343,7 @@ describe("server event dispatch", () => {
     latestWs().simulateOpen();
 
     expect(() => latestWs().simulateRawMessage("not-json{{")).not.toThrow();
-    expect(statuses).toContain("error");
+    expect(statuses.at(-1)).toBe("connected");
     expect(received).toContainEqual({
       type: "error",
       code: "invalid_frame",
@@ -503,23 +507,159 @@ describe("observability channel subscription", () => {
 // Handshake rejection (covers HTTP 409 Conflict / duplicate tab)
 // ---------------------------------------------------------------------------
 
-describe("handshake rejection", () => {
-  it("emits 'error' and does not retry when connection never opens", () => {
-    const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
-    const statuses: string[] = [];
-    client.onStatusChange((s) => statuses.push(s));
+describe("connection failure classification", () => {
+  it("fails an opening message when ownership is refused after upgrade", async () => {
+    const { createStreamingStore } = await import("../stores/streaming");
+    const streaming = createStreamingStore();
+    const store = createConnectionStore({
+      wsClientFactory: () => createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" }),
+    });
+    store.onServerEvent(event => streaming.handleServerEvent(event));
+    store.connectTo("conv-opening");
+    streaming.startTurn("Queued while opening");
+    store.sendMessage("conv-opening", "Queued while opening");
+    expect(streaming.isStreaming).toBe(true);
+    latestWs().simulateOpen();
+    latestWs().simulateMessage({ type: "error", code: "already_connected", message: "Already owned" });
 
-    client.connect("conv-abc");
-    // Connection closes before ever opening — typical of an HTTP 409 rejection
-    // during the WebSocket upgrade handshake.
+    expect(streaming.turnError?.code).toBe("not_connected");
+    expect(streaming.turnError?.message).toContain("message was not sent");
+    expect(streaming.isStreaming).toBe(false);
+    expect(store.errorMessage).toContain("another tab");
+  });
+
+  it.each([404, 422])("stops retrying an unavailable conversation (HTTP %s) and allows explicit Retry", async (status) => {
+    const lookup = vi.spyOn(conversationsApi, "getConversation").mockRejectedValue(
+      new ApiError(status, status === 404 ? "not_found" : "validation_error", "Conversation no longer exists"),
+    );
+    const store = createConnectionStore({
+      wsClientFactory: () => createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" }),
+    });
+    store.connectTo("conv-deleted");
+    latestWs().simulateUnexpectedClose();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.status).toBe("error");
+    expect(store.errorMessage).toContain("Conversation no longer exists");
+    expect(lookup).toHaveBeenCalledWith("conv-deleted");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(MockWebSocket.instances).toHaveLength(1);
+    store.connectTo("conv-deleted");
+    expect(MockWebSocket.instances).toHaveLength(2);
+  });
+
+  it("retries an opening transport failure without claiming another tab", async () => {
+    const store = createConnectionStore({ wsClientFactory: () => createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" }) });
+    store.connectTo("conv-abc");
     latestWs().simulateUnexpectedClose(1006);
+    expect(store.status).toBe("reconnecting");
+    expect(store.errorMessage ?? "").not.toContain("another tab");
+    await vi.advanceTimersByTimeAsync(0);
+    vi.advanceTimersByTime(1_000);
+    expect(MockWebSocket.instances).toHaveLength(2);
+    latestWs().simulateOpen();
+    expect(store.status).toBe("connected");
+    expect(store.errorMessage).toBeNull();
+    store.sendMessage("conv-abc", "After recovery");
+    expect(latestWs().sentMessages.map(frame => JSON.parse(frame))).toContainEqual({ type: "send_message", content: "After recovery" });
+  });
 
-    expect(statuses).toContain("error");
-    expect(statuses).not.toContain("reconnecting");
-
-    // No timer should be pending.
+  it("reports a gateway-confirmed duplicate owner and clears it on retry", () => {
+    const store = createConnectionStore({ wsClientFactory: () => createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" }) });
+    const received: ServerEvent[] = [];
+    store.onServerEvent(event => received.push(event));
+    store.connectTo("conv-abc");
+    latestWs().simulateOpen();
+    latestWs().simulateMessage({ type: "error", code: "already_connected", message: "Conversation already has an active connection" });
+    latestWs().simulateUnexpectedClose(1000);
+    expect(store.status).toBe("error");
+    expect(store.errorMessage).toBe("Conversation already has an active connection");
+    expect(received).toEqual([]);
     vi.advanceTimersByTime(60_000);
     expect(MockWebSocket.instances).toHaveLength(1);
+    store.connectTo("conv-abc");
+    latestWs().simulateOpen();
+    expect(store.status).toBe("connected");
+    expect(store.errorMessage).toBeNull();
+  });
+
+  it("keeps a running turn active when reconnect is refused by another owner", async () => {
+    const { createStreamingStore } = await import("../stores/streaming");
+    const streaming = createStreamingStore();
+    const store = createConnectionStore({
+      wsClientFactory: () => createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" }),
+    });
+    const received: ServerEvent[] = [];
+    store.onServerEvent((event, id) => {
+      received.push(event);
+      streaming.handleServerEvent(event, id);
+    });
+    const id = "conv-running";
+    store.connectTo(id);
+    latestWs().simulateOpen();
+    latestWs().simulateMessage({ type: "queue_drained", session_id: id, turn_id: "turn-1", queued_ids: [] });
+    latestWs().simulateMessage({ type: "token", content: "Still working" });
+    const stream = streaming.streamFor!(id);
+    expect(stream.isStreaming).toBe(true);
+    expect(stream.streamedContent).toBe("Still working");
+    const startedAt = stream.turnStartedAt;
+    const generation = stream.activeTurnGeneration;
+
+    latestWs().simulateUnexpectedClose();
+    expect(store.status).toBe("reconnecting");
+    expect(stream.isStreaming).toBe(true);
+    vi.advanceTimersByTime(1_000);
+    latestWs().simulateOpen();
+    expect(stream.isStreaming).toBe(true);
+    latestWs().simulateMessage({ type: "error", code: "already_connected", message: "Conversation already has an active connection" });
+
+    expect(store.status).toBe("error");
+    expect(store.errorMessage).toBe("Conversation already has an active connection");
+    expect(stream.isStreaming).toBe(true);
+    expect(stream.streamedContent).toBe("Still working");
+    expect(stream.turnStartedAt).toBe(startedAt);
+    expect(stream.activeTurnGeneration).toBe(generation);
+    expect(stream.turnError).toBeNull();
+    expect(received.some(event => event.type === "error")).toBe(false);
+    vi.advanceTimersByTime(60_000);
+    expect(MockWebSocket.instances).toHaveLength(2);
+  });
+
+  it("keeps ownership errors out of the turn through successful Retry without sending", async () => {
+    const { createStreamingStore } = await import("../stores/streaming");
+    const streaming = createStreamingStore();
+    const store = createConnectionStore({
+      wsClientFactory: () => createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" }),
+      onReconnect: id => streaming.clearConnectionError(id),
+    });
+    store.onServerEvent((event, id) => streaming.handleServerEvent(event, id));
+    store.connectTo("conv-ownership");
+    latestWs().simulateOpen();
+    latestWs().simulateMessage({ type: "error", code: "already_connected", message: "Conversation already has an active connection" });
+    expect(store.errorMessage).toContain("another tab");
+    expect(streaming.streamFor!("conv-ownership").turnError).toBeNull();
+    store.connectTo("conv-ownership");
+    expect(streaming.streamFor!("conv-ownership").turnError).toBeNull();
+    latestWs().simulateOpen();
+    expect(store.status).toBe("connected");
+    expect(store.errorMessage).toBeNull();
+    expect(streaming.streamFor!("conv-ownership").turnError).toBeNull();
+    expect(MockWebSocket.instances.flatMap(socket => socket.sentMessages)
+      .map(frame => JSON.parse(frame)).filter(frame => frame.type === "send_message")).toEqual([]);
+  });
+
+  it("ignores a late close from a replaced socket", () => {
+    const client = createWebSocketClient({ wsBaseUrl: "ws://localhost:3000" });
+    const statuses: string[] = [];
+    client.onStatusChange(status => statuses.push(status));
+    client.connect("conv-a");
+    const oldSocket = latestWs();
+    oldSocket.simulateOpen();
+    client.connect("conv-b");
+    latestWs().simulateOpen();
+    oldSocket.simulateUnexpectedClose();
+    expect(statuses.at(-1)).toBe("connected");
+    vi.advanceTimersByTime(60_000);
+    expect(MockWebSocket.instances).toHaveLength(2);
   });
 });
 

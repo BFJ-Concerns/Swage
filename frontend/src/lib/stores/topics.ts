@@ -14,7 +14,7 @@ export interface TopicStore {
   readonly isLoading: boolean;
   loadTopics(): Promise<void>;
   selectTopic(id: string): Promise<void>;
-  /** Drop the current topic selection and return to the picker. */
+  /** Clear the current topic selection. */
   closeTopic(): void;
   createTopic(name: string): Promise<void>;
   deleteTopic(id: string): Promise<void>;
@@ -79,9 +79,7 @@ export function createTopicStore(): TopicStore {
     },
 
     closeTopic() {
-      // Return to the topic picker. The topic list is preserved so reopening
-      // is instant; only the active selection is dropped. The caller is
-      // responsible for navigating the URL to the picker route.
+      // Keep the catalogue available while clearing the live selection.
       currentTopicStore.set(null);
     },
 

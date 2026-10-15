@@ -81,7 +81,7 @@ export function createConnectionStore(
     client.onEvent((event) => {
       for (const handler of serverEventHandlers) handler(event, conversationId);
     });
-    client.onStatusChange((newStatus) => {
+    client.onStatusChange((newStatus, message) => {
       const wasReconnecting = statuses.get(conversationId) === "reconnecting";
       statuses.set(conversationId, newStatus);
       if (wasReconnecting && newStatus === "connected") {
@@ -90,7 +90,7 @@ export function createConnectionStore(
       if (conversationId !== selectedConversationId) return;
       errorMessageStore.set(
         newStatus === "error"
-          ? "Connection failed. This conversation may already be open in another tab."
+          ? message ?? "Could not open the conversation connection."
           : null,
       );
       statusStore.set(newStatus);
@@ -124,6 +124,7 @@ export function createConnectionStore(
         releaseInactiveClients();
         return;
       }
+      statusStore.set("disconnected");
       clientFor(conversationId).connect(conversationId);
       releaseInactiveClients();
     },
@@ -150,6 +151,7 @@ export function createConnectionStore(
       statuses.clear();
       streamingConversations.clear();
       selectedConversationId = null;
+      errorMessageStore.set(null);
       statusStore.set("disconnected");
     },
 
