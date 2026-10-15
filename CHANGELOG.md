@@ -43,6 +43,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- The web UI serves Bebas Neue, Hanken Grotesk and DM Mono from bundled font files without contacting Google Fonts.
+
 - LAN installation accepts a host and port, saves valid gateway defaults, and finds release artefacts under a custom Cargo target directory.
 
 - Session previews in the recent list, sidebar, conversation selector, delete controls and Operator deck show plain text without Markdown formatting or link destinations. Operator session summaries are limited to three lines.
