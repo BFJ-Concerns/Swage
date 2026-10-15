@@ -2275,6 +2275,7 @@ mod tests {
                 "{base_url}/api/settings/providers/anthropic/models"
             ))
             .json(&swage_protocol::client::settings::SaveProviderSettings {
+                display_name: None,
                 protocol: swage_protocol::client::settings::ProviderProtocol::Anthropic,
                 worker_staleness_threshold_ms: None,
                 base_url: None,

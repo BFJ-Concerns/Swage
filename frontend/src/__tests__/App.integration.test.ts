@@ -157,6 +157,7 @@ vi.mock("../lib/api/operator", () => ({
 vi.mock("../lib/api/settings", () => ({
   discoverModels: vi.fn(),
   fetchSettings: vi.fn(),
+  fetchProviderSecrets: vi.fn(),
   restartGateway: vi.fn(),
   saveSettings: vi.fn(),
 }));
@@ -404,6 +405,10 @@ describe("App", () => {
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(
       makeOperatorOverview(),
     );
+    vi.mocked(settingsApi.fetchProviderSecrets).mockResolvedValue({
+      secrets: [],
+      managed_backend: { status: "ready", detail: "", key_source: null },
+    });
     vi.mocked(settingsApi.fetchSettings).mockRejectedValue(
       new Error("settings are not configured in this test"),
     );
@@ -1989,7 +1994,7 @@ describe("App", () => {
     flushSync(() => settingsButton!.click());
     await settleUi();
     const newModelButton = Array.from(document.querySelectorAll("button")).find(
-      (button) => button.textContent?.trim().startsWith("local/new-model"),
+      (button) => button.textContent?.trim() === "new-model · local",
     );
     flushSync(() => newModelButton!.click());
     await waitForText(
@@ -2032,7 +2037,7 @@ describe("App", () => {
     const existingModelButton = Array.from(
       document.querySelectorAll("button"),
     ).find((button) =>
-      button.textContent?.trim().startsWith("local/existing-model"),
+      button.textContent?.trim() === "existing-model · local",
     );
     flushSync(() => existingModelButton!.click());
     await waitForText(

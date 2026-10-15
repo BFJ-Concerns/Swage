@@ -82,6 +82,7 @@ pub async fn load_settings(state: &AppState) -> Result<SettingsResponse, ApiErro
             Ok((
                 id.clone(),
                 ProviderSettings {
+                    display_name: provider.display_name.clone(),
                     protocol: try_wire_from_config(provider.protocol.clone())?,
                     worker_staleness_threshold_ms: provider.worker_staleness_threshold_ms,
                     base_url: provider.base_url.clone(),
@@ -174,6 +175,7 @@ pub async fn save_settings(
         providers.insert(
             provider_id.clone(),
             swage_config::ProviderEndpointConfig {
+                display_name: provider.display_name.clone(),
                 worker_staleness_threshold_ms: provider.worker_staleness_threshold_ms,
                 protocol: config_from_wire(provider.protocol.clone())?,
                 api_key_secret_ref: provider.api_key_secret_ref.clone(),
@@ -564,6 +566,7 @@ fn save_provider_into_endpoint_config(
     provider: SaveProviderSettings,
 ) -> Result<swage_config::ProviderEndpointConfig, ApiError> {
     Ok(swage_config::ProviderEndpointConfig {
+        display_name: provider.display_name.clone(),
         worker_staleness_threshold_ms: provider.worker_staleness_threshold_ms,
         protocol: config_from_wire(provider.protocol)?,
         base_url: provider.base_url,
@@ -594,6 +597,7 @@ fn settings_response_from_saved_config(
             (
                 id.clone(),
                 ProviderSettings {
+                    display_name: provider.display_name.clone(),
                     protocol: wire_from_config(provider.protocol.clone()),
                     worker_staleness_threshold_ms: provider.worker_staleness_threshold_ms,
                     base_url: provider.base_url.clone(),
@@ -611,7 +615,7 @@ fn settings_response_from_saved_config(
     SettingsResponse {
         providers,
         default_provider,
-        models,
+        models: models.into_iter().collect(),
         default_model,
         generation_presets: wire_from_config(generation_presets),
         tool_runtime: tool_runtime_from_config(&active_config.tools)
@@ -1331,6 +1335,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_settings_preserve_display_names_across_save_and_reload() {
+        let home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::new_with_config_root(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        let mut value = serde_json::to_value(succession_settings_request(None)).unwrap();
+        value["providers"]["local"]["display_name"] = json!("Homelab proxy");
+        value["providers"]["local"]["api_key_env"] = json!("PROXY_KEY");
+        let request = serde_json::from_value(value).unwrap();
+        let saved = serde_json::to_value(save_settings(&state, request).await.unwrap()).unwrap();
+        assert_eq!(saved["providers"]["local"]["display_name"], "Homelab proxy");
+        let loaded = serde_json::to_value(load_settings(&state).await.unwrap()).unwrap();
+        assert_eq!(
+            loaded["providers"]["local"]["display_name"],
+            "Homelab proxy"
+        );
+        assert_eq!(loaded["providers"]["local"]["api_key_env"], "PROXY_KEY");
+        assert!(loaded["providers"]["local"]["api_key_secret_ref"].is_null());
+        let file = tokio::fs::read_to_string(home.path().join("config.toml"))
+            .await
+            .unwrap();
+        let config: swage_config::PartialConfig = toml::from_str(&file).unwrap();
+        let encoded = serde_json::to_value(config).unwrap();
+        assert_eq!(
+            encoded["providers"]["entries"]["local"]["display_name"],
+            "Homelab proxy"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_settings_serialise_catalogues_in_key_order() {
+        let home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let mut config = swage_config::ResolvedConfig::default();
+        // Many reversed keys make iteration order observable independently of
+        // whichever random seed each HashMap receives.
+        for id in (0..24).rev().map(|n| format!("provider-{n:02}")) {
+            config
+                .providers
+                .entries
+                .insert(id, swage_config::ProviderEndpointConfig::default());
+        }
+        let state = AppState::new_with_config_root(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        let text = serde_json::to_string(&load_settings(&state).await.unwrap()).unwrap();
+        let positions: Vec<_> = (0..24)
+            .map(|n| text.find(&format!("\"provider-{n:02}\":")).unwrap())
+            .collect();
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "provider keys are not sorted: {text}"
+        );
+    }
+
+    #[tokio::test]
     async fn configuration_changes_emit_one_environment_credential_warning() {
         use swage_agent::fixtures::MessageRecorder;
         use tracing_subscriber::{Registry, layer::SubscriberExt};
@@ -1801,6 +1874,7 @@ mod tests {
         providers.insert(
             "llama-cpp".to_string(),
             swage_config::ProviderEndpointConfig {
+                display_name: None,
                 worker_staleness_threshold_ms: None,
                 protocol: swage_config::Protocol::OpenAi,
                 base_url: Some("http://127.0.0.1:8080/v1".to_string()),
@@ -1872,6 +1946,7 @@ mod tests {
             providers: [(
                 "local".to_string(),
                 SaveProviderSettings {
+                    display_name: None,
                     protocol: swage_protocol::client::settings::ProviderProtocol::OpenAi,
                     worker_staleness_threshold_ms: None,
                     base_url: Some("http://127.0.0.1:65535/v1".to_string()),
@@ -2004,6 +2079,7 @@ mod tests {
             providers: [(
                 "local".to_string(),
                 SaveProviderSettings {
+                    display_name: None,
                     protocol: swage_protocol::client::settings::ProviderProtocol::OpenAi,
                     worker_staleness_threshold_ms: None,
                     base_url: Some("http://127.0.0.1:65535/v1".to_string()),
@@ -2175,6 +2251,7 @@ mod tests {
             initial_config.providers.entries.insert(
                 id.to_string(),
                 swage_config::ProviderEndpointConfig {
+                    display_name: None,
                     worker_staleness_threshold_ms: threshold,
                     protocol: swage_config::Protocol::OpenAi,
                     base_url: Some("http://127.0.0.1:65535/v1".to_string()),
@@ -2213,6 +2290,7 @@ mod tests {
                 (
                     id.clone(),
                     SaveProviderSettings {
+                        display_name: None,
                         protocol: provider.protocol.clone(),
                         worker_staleness_threshold_ms: provider.worker_staleness_threshold_ms,
                         base_url: provider.base_url.clone(),
@@ -2350,6 +2428,7 @@ mod tests {
             providers: [(
                 "local".to_string(),
                 SaveProviderSettings {
+                    display_name: None,
                     protocol: swage_protocol::client::settings::ProviderProtocol::OpenAi,
                     worker_staleness_threshold_ms: None,
                     base_url: Some("http://127.0.0.1:65535/v1".to_string()),
@@ -2531,6 +2610,7 @@ mod tests {
             providers: [(
                 "local".to_string(),
                 SaveProviderSettings {
+                    display_name: None,
                     protocol: swage_protocol::client::settings::ProviderProtocol::OpenAi,
                     worker_staleness_threshold_ms: None,
                     base_url: Some("http://127.0.0.1:65535/v1".to_string()),

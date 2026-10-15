@@ -44,6 +44,8 @@ pub enum Protocol {
 /// Connection settings for one configured LLM provider.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderEndpointConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub protocol: Protocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_secret_ref: Option<String>,
@@ -68,6 +70,7 @@ pub struct ProviderEndpointConfig {
 impl Default for ProviderEndpointConfig {
     fn default() -> Self {
         Self {
+            display_name: None,
             protocol: Protocol::OpenAi,
             api_key_secret_ref: None,
             api_key_env: None,

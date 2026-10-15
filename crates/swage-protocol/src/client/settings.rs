@@ -143,6 +143,9 @@ pub enum ProviderProtocol {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[ts(optional_fields = nullable)]
 pub struct ProviderSettings {
+    #[serde(default)]
+    #[ts(optional)]
+    pub display_name: Option<String>,
     pub protocol: ProviderProtocol,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
@@ -158,6 +161,9 @@ pub struct ProviderSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[ts(optional_fields = nullable)]
 pub struct SaveProviderSettings {
+    #[serde(default)]
+    #[ts(optional)]
+    pub display_name: Option<String>,
     pub protocol: ProviderProtocol,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
@@ -545,9 +551,9 @@ pub struct VoiceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[ts(optional_fields = nullable)]
 pub struct SettingsResponse {
-    pub providers: HashMap<String, ProviderSettings>,
+    pub providers: BTreeMap<String, ProviderSettings>,
     pub default_provider: String,
-    pub models: HashMap<String, ModelSettings>,
+    pub models: BTreeMap<String, ModelSettings>,
     pub default_model: String,
     pub generation_presets: HashMap<String, GenerationPresetConfig>,
     pub tool_runtime: ToolRuntimeSettings,

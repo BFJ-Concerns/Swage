@@ -171,6 +171,40 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 
+describe("provider failure notice", () => {
+  it("keeps diagnostics collapsed, names the selected route and offers recovery once", () => {
+    const raw = '{"error":{"message":"Rejected at https://Proxy.Example/v1","request_id":"Req-AbC"}}';
+    const request: MessageView = { role: "user", content: "Hello", timestamp: "2026-10-15T12:00:00Z", turn_id: "failed-turn" };
+    const reply = { ...makeAssistantMessage("Partial answer", undefined, "MixedCase-Model", "failed", "failed-turn"), failure_message: raw };
+    const streaming = makeStreamingStore();
+    Object.defineProperty(streaming, "turnError", { get: () => ({ code: "provider_error", message: raw }) });
+    streaming.startTurn = vi.fn();
+    component = mount(MessageDisplay, { target: document.body, props: { store: makeConversationStore([request, reply]), streamingStore: streaming } });
+    flushSync();
+    expect(document.querySelectorAll(".turn-error")).toHaveLength(1);
+    const notice = document.querySelector<HTMLElement>(".turn-error")!;
+    expect(notice.querySelector("p")?.textContent).toContain("using model MixedCase-Model failed");
+    expect(notice.querySelector("details")?.open).toBe(false);
+    expect(notice.querySelector("pre")?.textContent).toBe(raw);
+    expect(notice.querySelector("a")?.getAttribute("href")).toBe("/settings/providers");
+    notice.querySelector<HTMLButtonElement>("button")!.click();
+    expect(streaming.startTurn).toHaveBeenCalledWith("Hello");
+    const compiled = compile(messageDisplaySource, { generate: "client", css: "external" });
+    expect(compiled.css?.code.match(/\.turn-error[^{}]*\{([^}]+)\}/)?.[1]).toMatch(/text-transform:\s*none/);
+    expect(compiled.css?.code).toMatch(/overflow-wrap:\s*anywhere/);
+  });
+
+  it("offers generic recovery without inventing a provider or error category", () => {
+    const streaming = makeStreamingStore();
+    Object.defineProperty(streaming, "turnError", { get: () => ({ code: "provider_error", message: "opaque diagnostic" }) });
+    component = mount(MessageDisplay, { target: document.body, props: { store: makeConversationStore([{ role: "user", content: "Hello", timestamp: "2026-10-15T12:00:00Z" }]), streamingStore: streaming } });
+    flushSync();
+    expect(document.querySelector(".turn-error p")?.textContent).toBe("The request failed. See the details for the reported cause.");
+    expect(document.querySelector(".turn-error button")?.textContent).toBe("Retry");
+    expect(document.querySelector(".turn-error a")?.textContent).toBe("Provider settings");
+  });
+});
+
 describe("turn context inspector trigger", () => {
   it.each([true, false])("retries the person's request from an empty-response account with recorded input %s", async (recorded) => {
     const request: MessageView = { role: "user", origin: "user", content: "Summarise the document.", timestamp: "2026-10-05T12:00:00Z", ...(recorded ? { turn_id: "empty-turn" } : {}) };

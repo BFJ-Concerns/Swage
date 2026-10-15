@@ -1173,6 +1173,7 @@ mod tests {
                 entries: Some(HashMap::from([(
                     "openai".to_string(),
                     ProviderEndpointConfig {
+                        display_name: None,
                         protocol: Protocol::OpenAi,
                         api_key_secret_ref: None,
                         api_key_env: Some("OPENAI_API_KEY".to_string()),

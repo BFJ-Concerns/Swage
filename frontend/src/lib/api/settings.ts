@@ -61,3 +61,5 @@ export async function signOutProvider(providerId: string): Promise<ProviderSignI
 export function emptyPreset(): GenerationPresetConfig {
   return { stop_sequences: [] };
 }
+
+export const fetchProviderSecrets = generated.listSecrets;

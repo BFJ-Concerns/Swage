@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
-use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use uuid::Uuid;
@@ -20,12 +19,7 @@ use crate::store::SecretStore;
 pub const MANAGED_SECRET_KEY_ENV: &str = "SWAGE_MANAGED_SECRET_KEY";
 const MANAGED_SECRET_ALGORITHM: &str = "aes256-gcm-siv-v1";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ManagedSecretEncryptionDiagnostics {
-    pub status: String,
-    pub detail: String,
-    pub key_source: Option<String>,
-}
+pub use swage_protocol::hosting::ManagedSecretEncryptionDiagnostics;
 
 #[derive(Clone)]
 struct ManagedSecretEncryptor {

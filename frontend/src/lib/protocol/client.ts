@@ -32,6 +32,7 @@ import type { RestartStatusResponse } from "./RestartStatusResponse";
 import type { SaveProviderSettings } from "./SaveProviderSettings";
 import type { SaveSettingsRequest } from "./SaveSettingsRequest";
 import type { SaveSurfaceToLibraryRequest } from "./SaveSurfaceToLibraryRequest";
+import type { SecretListResponse } from "./SecretListResponse";
 import type { SettingsResponse } from "./SettingsResponse";
 import type { StartProviderSignInRequest } from "./StartProviderSignInRequest";
 import type { StartProviderSignInResponse } from "./StartProviderSignInResponse";
@@ -273,6 +274,11 @@ export async function updateSurfaceAnnotation(annotationId: string, body: Update
 /** Delete a surface annotation. */
 export async function deleteSurfaceAnnotation(annotationId: string): Promise<DeleteSurfaceAnnotationResponse> {
   return request<DeleteSurfaceAnnotationResponse>("DELETE", `/api/surface-annotations/${encodeURIComponent(annotationId)}`);
+}
+
+/** List governed secrets without revealing values. */
+export async function listSecrets(): Promise<SecretListResponse> {
+  return request<SecretListResponse>("GET", `/api/secrets`);
 }
 
 /** Read gateway settings. */

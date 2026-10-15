@@ -171,6 +171,15 @@
   const isStreaming = $derived(stream?.isStreaming ?? streamingStore?.isStreaming ?? false);
   const streamedContent = $derived(stream?.streamedContent ?? streamingStore?.streamedContent ?? "");
   const turnError = $derived(stream?.turnError ?? streamingStore?.turnError ?? null);
+  const recordedFailure = $derived(messages.at(-1)?.failure_message === turnError?.message);
+  function errorSummary(model?: string | null, catalogueSelection = false): string {
+    const selection = model;
+    if (!selection) return "The request failed. See the details for the reported cause.";
+    const separator = selection.indexOf(":");
+    return catalogueSelection && separator > 0
+      ? `The request to ${selection.slice(0, separator)} using model ${selection.slice(separator + 1)} failed. See the details for the reported cause.`
+      : `The request using model ${selection} failed. See the details for the reported cause.`;
+  }
   const providerRetry = $derived(stream?.providerRetry ?? streamingStore?.providerRetry ?? null);
   const retryWaitSeconds = $derived(
     providerRetry ? Math.max(1, Math.ceil(providerRetry.wait_ms / 1000)) : 0,
@@ -249,7 +258,7 @@
   // live region below updates a handful of times per turn, not per token.
   const streamingStatus = $derived(
     turnError
-      ? `Error: ${turnError.message}`
+      ? errorSummary(store?.activeConversation?.selected_model_id, true)
       : providerRetry
         ? `Retrying provider: attempt ${providerRetry.attempt} of ${providerRetry.max_retries}`
         : isStreaming
@@ -373,12 +382,9 @@
           </p>
         {/if}
         {#if message.failure_message}
-          <div class="turn-error" role="alert">
-            <span class="error-icon" aria-hidden="true">⚠</span>
-            <span class="error-message">{message.failure_message}</span>
-          </div>
+          {@render failureNotice(message.failure_message, message.model, retryContent(message))}
         {/if}
-        {#if retryContent(message) !== null && !isStreaming}
+        {#if !message.failure_message && retryContent(message) !== null && !isStreaming}
           <button class="branch-link" onclick={() => retry(retryContent(message)!)}>Retry</button>
         {/if}
         {#if shouldShowModel(message.role) && message.model}
@@ -466,17 +472,22 @@
     {/if}
 
     <!-- ---- Turn error: shown inline after any partial response ---- -->
-    {#if turnError}
-      <div class="turn-error" role="alert">
-        <span class="error-icon" aria-hidden="true">⚠</span>
-        <span class="error-message">{turnError.message}</span>
-      </div>
-      {#if lastPersonsMessage && !isStreaming}
-        <button class="branch-link" onclick={() => retry(lastPersonsMessage.content)}>Retry</button>
-      {/if}
+    {#if turnError && !recordedFailure}
+      {@render failureNotice(turnError.message, store?.activeConversation?.selected_model_id, lastPersonsMessage?.content ?? null, true)}
     {/if}
   {/if}
 </div>
+
+{#snippet failureNotice(detail: string, model: string | null | undefined, content: string | null, catalogueSelection = false)}
+  <div class="turn-error" role="alert">
+    <span class="error-icon" aria-hidden="true">⚠</span>
+    <div class="error-message">
+      <p>{errorSummary(model, catalogueSelection)}</p>
+      <div class="error-actions"><button class="branch-link" disabled={isStreaming || content === null} onclick={() => content !== null && retry(content)}>Retry</button><a href="/settings/providers">Provider settings</a></div>
+      <details><summary>Technical details</summary><pre>{detail}</pre></details>
+    </div>
+  </div>
+{/snippet}
 
 <div class="turn-context-inspector-outlet" bind:this={inspectorTarget}></div>
 
@@ -759,11 +770,18 @@
     font-weight: 500;
     font-size: var(--font-label-sm);
     letter-spacing: 0.08em;
-    text-transform: uppercase;
+    text-transform: none;
     color: var(--error);
-    max-width: 80ch;
+    max-width: min(100%, 80ch);
+    box-sizing: border-box;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
+  .error-message { min-width: 0; }
+  .error-message p { margin: 0 0 8px; }
+  .error-message pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .error-actions { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 8px; }
   .error-icon {
     flex-shrink: 0;
   }

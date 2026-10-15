@@ -9,7 +9,7 @@
   this component just reads the tab and shows the matching field set.
 -->
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
   import { fetchSettings, restartGateway, saveSettings } from "../api/settings";
   import ScheduleAutomationPanel from "./ScheduleAutomationPanel.svelte";
   import AutomationSettingsPanel from "./settings/AutomationSettingsPanel.svelte";
@@ -24,7 +24,7 @@
   import type { MemoryPageAddress } from "../router";
   import SkillsPanel from "./SkillsPanel.svelte";
   import VoiceSettingsPanel from "./settings/VoiceSettingsPanel.svelte";
-  import type { GenerationPresetConfig, SettingsResponse, Topic } from "../types";
+  import type { GenerationPresetConfig, SettingsPayload, SettingsResponse, Topic } from "../types";
 
   // Agents, providers, generation, automation, and recovery have working
   // backends. The remaining partial pages are identified below.
@@ -67,8 +67,33 @@
   let settings = $state<SettingsResponse | null>(null);
   let savedProviderIds = $state<Set<string>>(new Set());
   let isPersisting = $state(false);
+  let saveFailed = $state(false);
   let hasLoadedSettings = $state(false);
-  let lastPersistedSettingsFingerprint = "";
+  let leaving = false;
+  let previousTab: SettingsTabId | null = null;
+  $effect(() => {
+    const current = tab;
+    const leavingProviders = previousTab === "providers" && current !== "providers";
+    previousTab = current;
+    if (leavingProviders) untrack(() => {
+      leaving = true;
+      if (hasLoadedSettings && settingsFingerprint() !== lastPersistedSettingsFingerprint && !isPersisting) void persist();
+    });
+  });
+
+  function warnBeforeUnload(event: BeforeUnloadEvent): void {
+    if (tab !== "providers" || (!providerEditsPending && !isPersisting)) return;
+    event.preventDefault();
+    event.returnValue = "";
+  }
+
+  onDestroy(() => {
+    leaving = true;
+    if (providerEditsPending && !isPersisting) void persist();
+  });
+  let lastPersistedSettingsFingerprint = $state("");
+  const providerEditsPending = $derived(tab === "providers" && hasLoadedSettings && settingsFingerprint() !== lastPersistedSettingsFingerprint);
+
   let lastSavedSearch: SettingsResponse["tool_runtime"]["search"] = null;
   let hasInvalidBundlesJson = $state(false);
   let hasInvalidApprovalJson = $state(false);
@@ -117,7 +142,7 @@
       settings.default_provider = settings.models[settings.default_model].provider_id;
       return;
     }
-    const replacement = Object.keys(settings.models)[0] ?? "";
+    const replacement = Object.keys(settings.models).sort()[0] ?? "";
     settings.default_model = replacement;
     settings.default_provider = replacement ? settings.models[replacement].provider_id : "";
   }
@@ -153,7 +178,8 @@
   }
 
   async function persist(options: { message?: string } = {}): Promise<boolean> {
-    if (!settings) return false;
+    if (!settings || isPersisting) return false;
+    saveFailed = false;
     error = null;
     status = "";
     if (archiveDelayError) {
@@ -183,7 +209,11 @@
     try {
       isPersisting = true;
       normaliseDefaultModel();
-      const saved = await saveSettings({ ...settings, tool_runtime: toolRuntimeForSave(settings.tool_runtime) });
+      const submittedFingerprint = settingsFingerprint();
+      const submitted = JSON.parse(JSON.stringify({ ...settings, tool_runtime: toolRuntimeForSave(settings.tool_runtime) })) as SettingsPayload;
+      const saved = await saveSettings(submitted);
+      const editedDuringSave = settingsFingerprint() !== submittedFingerprint;
+      const pendingSettings = settings;
       const searchDraft = settings.tool_runtime.search;
       settings = saved;
       lastSavedArchiveDelay = saved.sessions.archive_after_days;
@@ -193,6 +223,18 @@
       // password field returns to the "Stored credential" placeholder.
       for (const provider of Object.values(settings.providers)) provider.api_key = "";
       lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
+      if (editedDuringSave) {
+        for (const [id, provider] of Object.entries(pendingSettings.providers)) {
+          const savedProvider = saved.providers[id];
+          if (!savedProvider) continue;
+          if (provider.api_key === submitted.providers[id]?.api_key) provider.api_key = "";
+          if (provider.api_key_secret_ref === submitted.providers[id]?.api_key_secret_ref) {
+            provider.api_key_secret_ref = savedProvider.api_key_secret_ref;
+            provider.has_credential = savedProvider.has_credential;
+          }
+        }
+        settings = pendingSettings;
+      }
       if (holdSearchDraft) settings.tool_runtime.search = searchDraft;
       await onSettingsSaved?.();
       status = hasInvalidBundlesJson
@@ -202,10 +244,12 @@
           : options.message ?? "Saved. New turns will use the updated runtime.";
       return true;
     } catch (err) {
+      saveFailed = true;
       error = err instanceof Error ? err.message : "Failed to save settings.";
       return false;
     } finally {
       isPersisting = false;
+      if (leaving && !error && settingsFingerprint() !== lastPersistedSettingsFingerprint) void persist();
     }
   }
 
@@ -221,7 +265,7 @@
   const TAB_TITLES: Record<SettingsTabId, { title: string; sub: string }> = {
     providers: {
       title: "Providers",
-      sub: "Connection settings for the LLM gateways Swage talks to. Credentials are stored on the server and never returned over the wire.",
+      sub: "Configure providers, credentials and models. Stored credentials stay on the server; environment credentials come from the gateway’s environment.",
     },
     agents: {
       title: "Agent definitions",
@@ -304,7 +348,7 @@
   const shouldAutosaveSettings = $derived(HOT_AUTOSAVE_TABS.has(tab));
 
   $effect(() => {
-    if (!hasLoadedSettings || !shouldAutosaveSettings) return;
+    if (!hasLoadedSettings || !shouldAutosaveSettings || isPersisting) return;
     const fingerprint = settingsFingerprint();
     if (!fingerprint || fingerprint === lastPersistedSettingsFingerprint) return;
 
@@ -315,6 +359,8 @@
     return () => window.clearTimeout(timer);
   });
 </script>
+
+<svelte:window onbeforeunload={warnBeforeUnload} />
 
 <div class="settings-pane" aria-label="Settings">
   {#if isShellTab}
@@ -410,7 +456,7 @@
       <div class="head-actions">
         {#if shouldAutosaveSettings && tab !== "automation"}
           <span class="autosave-state" class:saving={isPersisting}>
-            {isPersisting ? "Autosaving" : "Autosave"}
+            {tab === "providers" ? isPersisting ? "Saving…" : providerEditsPending ? saveFailed ? "Save failed" : "Changes not saved" : "Saved" : isPersisting ? "Autosaving" : "Autosave"}
           </span>
         {:else if !shouldAutosaveSettings}
           <button type="button" class="btn primary" onclick={() => persist()} disabled={isPersisting}>

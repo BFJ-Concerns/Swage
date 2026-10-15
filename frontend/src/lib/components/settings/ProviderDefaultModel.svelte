@@ -1,11 +1,13 @@
 <script lang="ts">
   interface Props {
+    models: Record<string, import("../../types").ModelSettings>;
+    providerName: (id: string) => string;
     modelIds: string[];
     defaultModel: string;
     onselect: (id: string) => void;
   }
 
-  let { modelIds, defaultModel, onselect }: Props = $props();
+  let { models, providerName, modelIds, defaultModel, onselect }: Props = $props();
 </script>
 
 <div class="field">
@@ -16,7 +18,7 @@
   <div class="val">
     {#each modelIds as id (id)}
       <button type="button" class="opt opt-with-x" class:active={defaultModel === id} onclick={() => onselect(id)}>
-        {id}
+        {models[id].model_id} · {providerName(models[id].provider_id)}
       </button>
     {:else}
       <p class="empty">No models configured. Add a provider, then add a model under it.</p>
@@ -29,7 +31,7 @@
   .key { font-family: var(--font-mono); font-weight: 500; font-size: 11px; line-height: 1.5; letter-spacing: 0.18em; text-transform: uppercase; }
   .key small { display: block; margin-top: 4px; font-family: var(--font-body); font-weight: 400; font-size: 11px; line-height: 1.4; letter-spacing: 0; text-transform: none; color: var(--ink-soft); }
   .val { display: flex; gap: 10px; flex-wrap: wrap; }
-  .opt { position: relative; display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); padding: 6px 12px; font-family: var(--font-display); font-weight: 400; font-size: 14px; line-height: 1; letter-spacing: 0.04em; text-transform: uppercase; cursor: pointer; isolation: isolate; }
+  .opt { position: relative; display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); padding: 6px 12px; font-family: var(--font-display); font-weight: 400; font-size: 14px; line-height: 1; letter-spacing: 0.04em; text-transform: none; cursor: pointer; isolation: isolate; }
   .opt:hover:not(:disabled):not(.active) { background: color-mix(in srgb, var(--ink) 8%, transparent); }
   .opt.active { background: var(--ink); color: var(--paper); }
   .opt.active::before { content: ""; position: absolute; inset: 0; background: var(--accent); transform: translate(2px, 2px); z-index: -1; mix-blend-mode: var(--shadow-blend); opacity: var(--shadow-opacity); pointer-events: none; }

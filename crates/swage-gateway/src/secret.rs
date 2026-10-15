@@ -26,8 +26,8 @@ use uuid::Uuid;
 
 use swage_core::{GatewayError, StorageError};
 use swage_storage::{
-    ManagedSecretEncryptionDiagnostics, NewAuditEvent, NewSecretRecord, SecretRecord,
-    managed_secret_encryption_diagnostics, store::Storage,
+    NewAuditEvent, NewSecretRecord, SecretRecord, managed_secret_encryption_diagnostics,
+    store::Storage,
 };
 
 /// Backend identifiers as stored in `secrets.backend_kind`.
@@ -70,29 +70,7 @@ pub struct GenerateSecretRequest {
     pub metadata: Option<Value>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SecretResponse {
-    pub id: Uuid,
-    pub name: String,
-    pub material_kind: String,
-    pub owner_kind: String,
-    pub backend_kind: String,
-    pub scope_kind: String,
-    pub scope_id: Option<String>,
-    pub reference: String,
-    pub metadata: Value,
-    pub status: String,
-    pub created_at: chrono::DateTime<Utc>,
-    pub updated_at: chrono::DateTime<Utc>,
-    pub revoked_at: Option<chrono::DateTime<Utc>>,
-    pub revealed_value: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct SecretListResponse {
-    pub secrets: Vec<SecretResponse>,
-    pub managed_backend: ManagedSecretEncryptionDiagnostics,
-}
+pub use swage_protocol::hosting::{SecretListResponse, SecretResponse};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SecretValidationResponse {

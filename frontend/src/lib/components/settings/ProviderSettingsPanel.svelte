@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
-  import { discoverModels, fetchProviderSignIn, signOutProvider, startProviderSignIn } from "../../api/settings";
+  import { discoverModels, fetchProviderSecrets, fetchProviderSignIn, signOutProvider, startProviderSignIn } from "../../api/settings";
   import type { DiscoveredModel, ModelSettings, SettingsResponse } from "../../types";
   import type { ProviderSignInState } from "../../protocol/ProviderSignInState";
   import { providerBaseUrlError } from "./provider-endpoint";
@@ -28,16 +28,19 @@
   let deviceCode = $state<{ code: string; verificationUrl: string } | null>(null);
   const signInPolls = new Map<string, ReturnType<typeof setTimeout>>();
 
+  let secrets = $state<import("../../protocol/SecretResponse").SecretResponse[]>([]);
+  let secretsError = $state("");
+
   const PROVIDER_KINDS = [
-    { id: "OpenAi", label: "OpenAI", protocol: "openai" },
-    { id: "OpenAiResponses", label: "OpenAI Responses", protocol: "openai-responses" },
-    { id: "Anthropic", label: "Anthropic", protocol: "anthropic" },
-    { id: "Google", label: "Google", protocol: "google" },
-    { id: "OpenRouter", label: "OpenRouter", protocol: "openrouter" },
-    { id: "OpenAiCompatible", label: "OpenAI compatible", protocol: "openai" },
+    { description: "Use the OpenAI Chat Completions API.", id: "OpenAi", label: "OpenAI", protocol: "openai" },
+    { description: "Use the OpenAI Responses API when your endpoint supports Responses.", id: "OpenAiResponses", label: "OpenAI Responses", protocol: "openai-responses" },
+    { description: "Use the Anthropic Messages API.", id: "Anthropic", label: "Anthropic", protocol: "anthropic" },
+    { description: "Use the Google Gemini API.", id: "Google", label: "Google", protocol: "google" },
+    { description: "Use OpenRouter to access its model catalogue.", id: "OpenRouter", label: "OpenRouter", protocol: "openrouter" },
+    { description: "Use a proxy or local server offering the OpenAI Chat Completions API.", id: "OpenAiCompatible", label: "OpenAI compatible", protocol: "openai" },
   ] as const satisfies readonly ProviderKindDefinition[];
-  const providerIds = $derived(Object.keys(settings.providers));
-  const modelIds = $derived(Object.keys(settings.models));
+  const providerIds = $derived(Object.keys(settings.providers).sort());
+  const modelIds = $derived(Object.keys(settings.models).sort());
   const defaultModel = $derived(settings.models[settings.default_model] ?? null);
   // Discovered models that have already been added under this provider — used
   // to mark the chip as ADDED rather than silently overwriting on re-click.
@@ -53,6 +56,9 @@
 
 
   onMount(() => {
+    void fetchProviderSecrets().then((response) => {
+      secrets = response.secrets.filter((secret) => secret.material_kind === "provider_key" && secret.status === "active" && secret.scope_kind === "global").sort((a, b) => a.name.localeCompare(b.name));
+    }).catch(() => { secretsError = "Could not load stored credentials. Reload to try again, or paste a key."; });
     selectedProvider = settings.default_provider || providerIds[0] || "";
     if (selectedProvider) void loadModels();
     if (selectedProvider) void loadSignInState(selectedProvider);
@@ -176,7 +182,7 @@
 
   function providerModels(providerId: string): [string, ModelSettings][] {
     if (!settings) return [];
-    return Object.entries(settings.models).filter(([, model]) => model.provider_id === providerId);
+    return Object.entries(settings.models).filter(([, model]) => model.provider_id === providerId).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
   }
 
   function slugifyProviderName(value: string): string {
@@ -202,13 +208,13 @@
     if (!settings) return id;
     const provider = settings.providers[id];
     if (!provider) return id;
-    if (provider.protocol === "openai" && provider.base_url) return "OpenAI compatible";
-    return PROVIDER_KINDS.find((kind) => kind.protocol === provider.protocol && kind.id !== "OpenAiCompatible")?.label ?? id;
+    return provider.display_name?.trim() || id;
   }
 
   function pickProviderKind(kind: ProviderKindDefinition): void {
     const id = nextProviderId(slugifyProviderName(kind.label));
     settings.providers[id] = {
+      display_name: kind.label,
       protocol: kind.protocol,
       base_url: kind.id === "OpenRouter" ? "https://openrouter.ai/api/v1" : null,
       api_key_secret_ref: null,
@@ -233,6 +239,7 @@
     const baseId = slugifyProviderName(name) || "openai-compatible";
     const id = nextProviderId(baseId);
     settings.providers[id] = {
+      display_name: name.trim() || "OpenAI compatible",
       protocol: "openai",
       base_url: baseUrl,
       api_key_secret_ref: null,
@@ -248,7 +255,7 @@
 
   function removeProvider(id: string): void {
 
-    for (const modelId of Object.keys(settings.models)) {
+    for (const modelId of Object.keys(settings.models).sort()) {
       if (settings.models[modelId].provider_id === id) removeModel(modelId);
     }
     delete settings.providers[id];
@@ -309,13 +316,13 @@
 </script>
 
 <div class="provider-settings-surface">
-  <ProviderDefaultModel {modelIds} defaultModel={settings.default_model} onselect={setDefaultModel} />
+  <ProviderDefaultModel models={settings.models} providerName={providerDisplayName} {modelIds} defaultModel={settings.default_model} onselect={setDefaultModel} />
   <ProviderCreation kinds={PROVIDER_KINDS} onpick={pickProviderKind} oncompatible={commitCompatibleProvider} onclearerror={() => error = null} />
 
 {#each providerIds as id, ix (id)}
   {@const provider = settings.providers[id]}
   <ProviderConfiguration
-    {id} index={ix} {provider} displayName={providerDisplayName(id)} models={providerModels(id)}
+    {secrets} {secretsError} {id} index={ix} {provider} kindLabel={provider.protocol === "openai" && provider.base_url ? "OpenAI compatible" : PROVIDER_KINDS.find((kind) => kind.protocol === provider.protocol)?.label ?? provider.protocol} displayName={providerDisplayName(id)} models={providerModels(id)}
     defaultModel={settings.default_model} saved={savedProviderIds.has(id)} signInState={signInByProvider[id]}
     {deviceCode} selected={selectedProvider === id} query={modelQuery} {discoveredModels} {addedModelIds} {isPersisting}
     onremoveprovider={removeProvider} onmanualadd={addManualModel} onremovemodel={removeModel} ondefault={setDefaultModel}
@@ -323,7 +330,7 @@
     onbegin={beginSignIn} oncheck={loadSignInState} oncopy={copyDeviceCode} onend={endSignIn}
   />
 {:else}
-  <div class="field"><div class="key">No providers<small>Swage will start without messaging until a model/provider pair exists.</small></div><div class="val"><p class="empty">Add a provider above. Nothing is assumed.</p></div></div>
+  <div class="field"><div class="key">No providers<small>Swage is running. To send messages, add a provider and a model.</small></div><div class="val"><p class="empty">Add a provider above. Nothing is assumed.</p></div></div>
   {/each}
 </div>
 

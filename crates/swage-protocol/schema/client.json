@@ -169,6 +169,9 @@
     "schedule_run_list": {
       "$ref": "#/$defs/ScheduleRunListResponse"
     },
+    "secret_list": {
+      "$ref": "#/$defs/SecretListResponse"
+    },
     "send_message": {
       "$ref": "#/$defs/SendMessageRequest"
     },
@@ -288,6 +291,7 @@
     }
   },
   "required": [
+    "secret_list",
     "api_error",
     "client_event",
     "server_event",
@@ -2648,6 +2652,27 @@
         "entries"
       ]
     },
+    "ManagedSecretEncryptionDiagnostics": {
+      "type": "object",
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "key_source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "detail"
+      ]
+    },
     "MaterialListResponse": {
       "type": "object",
       "properties": {
@@ -3398,6 +3423,13 @@
             "null"
           ]
         },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "has_credential": {
           "type": "boolean"
         },
@@ -3941,6 +3973,13 @@
           ]
         },
         "command": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "display_name": {
           "type": [
             "string",
             "null"
@@ -4565,6 +4604,95 @@
       "required": [
         "provider_type",
         "base_url"
+      ]
+    },
+    "SecretListResponse": {
+      "type": "object",
+      "properties": {
+        "managed_backend": {
+          "$ref": "#/$defs/ManagedSecretEncryptionDiagnostics"
+        },
+        "secrets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SecretResponse"
+          }
+        }
+      },
+      "required": [
+        "secrets",
+        "managed_backend"
+      ]
+    },
+    "SecretResponse": {
+      "type": "object",
+      "properties": {
+        "backend_kind": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "material_kind": {
+          "type": "string"
+        },
+        "metadata": true,
+        "name": {
+          "type": "string"
+        },
+        "owner_kind": {
+          "type": "string"
+        },
+        "reference": {
+          "type": "string"
+        },
+        "revealed_value": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revoked_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "scope_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope_kind": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "material_kind",
+        "owner_kind",
+        "backend_kind",
+        "scope_kind",
+        "reference",
+        "metadata",
+        "status",
+        "created_at",
+        "updated_at"
       ]
     },
     "SendMessageRequest": {

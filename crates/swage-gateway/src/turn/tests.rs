@@ -19352,6 +19352,7 @@ async fn selected_responses_entry_sharing_an_upstream_id_is_served_by_its_own_pr
         config.providers.entries.insert(
             provider_id.into(),
             swage_config::ProviderEndpointConfig {
+                display_name: None,
                 worker_staleness_threshold_ms: None,
                 protocol,
                 api_key_secret_ref: None,
@@ -19673,6 +19674,7 @@ async fn turn_against_single_provider(
     config.providers.entries.insert(
         "configured-endpoint".into(),
         swage_config::ProviderEndpointConfig {
+            display_name: None,
             worker_staleness_threshold_ms: None,
             protocol,
             api_key_secret_ref: None,

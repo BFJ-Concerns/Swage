@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use ts_rs::TS;
 use uuid::Uuid;
 
@@ -363,6 +364,7 @@ pub struct KnowledgeMirrorRegenerateResponse {
 #[derive(JsonSchema)]
 #[allow(dead_code)]
 pub struct HostingSurface {
+    secrets: SecretListResponse,
     presence: PresenceSnapshotResponse,
     approvals: ApprovalListResponse,
     approval_decision: ApprovalDecisionRequest,
@@ -377,4 +379,39 @@ pub struct HostingSurface {
     agent_definition_mutation: AgentDefinitionMutationResponse,
     devices: device::DeviceListResponse,
     knowledge_mirror: KnowledgeMirrorRegenerateResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct SecretResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub material_kind: String,
+    pub owner_kind: String,
+    pub backend_kind: String,
+    pub scope_kind: String,
+    pub scope_id: Option<String>,
+    pub reference: String,
+    #[ts(type = "unknown")]
+    pub metadata: Value,
+    pub status: String,
+    pub created_at: chrono::DateTime<Utc>,
+    pub updated_at: chrono::DateTime<Utc>,
+    pub revoked_at: Option<chrono::DateTime<Utc>>,
+    pub revealed_value: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct SecretListResponse {
+    pub secrets: Vec<SecretResponse>,
+    pub managed_backend: ManagedSecretEncryptionDiagnostics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct ManagedSecretEncryptionDiagnostics {
+    pub status: String,
+    pub detail: String,
+    pub key_source: Option<String>,
 }

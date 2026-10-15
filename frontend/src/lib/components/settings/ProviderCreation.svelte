@@ -2,7 +2,7 @@
   import type { ProviderProtocol } from "../../types";
 
   export type ProviderKind = "OpenAi" | "OpenAiResponses" | "Anthropic" | "Google" | "OpenRouter" | "OpenAiCompatible" | "Codex";
-  export type ProviderKindDefinition = { id: ProviderKind; label: string; protocol: ProviderProtocol };
+  export type ProviderKindDefinition = { id: ProviderKind; label: string; description: string; protocol: ProviderProtocol };
 
   interface Props {
     kinds: readonly ProviderKindDefinition[];
@@ -61,7 +61,7 @@
       <div class="opt-row add-row">
         {#each kinds as kind (kind.id)}
           <button type="button" class="opt opt-pick" class:active={kind.id === "OpenAiCompatible" && !!compatibleDraft} onclick={() => pick(kind)}>
-            <span class="pick-mark" aria-hidden="true">+</span><span>{kind.label}</span>
+            <span class="pick-mark" aria-hidden="true">+</span><span>{kind.label}<small class="kind-guidance">{kind.description}</small></span>
           </button>
         {/each}
         <button type="button" class="opt opt-cancel" onclick={toggle}><span aria-hidden="true">×</span><span>Cancel</span></button>
@@ -86,6 +86,7 @@
 </div>
 
 <style>
+  .kind-guidance { display: block; max-width: 32ch; margin-top: 6px; font-family: var(--font-body); font-size: var(--font-label-sm); line-height: 1.4; text-transform: none; letter-spacing: 0; }
   .field { display: grid; grid-template-columns: 220px 1fr; gap: 24px; border-top: 1px solid var(--rule-soft); padding: 14px 0; align-items: baseline; }
   .key { font-family: var(--font-mono); font-weight: 500; font-size: 11px; line-height: 1.5; letter-spacing: 0.18em; text-transform: uppercase; }
   .key small { display: block; margin-top: 4px; font-family: var(--font-body); font-weight: 400; font-size: 11px; line-height: 1.4; letter-spacing: 0; text-transform: none; color: var(--ink-soft); }

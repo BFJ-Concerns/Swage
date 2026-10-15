@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
+import { createClassComponent } from "svelte/legacy";
 import { fromStore, writable } from "svelte/store";
 
 import SettingsPage from "../components/SettingsPage.svelte";
@@ -16,6 +17,7 @@ import { makeSchedule } from "./fixtures/schedules";
 
 vi.mock("../api/settings", () => ({
   discoverModels: vi.fn(),
+  fetchProviderSecrets: vi.fn(async () => ({ secrets: [] })),
   fetchSettings: vi.fn(),
   restartGateway: vi.fn(),
   saveSettings: vi.fn(),
@@ -209,6 +211,138 @@ describe("SettingsPage", () => {
     component = undefined;
     document.body.innerHTML = "";
     vi.clearAllMocks();
+  });
+
+  function configuredProvider(source: "environment" | "stored" | "none" = "none"): SettingsResponse {
+    const settings = emptySettings();
+    settings.providers.proxy = { protocol: "openai", display_name: "Homelab proxy", base_url: "https://Proxy.Example/v1", api_key_secret_ref: source === "stored" ? "secret:existing" : null, api_key_env: source === "environment" ? "PROXY_KEY" : null, has_credential: source !== "none" };
+    settings.models["proxy:MixedCase-Model"] = { provider_id: "proxy", model_id: "MixedCase-Model", aliases: [], generation_preset: null };
+    settings.default_model = "proxy:MixedCase-Model";
+    settings.default_provider = "proxy";
+    return settings;
+  }
+
+  it.each(["environment", "stored", "none"] as const)("reports %s credential source truthfully", async (source) => {
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(configuredProvider(source));
+    component = mount(SettingsPage, { target: document.body, props: { tab: "providers" } });
+    await flushUi();
+    const header = document.querySelector(".provider-collapse")!;
+    expect(header.textContent).toContain(source === "environment" ? "Environment credential" : source === "stored" ? "Stored credential" : "No credential");
+    const input = document.querySelector<HTMLInputElement>('input[type="password"]')!;
+    expect(input.placeholder).toBe(source === "environment" ? "Resolved from environment" : source === "stored" ? "Stored credential" : "Paste to store");
+    if (source === "none") expect(document.body.textContent).toContain("Authenticated turns cannot run");
+  });
+
+  it("keeps the chosen provider name through creation and autosave", async () => {
+    component = mount(SettingsPage, { target: document.body, props: { tab: "providers" } });
+    await flushUi();
+    buttonContaining("Add provider").click(); await flushUi();
+    buttonContaining("OpenAI compatible").click(); await flushUi();
+    const name = document.querySelector<HTMLInputElement>("#compatible-name")!;
+    name.value = "Homelab proxy"; name.dispatchEvent(new Event("input", { bubbles: true }));
+    const url = document.querySelector<HTMLInputElement>("#compatible-base-url")!;
+    url.value = "https://Proxy.Example/v1"; url.dispatchEvent(new Event("input", { bubbles: true })); await flushUi();
+    buttonContaining("Connect").click(); await flushUi();
+    expect(document.querySelector(".provider-head h2")?.textContent).toBe("Homelab proxy");
+    await waitForSaveCall();
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].providers["homelab-proxy"].display_name).toBe("Homelab proxy");
+  });
+
+  it("shows readable default labels and disables selecting the current model again", async () => {
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(configuredProvider());
+    component = mount(SettingsPage, { target: document.body, props: { tab: "providers" } }); await flushUi();
+    const choice = document.querySelector<HTMLButtonElement>(".provider-settings-surface .field button")!;
+    expect(choice.textContent?.trim()).toBe("MixedCase-Model · Homelab proxy");
+    expect(document.querySelector<HTMLButtonElement>(".row-actions button")?.disabled).toBe(true);
+    expect(document.querySelector(".row-actions button")?.textContent).toBe("Default");
+  });
+
+  it("orders provider and model choices deterministically despite input insertion order", async () => {
+    const settings = configuredProvider();
+    settings.providers = { zulu: { ...settings.providers.proxy, display_name: "Zulu" }, alpha: { ...settings.providers.proxy, display_name: "Alpha" } };
+    settings.models = { z: { ...settings.models[settings.default_model], provider_id: "zulu", model_id: "Z" }, a: { ...settings.models[settings.default_model], provider_id: "alpha", model_id: "A" } };
+    settings.default_model = "a"; settings.default_provider = "alpha";
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(settings);
+    component = mount(SettingsPage, { target: document.body, props: { tab: "providers" } }); await flushUi();
+    expect([...document.querySelectorAll(".provider-head h2")].map((node) => node.textContent)).toEqual(["Alpha", "Zulu"]);
+    expect([...document.querySelectorAll(".provider-settings-surface > .field:first-child button")].map((node) => node.textContent?.trim())).toEqual(["A · Alpha", "Z · Zulu"]);
+  });
+
+  it("explains the empty state and each protocol choice", async () => {
+    component = mount(SettingsPage, { target: document.body, props: { tab: "providers" } }); await flushUi();
+    expect(document.body.textContent).toContain("Swage is running. To send messages, add a provider and a model.");
+    buttonContaining("Add provider").click(); await flushUi();
+    const options = [...document.querySelectorAll(".add-row .opt-pick")];
+    expect(options).toHaveLength(6);
+    for (const option of options) expect(option.querySelector("small")?.textContent?.length ?? 0).toBeGreaterThan(15);
+    expect(document.querySelector(".add-row")?.textContent).toContain("Responses API");
+    expect(document.querySelector(".add-row")?.textContent).toContain("Chat Completions API");
+  });
+
+  it("warns on immediate reload and flushes provider edits on navigation", async () => {
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(configuredProvider());
+    component = mount(SettingsPage, { target: document.body, props: { tab: "providers" } }); await flushUi();
+    const input = document.querySelector<HTMLInputElement>('.provider-section input[type="text"]')!;
+    input.value = "https://Changed.Example/v1"; input.dispatchEvent(new Event("input", { bubbles: true })); await flushUi();
+    const event = new Event("beforeunload", { cancelable: true }); window.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    await unmount(component); component = undefined; await flushUi();
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)?.[0].providers.proxy.base_url).toBe("https://Changed.Example/v1");
+  });
+
+  it("flushes provider edits when switching settings tabs", async () => {
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(configuredProvider());
+    const page = createClassComponent({ component: SettingsPage, target: document.body, props: { tab: "providers" as "providers" | "agents" } });
+    await flushUi();
+    try {
+      const input = document.querySelector<HTMLInputElement>('.provider-section input[type="text"]')!;
+      input.value = "https://TabSwitch.Example/v1";
+      input.dispatchEvent(new Event("input", { bubbles: true })); await flushUi();
+      page.$set({ tab: "agents" }); await flushUi();
+      expect(vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)?.[0].providers.proxy.base_url).toBe("https://TabSwitch.Example/v1");
+    } finally { page.$destroy(); }
+  });
+
+  it("labels pasted credentials as unsaved and preserves edits made during a save", async () => {
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(configuredProvider("stored"));
+    let release!: (value: SettingsResponse) => void;
+    vi.mocked(settingsApi.saveSettings).mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    component = mount(SettingsPage, { target: document.body, props: { tab: "providers" } }); await flushUi();
+    const key = document.querySelector<HTMLInputElement>('input[type="password"]')!;
+    key.value = "replacement-key"; key.dispatchEvent(new Event("input", { bubbles: true })); await flushUi();
+    expect(document.body.textContent).toContain("Credential not saved");
+    await waitForSaveCall();
+    const url = document.querySelector<HTMLInputElement>('.provider-section input[type="text"]')!;
+    url.value = "https://Later.Example/v1"; url.dispatchEvent(new Event("input", { bubbles: true })); await flushUi();
+    release(configuredProvider("stored")); await flushUi();
+    expect(document.querySelector<HTMLInputElement>('.provider-section input[type="text"]')?.value).toBe("https://Later.Example/v1");
+    expect(document.querySelector<HTMLInputElement>('input[type="password"]')?.value).toBe("");
+  });
+
+  it("keeps rejected credential edits visibly unsaved", async () => {
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(configuredProvider("environment"));
+    vi.mocked(settingsApi.saveSettings).mockRejectedValue(new Error("Save rejected"));
+    component = mount(SettingsPage, { target: document.body, props: { tab: "providers" } }); await flushUi();
+    const input = document.querySelector<HTMLInputElement>('input[type="password"]')!;
+    input.value = "edited-key"; input.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall(); await flushUi();
+    expect(document.body.textContent).toContain("Credential not saved");
+    expect(document.body.textContent).toContain("Save rejected");
+    expect(document.querySelector(".autosave-state")?.textContent).toContain("Save failed");
+    expect(input.value).toBe("edited-key");
+  });
+
+  it("binds an existing governed secret by reference without putting its value in the key input", async () => {
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(configuredProvider("environment"));
+    vi.mocked(settingsApi.fetchProviderSecrets).mockResolvedValue({ secrets: [{ id: "chosen", name: "Proxy credential", reference: "secret:chosen", material_kind: "provider_key", owner_kind: "provider", backend_kind: "managed", scope_kind: "global", scope_id: null, metadata: {}, status: "active", created_at: "2026-01-01", updated_at: "2026-01-01", revoked_at: null, revealed_value: null }], managed_backend: { status: "ready", detail: "", key_source: null } });
+    component = mount(SettingsPage, { target: document.body, props: { tab: "providers" } }); await flushUi();
+    const select = document.querySelector<HTMLSelectElement>('select[aria-label="Stored credential for Homelab proxy"]');
+    expect(select).not.toBeNull();
+    select!.value = "secret:chosen"; select!.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitForSaveCall(); await flushUi();
+    const sent = vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].providers.proxy;
+    expect(sent.api_key_secret_ref).toBe("secret:chosen"); expect(sent.api_key_env).toBeNull(); expect(sent.api_key).toBe("");
+    expect(document.querySelector<HTMLInputElement>('input[type="password"]')?.value).toBe("");
   });
 
   it("refuses invalid provider URL drafts before autosave and accepts corrections or clearing", async () => {
