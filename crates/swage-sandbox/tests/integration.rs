@@ -199,3 +199,53 @@ async fn bubblewrap_agent_connects_when_socket_lies_under_tmp() {
         sandbox.shutdown().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn timed_out_request_does_not_supply_the_next_requests_reply() {
+    use std::time::Duration;
+    let (host_socket, agent_socket) = tokio::net::UnixStream::pair().unwrap();
+    let config = SandboxConfig::builder()
+        .working_directory(std::env::current_dir().unwrap())
+        .tool_call_timeout(Duration::from_millis(50))
+        .build()
+        .unwrap();
+    let mut host = HostConnection::new(IpcTransport::new(host_socket), &config);
+    let mut agent = AgentConnection::new(IpcTransport::new(agent_socket));
+    let (first, abandoned_id) = tokio::join!(
+        host.send_tool_call("shell", json!({"command": "sleep 180"})),
+        async {
+            match agent.receive_message().await.unwrap() {
+                IpcMessage::ToolCallRequest { request_id, .. } => request_id,
+                other => panic!("expected request, got {other:?}"),
+            }
+        }
+    );
+    let error = first.expect_err("the first request must time out");
+    assert!(error.to_string().contains("timeout"), "{error}");
+    agent
+        .send_tool_result(abandoned_id.clone(), json!("stale"), 100, None)
+        .await
+        .unwrap();
+    let (second, own_id) = tokio::join!(host.send_tool_call("echo", json!({})), async {
+        loop {
+            match agent.receive_message().await.unwrap() {
+                IpcMessage::ToolCallCancel { request_id } => assert_eq!(request_id, abandoned_id),
+                IpcMessage::ToolCallRequest { request_id, .. } => {
+                    agent
+                        .send_tool_result(request_id.clone(), json!("fresh"), 1, None)
+                        .await
+                        .unwrap();
+                    break request_id;
+                }
+                other => panic!("expected request or cancel, got {other:?}"),
+            }
+        }
+    });
+    assert_ne!(own_id, abandoned_id);
+    assert_eq!(
+        second
+            .expect("the second request must receive its own reply")
+            .output,
+        json!("fresh")
+    );
+}

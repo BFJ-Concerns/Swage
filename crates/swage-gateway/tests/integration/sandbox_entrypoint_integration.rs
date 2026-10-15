@@ -450,3 +450,112 @@ async fn native_file_mutations_in_sandbox_child_refuse_without_attachment_author
         );
     }
 }
+
+async fn assert_configured_shell_timeout(
+    sandbox: &dyn Sandbox,
+    workspace: &std::path::Path,
+    seconds: u64,
+) {
+    let command = "echo $$ > shell.pid; printf before > marker; sleep 10; printf after >> marker";
+    let mut call = Box::pin(sandbox.execute_tool("shell", json!({"command": command})));
+    let pid = tokio::select! {
+        result = call.as_mut() => panic!("the shell must start before its deadline: {result:?}"),
+        pid = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if let Some(pid) = std::fs::read_to_string(workspace.join("shell.pid")).ok()
+                    .and_then(|pid| host_pid_of(&["sh", "-c", command], pid.trim())) {
+                    break pid;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }) => pid.expect("the real shell must write its PID"),
+    };
+    assert!(
+        is_live(pid),
+        "the shell must actually run before timing out"
+    );
+    let first = tokio::time::timeout(std::time::Duration::from_secs(seconds + 2), call).await;
+    let next = sandbox
+        .execute_tool("shell", json!({"command": "cat marker"}))
+        .await;
+    let stopped = !is_live(pid);
+    sandbox.shutdown().await.unwrap();
+    let result = first
+        .expect("the configured shell deadline must finish the call")
+        .expect("a shell timeout must be a tool result, not an IPC wait failure");
+    let error = result
+        .error
+        .expect("the command must time out rather than finish");
+    assert!(
+        error.contains(&format!("timed out after {seconds}.0s"))
+            && error.contains("shell_timeout_secs"),
+        "{error}"
+    );
+    assert!(stopped, "the timed-out shell process must be stopped");
+    let next = next.expect("the next independent shell call must return its own result");
+    assert!(next.error.is_none(), "{next:?}");
+    assert_eq!(next.output["output"], "before");
+}
+
+#[tokio::test]
+async fn fallback_sandbox_real_binary_uses_configured_shell_timeout_then_serves_next_call() {
+    let mut env_guard = ProcessEnvGuard::new();
+    env_guard.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    for seconds in [1, 2] {
+        let root = crate::support::scratch_tempdir();
+        let tools = swage_config::ToolConfig {
+            shell_timeout_secs: seconds,
+            ..Default::default()
+        };
+        let runtime = serde_json::from_value(serde_json::to_value(tools).unwrap()).unwrap();
+        let config = SandboxConfig::builder()
+            .working_directory(root.path())
+            .tool_runtime(runtime)
+            .build()
+            .unwrap();
+        let mut sandbox = FallbackSandbox::new(config, test_llm_handler());
+        sandbox.spawn_agent().await.unwrap();
+        assert_configured_shell_timeout(&sandbox, root.path(), seconds).await;
+    }
+}
+
+#[tokio::test]
+async fn bubblewrap_sandbox_real_binary_uses_configured_shell_timeout_then_serves_next_call() {
+    // A missing or unavailable namespace is reported, never counted as this leg's proof.
+    let bwrap = match find_bwrap() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("bubblewrap consumer unavailable: {error}");
+            return;
+        }
+    };
+    let probe = std::process::Command::new(bwrap)
+        .args(["--unshare-all", "--ro-bind", "/", "/", "--", "/bin/true"])
+        .output()
+        .unwrap();
+    if !probe.status.success() {
+        eprintln!(
+            "bubblewrap consumer unavailable: {}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        return;
+    }
+    let mut env_guard = ProcessEnvGuard::new();
+    env_guard.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    for seconds in [1, 2] {
+        let root = crate::support::scratch_tempdir();
+        let tools = swage_config::ToolConfig {
+            shell_timeout_secs: seconds,
+            ..Default::default()
+        };
+        let runtime = serde_json::from_value(serde_json::to_value(tools).unwrap()).unwrap();
+        let config = SandboxConfig::builder()
+            .working_directory(root.path())
+            .tool_runtime(runtime)
+            .build()
+            .unwrap();
+        let mut sandbox = BubblewrapSandbox::new(config, test_llm_handler());
+        sandbox.spawn_agent().await.unwrap();
+        assert_configured_shell_timeout(&sandbox, root.path(), seconds).await;
+    }
+}

@@ -77,38 +77,57 @@ impl HostConnection {
             })
             .await?;
 
-        let response = self
-            .transport
-            .receive_timeout(self.config.tool_call_timeout)
-            .await?;
-
-        match response {
-            IpcMessage::ToolCallResult {
-                request_id: resp_id,
-                output,
-                duration_ms,
-                error,
-            } => {
-                // Verify the response correlates with our request.
-                if resp_id != request_id {
-                    return Err(SandboxError::IpcError {
-                        message: format!(
-                            "request ID mismatch: sent {request_id}, received {resp_id}"
-                        ),
-                    });
+        let deadline = tokio::time::Instant::now() + self.config.tool_call_timeout;
+        loop {
+            let response = match self
+                .transport
+                .receive_timeout(deadline.saturating_duration_since(tokio::time::Instant::now()))
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    self.transport.abandon_tool_call(request_id.clone());
+                    self.transport
+                        .send(&IpcMessage::ToolCallCancel { request_id })
+                        .await?;
+                    return Err(error);
                 }
-                Ok(ToolCallResult {
+            };
+
+            match response {
+                IpcMessage::ToolCallResult {
+                    request_id: resp_id,
                     output,
                     duration_ms,
                     error,
-                })
+                } => {
+                    if resp_id != request_id {
+                        if self.transport.take_abandoned_tool_call(&resp_id) {
+                            continue;
+                        }
+                        return Err(SandboxError::IpcError {
+                            message: format!(
+                                "request ID mismatch: sent {request_id}, received {resp_id}"
+                            ),
+                        });
+                    }
+                    return Ok(ToolCallResult {
+                        output,
+                        duration_ms,
+                        error,
+                    });
+                }
+                IpcMessage::ErrorMessage { description, .. } => {
+                    return Err(SandboxError::IpcError {
+                        message: description,
+                    });
+                }
+                other => {
+                    return Err(SandboxError::IpcError {
+                        message: format!("unexpected response to ToolCallRequest: {other:?}"),
+                    });
+                }
             }
-            IpcMessage::ErrorMessage { description, .. } => Err(SandboxError::IpcError {
-                message: description,
-            }),
-            other => Err(SandboxError::IpcError {
-                message: format!("unexpected response to ToolCallRequest: {other:?}"),
-            }),
         }
     }
 

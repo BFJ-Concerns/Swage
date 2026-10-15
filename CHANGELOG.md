@@ -43,6 +43,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Sandboxed shell commands honour `shell_timeout_secs`, report that limit when they time out, and leave later calls receiving their own replies.
+
 - Interrupted sandbox IPC reads retain partial frames, so the next call can complete the frame without corrupting the connection.
 
 - Session previews in the recent list, sidebar, conversation selector, delete controls and Operator deck show plain text without Markdown formatting or link destinations. Operator session summaries are limited to three lines.

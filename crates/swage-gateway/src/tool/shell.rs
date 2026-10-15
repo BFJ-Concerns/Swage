@@ -137,7 +137,10 @@ impl Tool for ShellTool {
                 kill_child(&mut child, &mut process_group).await;
                 Err(ToolError::ExecutionFailed {
                     name: self.name().to_owned(),
-                    message: format!("Command timed out after {:.1}s", self.timeout.as_secs_f64()),
+                    message: format!(
+                        "Command timed out after {:.1}s (shell_timeout_secs)",
+                        self.timeout.as_secs_f64()
+                    ),
                 })
             }
 
@@ -443,7 +446,7 @@ mod tests {
         assert!(result.is_err(), "timeout should produce an error");
         let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("timed out"),
+            msg.contains("timed out after 0.2s") && msg.contains("shell_timeout_secs"),
             "error message should mention timeout: {msg:?}"
         );
     }

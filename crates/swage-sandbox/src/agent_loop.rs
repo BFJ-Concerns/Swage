@@ -19,7 +19,9 @@ use crate::ipc::agent::AgentConnection;
 use crate::ipc::message::{ErrorCategory, IpcMessage};
 use crate::ipc::transport::IpcTransport;
 
-fn child_sandbox_config_from_env() -> Result<Option<crate::config::SandboxConfig>, SandboxError> {
+/// Read the host-provided configuration used by sandbox-mode tool setup.
+pub fn child_sandbox_config_from_env() -> Result<Option<crate::config::SandboxConfig>, SandboxError>
+{
     let Some(config_json) = std::env::var("SWAGE_SANDBOX_CONFIG_JSON").ok() else {
         return Ok(None);
     };

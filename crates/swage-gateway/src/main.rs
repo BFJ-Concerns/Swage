@@ -74,15 +74,19 @@ impl Tool for EnvReadTool {
     }
 }
 
-fn build_sandbox_agent_tools() -> Vec<Box<dyn Tool>> {
-    let tool_config = swage_config::ToolConfig::default();
-    let max_output_bytes = tool_config.max_output_bytes;
+fn build_sandbox_agent_tools(config: Option<&swage_sandbox::SandboxConfig>) -> Vec<Box<dyn Tool>> {
+    let defaults = swage_config::ToolConfig::default();
+    let runtime = config.and_then(|config| config.tool_runtime.as_ref());
+    let shell_timeout_secs = runtime.map_or(defaults.shell_timeout_secs, |settings| {
+        settings.shell_timeout_secs
+    });
+    let max_output_bytes = defaults.max_output_bytes;
 
     vec![
         Box::new(EchoTool),
         Box::new(EnvReadTool),
         Box::new(ShellTool {
-            timeout: std::time::Duration::from_secs(tool_config.shell_timeout_secs),
+            timeout: std::time::Duration::from_secs(shell_timeout_secs),
             max_output_bytes,
         }),
         Box::new(FileReadTool { max_output_bytes }),
@@ -98,7 +102,12 @@ async fn main() {
     let cli = Cli::parse();
 
     if cli.sandbox_mode {
-        if let Err(error) = swage_sandbox::run_agent_loop(build_sandbox_agent_tools()).await {
+        let result = async {
+            let config = swage_sandbox::child_sandbox_config_from_env()?;
+            swage_sandbox::run_agent_loop(build_sandbox_agent_tools(config.as_ref())).await
+        }
+        .await;
+        if let Err(error) = result {
             eprintln!("Error: {error}");
             std::process::exit(1);
         }
@@ -214,7 +223,7 @@ mod tests {
 
     #[test]
     fn sandbox_agent_registers_workspace_tools() {
-        let tools = super::build_sandbox_agent_tools();
+        let tools = super::build_sandbox_agent_tools(None);
         let names: std::collections::HashSet<_> = tools.iter().map(|tool| tool.name()).collect();
 
         for name in [
