@@ -71,6 +71,7 @@ pub fn new_workflow_run(topic_id: Uuid) -> NewWorkflowRun {
         parent_run_id: None,
         parent_seq: None,
         dispatching_session_id: None,
+        dispatching_thread_id: None,
         script_version_id: None,
         inline_workflow_id: None,
         inline_workflow_name: None,

@@ -10,6 +10,7 @@ pub(crate) struct ShippedFile {
     pub(crate) path: &'static str,
     pub(crate) contents: &'static str,
     pub(crate) captured_sources_grant: bool,
+    pub(crate) conversation_delivery: bool,
 }
 
 pub(crate) struct ShippedSkill {
@@ -24,16 +25,18 @@ macro_rules! shipped_file {
             path: $path,
             contents: include_str!(concat!("../../../shipped/skills/", $path)),
             captured_sources_grant: false,
+            conversation_delivery: false,
         }
     };
 }
 
 macro_rules! shipped_workflow_file {
-    ($path:literal, $captured_sources_grant:expr) => {
+    ($path:literal, $captured_sources_grant:expr, $conversation_delivery:expr) => {
         ShippedFile {
             path: $path,
             contents: include_str!(concat!("../../../shipped/skills/", $path)),
             captured_sources_grant: $captured_sources_grant,
+            conversation_delivery: $conversation_delivery,
         }
     };
 }
@@ -102,7 +105,7 @@ const PROJECT_DOCS_FILES: &[ShippedFile] = &[
 
 const RESEARCH_FILES: &[ShippedFile] = &[
     shipped_file!("research/SKILL.md"),
-    shipped_workflow_file!("research/workflows/research-sweep.js", true),
+    shipped_workflow_file!("research/workflows/research-sweep.js", true, true),
 ];
 
 const SHAKEDOWN_FILES: &[ShippedFile] = &[
