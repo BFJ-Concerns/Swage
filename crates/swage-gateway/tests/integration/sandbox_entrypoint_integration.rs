@@ -295,26 +295,29 @@ async fn bubblewrap_sandbox_reads_broadly_masks_private_paths_and_reaches_the_ne
         }
     };
 
-    // Reads are broad: a file beside the masks is readable; the masks are not.
-    let reads = shell(format!(
-        "cat {notes}; echo; find {ssh} -mindepth 1 -maxdepth 1 ! -name granted | wc -l; cat {netrc} | wc -c; cat {ssh}/id_ed25519 2>&1 || true",
-        notes = home.path().join("notes.txt").display(),
-        ssh = ssh.display(),
-        netrc = home.path().join(".netrc").display(),
+    // Keep observations separate: an empty token must not satisfy the
+    // assertion about hidden directory entries.
+    let notes = shell(format!("cat {}", home.path().join("notes.txt").display())).await;
+    assert_eq!(notes.trim(), "readable", "reads beside masks remain broad");
+    let siblings = shell(format!(
+        "find {} -mindepth 1 -maxdepth 1 ! -name granted -printf '%f\\n'",
+        ssh.display(),
     ))
     .await;
-    assert!(reads.contains("readable"), "{reads}");
-    assert!(
-        reads.lines().any(|line| line.trim() == "0"),
-        "the masked key directory must read as empty: {reads}"
+    assert_eq!(
+        siblings.trim(),
+        "",
+        "masked sibling entries must stay hidden even if their contents are unreadable"
     );
-    assert!(
-        !reads.contains("PRIVATE KEY"),
-        "the key must not be readable: {reads}"
-    );
-    assert!(
-        !reads.contains("secret"),
-        "the token file must read as empty: {reads}"
+    let token_bytes = shell(format!(
+        "cat {} 2>/dev/null | wc -c",
+        home.path().join(".netrc").display()
+    ))
+    .await;
+    assert_eq!(
+        token_bytes.trim(),
+        "0",
+        "the masked token must yield no readable bytes"
     );
 
     let reopened = shell(format!("cat {}/visible", granted.display())).await;
@@ -323,15 +326,26 @@ async fn bubblewrap_sandbox_reads_broadly_masks_private_paths_and_reaches_the_ne
         "granted subtree",
         "grant beneath mask must reopen"
     );
-    assert!(
-        shell(format!(
-            "cat {}/id_ed25519 2>/dev/null || true",
-            ssh.display()
-        ))
-        .await
-        .trim()
-        .is_empty(),
-        "the granted subtree must not reopen its private sibling"
+    let sibling_state = shell(format!(
+        "if test -e {}/id_ed25519; then printf present; else printf absent; fi",
+        ssh.display(),
+    ))
+    .await;
+    assert_eq!(
+        sibling_state.trim(),
+        "absent",
+        "the granted subtree must not expose its private sibling's name"
+    );
+
+    let sibling_contents = shell(format!(
+        "cat {}/id_ed25519 2>/dev/null || true",
+        ssh.display(),
+    ))
+    .await;
+    assert_eq!(
+        sibling_contents.trim(),
+        "",
+        "the granted subtree must not reveal its private sibling's contents"
     );
 
     // Writes: the workspace yes, the sibling outside the write set no.
