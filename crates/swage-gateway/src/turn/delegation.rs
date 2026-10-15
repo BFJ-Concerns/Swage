@@ -330,6 +330,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             &session_variables,
         );
         let mut assembly_report = output.report;
+        super::redact_element_texts(&self.state, &mut assembly_report).await;
         assembly_report.effective_tool_permissions = Some(self.effective_tool_permissions.clone());
         let report = serde_json::to_value(&assembly_report).unwrap_or_else(|error| {
             tracing::warn!(%error, "failed to serialise delegated assembly report");
@@ -461,7 +462,8 @@ impl DelegationSnapshotRecorder for GatewayDelegationSnapshotRecorder {
         let turn_id = match &event {
             AgentEvent::ProviderRequestPrepared { turn_id, .. }
             | AgentEvent::ProviderResponseCaptured { turn_id, .. }
-            | AgentEvent::ProviderReasoningCaptured { turn_id, .. } => *turn_id,
+            | AgentEvent::ProviderReasoningCaptured { turn_id, .. }
+            | AgentEvent::ProviderAttempt { turn_id, .. } => *turn_id,
             _ => return Ok(()),
         };
         let Some(snapshot) = self.state.storage.get_snapshot(turn_id).await? else {

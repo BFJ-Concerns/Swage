@@ -1417,10 +1417,17 @@ mod tests {
         ]);
         let mut stream = failover.stream(completion_req());
 
-        let progress = tokio::time::timeout(Duration::from_millis(100), stream.next())
-            .await
-            .expect("retry progress must arrive while failover content is still unavailable")
-            .expect("retry progress chunk");
+        let progress = tokio::time::timeout(Duration::from_millis(100), async {
+            loop {
+                let chunk = stream.next().await;
+                if !matches!(chunk, Some(StreamChunk::ProviderAttempt(_))) {
+                    break chunk;
+                }
+            }
+        })
+        .await
+        .expect("retry progress must arrive while failover content is still unavailable")
+        .expect("retry progress chunk");
         assert!(matches!(
             progress,
             StreamChunk::ProviderRetryStarted { ref provider, .. } if provider == "p1"

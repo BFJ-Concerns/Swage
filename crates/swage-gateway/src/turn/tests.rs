@@ -20249,3 +20249,237 @@ async fn approval_scope_expired_live_waiter_interrupts_turn() {
 async fn approval_scope_expired_live_waiter_records_expired_feedback() {
     expired_live_waiter(false).await;
 }
+
+#[tokio::test]
+async fn inspector_snapshot_records_each_real_provider_attempt_and_redacts_its_error() {
+    let secret = "inspector-private-error-value";
+    let inner = MultiRoundMockProvider::new(vec![
+        vec![StreamChunk::Error {
+            message: format!("temporary failure {secret}"),
+        }],
+        vec![StreamChunk::Error {
+            message: "second temporary failure".into(),
+        }],
+        vec![
+            StreamChunk::Delta {
+                content: "recovered".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]);
+    let provider = swage_provider::retry::RetryProvider::new(
+        inner,
+        swage_provider::retry::RetryConfig {
+            max_retries: 2,
+            initial_backoff: Duration::ZERO,
+            max_backoff: Duration::ZERO,
+        },
+    );
+    let (state, session_id, storage) =
+        make_state_with_tool_provider_and_storage(Arc::new(provider)).await;
+    state
+        .secret_manager
+        .create_secret(crate::secret::CreateSecretRequest {
+            name: "Inspector test secret".into(),
+            material_kind: "plugin_secret".into(),
+            owner_kind: "service".into(),
+            backend_kind: "managed".into(),
+            scope_kind: "plugin".into(),
+            scope_id: Some("inspector-test".into()),
+            metadata: None,
+            value: Some(secret.into()),
+            external_reference: None,
+        })
+        .await
+        .unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from(format!("Read this {secret}")),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .unwrap();
+    let turn_id = std::iter::from_fn(|| rx.try_recv().ok())
+        .find_map(|e| match e {
+            ServerEvent::ContextAssembled { turn_id, .. } => Some(turn_id),
+            _ => None,
+        })
+        .unwrap();
+    let snapshot = storage.get_snapshot(turn_id).await.unwrap().unwrap();
+    let report: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+    let attempts = report["provider_attempts"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        attempts.len(),
+        3,
+        "the stored turn must account for all actual provider calls"
+    );
+    for (index, attempt) in attempts.iter().enumerate() {
+        assert_eq!(attempt["attempt"], index + 1);
+        assert!(
+            attempt["started_at_ms"].as_u64().unwrap() <= attempt["ended_at_ms"].as_u64().unwrap()
+        );
+        assert_eq!(
+            attempt["outcome"],
+            if index < 2 { "failed" } else { "succeeded" }
+        );
+    }
+    assert_eq!(attempts[0]["error"], "temporary failure [REDACTED_SECRET]");
+    assert_eq!(attempts[1]["error"], "second temporary failure");
+    assert!(attempts[2]["error"].is_null());
+    let history = report["elements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "history")
+        .unwrap();
+    assert!(
+        history["full_text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[REDACTED_SECRET]")
+    );
+    assert!(
+        !snapshot.contains(secret),
+        "element text and attempt errors share request redaction"
+    );
+}
+
+#[tokio::test]
+async fn inspector_records_real_norms_content_for_each_scaffold_without_exposing_its_assignment() {
+    use swage_context::working_norms::{WorkingNormsElement, WorkingNormsScaffold};
+    let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("gpt-6.1-sol");
+    let mut records = Vec::new();
+    for scaffold in [
+        WorkingNormsScaffold::FamilyFallback,
+        WorkingNormsScaffold::Native,
+    ] {
+        let norms = WorkingNormsElement::for_model("gpt-6.1-sol", scaffold);
+        let expected = norms.content()[0].text_content();
+        let output = swage_context::assembly::default_assembly(
+            &[Box::new(norms)],
+            &Default::default(),
+            &tokeniser,
+        );
+        let record = serde_json::to_value(&output.report.elements[0]).unwrap();
+        assert_eq!(record["full_text"], expected);
+        assert_eq!(record["token_count"], output.report.total_tokens);
+        assert_eq!(record["source"], "built-in working norms (GPT family)");
+        assert!(record.get("variant_id").is_none());
+        records.push(record);
+    }
+    assert_ne!(records[0]["full_text"], records[1]["full_text"]);
+    assert_ne!(records[0]["token_count"], records[1]["token_count"]);
+}
+
+#[tokio::test]
+async fn inspector_snapshot_keeps_attempts_across_provider_failover() {
+    let config = swage_provider::retry::RetryConfig {
+        max_retries: 1,
+        initial_backoff: Duration::ZERO,
+        max_backoff: Duration::ZERO,
+    };
+    let primary = swage_provider::retry::RetryProvider::new(
+        MultiRoundMockProvider::new(vec![
+            vec![StreamChunk::Error {
+                message: "primary unavailable".into(),
+            }],
+            vec![StreamChunk::Error {
+                message: "primary still unavailable".into(),
+            }],
+        ]),
+        config.clone(),
+    );
+    let secondary = swage_provider::retry::RetryProvider::new(
+        MultiRoundMockProvider::new(vec![vec![
+            StreamChunk::Delta {
+                content: "secondary answer".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]]),
+        config,
+    );
+    let failover = swage_provider::failover::FailoverProvider::with_defaults(vec![
+        Arc::new(primary),
+        Arc::new(secondary),
+    ]);
+    let (state, session_id, storage) =
+        make_state_with_tool_provider_and_storage(Arc::new(failover)).await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("answer through failover"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .unwrap();
+    let turn_id = std::iter::from_fn(|| rx.try_recv().ok())
+        .find_map(|e| match e {
+            ServerEvent::ContextAssembled { turn_id, .. } => Some(turn_id),
+            _ => None,
+        })
+        .unwrap();
+    let snapshot = storage.get_snapshot(turn_id).await.unwrap().unwrap();
+    let report: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+    let attempts = report["provider_attempts"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        attempts.len(),
+        3,
+        "changing providers must not overwrite the first provider's attempts"
+    );
+    assert_eq!(attempts[0]["outcome"], "failed");
+    assert_eq!(attempts[1]["outcome"], "failed");
+    assert_eq!(attempts[2]["outcome"], "succeeded");
+    assert_eq!(attempts[0]["attempt"], attempts[2]["attempt"]);
+    assert_ne!(attempts[0]["id"], attempts[2]["id"]);
+}
+
+#[tokio::test]
+async fn inspector_snapshot_settles_an_attempt_when_the_turn_is_cancelled() {
+    let provider = swage_provider::retry::RetryProvider::new(
+        PendingFinalRoundProvider::new(vec![vec![StreamChunk::Delta { content: "partial".into() }]]),
+        swage_provider::retry::RetryConfig { max_retries: 1, initial_backoff: Duration::ZERO, max_backoff: Duration::ZERO },
+    );
+    let (state, session_id, storage) = make_state_with_tool_provider_and_storage(Arc::new(provider)).await;
+    let state = Arc::new(state);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let running_state = Arc::clone(&state);
+    let running = tokio::spawn(async move {
+        process_turn(&running_state, session_id, None, TurnInput::from("begin"), tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))), None).await
+    });
+    let mut turn_id = None;
+    loop {
+        match rx.recv().await.unwrap() {
+            ServerEvent::ContextAssembled { turn_id: id, .. } => turn_id = Some(id),
+            ServerEvent::Token { .. } => break,
+            _ => {}
+        }
+    }
+    cancel_turn(&state, session_id).await.unwrap();
+    running.await.unwrap().unwrap();
+    let snapshot = storage.get_snapshot(turn_id.unwrap()).await.unwrap().unwrap();
+    let report: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+    let attempts = report["provider_attempts"].as_array().cloned().unwrap_or_default();
+    assert_eq!(attempts.len(), 1, "the interrupted request remains in the turn's record");
+    assert_eq!(attempts[0]["outcome"], "interrupted");
+    assert!(attempts[0]["ended_at_ms"].as_u64().unwrap() >= attempts[0]["started_at_ms"].as_u64().unwrap());
+}

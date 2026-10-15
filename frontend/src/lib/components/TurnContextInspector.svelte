@@ -44,6 +44,41 @@
       });
   });
 
+  function object(value: unknown): Record<string, unknown> {
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown> : {};
+  }
+
+  function list(value: unknown): unknown[] {
+    return Array.isArray(value) ? value : [];
+  }
+
+  // Assignment metadata is not part of the live inspector's reading surface.
+  function blind(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(blind);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).filter(([key]) =>
+        !/^(variant(_id|_name)?|experiment_assignment|selected_variant)$/i.test(key),
+      ).map(([key, child]) => [key, blind(child)]));
+    }
+    return value;
+  }
+
+  function sentEffort(value: unknown): string {
+    const control = object(value);
+    switch (control.kind) {
+      case "level": return String(control.level);
+      case "budget": return `${String(control.tokens)} thinking tokens`;
+      case "disabled": return "Disabled";
+      case "omitted": return "No effort control sent";
+      default: return "Not recorded";
+    }
+  }
+
+  const visible = $derived(object(report?.provider_visible));
+  const model = $derived(object(visible.effective_model));
+  const effort = $derived(object(visible.effort));
+  const requests = $derived(list(visible.requests).map(object));
   const totalTokens = $derived(report?.total_tokens ?? 0);
   const durationMs = $derived(
     report
@@ -79,6 +114,52 @@
       do not sum to the request total.
     </p>
 
+    {#if Object.keys(model).length > 0 || Object.keys(effort).length > 0 || report.budget != null || report.budget_remaining != null}
+      <section aria-label="Effective request">
+        <h3>Effective request</h3>
+        {#if model.model_id}<p>Model: {String(model.model_id)}</p>{/if}
+        {#if model.provider_id}<p>Provider: {String(model.provider_id)}</p>{/if}
+        {#if effort.requested}<p>Effort: {String(effort.requested)} → {String(effort.clamped_to ?? effort.requested)}{effort.clamped_to ? " (clamped)" : ""}</p>{/if}
+        {#if Object.keys(effort).length > 0}<p>Sent effort: {sentEffort(effort.control)}</p>{/if}
+        {#if effort.note}<p>{String(effort.note)}</p>{/if}
+        {#if report.budget != null}<p>Configured budget: {report.budget} tokens</p>{/if}
+        {#if report.budget_remaining != null}<p>Remaining: {report.budget_remaining} tokens</p>{/if}
+      </section>
+    {/if}
+
+    {#if requests.length > 0}
+      <section aria-label="Provider requests">
+        <h3>Provider requests</h3>
+        {#each requests as request}
+          <details>
+            <summary>Full request · round {String(request.round)}</summary>
+            <pre>{JSON.stringify(blind(request.request), null, 2)}</pre>
+          </details>
+          {#if list(object(request.request).divergences).length > 0}
+            <section aria-label="Request divergences">
+              <h4>Request divergences · round {String(request.round)}</h4>
+              <pre>{JSON.stringify(blind(object(request.request).divergences), null, 2)}</pre>
+            </section>
+          {/if}
+        {/each}
+      </section>
+    {/if}
+
+    {#if (report.provider_attempts ?? []).length > 0}
+      <section aria-label="Provider attempts">
+        <h3>Provider attempts</h3>
+        <ol>
+          {#each report.provider_attempts as attempt}
+            <li>Round {attempt.round}, attempt {attempt.attempt}: {attempt.outcome}
+              <div>Started: {new Date(attempt.started_at_ms).toISOString()}</div>
+              <div>Ended: {attempt.ended_at_ms == null ? "Outstanding" : new Date(attempt.ended_at_ms).toISOString()}</div>
+              {#if attempt.error}<pre>{attempt.error}</pre>{/if}
+            </li>
+          {/each}
+        </ol>
+      </section>
+    {/if}
+
     <table class="elements">
       <thead>
         <tr>
@@ -95,6 +176,12 @@
               {element.source}
               {#if element.preview}
                 <span class="preview">{element.preview}</span>
+              {/if}
+              {#if element.full_text !== null && element.full_text !== undefined}
+                <details>
+                  <summary>Full text · {element.name}</summary>
+                  <pre>{element.full_text}</pre>
+                </details>
               {/if}
             </td>
             <td class="numeric">{element.token_count}</td>
@@ -162,6 +249,14 @@
 </aside>
 
 <style>
+  pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 0.8rem;
+  }
+
+  summary { cursor: pointer; }
+
   .context-inspector {
     padding: 1rem;
     border-left: var(--border);

@@ -11,6 +11,9 @@ pub struct AssemblyReport {
     pub assembly_name: String,
     pub elements: Vec<ElementReport>,
     pub total_tokens: usize,
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub provider_attempts: Vec<ProviderAttemptRecord>,
     pub budget: Option<usize>,
     pub budget_remaining: Option<isize>,
     pub compaction_applied: Vec<CompactionRecord>,
@@ -41,6 +44,7 @@ impl AssemblyReport {
             assembly_name: assembly_name.into(),
             elements: Vec::new(),
             total_tokens: 0,
+            provider_attempts: Vec::new(),
             budget: None,
             budget_remaining: None,
             compaction_applied: Vec::new(),
@@ -78,6 +82,8 @@ pub struct ElementReport {
     pub source: String,
     pub token_count: usize,
     pub preview: Option<String>,
+    /// The element's rendered text after substitution and assembly compaction.
+    pub full_text: Option<String>,
     pub priority: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub named_assembly: Option<NamedAssemblyReport>,
@@ -233,4 +239,28 @@ mod tests {
 
         assert!(parsed.declared_omissions.is_empty());
     }
+}
+
+/// One actual stream attempt, including the initial request and any retries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
+pub struct ProviderAttemptRecord {
+    pub id: String,
+    pub round: usize,
+    pub attempt: u32,
+    #[ts(type = "number")]
+    pub started_at_ms: u64,
+    #[ts(optional, type = "number | null")]
+    pub ended_at_ms: Option<u64>,
+    pub outcome: ProviderAttemptOutcome,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAttemptOutcome {
+    Outstanding,
+    Succeeded,
+    Failed,
+    Interrupted,
 }

@@ -240,83 +240,38 @@ pub(super) async fn project_agent_events(
                 )
                 .await;
             }
-            AgentEvent::ProviderReasoningCaptured {
-                turn_id: snapshot_turn_id,
-                round,
-                content,
-                details,
-            } => {
+            event @ (AgentEvent::ProviderReasoningCaptured { .. }
+            | AgentEvent::ProviderResponseCaptured { .. }
+            | AgentEvent::ProviderAttempt { .. }) => {
+                let snapshot_turn_id = match &event {
+                    AgentEvent::ProviderReasoningCaptured { turn_id, .. }
+                    | AgentEvent::ProviderResponseCaptured { turn_id, .. }
+                    | AgentEvent::ProviderAttempt { turn_id, .. } => *turn_id,
+                    _ => unreachable!(),
+                };
                 apply_provider_snapshot_event(
                     state,
                     report_json,
-                    AgentEvent::ProviderReasoningCaptured {
-                        turn_id: snapshot_turn_id,
-                        round,
-                        content,
-                        details,
-                    },
+                    event,
                     ProviderSnapshotCapturePath::Ordinary,
                 )
                 .await;
-                if let Err(e) = state
+                if let Err(error) = state
                     .storage
                     .store_snapshot(snapshot_turn_id, &report_json.to_string())
                     .await
                 {
-                    // Reconstructive record (record_durability.rs).
-                    tracing::warn!(
-                        error = %e,
-                        "failed to persist provider reasoning context snapshot"
-                    );
                     if let Err(audit_error) = record_durability::record_reconstruction_gap(
                         state.storage.as_ref(),
                         Some(session_id),
                         snapshot_turn_id,
-                        "provider_reasoning_snapshot",
-                        &e,
+                        "provider_snapshot",
+                        &error,
                     )
                     .await
                     {
                         record_integrity_lost.get_or_insert(format!(
-                            "provider reasoning snapshot lost and the loss could not be recorded: {audit_error}"
-                        ));
-                    }
-                }
-            }
-            AgentEvent::ProviderResponseCaptured {
-                turn_id: snapshot_turn_id,
-                round,
-                witness,
-            } => {
-                apply_provider_snapshot_event(
-                    state,
-                    report_json,
-                    AgentEvent::ProviderResponseCaptured {
-                        turn_id: snapshot_turn_id,
-                        round,
-                        witness,
-                    },
-                    ProviderSnapshotCapturePath::Ordinary,
-                )
-                .await;
-                if let Err(e) = state
-                    .storage
-                    .store_snapshot(snapshot_turn_id, &report_json.to_string())
-                    .await
-                {
-                    // Reconstructive record (record_durability.rs).
-                    tracing::warn!(error = %e, "failed to persist provider response witness");
-                    if let Err(audit_error) = record_durability::record_reconstruction_gap(
-                        state.storage.as_ref(),
-                        Some(session_id),
-                        snapshot_turn_id,
-                        "provider_response_witness",
-                        &e,
-                    )
-                    .await
-                    {
-                        record_integrity_lost.get_or_insert(format!(
-                            "provider response witness lost and the loss could not be recorded: {audit_error}"
+                            "provider snapshot lost and the loss could not be recorded: {audit_error}"
                         ));
                     }
                 }

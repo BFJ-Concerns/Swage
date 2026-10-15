@@ -491,6 +491,13 @@
             "$ref": "#/$defs/AssemblyError"
           }
         },
+        "provider_attempts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ProviderAttemptRecord"
+          }
+        },
         "provider_visible": true,
         "tool_scope": true,
         "total_tokens": {
@@ -2185,6 +2192,13 @@
     "ElementReport": {
       "type": "object",
       "properties": {
+        "full_text": {
+          "description": "The element's rendered text after substitution and assembly compaction.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "type": "string"
         },
@@ -3351,6 +3365,62 @@
           ]
         }
       }
+    },
+    "ProviderAttemptOutcome": {
+      "type": "string",
+      "enum": [
+        "outstanding",
+        "succeeded",
+        "failed"
+      ]
+    },
+    "ProviderAttemptRecord": {
+      "description": "One actual stream attempt, including the initial request and any retries.",
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "ended_at_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ProviderAttemptOutcome"
+        },
+        "round": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "started_at_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "round",
+        "attempt",
+        "started_at_ms",
+        "outcome"
+      ]
     },
     "ProviderProtocol": {
       "oneOf": [

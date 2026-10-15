@@ -1724,10 +1724,16 @@ impl Agent {
         let mut tool_calls = Vec::new();
         let mut reasoning = Vec::new();
         let mut incomplete_reason = None;
+        let mut active_attempt: Option<swage_core::ProviderAttemptRecord> = None;
 
         loop {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
+                    if let Some(mut record) = active_attempt.take() {
+                        record.ended_at_ms = Some(chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default());
+                        record.outcome = swage_core::ProviderAttemptOutcome::Interrupted;
+                        let _ = event_tx.send(AgentEvent::ProviderAttempt { turn_id: execution.turn_id, record });
+                    }
                     let accumulated_partial = format!("{accumulated_prefix}{text}");
                     self.persist_cancelled_partial(
                         execution.thread_id,
@@ -1795,6 +1801,11 @@ impl Agent {
                                 round,
                                 witness,
                             });
+                        }
+                        Some(StreamChunk::ProviderAttempt(mut record)) => {
+                            record.round = round;
+                            active_attempt = record.ended_at_ms.is_none().then(|| record.clone());
+                            let _ = event_tx.send(AgentEvent::ProviderAttempt { turn_id: execution.turn_id, record });
                         }
                         Some(StreamChunk::ProviderRetryStarted { attempt, max_retries, provider, wait_ms }) => {
                             let _ = event_tx.send(AgentEvent::ProviderRetryStarted {

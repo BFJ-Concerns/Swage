@@ -119,6 +119,13 @@
             },
             "type": "array"
           },
+          "provider_attempts": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProviderAttemptRecord"
+            },
+            "type": "array"
+          },
           "provider_visible": true,
           "tool_scope": true,
           "total_tokens": {
@@ -1813,6 +1820,13 @@
       },
       "ElementReport": {
         "properties": {
+          "full_text": {
+            "description": "The element's rendered text after substitution and assembly compaction.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "name": {
             "type": "string"
           },
@@ -2979,6 +2993,62 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "ProviderAttemptOutcome": {
+        "enum": [
+          "outstanding",
+          "succeeded",
+          "failed"
+        ],
+        "type": "string"
+      },
+      "ProviderAttemptRecord": {
+        "description": "One actual stream attempt, including the initial request and any retries.",
+        "properties": {
+          "attempt": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "ended_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ProviderAttemptOutcome"
+          },
+          "round": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "started_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "round",
+          "attempt",
+          "started_at_ms",
+          "outcome"
+        ],
         "type": "object"
       },
       "ProviderProtocol": {

@@ -622,6 +622,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
     )
     .await;
     let (assembled_messages, mut assembly_report) = (output.messages, output.report);
+    redact_element_texts(state, &mut assembly_report).await;
     assembly_report.tool_scope = Some(serde_json::json!({
         "effective_root": tool_root.path,
     }));
