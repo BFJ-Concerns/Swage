@@ -45,6 +45,7 @@ pub use swage_protocol::client::voice::{
 pub struct GatewayClient {
     client: reqwest::Client,
     base_url: String,
+    token: Option<reqwest::header::HeaderValue>,
 }
 
 impl GatewayClient {
@@ -57,7 +58,104 @@ impl GatewayClient {
         Self {
             client: reqwest::Client::new(),
             base_url: address.trim_end_matches('/').to_string(),
+            token: None,
         }
+    }
+
+    /// Construct a client using its remembered token for this gateway origin.
+    pub fn with_saved_pairing(address: &str, path: &std::path::Path) -> Result<Self, ClientError> {
+        let token = crate::pairing::load(path, address)
+            .map_err(|source| ClientError::MetadataIo { source })?;
+        Self::with_token(address, token.as_deref())
+    }
+
+    fn with_token(address: &str, token: Option<&str>) -> Result<Self, ClientError> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        let token = token
+            .map(reqwest::header::HeaderValue::from_str)
+            .transpose()
+            .map_err(|error| ClientError::MetadataIo {
+                source: std::io::Error::other(error),
+            })?
+            .map(|mut value| {
+                value.set_sensitive(true);
+                value
+            });
+        if let Some(value) = &token {
+            headers.insert("X-Swage-Token", value.clone());
+        }
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|source| ClientError::ConnectionFailed {
+                address: address.to_owned(),
+                source,
+            })?;
+        Ok(Self {
+            client,
+            base_url: address.trim_end_matches('/').to_owned(),
+            token,
+        })
+    }
+
+    /// The remembered token for a native WebSocket upgrade header.
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_ref().and_then(|value| value.to_str().ok())
+    }
+
+    /// Whether this client is already admitted, including a local ungated client.
+    pub async fn access_status(
+        &self,
+    ) -> Result<swage_protocol::client::access::AccessStatusResponse, ClientError> {
+        let url = format!("{}/api/access", self.base_url);
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|error| self.map_reqwest_error(error, &url))?;
+        self.check_success(response, &url)
+            .await?
+            .json()
+            .await
+            .map_err(|source| ClientError::RequestFailed {
+                address: url,
+                source,
+            })
+    }
+
+    /// Redeem a code once and remember the returned token for subsequent runs.
+    pub async fn pair_and_remember(
+        &mut self,
+        code: &str,
+        path: &std::path::Path,
+    ) -> Result<(), ClientError> {
+        use swage_protocol::client::access::{PairClientRequest, PairClientResponse};
+        let url = format!("{}/api/pair", self.base_url);
+        let response = self
+            .client
+            .post(&url)
+            .json(&PairClientRequest {
+                pairing_code: code.to_owned(),
+            })
+            .send()
+            .await
+            .map_err(|error| self.map_reqwest_error(error, &url))?;
+        let paired: PairClientResponse = self
+            .check_success(response, &url)
+            .await?
+            .json()
+            .await
+            .map_err(|source| ClientError::RequestFailed {
+                address: url,
+                source,
+            })?;
+        let client = Self::with_token(&self.base_url, Some(&paired.token))?;
+        crate::pairing::save(path, &self.base_url, &paired.token)
+            .map_err(|source| ClientError::MetadataIo { source })?;
+        *self = client;
+        Ok(())
     }
 
     /// Discovers the gateway address from runtime metadata and constructs a client.

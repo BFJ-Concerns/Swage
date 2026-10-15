@@ -75,6 +75,10 @@ pub enum Command {
 /// Arguments for `swage run`.
 #[derive(Debug, clap::Args)]
 pub struct RunArgs {
+    /// One-time code from `swage gateway pair`; remembered for this gateway.
+    #[arg(long)]
+    pub pairing_code: Option<String>,
+
     /// Gateway URL to connect to.
     ///
     /// Defaults to the running gateway's address found via runtime metadata,

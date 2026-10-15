@@ -6,6 +6,8 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- The desktop shell and `swage run` pair once with a network gateway and remember its token for later HTTP and WebSocket requests. `swage run --pairing-code` accepts the one-time code; without it, an unpaired CLI asks for the code before reading the prompt.
+
 - Settings → Security shows the install’s effective checks, overrides and attributed relaxations. Install and topic approval lists use a registered-tool picker with per-tool timeouts, and sessions show which checks are relaxed and by which scope.
 
 - Settings has a Memory tab listing every memory page, general and per topic, to read; a chat box there changes memory by instructing the curator, showing its reply and each page it changed. The curator's notice links open the page they name.

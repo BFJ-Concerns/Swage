@@ -586,7 +586,8 @@ mod tests {
                 crate::tool::file_read::FileReadTool {
                     max_output_bytes: 4096,
                 },
-            ) as Arc<dyn crate::tool::Tool>]),
+            )
+                as Arc<dyn crate::tool::Tool>]),
         );
         let reading = read_security_settings(&state, SettingsScope::Install)
             .await

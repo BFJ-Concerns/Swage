@@ -3,7 +3,7 @@
 //! Creates a fresh conversation, streams one prompt through the gateway, and
 //! writes the assistant's live response to stdout.
 
-use std::io::{self, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
 
 use swage_client::error::ClientError;
@@ -23,12 +23,11 @@ pub fn resolve_gateway_url(args: &RunArgs) -> String {
     }
 }
 
-async fn read_message(args: &RunArgs) -> Result<String, ClientError> {
+async fn read_message(args: &RunArgs, client: &GatewayClient) -> Result<String, ClientError> {
     if let Some(audio_input) = &args.audio_input {
         let audio_bytes = tokio::fs::read(audio_input)
             .await
             .map_err(|source| ClientError::MetadataIo { source })?;
-        let client = GatewayClient::new(&resolve_gateway_url(args));
         let capabilities = client.voice_capabilities().await?;
         if !capabilities.transcription {
             return Err(ClientError::GatewayNotRunning {
@@ -78,12 +77,45 @@ async fn read_message(args: &RunArgs) -> Result<String, ClientError> {
 /// Run one prompt through the gateway and stream the reply to stdout.
 pub async fn run(args: &RunArgs) -> Result<(), ClientError> {
     let url = resolve_gateway_url(args);
-    let message = read_message(args).await?;
-    let client = GatewayClient::new(&url);
+    let path = swage_client::pairing::token_path();
+    let mut client = GatewayClient::with_saved_pairing(&url, &path)?;
+    let access = client.access_status().await?;
+    if access.mode == swage_protocol::client::access::AccessGateMode::Token && !access.admitted {
+        let code = if let Some(code) = &args.pairing_code {
+            code.clone()
+        } else {
+            eprint!(
+                "Pair this client: run `swage gateway pair` on the gateway's machine, then enter its code: "
+            );
+            io::stderr()
+                .flush()
+                .map_err(|source| ClientError::MetadataIo { source })?;
+            tokio::task::spawn_blocking(|| {
+                let mut code = String::new();
+                if io::stdin().is_terminal() {
+                    io::stdin().read_line(&mut code)?;
+                } else {
+                    let terminal = std::fs::File::open("/dev/tty").map_err(|_| {
+                        io::Error::other("pairing requires a terminal; supply --pairing-code to pair this client")
+                    })?;
+                    io::BufReader::new(terminal).read_line(&mut code)?;
+                }
+                Ok::<_, io::Error>(code.trim().to_owned())
+            })
+            .await
+            .map_err(|error| ClientError::MetadataIo {
+                source: io::Error::other(error),
+            })?
+            .map_err(|source| ClientError::MetadataIo { source })?
+        };
+        client.pair_and_remember(code.trim(), &path).await?;
+    }
+    let message = read_message(args, &client).await?;
     let conversation = client
         .create_conversation_with_model(args.model.as_deref())
         .await?;
-    let mut ws = GatewayWebSocket::connect(&url, conversation.id).await?;
+    let mut ws =
+        GatewayWebSocket::connect_with_token(&url, conversation.id, client.token()).await?;
 
     ws.send(ClientEvent::SendMessage {
         client_id: None,
@@ -192,6 +224,7 @@ mod tests {
     #[test]
     fn explicit_url_takes_precedence() {
         let args = RunArgs {
+            pairing_code: None,
             url: Some("http://example.invalid:1234".into()),
             audio_input: None,
             audio_output: None,

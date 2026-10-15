@@ -28,14 +28,40 @@ impl GatewayWebSocket {
     /// `address` is the gateway's HTTP base URL (e.g. `"http://127.0.0.1:3000"`).
     /// It is converted to a `ws://` URL automatically.
     pub async fn connect(address: &str, conversation_id: Uuid) -> Result<Self, ClientError> {
+        Self::connect_with_token(address, conversation_id, None).await
+    }
+
+    /// Connect with the paired token in a native upgrade header.
+    pub async fn connect_with_token(
+        address: &str,
+        conversation_id: Uuid,
+        token: Option<&str>,
+    ) -> Result<Self, ClientError> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let url =
             build_ws_url(address, conversation_id).map_err(|msg| ClientError::WebSocketFailed {
                 address: address.to_string(),
                 message: msg,
             })?;
 
+        let mut request =
+            url.into_client_request()
+                .map_err(|error| ClientError::WebSocketFailed {
+                    address: address.to_owned(),
+                    message: error.to_string(),
+                })?;
+        if let Some(token) = token {
+            let mut value = token
+                .parse::<tokio_tungstenite::tungstenite::http::HeaderValue>()
+                .map_err(|_| ClientError::WebSocketFailed {
+                    address: address.to_owned(),
+                    message: "invalid gateway token".into(),
+                })?;
+            value.set_sensitive(true);
+            request.headers_mut().insert("X-Swage-Token", value);
+        }
         let (stream, _response) =
-            connect_async(&url)
+            connect_async(request)
                 .await
                 .map_err(|e| ClientError::WebSocketFailed {
                     address: address.to_string(),
