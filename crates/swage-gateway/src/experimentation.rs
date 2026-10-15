@@ -59,7 +59,7 @@ pub enum SelectionReason {
 }
 
 /// The outcome of one variant selection.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VariantDecision {
     pub variant: String,
     pub reason: SelectionReason,

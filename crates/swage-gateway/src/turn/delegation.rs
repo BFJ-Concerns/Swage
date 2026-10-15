@@ -46,13 +46,7 @@ struct DelegatedSelection {
     model: Option<swage_config::ModelEndpointConfig>,
     preset: Option<swage_config::GenerationPresetConfig>,
     effort: Option<swage_core::ResolvedEffort>,
-    prompt: Option<DelegatedPromptDecision>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct DelegatedPromptDecision {
-    variant: String,
-    reason: crate::experimentation::SelectionReason,
+    prompt: Option<crate::experimentation::VariantDecision>,
 }
 
 struct ResolvedNamedChild {
@@ -298,10 +292,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
                 && let Err(error) = crate::experimentation::record_selection(
                     &self.state,
                     crate::experimentation::LOCATION_TASK_PROMPT,
-                    &crate::experimentation::VariantDecision {
-                        variant: prompt.variant,
-                        reason: prompt.reason,
-                    },
+                    &prompt,
                     Some(session.id),
                     Some(turn_id),
                 )
@@ -851,10 +842,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                         sender_turn_id,
                     )
                     .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
-                    prompt_decision = Some(DelegatedPromptDecision {
-                        variant: decision.variant,
-                        reason: decision.reason,
-                    });
+                    prompt_decision = Some(decision);
                 }
                 super::apply_task_definition(target_resolved, &definition)
                     .map_err(|error| AgentError::InvalidConfig(error.to_string()))?
