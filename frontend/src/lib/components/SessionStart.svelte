@@ -35,6 +35,10 @@
     onCreateTopic,
   }: Props = $props();
 
+  let topicSearch = $state("");
+  const matchingTopics = $derived(topics.filter(topic =>
+    topic.id === selectedTopicId || topic.name.toLocaleLowerCase().includes(topicSearch.trim().toLocaleLowerCase()),
+  ));
   let selectedAgentId = $state("");
   let showCreateForm = $state(false);
   let newTopicName = $state("");
@@ -82,9 +86,10 @@
   <div class="controls">
     <label class="topic-choice">
       <span>Topic</span>
+      <input type="search" aria-label="Search start topics" placeholder="Search topics…" bind:value={topicSearch} />
       <select aria-label="Topic" bind:value={selectedTopicId}>
         <option value="">No topic — general assistant</option>
-        {#each topics as topic (topic.id)}
+        {#each matchingTopics as topic (topic.id)}
           <option value={topic.id}>{topic.name}</option>
         {/each}
       </select>
@@ -169,6 +174,7 @@
     font-size: var(--font-label-sm);
   }
 
+  .topic-choice input,
   .topic-choice select,
   .create-topic input {
     border: 1px solid var(--rule-soft);

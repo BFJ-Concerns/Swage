@@ -12,7 +12,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
 import App from "../../App.svelte";
-import { createConversation, getConversation } from "../api/conversations";
+import { createConversation, getConversation, listConversations } from "../api/conversations";
+import { listTopics } from "../api/topics";
+import { ApiError } from "../api/error";
 import type { WebSocketClient } from "../api/websocket";
 
 const topic = {
@@ -144,6 +146,7 @@ describe("ambient channel control path", () => {
   let component: MountedComponent | undefined;
 
   beforeEach(() => {
+    vi.mocked(listTopics).mockResolvedValue([topic]);
     window.localStorage.clear();
     window.localStorage.setItem("swage:active-topic", JSON.stringify(topic.id));
     vi.clearAllMocks();
@@ -241,6 +244,95 @@ describe("ambient channel control path", () => {
     ) as HTMLSelectElement).value).toBe("conv-new");
     expect(document.body.textContent).not.toContain("History of conv-1");
     expect(surfaceButton("Surfaces").getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it.each([
+    { id: "empty-topic", name: "Empty" },
+    { id: null, name: "General" },
+  ])("never renders previous rows beneath the newly selected $name scope header", async (choice) => {
+    const empty = { ...topic, id: "empty-topic", name: "Empty", slug: "empty" };
+    vi.mocked(listTopics).mockResolvedValue([topic, empty]);
+    component = await mountAppOnConversation();
+    (document.querySelector('button.sessions-btn') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(document.querySelector('select[aria-label="Topic"]')).not.toBeNull());
+    const select = document.querySelector<HTMLSelectElement>('select[aria-label="Topic"]')!;
+    select.value = choice.id ?? "";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    let release: ((rows: typeof summaries) => void) | undefined;
+    vi.mocked(listConversations).mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    const frames: string[] = [];
+    const observer = new MutationObserver(() => {
+      if (document.querySelector('.scope-name')?.textContent === choice.name) {
+        frames.push(document.querySelector('.conversation-list')?.textContent ?? "");
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    try {
+      (document.querySelector('button.start-btn') as HTMLButtonElement).click();
+      await vi.waitFor(() => expect(listConversations).toHaveBeenLastCalledWith(choice.id));
+      await vi.waitFor(() => expect(frames.length).toBeGreaterThan(0));
+      for (const rows of frames) expect(rows).not.toContain("Release checklist review");
+    } finally {
+      observer.disconnect();
+      release?.([]);
+    }
+  });
+
+  it("does not install a delayed creation after selecting a session in another topic", async () => {
+    const other = { ...topic, id: "topic-2", name: "Other", slug: "other" };
+    vi.mocked(listTopics).mockResolvedValue([topic, other]);
+    component = await mountAppOnConversation();
+    let release!: (value: Awaited<ReturnType<typeof createConversation>>) => void;
+    vi.mocked(createConversation).mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    (document.querySelector('button.new-session') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(createConversation).toHaveBeenCalled());
+    vi.mocked(getConversation).mockResolvedValueOnce({ ...detail("conv-2"), agent_id: "gateway", topic_id: other.id });
+    const selector = document.querySelector<HTMLSelectElement>('select[aria-label="Active conversation"]')!;
+    selector.value = "conv-2";
+    selector.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(window.location.pathname).toBe("/conversations/conv-2"));
+    release({ id: "late", topic_id: topic.id, agent_id: "gateway", selected_model_id: null, created_at: "", last_activity: "" });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(window.location.pathname).toBe("/conversations/conv-2");
+    expect(document.body.textContent).toContain("History of conv-2");
+    expect(selector.value).toBe("conv-2");
+    expect(wsClient.connect).not.toHaveBeenCalledWith("late");
+  });
+
+  it("shows a structured creation error while keeping the conversation usable", async () => {
+    component = await mountAppOnConversation();
+    vi.mocked(createConversation).mockRejectedValueOnce(new ApiError(422, "validation_error", "Choose an available agent"));
+    (document.querySelector('button.new-session') as HTMLButtonElement).click();
+    await vi.waitFor(() => {
+      expect(document.querySelector('[role="alert"]')?.textContent ?? "").toContain("validation_error: Choose an available agent");
+    });
+    expect(document.body.textContent).toContain("History of conv-1");
+    expect(window.location.pathname).toBe("/conversations/conv-1");
+  });
+
+  it("reports a failed selection locally and retains the existing conversation", async () => {
+    component = await mountAppOnConversation();
+    vi.mocked(getConversation).mockRejectedValueOnce(new ApiError(404, "not_found", "Conversation missing"));
+    const selector = document.querySelector<HTMLSelectElement>('select[aria-label="Active conversation"]')!;
+    selector.value = "conv-2";
+    selector.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => {
+      expect(document.querySelector('[role="alert"]')?.textContent ?? "").toContain("not_found: Conversation missing");
+    });
+    expect(document.body.textContent).toContain("History of conv-1");
+    expect(document.body.textContent).not.toContain("Could not connect to the gateway");
+    expect(document.querySelector('textarea')).not.toBeNull();
+  });
+
+  it("keeps a deep-link server error local instead of declaring the gateway unreachable", async () => {
+    window.history.replaceState({}, "", "/conversations/unavailable");
+    vi.mocked(getConversation).mockRejectedValueOnce(new ApiError(503, "internal_error", "Conversation temporarily unavailable"));
+    component = mount(App, { target: document.body });
+    await vi.waitFor(() => {
+      expect(document.querySelector('[role="alert"]')?.textContent ?? "").toContain("internal_error: Conversation temporarily unavailable");
+    });
+    expect(document.body.textContent).not.toContain("Could not connect to the gateway");
+    expect(document.body.textContent).toContain("New session");
   });
 
   it("routes a workflow run URL into the run view and requests that run", async () => {

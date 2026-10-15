@@ -43,6 +43,15 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Conversation connections recover after a gateway restart, explain when another tab owns the conversation and how to retry, clear that warning once reconnected, distinguish that refusal from transport loss, preserve a running turn when another tab refuses a reconnect, and ignore late events from sockets replaced during navigation.
+
+- Switching session scope clears the sidebar immediately and ignores older list responses.
+- General sessions show “General” in the header; named topics retain their topic label.
+- Selecting another session prevents an outstanding creation response from changing the conversation or URL.
+- Conversation navigation and creation failures show their own recoverable errors, including the gateway’s error code and message, while the current conversation remains available.
+- The session-start topic selector and recent-session topic filter can search large topic catalogues.
+- The web UI serves a favicon.
+
 - Session previews in the recent list, sidebar, conversation selector, delete controls and Operator deck show plain text without Markdown formatting or link destinations. Operator session summaries are limited to three lines.
 - The workflow-authoring skill states event-kind names as the gateway accepts them: segments are joined by `.`, `:` or `/` only, with `_` and `-` allowed inside a segment but never separating one.
 - Denying a tool approval identifies the user's denial in the tool card and the feedback sent to the model, distinct from an approval timeout.

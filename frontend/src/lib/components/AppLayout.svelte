@@ -224,7 +224,7 @@
   <header class="topbar">
     <button type="button" class="sessions-btn" onclick={() => onOpenSessions?.()}>All sessions</button>
     <span class="scope" aria-label="Session scope">
-      <span class="scope-label">Topic</span>
+      {#if currentTopic}<span class="scope-label">Topic</span>{/if}
       {#if currentTopic}
         <button type="button" class="scope-name" onclick={openTopicSettings} title="Topic settings">{scopeName}</button>
       {:else}

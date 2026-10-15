@@ -1423,3 +1423,53 @@ async fn queued_websocket_send_preserves_its_client_id() {
         "a queued acknowledgement must identify its client send"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_duplicate_socket_receives_the_reason_over_the_websocket() {
+    use axum::routing::get;
+    use futures::StreamExt;
+    use tokio::time::{Duration, timeout};
+
+    use swage_storage::store::{SessionStore, Storage, TopicStore};
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .unwrap();
+    let session_id = session.id;
+    let state = AppState::new_with_config_root(
+        storage.clone() as Arc<dyn Storage>,
+        storage as Arc<dyn TopicStore>,
+        Arc::new(MockProvider::new(vec![])),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    let router = axum::Router::new()
+        .route("/ws/{id}", get(super::ws_handler))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let url = format!("ws://{address}/ws/{session_id}");
+    let (mut first, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let duplicate = tokio_tungstenite::connect_async(&url).await;
+    assert!(
+        duplicate.is_ok(),
+        "the browser must receive the rejection reason on the socket: {duplicate:?}"
+    );
+    let (mut duplicate, _) = duplicate.unwrap();
+    let frame = timeout(Duration::from_secs(3), duplicate.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let event: ServerEvent = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+    assert!(matches!(event, ServerEvent::Error { code, .. } if code == "already_connected"));
+    assert!(first.close(None).await.is_ok());
+    let _ = duplicate.close(None).await;
+    server.abort();
+}

@@ -250,6 +250,8 @@ export function createConversationStore(): ConversationStore {
     updateConversationSummary(ownerId, message);
   }
 
+  let listGeneration = 0;
+
   return {
     // ---------------------------------------------------------------------------
     // Reactive state (read-only to callers via readonly interface)
@@ -280,13 +282,15 @@ export function createConversationStore(): ConversationStore {
     // ---------------------------------------------------------------------------
 
     async loadConversations(topicId) {
+      const generation = ++listGeneration;
+      conversationsStore.set([]);
       isLoadingStore.set(true);
       try {
         const list = await api.listConversations(topicId);
+        if (generation !== listGeneration) return;
         conversationsStore.set(sortByRecency(list));
       } finally {
-        // Always clear loading — even on error, so the UI isn't stuck.
-        isLoadingStore.set(false);
+        if (generation === listGeneration) isLoadingStore.set(false);
       }
     },
 

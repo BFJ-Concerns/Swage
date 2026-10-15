@@ -22,6 +22,7 @@
   import { listEffectiveAgentDefinitions } from "./lib/api/agent-definitions";
   import type { EffectiveAgentDefinitionResponse } from "./lib/protocol/EffectiveAgentDefinitionResponse";
   import type { ConversationStore } from "./lib/stores/conversations";
+  import { ApiError } from "./lib/api/error";
   import { createConversationStore } from "./lib/stores/conversations";
   import { createConnectionStore } from "./lib/stores/connection";
   import { createSurfacesStore } from "./lib/stores/surfaces";
@@ -54,6 +55,7 @@
   let streamingStore: StreamingStore;
   const connectionStore = createConnectionStore({
     onReconnect: async (conversationId) => {
+      streamingStore.clearConnectionError(conversationId);
       const recoveredTurnGeneration = streamingStore.streamFor?.(conversationId)
         .activeTurnGeneration ?? 0;
       if (conversationStore.activeConversation?.id === conversationId) {
@@ -107,8 +109,10 @@
   }
 
   async function selectAndNavigateOrThrow(id: string): Promise<void> {
-    keepSurfaceForConversation();
+    actionError = null;
+    scopeGeneration += 1;
     await conversationStore.selectConversation(id);
+    keepSurfaceForConversation();
 
     // A deep-linked conversation may belong to a topic other than the one
     // currently in scope (or none, on first load). Bring the topic into
@@ -135,15 +139,17 @@
   // is left alone so nothing reloads needlessly.
   async function bringScopeIntoView(topicId: string | null): Promise<void> {
     const inView = topicStore.currentTopic?.id ?? null;
-    if (topicId && inView !== topicId) {
-      await topicStore.selectTopic(topicId);
-    } else if (!topicId && inView) {
-      topicStore.closeTopic();
-    } else if (inView === topicId && scopeLoadedFor === topicId) {
-      return;
-    }
+    if (inView === topicId && scopeLoadedFor === topicId) return;
     scopeLoadedFor = topicId;
-    await conversationStore.loadConversations(topicId);
+    // Clear the old rows before publishing the new scope. Awaiting even a
+    // local topic selection can yield a rendered frame beneath its header.
+    const loading = conversationStore.loadConversations(topicId);
+    if (topicId && inView !== topicId) {
+      await Promise.all([loading, topicStore.selectTopic(topicId)]);
+    } else {
+      if (!topicId && inView) topicStore.closeTopic();
+      await loading;
+    }
     try {
       agentDefinitions = await listEffectiveAgentDefinitions(topicId);
     } catch (error) {
@@ -158,7 +164,7 @@
     try {
       await selectAndNavigateOrThrow(id);
     } catch (err) {
-      console.error("Failed to select conversation:", err);
+      actionError = describeActionError("Could not open conversation", err);
     }
   }
 
@@ -174,6 +180,7 @@
     effort?: import("./lib/protocol/Effort").Effort | null,
   ): Promise<string | null> {
     try {
+      actionError = null;
       keepSurfaceForConversation();
       // The scope in view, or none: a conversation started without a topic
       // runs in the general scope.
@@ -199,7 +206,7 @@
       router.navigate(conversationPath(id));
       return id;
     } catch (err) {
-      console.error("Failed to create conversation:", err);
+      actionError = describeActionError("Could not create conversation", err);
       return null;
     }
   }
@@ -302,6 +309,9 @@
       selectConversation: selectAndNavigateOrThrow,
     },
     onRouteChange: handleRouteChange,
+    onNavigationError: (error) => {
+      actionError = describeActionError("Could not open conversation", error);
+    },
   });
 
   // ---------------------------------------------------------------------------
@@ -310,6 +320,14 @@
 
   let isInitialising = $state(true);
   let loadError = $state<string | null>(null);
+  let actionError = $state<string | null>(null);
+
+  function describeActionError(action: string, error: unknown): string {
+    const detail = error instanceof ApiError && error.code
+      ? `${error.code}: ${error.message}`
+      : error instanceof Error ? error.message : String(error);
+    return `${action}: ${detail}`;
+  }
   // Set to true when the router detects that the URL contained a stale ID.
   let notFound = $state(false);
   let activeSurface = $state<Surface>("conversation");
@@ -592,6 +610,13 @@
     onNavigate={navigate}
     onSettingsSaved={refreshModelCatalogueAfterSave}
     />
+
+  {#if actionError}
+    <div class="not-found-notice" role="alert">
+      {actionError}
+      <button class="dismiss" aria-label="Dismiss error" onclick={() => (actionError = null)}>✕</button>
+    </div>
+  {/if}
 
   {#if notFound}
     <!--
