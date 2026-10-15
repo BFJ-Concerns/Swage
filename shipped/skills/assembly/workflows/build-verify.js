@@ -5,6 +5,66 @@
 // landing stage that reports a derived result. Verification is a stage,
 // not a decision.
 
+export const meta = {
+  description:
+    "Build one unit from its brief: admission-checked restatement (hold), build, cross-family verification, fix rounds, per-finding triage of the residue (hold), and a landing stage reporting a derived result.",
+  argumentSchema: {
+    "type": "object",
+    "properties": {
+      "briefPath": {
+        "type": "string",
+        "description": "absolute path to the unit's brief"
+      },
+      "worktree": {
+        "type": "string",
+        "description": "absolute path to the unit's worktree"
+      },
+      "unitDir": {
+        "type": "string",
+        "description": "absolute path to the unit's record directory"
+      },
+      "mergePolicy": {
+        "type": "string",
+        "enum": [
+          "direct-merge",
+          "pr"
+        ],
+        "description": "how the unit lands"
+      },
+      "integrationBranch": {
+        "type": "string",
+        "description": "the branch the unit's PR targets; required when mergePolicy is \"pr\""
+      },
+      "annexeConfigPath": {
+        "type": "string",
+        "description": "absolute path to the annexe's config.toml (push_policy)"
+      },
+      "commissionPath": {
+        "type": "string",
+        "description": "absolute path to the commission (the annexe README)"
+      },
+      "spinePath": {
+        "type": "string",
+        "description": "absolute path to build/spine.md"
+      },
+      "verificationPath": {
+        "type": "string",
+        "description": "absolute path to VERIFICATION.md"
+      }
+    },
+    "required": [
+      "briefPath",
+      "worktree",
+      "commissionPath",
+      "spinePath",
+      "verificationPath",
+      "unitDir",
+      "mergePolicy",
+      "annexeConfigPath"
+    ]
+  },
+};
+
 export const defaults = {
   // Builders ride the flagship GPT tier at low effort: the brief plus the
   // named exemplar have already decided the path, so the tier carries the

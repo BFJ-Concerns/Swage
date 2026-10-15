@@ -19,6 +19,76 @@
 // pins the flagship: both passes are review work, which runs the flagship
 // (references/model-selection.md). Pin model and effort together on every
 // call: an unpinned call has no model to ride.
+export const meta = {
+  description:
+    "Compare a working-tree draft against the published contract for silent losses, first blind and then with the session's deliberate changes in hand.",
+  argumentSchema: {
+    "type": "object",
+    "properties": {
+      "baseline": {
+        "type": "string",
+        "description": "the contract at HEAD, full text"
+      },
+      "candidate": {
+        "type": "string",
+        "description": "the working-tree draft, full text"
+      },
+      "shed_files": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "file name"
+            },
+            "content": {
+              "type": "string",
+              "description": "file content"
+            }
+          },
+          "required": [
+            "name",
+            "content"
+          ]
+        },
+        "description": "shed files that are part of the candidate"
+      },
+      "deliberate_changes": {
+        "type": "object",
+        "properties": {
+          "integrated_delta": {
+            "type": "string",
+            "description": "what this session set out to change"
+          },
+          "cut_keep_list": {
+            "type": "string",
+            "description": "what grounding judged built versus not"
+          },
+          "shed_map": {
+            "type": "string",
+            "description": "each shed item and the file it went to"
+          },
+          "deliberate_drops": {
+            "type": "string",
+            "description": "what was dropped on purpose, with its decision"
+          },
+          "settled_items": {
+            "type": "string",
+            "description": "what the handshake settled"
+          }
+        },
+        "required": [],
+        "description": "pass 2 only; never shown to pass 1"
+      }
+    },
+    "required": [
+      "baseline",
+      "candidate"
+    ]
+  },
+};
+
 const FAMILY = {
   gpt: { model: "gpt-6.1-sol", effort: "medium" },
   claude: { model: "claude-opus-5-5", effort: "high" },

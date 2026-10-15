@@ -186,6 +186,32 @@ mod tests {
     use super::*;
     use std::{collections::BTreeMap, fs, path::Path};
 
+    /// Every shipped workflow declares its argument contract as valid JSON
+    /// Schema over an object, so the listing and `workflow_list` report the
+    /// real contract for product content rather than "unconstrained".
+    #[test]
+    fn every_shipped_workflow_declares_a_valid_argument_schema() {
+        let mut declared = 0;
+        for skill in SHIPPED_SKILLS {
+            for file in workflow_files(skill.name) {
+                let meta = swage_workflow::script_meta(file.contents)
+                    .unwrap_or_else(|error| panic!("{}: {error}", file.path));
+                let schema = meta
+                    .argument_schema
+                    .unwrap_or_else(|| panic!("{} declares no argumentSchema", file.path));
+                swage_core::json_schema_validator(&schema)
+                    .unwrap_or_else(|error| panic!("{}: {error}", file.path));
+                assert_eq!(
+                    schema["type"], "object",
+                    "{}: a workflow's arguments are an object",
+                    file.path
+                );
+                declared += 1;
+            }
+        }
+        assert!(declared > 0, "the catalogue carries workflows");
+    }
+
     fn repository_files(root: &Path) -> BTreeMap<String, Vec<u8>> {
         fn visit(root: &Path, directory: &Path, files: &mut BTreeMap<String, Vec<u8>>) {
             for entry in fs::read_dir(directory).expect("read shipped skills directory") {

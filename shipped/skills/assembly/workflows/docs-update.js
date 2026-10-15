@@ -6,6 +6,51 @@
 // merge policy. The build-verify shape with the writer and verifier
 // families swapped.
 
+export const meta = {
+  description:
+    "Write or refresh the documentation a brief names for landed units, verify it against the tree, hold for triage, and land it by the merge policy.",
+  argumentSchema: {
+    "type": "object",
+    "properties": {
+      "briefPath": {
+        "type": "string",
+        "description": "absolute path to the unit's brief"
+      },
+      "worktree": {
+        "type": "string",
+        "description": "absolute path to the unit's worktree"
+      },
+      "unitDir": {
+        "type": "string",
+        "description": "absolute path to the unit's record directory"
+      },
+      "mergePolicy": {
+        "type": "string",
+        "enum": [
+          "direct-merge",
+          "pr"
+        ],
+        "description": "how the unit lands"
+      },
+      "integrationBranch": {
+        "type": "string",
+        "description": "the branch the unit's PR targets; required when mergePolicy is \"pr\""
+      },
+      "annexeConfigPath": {
+        "type": "string",
+        "description": "absolute path to the annexe's config.toml (push_policy)"
+      }
+    },
+    "required": [
+      "briefPath",
+      "worktree",
+      "unitDir",
+      "mergePolicy",
+      "annexeConfigPath"
+    ]
+  },
+};
+
 export const defaults = {
   // Families swap relative to build-verify: the writer is a Claude leg
   // (the default below) and verification crosses to a GPT model pinned per

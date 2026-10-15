@@ -2,6 +2,103 @@ export const meta = {
   name: "shakedown-judgement-wave",
   description:
     "Fan judgement over imported session evidence: per session, a cross-family baseline sweep (readability screen, tiered transcription, charter check) and a taste-tier deep pass over flagged captures plus a pre-declared unflagged sample — concurrent where separately dispatched, collapsed into one combined judge for low-risk charters. Returns structured findings and coverage verdicts for the seat to file; rejections and escalations stay the seat's.",
+  argumentSchema: {
+    "type": "object",
+    "properties": {
+      "driverFamily": {
+        "type": "string",
+        "enum": [
+          "gpt",
+          "claude"
+        ],
+        "description": "the drivers' family; judges resolve to the other"
+      },
+      "findingsRef": {
+        "type": "string",
+        "description": "the findings reference text, inline"
+      },
+      "sweep": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "model id; the id selects the family"
+          },
+          "effort": {
+            "type": "string",
+            "description": "effort level"
+          }
+        },
+        "required": [],
+        "description": "staffing overrides for the sweep"
+      },
+      "deep": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "model id; the id selects the family"
+          },
+          "effort": {
+            "type": "string",
+            "description": "effort level"
+          }
+        },
+        "required": [],
+        "description": "staffing overrides for the deep pass"
+      },
+      "sessions": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "names the slot in the result"
+            },
+            "evidenceDir": {
+              "type": "string",
+              "description": "absolute path to the imported session evidence"
+            },
+            "charter": {
+              "type": "string",
+              "description": "the charter the session drove, inline"
+            },
+            "riskTier": {
+              "type": "string",
+              "enum": [
+                "low",
+                "high"
+              ]
+            },
+            "sampleSize": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "unflagged captures the deep pass samples"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "per-judge bound in milliseconds"
+            }
+          },
+          "required": [
+            "id",
+            "evidenceDir",
+            "charter",
+            "riskTier"
+          ]
+        },
+        "description": "the imported sessions to judge",
+        "minItems": 1
+      }
+    },
+    "required": [
+      "driverFamily",
+      "findingsRef",
+      "sessions"
+    ]
+  },
 };
 
 export const defaults = {

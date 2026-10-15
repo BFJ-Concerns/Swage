@@ -2,6 +2,73 @@ export const meta = {
   name: "shakedown-driver-wave",
   description:
     "Fan out one charter driver per prepared black-box workspace: each drives its charter at the product's real interface, records evidence into its own workspace, and returns its session report — findings or an explicit null return. Staffing is declared once and overridden per charter; escalation and re-dispatch stay the seat's decisions between waves.",
+  argumentSchema: {
+    "type": "object",
+    "properties": {
+      "driver": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "model id; the id selects the family"
+          },
+          "effort": {
+            "type": "string",
+            "description": "effort level"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "description": "the staffing table's driver row"
+      },
+      "charters": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "names the slot in the result"
+            },
+            "workspace": {
+              "type": "string",
+              "description": "absolute path to the charter's prepared black-box workspace"
+            },
+            "prompt": {
+              "type": "string",
+              "description": "the charter brief, inline"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "per-session bound in milliseconds"
+            },
+            "model": {
+              "type": "string",
+              "description": "per-charter model override"
+            },
+            "effort": {
+              "type": "string",
+              "description": "per-charter effort override"
+            }
+          },
+          "required": [
+            "id",
+            "workspace",
+            "prompt",
+            "timeoutMs"
+          ]
+        },
+        "description": "one charter per prepared workspace",
+        "minItems": 1
+      }
+    },
+    "required": [
+      "driver",
+      "charters"
+    ]
+  },
 };
 
 export const defaults = {

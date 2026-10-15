@@ -5,6 +5,67 @@
 // writes a durable report. Fails closed when the blind sweep produces
 // nothing usable.
 
+export const meta = {
+  description:
+    "Audit a teardown window: blind sweeps of the opposite model family re-derive what was removed, adjudicated against the restoration records, the retired list and the sweep records.",
+  argumentSchema: {
+    "type": "object",
+    "properties": {
+      "repo": {
+        "type": "string",
+        "description": "absolute path to the code repository"
+      },
+      "baseCommit": {
+        "type": "string",
+        "description": "the window's base commit hash"
+      },
+      "headCommit": {
+        "type": "string",
+        "description": "the window's head commit hash, resolved before the run"
+      },
+      "obligationsDir": {
+        "type": "string",
+        "description": "absolute path to build/obligations/"
+      },
+      "retiredPath": {
+        "type": "string",
+        "description": "absolute path to build/retired.md"
+      },
+      "teardownsDir": {
+        "type": "string",
+        "description": "absolute path to build/teardowns/"
+      },
+      "reportPath": {
+        "type": "string",
+        "description": "absolute path the audit report is written to"
+      },
+      "sweeps": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "blind-sweep worker count (default 3)"
+      },
+      "auditFamily": {
+        "type": "string",
+        "enum": [
+          "gpt",
+          "claude"
+        ],
+        "description": "the model family opposite the seat running the structural phase"
+      }
+    },
+    "required": [
+      "repo",
+      "baseCommit",
+      "headCommit",
+      "obligationsDir",
+      "retiredPath",
+      "teardownsDir",
+      "reportPath",
+      "auditFamily"
+    ]
+  },
+};
+
 export const defaults = {
   // Cheap volume for the blind sweep; adjudication compares finished lists
   // against records, so it rides a mid tier. Pinned because per-model effort

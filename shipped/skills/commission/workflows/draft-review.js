@@ -14,6 +14,67 @@
 // every GPT leg here attacks or adjudicates — review work, which runs the
 // flagship (references/model-selection.md). Pin model and effort together on
 // every call: an unpinned call has no model to ride.
+export const meta = {
+  description:
+    "Review a draft contract through several attack lenses across both model families and merge the findings into reconciled reviews.",
+  argumentSchema: {
+    "type": "object",
+    "properties": {
+      "draft": {
+        "type": "string",
+        "description": "the full draft contract text"
+      },
+      "settled_decisions": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "decision id"
+            },
+            "decision": {
+              "type": "string",
+              "description": "the decision"
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "examined",
+                "provisional"
+              ]
+            },
+            "rationale": {
+              "type": "string",
+              "description": "why"
+            }
+          },
+          "required": [
+            "id",
+            "decision"
+          ]
+        },
+        "description": "decisions already settled"
+      },
+      "delta": {
+        "type": "string",
+        "description": "what this session changed; empty for greenfield"
+      },
+      "lenses": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "description": "an attack lens"
+        },
+        "description": "attack lenses; sensible defaults when omitted"
+      }
+    },
+    "required": [
+      "draft"
+    ]
+  },
+};
+
 const FAMILY = {
   gpt: { model: "gpt-6.1-sol", effort: "medium" },
   claude: { model: "claude-opus-5-5", effort: "high" },

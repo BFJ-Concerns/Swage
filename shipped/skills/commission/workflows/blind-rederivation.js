@@ -14,6 +14,59 @@
 // at the resting level (review work runs the flagship —
 // references/model-selection.md). Pin model and effort together on every
 // call: an unpinned call has no model to ride.
+export const meta = {
+  description:
+    "Have blind designers re-derive a design from anchor-free briefs, one sustained designer per chunk, and compare the results against the settled design when one is supplied.",
+  argumentSchema: {
+    "type": "object",
+    "properties": {
+      "run_dir": {
+        "type": "string",
+        "description": "absolute path to an isolated empty directory for this run"
+      },
+      "domain": {
+        "type": "string",
+        "description": "the product domain stated generically, with no product name or incumbent vocabulary"
+      },
+      "premise": {
+        "type": "string",
+        "description": "the user's core hypothesis, taken as a given design premise"
+      },
+      "chunks": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "stable handle; names design-<id>.md"
+            },
+            "brief": {
+              "type": "string",
+              "description": "the anchor-audited brief for this chunk"
+            }
+          },
+          "required": [
+            "id",
+            "brief"
+          ]
+        },
+        "description": "ordered chunks, one sustained designer each",
+        "minItems": 1
+      },
+      "existing": {
+        "type": "string",
+        "description": "the settled design text to compare against; omit to run derivation only"
+      }
+    },
+    "required": [
+      "run_dir",
+      "domain",
+      "chunks"
+    ]
+  },
+};
+
 const FAMILY = {
   gpt: { model: "gpt-6.1-sol", effort: "medium" },
   claude: { model: "claude-opus-5-5", effort: "high" },

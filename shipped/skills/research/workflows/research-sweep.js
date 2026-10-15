@@ -14,6 +14,33 @@
 // sweep re-running an interrupted gather turn re-records under the same
 // scope and gets the first attempt's observation back, so no observation
 // duplicates even when the live page's bytes changed between attempts.
+export const meta = {
+  description:
+    "Research a subject for a purpose: scouts and gatherers capture sources into the knowledge base, an organiser orders them, and a synthesist writes the account.",
+  argumentSchema: {
+    "type": "object",
+    "properties": {
+      "subject": {
+        "type": "string",
+        "description": "what to research"
+      },
+      "purpose": {
+        "type": "string",
+        "description": "what the research is for"
+      },
+      "maxSources": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "sources to gather (default 8)"
+      }
+    },
+    "required": [
+      "subject",
+      "purpose"
+    ]
+  },
+};
+
 export const defaults = { maxAttempts: 3 };
 
 const subject = args.subject;

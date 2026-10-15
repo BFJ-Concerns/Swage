@@ -15,6 +15,59 @@
 // the GPT side pins the volume tier and Claude the cheap tier, both at the
 // floor — the brief decides the path. Pin model and effort together on every
 // call: an unpinned call has no model to ride.
+export const meta = {
+  description:
+    "Audit a draft commitment register against the conversation that produced it: mine the wants voiced, diff them against the lines, and judge each line's cheapest hollow reading.",
+  argumentSchema: {
+    "type": "object",
+    "properties": {
+      "transcripts": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "description": "absolute path to a transcript file"
+        },
+        "description": "every transcript file of this conversation",
+        "minItems": 1
+      },
+      "commitments": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "the line's id"
+            },
+            "text": {
+              "type": "string",
+              "description": "the full commitment line, falsifier included"
+            }
+          },
+          "required": [
+            "id",
+            "text"
+          ]
+        },
+        "description": "the whole draft register",
+        "minItems": 1
+      },
+      "hollow_ids": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "description": "a commitment id"
+        },
+        "description": "ids to scope the hollow stage to; omitted means every line"
+      }
+    },
+    "required": [
+      "transcripts",
+      "commitments"
+    ]
+  },
+};
+
 const FAMILY = {
   gpt: { model: "gpt-6-luna", effort: "low" },
   claude: { model: "claude-sonnet-5-5", effort: "low" },

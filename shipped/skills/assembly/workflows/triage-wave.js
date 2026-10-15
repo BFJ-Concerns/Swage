@@ -4,6 +4,63 @@
 // one document for the orchestrator's judgement. Proposes only — never
 // writes the ledger header or the obligation records.
 
+export const meta = {
+  description:
+    "Fan workers over the commission, the spine, the ledger and the task queue to propose the obligations a build run should carry, merged into one proposal document.",
+  argumentSchema: {
+    "type": "object",
+    "properties": {
+      "repo": {
+        "type": "string",
+        "description": "absolute path to the code repository"
+      },
+      "commissionPath": {
+        "type": "string",
+        "description": "absolute path to the annexe README"
+      },
+      "spinePath": {
+        "type": "string",
+        "description": "absolute path to build/spine.md"
+      },
+      "retiredPath": {
+        "type": "string",
+        "description": "absolute path to build/retired.md"
+      },
+      "ledgerPath": {
+        "type": "string",
+        "description": "absolute path to build/ledger.md"
+      },
+      "obligationsDir": {
+        "type": "string",
+        "description": "absolute path to build/obligations/"
+      },
+      "tasksPath": {
+        "type": "string",
+        "description": "absolute path to the annexe's TASKS.md"
+      },
+      "outPath": {
+        "type": "string",
+        "description": "absolute path the merged proposal is written to"
+      },
+      "waves": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "worker count (default 4)"
+      }
+    },
+    "required": [
+      "repo",
+      "commissionPath",
+      "spinePath",
+      "retiredPath",
+      "ledgerPath",
+      "obligationsDir",
+      "tasksPath",
+      "outPath"
+    ]
+  },
+};
+
 export const defaults = {
   model: "gpt-6-luna",
   effort: "low",

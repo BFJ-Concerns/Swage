@@ -14,6 +14,58 @@
 // here researches, critiques, or synthesises — judgement work, not the
 // collection floor. Pin model and effort together on every call: an unpinned
 // call has no model to ride.
+export const meta = {
+  description:
+    "Survey divergent approaches to one outcome: research, several approaches from different stances across both model families, critiqued and synthesised into ranked options.",
+  argumentSchema: {
+    "type": "object",
+    "properties": {
+      "run_dir": {
+        "type": "string",
+        "description": "absolute path to an isolated empty directory outside the project"
+      },
+      "brief": {
+        "type": "object",
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "description": "what the finished thing must let someone do, anchor-free"
+          },
+          "constraints": {
+            "type": "string",
+            "description": "hard external facts bounding any approach"
+          },
+          "importance": {
+            "type": "string",
+            "description": "why this part is load-bearing"
+          }
+        },
+        "required": [
+          "outcome",
+          "constraints"
+        ]
+      },
+      "count": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "how many divergent approaches (default 4)"
+      },
+      "angles": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "description": "a divergence stance"
+        },
+        "description": "divergence stances; sensible defaults when omitted"
+      }
+    },
+    "required": [
+      "run_dir",
+      "brief"
+    ]
+  },
+};
+
 const run_dir = args.run_dir;
 if (typeof run_dir !== "string" || !run_dir.startsWith("/"))
   throw new Error(

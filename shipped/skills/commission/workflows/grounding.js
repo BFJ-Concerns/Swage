@@ -11,6 +11,49 @@
 // more, with a comment naming it. The default posture is the find stage:
 // retrieval-shaped code-reading at the resting level. Pin model and effort
 // together on every call: an unpinned call has no model to ride.
+export const meta = {
+  description:
+    "Check which capabilities a draft describes are already built in the repository: a finder per candidate, confirmed by a cross-family verifier.",
+  argumentSchema: {
+    "type": "object",
+    "properties": {
+      "repo": {
+        "type": "string",
+        "description": "absolute path to the code repository"
+      },
+      "candidates": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "stable handle"
+            },
+            "feature": {
+              "type": "string",
+              "description": "what a user or caller can do, in observable terms"
+            },
+            "where": {
+              "type": "string",
+              "description": "where it lives in the README"
+            }
+          },
+          "required": [
+            "id",
+            "feature"
+          ]
+        },
+        "description": "the candidates to ground"
+      }
+    },
+    "required": [
+      "repo",
+      "candidates"
+    ]
+  },
+};
+
 const FAMILY = {
   gpt: { model: "gpt-6.1-sol", effort: "medium" },
   claude: { model: "claude-sonnet-5-5", effort: "medium" },

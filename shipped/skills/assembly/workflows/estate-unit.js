@@ -5,6 +5,73 @@
 // with severe findings converged by autonomous fix rounds before the
 // triage hold. Acceptance is inverted: the tests are the deliverable.
 
+export const meta = {
+  description:
+    "Build a unit whose proof is a fail-before/pass-after demonstration: baseline mode runs the new tests against a checkout lacking the behaviour, mutation mode breaks the behaviour in a scratch checkout.",
+  argumentSchema: {
+    "type": "object",
+    "properties": {
+      "briefPath": {
+        "type": "string",
+        "description": "absolute path to the unit's brief"
+      },
+      "worktree": {
+        "type": "string",
+        "description": "absolute path to the unit's worktree"
+      },
+      "unitDir": {
+        "type": "string",
+        "description": "absolute path to the unit's record directory"
+      },
+      "mergePolicy": {
+        "type": "string",
+        "enum": [
+          "direct-merge",
+          "pr"
+        ],
+        "description": "how the unit lands"
+      },
+      "integrationBranch": {
+        "type": "string",
+        "description": "the branch the unit's PR targets; required when mergePolicy is \"pr\""
+      },
+      "annexeConfigPath": {
+        "type": "string",
+        "description": "absolute path to the annexe's config.toml (push_policy)"
+      },
+      "commissionPath": {
+        "type": "string",
+        "description": "absolute path to the commission (the annexe README)"
+      },
+      "verificationPath": {
+        "type": "string",
+        "description": "absolute path to VERIFICATION.md"
+      },
+      "proofMode": {
+        "type": "string",
+        "enum": [
+          "baseline",
+          "mutation"
+        ],
+        "description": "baseline (default) or mutation"
+      },
+      "baselineRef": {
+        "type": "string",
+        "description": "the ref without the behaviour under proof; required in baseline mode"
+      }
+    },
+    "required": [
+      "briefPath",
+      "worktree",
+      "commissionPath",
+      "verificationPath",
+      "unitDir",
+      "mergePolicy",
+      "annexeConfigPath"
+    ]
+  },
+};
+
 export const defaults = {
   // Builders ride the flagship GPT tier at low effort. The builder is one
   // held worker — restatement, build, fix rounds and a warm landing are
