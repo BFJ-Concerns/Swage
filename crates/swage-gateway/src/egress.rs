@@ -355,6 +355,7 @@ mod tests {
             self.asked.lock().unwrap().push(request);
             Judgement {
                 verdict: self.verdict.clone(),
+                confident: true,
                 reason: "scripted".into(),
                 judge: Some("judge".into()),
             }

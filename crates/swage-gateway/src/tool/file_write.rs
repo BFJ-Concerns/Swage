@@ -39,6 +39,10 @@ impl Tool for FileWriteTool {
         json!({
             "type": "object",
             "properties": {
+                "justification": {
+                    "type": "string",
+                    "description": "Why this file is needed when it lies outside the session's granted locations, in one or two sentences. Read by whoever answers for the request — the person, or the judge when nobody is watching; omitted, the request is weighed without a reason."
+                },
                 "path": {
                     "type": "string",
                     "description": "Path to the file, relative to the workspace root."

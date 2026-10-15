@@ -2238,12 +2238,21 @@ impl Agent {
             return tool_dispatch_result(result);
         }
 
-        if approval_scope.routes_reach_to_judge() {
-            let reach = crate::judge::RequestedReach::Location {
-                path: path.clone(),
-                access: access.clone(),
-            };
-            let judgement = self.judge_reach(call, execution, &reach).await?;
+        let reach = crate::judge::RequestedReach::Location {
+            path: path.clone(),
+            access: access.clone(),
+        };
+        let judgement = self.judge_reach(call, execution, &reach).await;
+        let recording_failed = judgement.is_err();
+        let judgement = judgement.unwrap_or_else(|error| {
+            crate::judge::Judgement::unavailable(format!(
+                "the judgement could not be recorded ({error})"
+            ))
+        });
+        if recording_failed
+            || approval_scope.routes_reach_to_judge()
+            || (judgement.confident && judgement.verdict != crate::judge::JudgeVerdict::Unavailable)
+        {
             if judgement.verdict != crate::judge::JudgeVerdict::Allowed {
                 let mut result: ToolDispatchResult = (
                     crate::judge::refused_feedback(&call.name, &reach, &judgement),
@@ -2395,7 +2404,7 @@ impl Agent {
         use crate::judge::{JudgeRequest, Judgement};
 
         let justification = crate::judge::justification_from_arguments(&call.arguments);
-        let mut judgement = match &self.request_judge {
+        let judgement = match &self.request_judge {
             Some(judge) => {
                 judge
                     .judge(JudgeRequest {
@@ -2437,14 +2446,11 @@ impl Agent {
                     "verdict": judgement.verdict.as_str(),
                     "reason": judgement.reason,
                     "judge": judgement.judge,
+                    "confident": judgement.confident,
                 }),
             })
             .await;
-        if let Err(error) = recorded {
-            tracing::error!(%error, tool = %call.name, "request judgement could not be recorded; refusing the request");
-            judgement =
-                Judgement::unavailable(format!("the judgement could not be recorded ({error})"));
-        }
+        recorded?;
         Ok(judgement)
     }
 
@@ -3368,6 +3374,7 @@ mod judge_seam_tests {
         Arc::new(ScriptedJudge {
             judgement: Judgement {
                 verdict,
+                confident: true,
                 reason: reason.into(),
                 judge: Some("judge".into()),
             },
@@ -3630,5 +3637,253 @@ mod judge_seam_tests {
             .await
             .expect("audit read");
         assert!(events.is_empty());
+    }
+
+    async fn attended_case(
+        verdict: Option<JudgeVerdict>,
+        confident: bool,
+        expected: &str,
+        card: bool,
+    ) {
+        let judge = verdict.map(|verdict| {
+            Arc::new(ScriptedJudge {
+                judgement: Judgement {
+                    verdict,
+                    confident,
+                    reason: "a recorded decision".into(),
+                    judge: Some("judge".into()),
+                },
+                asked: Mutex::new(Vec::new()),
+            })
+        });
+        let (mut agent, execution, storage) =
+            unattended_fixture(judge.clone().map(|judge| judge as SharedRequestJudge)).await;
+        agent.config.approval_prompts_enabled = true;
+        agent.approval_registrar = Some(Arc::new(|_, sender| {
+            sender
+                .send(crate::approval::ApprovalDecision {
+                    decision: crate::approval::ApprovalDecisionValue::Approved,
+                    scope: crate::approval::ApprovalDecisionScope::Once,
+                    reason: None,
+                })
+                .unwrap();
+            crate::approval::ApprovalChannelRegistration::default()
+        }));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut scope = TurnApprovalScope::default();
+        let result = agent
+            .dispatch_tool_call(
+                &ToolCall {
+                    call_id: "attended".into(),
+                    name: "outside_read".into(),
+                    arguments: json!({"path": OUTSIDE, "justification": "the task needs the plan"}),
+                },
+                &execution,
+                &[],
+                &tx,
+                &tokio_util::sync::CancellationToken::new(),
+                &mut scope,
+            )
+            .await
+            .expect("dispatch settles");
+        assert_eq!(result.status, expected, "{}", result.content);
+        let mut cards = 0;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, AgentEvent::ApprovalRequired { .. }) {
+                cards += 1;
+            }
+        }
+        assert_eq!(
+            cards,
+            usize::from(card),
+            "only uncertain cases ask the person"
+        );
+        let record = recorded_judgement(&storage, &execution).await;
+        assert_eq!(
+            record["confident"],
+            judge.as_ref().is_some_and(|j| j.judgement.confident)
+        );
+        if let Some(judge) = judge {
+            assert_eq!(judge.asked.lock().unwrap().len(), 1);
+        }
+        if expected == "refused" {
+            assert!(result.execution_prevented);
+            assert!(result.content.contains("a recorded decision"));
+        }
+        assert!(
+            !scope.should_skip_gate(),
+            "a judged yes cannot pre-approve later calls"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn attended_confident_allow_runs_without_a_card() {
+        attended_case(Some(JudgeVerdict::Allowed), true, "success", false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn attended_confident_refusal_prevents_execution_without_a_card() {
+        attended_case(Some(JudgeVerdict::Refused), true, "refused", false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn attended_uncertain_allow_asks_the_person() {
+        attended_case(Some(JudgeVerdict::Allowed), false, "success", true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn attended_uncertain_refusal_asks_the_person() {
+        attended_case(Some(JudgeVerdict::Refused), false, "success", true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn attended_unavailable_judge_asks_even_if_it_claims_confidence() {
+        attended_case(Some(JudgeVerdict::Unavailable), true, "success", true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn attended_missing_judge_asks_the_person() {
+        attended_case(None, false, "success", true).await;
+    }
+
+    async fn failed_record_refuses(attended: bool) {
+        let judge = scripted(JudgeVerdict::Allowed, "the task names this plan");
+        let (mut agent, execution, storage) = unattended_fixture(Some(judge.clone())).await;
+        agent.config.approval_prompts_enabled = attended;
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER refuse_judgement BEFORE INSERT ON audit_events
+             WHEN NEW.event_kind = 'request_judged'
+             BEGIN SELECT RAISE(FAIL, 'judgement disk failure'); END;",
+                )
+            })
+            .await
+            .unwrap();
+        let registrations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = registrations.clone();
+        agent.approval_registrar = Some(Arc::new(move |_, sender| {
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            sender
+                .send(crate::approval::ApprovalDecision {
+                    decision: crate::approval::ApprovalDecisionValue::Approved,
+                    scope: crate::approval::ApprovalDecisionScope::Once,
+                    reason: None,
+                })
+                .unwrap();
+            crate::approval::ApprovalChannelRegistration::default()
+        }));
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut scope = TurnApprovalScope::default();
+        if !attended {
+            scope.mark_unattended();
+        }
+        let result = agent
+            .dispatch_tool_call(
+                &ToolCall {
+                    call_id: "no-record".into(),
+                    name: "outside_read".into(),
+                    arguments: json!({"path": OUTSIDE}),
+                },
+                &execution,
+                &[],
+                &tx,
+                &tokio_util::sync::CancellationToken::new(),
+                &mut scope,
+            )
+            .await
+            .expect("refusal is a tool result");
+        assert_eq!(result.status, "refused", "{}", result.content);
+        assert!(result.execution_prevented);
+        assert!(
+            result.content.contains("judgement disk failure"),
+            "{}",
+            result.content
+        );
+        assert_eq!(registrations.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(judge.asked.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn attended_audit_write_failure_refuses_without_a_card() {
+        failed_record_refuses(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unattended_audit_write_failure_refuses() {
+        failed_record_refuses(false).await;
+    }
+
+    struct AuditCheckedRead {
+        storage: Arc<SqliteStorage>,
+        session_id: Uuid,
+    }
+
+    #[async_trait]
+    impl Tool for AuditCheckedRead {
+        fn name(&self) -> &str {
+            "outside_read"
+        }
+        fn description(&self) -> &str {
+            OutsideReadTool.description()
+        }
+        fn parameters(&self) -> Value {
+            OutsideReadTool.parameters()
+        }
+        async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+            if ctx
+                .allowed_paths()
+                .iter()
+                .any(|path| path.to_str() == Some(OUTSIDE))
+            {
+                let rows = self
+                    .storage
+                    .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                        session_id: Some(self.session_id),
+                        event_kind: Some("request_judged".into()),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap();
+                if rows.is_empty() {
+                    return Err(ToolError::ExecutionFailed {
+                        name: self.name().into(),
+                        message: "execution preceded its judgement record".into(),
+                    });
+                }
+            }
+            OutsideReadTool.execute(params, ctx).await
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn attended_judgement_is_recorded_before_tool_execution() {
+        let (mut agent, execution, storage) = unattended_fixture(Some(scripted(
+            JudgeVerdict::Allowed,
+            "the task names this plan",
+        )))
+        .await;
+        agent.config.approval_prompts_enabled = true;
+        agent.tool_dispatcher = Some(ToolDispatcher::allow_all(vec![Arc::new(AuditCheckedRead {
+            storage,
+            session_id: execution.session_id,
+        }) as Arc<dyn Tool>]));
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let result = agent
+            .dispatch_tool_call(
+                &ToolCall {
+                    call_id: "ordered".into(),
+                    name: "outside_read".into(),
+                    arguments: json!({"path":OUTSIDE}),
+                },
+                &execution,
+                &[],
+                &tx,
+                &tokio_util::sync::CancellationToken::new(),
+                &mut TurnApprovalScope::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.status, "success", "{}", result.content);
     }
 }

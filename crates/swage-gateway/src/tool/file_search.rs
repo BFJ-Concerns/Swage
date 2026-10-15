@@ -59,6 +59,10 @@ impl Tool for FileSearchTool {
         json!({
             "type": "object",
             "properties": {
+                "justification": {
+                    "type": "string",
+                    "description": "Why this file is needed when it lies outside the session's granted locations, in one or two sentences. Read by whoever answers for the request — the person, or the judge when nobody is watching; omitted, the request is weighed without a reason."
+                },
                 "pattern": {
                     "type": "string",
                     "description": "Case-insensitive substring pattern to search for."
