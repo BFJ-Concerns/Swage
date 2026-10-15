@@ -30,6 +30,12 @@ impl Tool for FileEditTool {
         "file_edit"
     }
 
+    fn display_hints(&self) -> swage_tool::tool::ToolDisplayHints {
+        swage_tool::tool::ToolDisplayHints {
+            summary_param: Some("/changes/0/path"),
+        }
+    }
+
     fn description(&self) -> &str {
         "Edit one or more text files by replacing exact current text, replacing Markdown sections, or appending to Markdown sections. Use file_read first for current text. Relative paths resolve from the workspace; absolute paths can target other approved machine locations. The tool rejects stale, ambiguous, or unsafe edits before writing."
     }
@@ -643,6 +649,19 @@ fn write_error(tool_name: &str, requested_path: &str, error: std::io::Error) -> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn declared_headline_renders_the_call_argument() {
+        let tool = FileEditTool;
+        assert_eq!(
+            swage_tool::tool::display_summary(
+                &tool.display_hints(),
+                &json!({"changes": [{"path": "notes/a.txt", "edits": []}]})
+            )
+            .as_deref(),
+            Some("notes/a.txt")
+        );
+    }
+
     use super::*;
     use tempfile::TempDir;
 

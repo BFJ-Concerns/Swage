@@ -39,13 +39,39 @@
     toolCall.status === "error" || toolCall.status === "rejected" || toolCall.status === "expired",
   );
 
-  // True once the result is long enough to warrant collapsing.
-  const resultText = $derived(
-    typeof toolCall.result === "string"
-      ? toolCall.result
-      : toolCall.result != null
-        ? JSON.stringify(toolCall.result, null, 2)
-        : "",
+  // Unwrap serialised output envelopes without changing the recorded result.
+  function readableResult(value: unknown): string {
+    // Bound decoding for malformed or unusually deep nested output.
+    for (let depth = 0; depth < 20; depth++) {
+      if (typeof value === "string") {
+        const text = value;
+        try {
+          const decoded: unknown = JSON.parse(text);
+          if (typeof decoded === "string" || (decoded !== null && typeof decoded === "object")) {
+            value = decoded;
+            continue;
+          }
+        } catch {
+          // Ordinary tool output is text, not necessarily JSON.
+        }
+        return text;
+      }
+      if (
+        value !== null && typeof value === "object" &&
+        "output" in value && typeof value.output === "string"
+      ) {
+        value = value.output;
+        continue;
+      }
+      return value == null ? "" : JSON.stringify(value, null, 2);
+    }
+    return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  }
+
+  const resultText = $derived(readableResult(toolCall.result));
+  const rawResult = $derived(JSON.stringify(toolCall.result, null, 2));
+  const hasEnvelope = $derived(
+    resultText !== (typeof toolCall.result === "string" ? toolCall.result : rawResult),
   );
   const isLongResult = $derived(resultText.length >= 500);
 
@@ -90,7 +116,17 @@
     }
     const firstKey = Object.keys(call.arguments)[0];
     if (firstKey !== undefined) {
-      return `${firstKey}=${String(call.arguments[firstKey])}`;
+      const value = call.arguments[firstKey];
+      let summary: string;
+      if (Array.isArray(value)) {
+        summary = `[${value.length} items]`;
+      } else if (value !== null && typeof value === "object") {
+        const keys = Object.keys(value);
+        summary = `{${keys.slice(0, 3).join(", ")}${keys.length > 3 ? ", …" : ""}}`;
+      } else {
+        summary = String(value);
+      }
+      return `${firstKey}=${summary}`;
     }
     return "";
   }
@@ -158,6 +194,13 @@
         </span>
       {/if}
     </div>
+
+    {#if hasEnvelope}
+      <details>
+        <summary>Raw result</summary>
+        <pre class="result-content">{rawResult}</pre>
+      </details>
+    {/if}
 
     {#if isLongResult}
       <!-- Toggle sits below the result block so it doesn't shift the header. -->

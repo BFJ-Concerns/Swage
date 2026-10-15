@@ -47,6 +47,7 @@ pub struct ToolDisplayHints {
     /// search tool. The framework reads it from the call's arguments at
     /// execution time; a missing or non-scalar value falls back to the
     /// generic rendering rather than erroring.
+    /// A leading slash selects a nested value using JSON Pointer syntax.
     pub summary_param: Option<&'static str>,
 }
 
@@ -55,7 +56,12 @@ pub struct ToolDisplayHints {
 /// back to their generic rendering, never to a per-tool branch.
 pub fn display_summary(hints: &ToolDisplayHints, arguments: &Value) -> Option<String> {
     let param = hints.summary_param?;
-    match arguments.get(param)? {
+    let value = if param.starts_with('/') {
+        arguments.pointer(param)?
+    } else {
+        arguments.get(param)?
+    };
+    match value {
         Value::String(text) => Some(text.clone()),
         Value::Number(number) => Some(number.to_string()),
         Value::Bool(flag) => Some(flag.to_string()),
@@ -302,6 +308,28 @@ mod tests {
         // Missing or non-scalar values fall back to the generic rendering.
         assert_eq!(display_summary(&hints, &json!({"other": true})), None);
         assert_eq!(display_summary(&hints, &json!({"command": ["ls"]})), None);
+    }
+
+    #[test]
+    fn headline_paths_select_nested_values_and_escape_keys() {
+        let args = json!({"changes": [{"path": "notes/a.txt"}], "a/b": {"~key": "escaped"}});
+        for (path, expected) in [
+            ("/changes/0/path", Some("notes/a.txt")),
+            ("/a~1b/~0key", Some("escaped")),
+            ("/changes/1/path", None),
+            ("/changes", None),
+        ] {
+            assert_eq!(
+                display_summary(
+                    &ToolDisplayHints {
+                        summary_param: Some(path)
+                    },
+                    &args
+                )
+                .as_deref(),
+                expected
+            );
+        }
     }
 
     #[test]
