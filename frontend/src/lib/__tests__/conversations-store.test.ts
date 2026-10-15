@@ -458,6 +458,19 @@ describe("durable local updates", () => {
     }).toEqual({ messages: [{ client_id: "first-send", timestamp: "2026-01-01T00:00:01Z" }], queued: [queued] });
   });
 
+  it("ignores a queued acknowledgement arriving after its drain, including after reopening the conversation", async () => {
+    const store = createConversationStore();
+    vi.mocked(api.getConversation).mockResolvedValue(makeDetail("conv-1"));
+    await store.selectConversation("conv-1");
+    const queued = { id: "late", origin: "user" as const, content: "already recorded", queued_at: "2026-01-01T00:02:00Z" };
+    store.clearQueuedMessages("conv-1", [queued.id]);
+    store.appendQueuedMessage(queued, "conv-1");
+    expect(store.activeConversation!.queued ?? []).toEqual([]);
+    await store.selectConversation("conv-1");
+    store.appendQueuedMessage(queued, "conv-1");
+    expect(store.activeConversation!.queued ?? []).toEqual([]);
+  });
+
   it("shows a message the gateway holds for the next turn, once, until the queue drains", async () => {
     const store = createConversationStore();
     vi.mocked(api.listConversations).mockResolvedValueOnce([
