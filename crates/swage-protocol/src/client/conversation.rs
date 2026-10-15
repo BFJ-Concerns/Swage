@@ -200,7 +200,8 @@ pub enum MessageOrigin {
     Delegation,
     /// A schedule's run: a fresh run's opening or a continuation's brief.
     Schedule,
-    /// A workflow script's prompt to a worker.
+    /// A workflow run: its script's prompt to a worker, or its completed
+    /// result delivered to a conversation.
     Workflow,
     /// A notice the platform itself attached to the conversation.
     Platform,

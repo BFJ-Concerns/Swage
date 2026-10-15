@@ -344,6 +344,7 @@ impl DelegationExecutor {
                     turn_id: Some(turn_id),
                     role: message.role(),
                     origin: swage_storage::MessageOrigin::Delegation,
+                    delivered: false,
                     content: message.text_content(),
                     agent_id: target_agent_id.clone(),
                 })

@@ -260,6 +260,7 @@ impl TurnQueueStore for SqliteStorage {
                     turn_id: Some(turn_id),
                     role: Role::User,
                     origin: item.origin,
+                    delivered: false,
                     content: item.content.clone(),
                     position,
                     agent_id: agent_id.clone(),

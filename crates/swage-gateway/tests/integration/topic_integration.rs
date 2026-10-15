@@ -133,6 +133,7 @@ async fn say_in_session(storage: &SqliteStorage, session_id: Uuid, role: Role, t
             turn_id: None,
             role,
             origin: swage_storage::MessageOrigin::User,
+            delivered: false,
             content: text.into(),
             attachments: vec![],
             position,

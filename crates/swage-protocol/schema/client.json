@@ -2953,7 +2953,7 @@
           "const": "schedule"
         },
         {
-          "description": "A workflow script's prompt to a worker.",
+          "description": "A workflow run: its script's prompt to a worker, or its completed\nresult delivered to a conversation.",
           "type": "string",
           "const": "workflow"
         },

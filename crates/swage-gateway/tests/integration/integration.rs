@@ -461,6 +461,7 @@ async fn an_interrupted_turn_keeps_its_tool_calls_after_restart() {
             turn_id: Some(turn.id),
             role: Role::User,
             origin: swage_storage::MessageOrigin::User,
+            delivered: false,
             content: "write the file".into(),
             attachments: Vec::new(),
             agent_id: "gateway".into(),

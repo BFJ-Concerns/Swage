@@ -65,6 +65,7 @@ pub(crate) async fn append_platform_message(
             turn_id: message.turn_id,
             role: Role::User,
             origin: message.origin,
+            delivered: true,
             content: message.content,
             attachments: Vec::new(),
             agent_id: message.agent_id,

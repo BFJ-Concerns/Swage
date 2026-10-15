@@ -429,6 +429,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
                     turn_id: Some(prepared_turn_id),
                     role: Role::User,
                     origin,
+                    delivered: false,
                     content: before_inbound.canonical_content.clone(),
                     agent_id: session.agent_id.clone(),
                 })
