@@ -14,7 +14,7 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 use swage_config::model::PythonExecuteToolConfig;
-use swage_sandbox::{ChildProcessManager, find_bwrap};
+use swage_sandbox::{ChildProcessManager, EgressSetup, SandboxConfig, find_bwrap};
 
 use crate::runtime_resolver::{PythonRuntimeError, ResolvedPythonRuntime};
 use crate::worker_protocol::{
@@ -89,6 +89,23 @@ impl PythonWorkerRuntime {
         &self,
         sandboxed: bool,
     ) -> Result<ReadyWorker, PythonWorkerError> {
+        self.spawn_worker(sandboxed, None, None).await
+    }
+
+    pub async fn spawn_worker_for_turn(
+        &self,
+        policy: SandboxConfig,
+        egress: EgressSetup,
+    ) -> Result<ReadyWorker, PythonWorkerError> {
+        self.spawn_worker(true, Some(policy), Some(egress)).await
+    }
+
+    async fn spawn_worker(
+        &self,
+        sandboxed: bool,
+        policy: Option<SandboxConfig>,
+        egress: Option<EgressSetup>,
+    ) -> Result<ReadyWorker, PythonWorkerError> {
         if sandboxed && !self.sandbox_supported() {
             return Err(PythonWorkerError::SandboxUnavailable(
                 "bubblewrap is required".to_string(),
@@ -103,8 +120,20 @@ impl PythonWorkerRuntime {
             ))
         })?;
 
+        let scoped = policy.is_some();
+        let proxy = egress
+            .map(swage_sandbox::egress::EgressProxy::start)
+            .transpose()
+            .map_err(|error| PythonWorkerError::SandboxUnavailable(error.to_string()))?;
         let mut command = if sandboxed {
-            build_sandboxed_command(&self.runtime, &worker_dir)?
+            let policy = policy.unwrap_or_else(|| {
+                SandboxConfig::builder()
+                    .working_directory(worker_dir.work_dir())
+                    .write_path(worker_dir.work_dir())
+                    .build()
+                    .expect("worker directory")
+            });
+            build_sandboxed_command(&self.runtime, &worker_dir, policy, proxy.as_ref())?
         } else {
             build_unsandboxed_command(&self.runtime, &worker_dir)
         };
@@ -158,7 +187,8 @@ impl PythonWorkerRuntime {
             Ok(transport) => Ok(ReadyWorker {
                 child,
                 transport,
-                sandboxed,
+                uses_worker_directory: sandboxed && !scoped,
+                _egress_proxy: proxy,
                 _worker_dir: worker_dir,
             }),
             Err(error) => {
@@ -312,13 +342,14 @@ impl PythonWorkerRuntime {
 pub struct ReadyWorker {
     child: ChildProcessManager,
     transport: WorkerTransport,
-    sandboxed: bool,
+    uses_worker_directory: bool,
     _worker_dir: WorkerDirectory,
+    _egress_proxy: Option<swage_sandbox::egress::EgressProxy>,
 }
 
 impl ReadyWorker {
     fn execution_working_directory<'a>(&'a self, logical_working_directory: &'a Path) -> &'a Path {
-        if self.sandboxed {
+        if self.uses_worker_directory {
             // Sandboxed workers are pooled before a turn supplies its logical
             // workspace, so only the worker directory is guaranteed mounted.
             // Host-side nested tools still receive the logical workspace.
@@ -450,10 +481,6 @@ impl WorkerDirectory {
     fn work_dir(&self) -> &Path {
         &self.work_dir
     }
-
-    fn socket_dir(&self) -> &Path {
-        &self.socket_dir
-    }
 }
 
 fn build_unsandboxed_command(
@@ -474,37 +501,45 @@ fn build_unsandboxed_command(
 fn build_sandboxed_command(
     runtime: &ResolvedPythonRuntime,
     worker_dir: &WorkerDirectory,
+    mut policy: SandboxConfig,
+    proxy: Option<&swage_sandbox::egress::EgressProxy>,
 ) -> Result<Command, PythonWorkerError> {
-    let bwrap =
-        find_bwrap().map_err(|error| PythonWorkerError::SandboxUnavailable(error.to_string()))?;
-    let mut command = Command::new(bwrap);
-    command.arg("--unshare-all");
-    command.arg("--die-with-parent");
-    command.args(["--dev", "/dev"]);
-    command.args(["--proc", "/proc"]);
-    command.args(["--tmpfs", "/tmp"]);
-    command
-        .arg("--bind")
-        .arg(worker_dir.socket_dir())
-        .arg(worker_dir.socket_dir());
-    command
-        .arg("--bind")
-        .arg(worker_dir.work_dir())
-        .arg(worker_dir.work_dir());
-
+    let map_error =
+        |error: swage_core::SandboxError| PythonWorkerError::SandboxUnavailable(error.to_string());
+    let bwrap = find_bwrap().map_err(map_error)?;
+    policy.write_paths.push(worker_dir.work_dir().to_owned());
     for mount in &runtime.read_only_mounts {
-        command.arg("--ro-bind").arg(mount).arg(mount);
+        // System runtime roots can be aliases such as /lib -> /usr/lib;
+        // bubblewrap requires the mount destination itself to be a real path.
+        let mount = mount.canonicalize().map_err(|error| {
+            PythonWorkerError::SpawnFailed(format!(
+                "failed to resolve runtime mount {}: {error}",
+                mount.display()
+            ))
+        })?;
+        policy.read_only_paths.push(mount);
     }
-
-    command.arg("--chdir").arg(worker_dir.work_dir());
-    command.arg("--setenv");
-    command.arg("SWAGE_PYTHON_WORKER_SOCKET");
-    command.arg(worker_dir.socket_path());
+    let agent_binary = swage_sandbox::resolve_agent_binary().map_err(map_error)?;
+    let mut command = swage_sandbox::policy_command(
+        &bwrap,
+        &policy,
+        &[&worker_dir.socket_path()],
+        &[&agent_binary, &runtime.executable_path],
+        proxy.map(|proxy| proxy.socket_path()),
+    )
+    .map_err(map_error)?;
+    command.arg("--chdir").arg(&policy.working_directory);
+    command
+        .arg("--setenv")
+        .arg("SWAGE_PYTHON_WORKER_SOCKET")
+        .arg(worker_dir.socket_path());
     for (key, value) in &runtime.environment {
         command.arg("--setenv").arg(key).arg(value);
     }
     command
         .arg("--")
+        .arg(agent_binary)
+        .arg("--sandbox-exec")
         .arg(&runtime.executable_path)
         .args(worker_python_startup_args(runtime));
     Ok(command)

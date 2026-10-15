@@ -3092,6 +3092,7 @@ dependencies = [
  "serde",
  "serde_json",
  "swage-core",
+ "swage-protocol",
  "swage-tool",
  "tempfile",
  "thiserror",

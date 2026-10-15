@@ -39,10 +39,14 @@ impl WorkerPool {
         let pool = Arc::new(Self {
             semaphore: Arc::new(Semaphore::new(runtime.config().max_workers)),
             idle_ttl: Duration::from_secs(runtime.config().idle_ttl_secs),
-            warm_target: runtime
-                .config()
-                .warm_target
-                .min(runtime.config().max_workers),
+            warm_target: if runtime.config().require_sandbox {
+                0
+            } else {
+                runtime
+                    .config()
+                    .warm_target
+                    .min(runtime.config().max_workers)
+            },
             spawn_sandboxed: runtime.config().require_sandbox,
             runtime,
             state: Mutex::new(PoolState {
@@ -78,6 +82,42 @@ impl WorkerPool {
             .runtime
             .spawn_ready_worker(self.spawn_sandboxed)
             .await?;
+        Ok(WorkerLease {
+            pool: Arc::downgrade(self),
+            worker: Some(worker),
+            permit: Some(permit),
+        })
+    }
+
+    /// Caller-scoped workers are never taken from the unscoped warm pool.
+    pub async fn acquire_for_turn(
+        self: &Arc<Self>,
+        policy: Option<swage_sandbox::SandboxConfig>,
+        egress: swage_sandbox::EgressSetup,
+    ) -> Result<WorkerLease, PythonWorkerError> {
+        let Some(policy) = policy else {
+            if self.spawn_sandboxed {
+                return Err(PythonWorkerError::SandboxUnavailable(
+                    "the calling turn supplied no sandbox policy".into(),
+                ));
+            }
+            return self.acquire().await;
+        };
+        if self.warm_target > 0 {
+            // Acquire through the pool so an in-flight warm-up cannot hold
+            // the last permit while a scoped caller waits for it forever.
+            let mut lease = self.acquire().await?;
+            lease.worker_mut().terminate().await;
+            lease.worker = Some(self.runtime.spawn_worker_for_turn(policy, egress).await?);
+            return Ok(lease);
+        }
+        let permit = self
+            .semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| PythonWorkerError::Protocol("worker semaphore closed".into()))?;
+        let worker = self.runtime.spawn_worker_for_turn(policy, egress).await?;
         Ok(WorkerLease {
             pool: Arc::downgrade(self),
             worker: Some(worker),

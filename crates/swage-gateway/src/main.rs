@@ -95,6 +95,27 @@ fn build_sandbox_agent_tools() -> Vec<Box<dyn Tool>> {
 
 #[tokio::main]
 async fn main() {
+    let args: Vec<_> = std::env::args_os().collect();
+    if args.get(1).is_some_and(|arg| arg == "--sandbox-exec") {
+        match swage_sandbox::run_sandboxed_command(args[2..].to_vec()).await {
+            Ok(code) => std::process::exit(code),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if args.get(1).is_some_and(|arg| arg == "git-credential") {
+        if let Err(error) = swage_gateway::git_credential::run_helper(
+            args.get(2).and_then(|arg| arg.to_str()).unwrap_or(""),
+        )
+        .await
+        {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let cli = Cli::parse();
 
     if cli.sandbox_mode {

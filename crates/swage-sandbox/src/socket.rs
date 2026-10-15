@@ -478,11 +478,7 @@ mod tests {
     fn is_stale_true_for_abandoned_socket() {
         use std::os::unix::net::UnixListener as StdUnixListener;
 
-        let path = test_socket_root().join(format!(
-            "{}-stale-test-{}.sock",
-            TEST_PREFIX,
-            uuid::Uuid::new_v4()
-        ));
+        let path = test_socket_root().join(format!("stale-{}.sock", uuid::Uuid::new_v4()));
 
         // Bind and immediately drop — leaves the file but no listener.
         let listener = StdUnixListener::bind(&path).expect("bind should succeed");

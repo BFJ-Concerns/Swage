@@ -12,6 +12,8 @@ use swage_core::SandboxError;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+#[cfg(test)]
+use crate::CREDENTIAL_ENV_VARS;
 use crate::bubblewrap::command::build_bwrap_command;
 use crate::config::SandboxConfig;
 use crate::egress::{EgressProxy, EgressSetup};
@@ -23,18 +25,6 @@ use crate::process::{ChildProcessManager, cleanup_failed_startup_process};
 use crate::resolve_agent_binary;
 use crate::sandbox::{Sandbox, ToolCallResult};
 use crate::socket::SocketManager;
-
-// ---------------------------------------------------------------------------
-// Credential isolation
-// ---------------------------------------------------------------------------
-
-/// API key env var names to strip from the bwrap process environment.
-///
-/// Bubblewrap inherits the host's environment by default — without explicit
-/// stripping, provider keys would propagate into the sandbox. Removing them
-/// here means bwrap never sees them and cannot forward them to the agent.
-/// All LLM completions are proxied through the host via IPC instead.
-const CREDENTIAL_ENV_VARS: &[&str] = &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"];
 
 // ---------------------------------------------------------------------------
 // Sandbox stderr
@@ -223,12 +213,6 @@ impl Sandbox for BubblewrapSandbox {
             egress_proxy.as_ref().map(EgressProxy::socket_path),
             &agent_binary,
         )?;
-
-        // Strip provider API keys — bwrap inherits the parent's environment,
-        // so we must remove credentials before it passes them through.
-        for var in CREDENTIAL_ENV_VARS {
-            cmd.env_remove(var);
-        }
 
         // Capture stderr so a sandbox that dies before connecting reports why.
         cmd.stderr(std::process::Stdio::piped());

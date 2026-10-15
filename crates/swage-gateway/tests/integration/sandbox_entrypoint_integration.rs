@@ -228,7 +228,17 @@ async fn bubblewrap_sandbox_reads_broadly_masks_private_paths_and_reaches_the_ne
 
     // A home with a key directory and a token file to mask, a workspace to
     // write, and a sibling directory outside the write set.
-    let home = tempfile::tempdir().unwrap();
+    // Ungranted host /tmp contents are intentionally hidden. Put the home
+    // fixture beside the runtime, as in the development sandbox tests, so
+    // notes exercise broad host reads rather than private temporary storage.
+    let home = tempfile::Builder::new()
+        .prefix("t")
+        .tempdir_in(
+            std::env::var_os("XDG_RUNTIME_DIR")
+                .filter(|path| !std::path::Path::new(path).starts_with("/tmp"))
+                .unwrap_or_else(|| env!("CARGO_MANIFEST_DIR").into()),
+        )
+        .unwrap();
     let ssh = home.path().join(".ssh");
     std::fs::create_dir(&ssh).unwrap();
     std::fs::write(ssh.join("id_ed25519"), "PRIVATE KEY").unwrap();

@@ -192,6 +192,8 @@ const MASKED_HOME_PATHS: &[&str] = &[
     ".kube",
     ".netrc",
     ".git-credentials",
+    ".config/gh/hosts.yml",
+    ".config/forgejo",
 ];
 
 /// Under the home, the shared build and package caches a sandboxed command
@@ -336,6 +338,7 @@ pub(super) async fn build_turn_sandbox(
     agent_config: &AgentConfig,
     workspace_policy: Option<&TrustedWorkspacePolicy>,
     egress: swage_sandbox::EgressSetup,
+    credentials: Option<&crate::git_credential::CredentialServer>,
 ) -> Result<TurnSandboxBuild, swage_core::SandboxError> {
     // An install that declares its boundary (a container image, for one)
     // runs every turn inside it: no per-turn sandbox is built, the host
@@ -401,6 +404,7 @@ pub(super) async fn build_turn_sandbox(
         agent_config,
         workspace_policy,
         egress,
+        credentials,
         swage_sandbox::find_bwrap().is_ok(),
         true,
     )
@@ -472,16 +476,21 @@ async fn build_turn_sandbox_for_backend_selection(
     agent_config: &AgentConfig,
     workspace_policy: Option<&TrustedWorkspacePolicy>,
     egress: swage_sandbox::EgressSetup,
+    credentials: Option<&crate::git_credential::CredentialServer>,
     bubblewrap_available: bool,
     spawn_fallback: bool,
 ) -> Result<TurnSandboxBuild, swage_core::SandboxError> {
     let roots = PolicyRoots::from_environment(&state.config_root)?;
-    let sandbox_config =
+    let mut sandbox_config =
         build_sandbox_config(agent_config, workspace_policy, &roots).map_err(|error| {
             swage_core::SandboxError::SpawnFailed {
                 message: format!("failed to build sandbox config: {error}"),
             }
         })?;
+
+    if let Some(credentials) = credentials {
+        credentials.configure(&mut sandbox_config)?;
+    }
 
     let provider = state.active_provider();
     let make_llm_handler = || {
@@ -599,7 +608,7 @@ pub(crate) async fn build_gateway_dispatcher(
     let base_dispatcher = state.active_tool_dispatcher();
     let dispatcher = ToolDispatcher::new(
         Arc::new(base_dispatcher.registry().for_agent(&agent_config.agent_id)),
-        permissions,
+        permissions.clone(),
         Arc::new(RateLimiter::new()),
         RateLimitConfig::default(),
         Arc::new(LeakDetector::default()),
@@ -619,12 +628,25 @@ pub(crate) async fn build_gateway_dispatcher(
         turn_id,
         &agent_config.agent_id,
     );
+    let credentials = crate::git_credential::CredentialServer::start(
+        state.secret_manager.clone(),
+        state.storage.clone(),
+        session_id,
+        turn_id,
+    )?;
+    let roots = PolicyRoots::from_environment(&state.config_root)?;
+    let mut python_config = build_sandbox_config(agent_config, workspace_policy.as_ref(), &roots)
+        .map_err(|error| swage_core::SandboxError::SpawnFailed {
+        message: error.to_string(),
+    })?;
+    credentials.configure(&mut python_config)?;
     let sandbox_build = build_turn_sandbox(
         state,
         config,
         agent_config,
         workspace_policy.as_ref(),
-        egress,
+        egress.clone(),
+        Some(&credentials),
     )
     .await?;
     tracing::debug!(backend = ?sandbox_build.backend, "selected turn sandbox backend");
@@ -645,15 +667,55 @@ pub(crate) async fn build_gateway_dispatcher(
         None => dispatcher,
     };
 
+    let mut nested_registry = swage_tool::registry::ToolRegistry::new();
+    for name in dispatcher
+        .registry()
+        .list()
+        .into_iter()
+        .filter(|name| *name != "python_execute")
+    {
+        nested_registry
+            .register_builtin(dispatcher.registry().get(name).expect("registered tool"))
+            .map_err(|error| swage_core::SandboxError::SpawnFailed {
+                message: error.to_string(),
+            })?;
+    }
+    let nested_dispatcher = ToolDispatcher::new(
+        Arc::new(nested_registry),
+        permissions,
+        Arc::new(RateLimiter::new()),
+        RateLimitConfig::default(),
+        Arc::new(LeakDetector::default()),
+        false,
+    )
+    .with_execution_strategy(Arc::new(GatewayExecutionStrategy::new(
+        inner_strategy.clone(),
+        ws_tx.clone(),
+        device.clone(),
+        state.secret_manager.clone(),
+        state.storage.clone(),
+        Some(state.clone()),
+    )));
+    let python_execution = crate::tool_executor::PythonExecution {
+        sandbox: (config.sandbox.enabled || config.tools.python_execute.require_sandbox)
+            .then_some(python_config),
+        egress,
+        dispatcher: Arc::new(nested_dispatcher),
+        credentials,
+    };
+
     Ok(GatewayDispatcherBuild {
-        dispatcher: dispatcher.with_execution_strategy(Arc::new(GatewayExecutionStrategy::new(
-            inner_strategy,
-            ws_tx,
-            device,
-            state.secret_manager.clone(),
-            state.storage.clone(),
-            Some(state.clone()),
-        ))),
+        dispatcher: dispatcher.with_execution_strategy(Arc::new(
+            GatewayExecutionStrategy::new(
+                inner_strategy,
+                ws_tx,
+                device,
+                state.secret_manager.clone(),
+                state.storage.clone(),
+                Some(state.clone()),
+            )
+            .with_python_execution(python_execution),
+        )),
         sandbox_guard,
         isolation: sandbox_build.isolation,
     })
@@ -830,7 +892,7 @@ mod tests {
         let mut config = swage_config::ResolvedConfig::default();
         config.sandbox.enabled = false;
 
-        let build = build_turn_sandbox(&state, &config, &agent_config, None, test_egress())
+        let build = build_turn_sandbox(&state, &config, &agent_config, None, test_egress(), None)
             .await
             .expect("a declared boundary needs no sandbox of its own");
         assert_eq!(
@@ -872,7 +934,7 @@ mod tests {
         config.sandbox.enabled = false;
         config.sandbox.allow_degraded_execution = true;
 
-        let build = build_turn_sandbox(&state, &config, &agent_config, None, test_egress())
+        let build = build_turn_sandbox(&state, &config, &agent_config, None, test_egress(), None)
             .await
             .expect("explicitly opted-in non-Codex execution should remain available");
 
@@ -903,6 +965,7 @@ mod tests {
             &agent_config,
             None,
             test_egress(),
+            None,
             false,
             false,
         )

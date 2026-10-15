@@ -6,5 +6,5 @@
 mod command;
 mod sandbox;
 
-pub use command::find_bwrap;
+pub use command::{find_bwrap, policy_command};
 pub use sandbox::BubblewrapSandbox;
