@@ -3031,3 +3031,77 @@ async fn agent_change_is_refused_without_mutating_the_schedule_api() {
     assert_eq!(after.expression, before.expression);
     assert_eq!(after.updated_at, before.updated_at);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn default_scheduled_session_discovers_topic_workflows() {
+    let dir = crate::support::scratch_tempdir();
+    let provider = MockProvider::new(crate::support::workflow_discovery_rounds());
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let state = AppState::new_with_config_root(
+        storage.clone(),
+        storage.clone(),
+        Arc::new(provider),
+        swage_config::ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(swage_gateway::tool::workflow_list::WorkflowListTool)
+                as Arc<dyn swage_gateway::tool::Tool>,
+            Arc::new(swage_gateway::tool::workflow_run::WorkflowRunTool),
+        ]),
+        None,
+        dir.path().to_path_buf(),
+    );
+    let router = build_router(state.clone());
+    let (status, topic) = request_json(
+        &router,
+        "POST",
+        "/api/topics",
+        Some(json!({"name": "Workflow discovery", "slug": "workflow-discovery"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{topic}");
+    let topic_id = topic["id"].as_str().unwrap();
+    let (status, saved) = request_json(
+        &router,
+        "POST",
+        &format!("/api/topics/{topic_id}/workflow-scripts"),
+        Some(json!({
+            "name": "fleet-hold",
+            "description": "Saved workflow",
+            "source": "return { done: true };",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let due_at = Utc::now() + Duration::seconds(1);
+    let created = schedule::create_schedule(
+        &state,
+        create_request(
+            "Check workflows",
+            ScheduleSpec::OneShot {
+                at: due_at.to_rfc3339(),
+            },
+            SessionPolicy::Fresh {
+                topic_id: Some(topic_id.parse().unwrap()),
+                agent_id: "gateway".into(),
+            },
+        ),
+        ScheduleCreator::User,
+    )
+    .await
+    .unwrap();
+    assert_eq!(tick_to_completion(&state, due_at).await, 1);
+    let runs = state.storage.list_schedule_runs(created.id).await.unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].trigger, ScheduleRunTrigger::Tick);
+    assert_eq!(runs[0].state, ScheduleRunState::Completed);
+    let session = state
+        .storage
+        .get_session(runs[0].session_id.unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.agent_id, "gateway");
+    assert_eq!(session.topic_id.to_string(), topic_id);
+    crate::support::assert_workflow_discovery(state.storage.as_ref(), runs[0].turn_id.unwrap())
+        .await;
+}
