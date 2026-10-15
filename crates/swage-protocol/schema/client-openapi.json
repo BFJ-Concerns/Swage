@@ -225,6 +225,23 @@
         ],
         "type": "object"
       },
+      "AttachmentsConfig": {
+        "additionalProperties": false,
+        "description": "Admission policy for image references submitted with a turn.",
+        "properties": {
+          "accepted_schemes": {
+            "description": "URI schemes accepted before checking the selected provider's capabilities.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "accepted_schemes"
+        ],
+        "type": "object"
+      },
       "BackgroundJobResponse": {
         "properties": {
           "attachment_id": {
@@ -3602,6 +3619,17 @@
       },
       "SaveSettingsRequest": {
         "properties": {
+          "attachments": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AttachmentsConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "communication": {
             "anyOf": [
               {
@@ -5289,6 +5317,9 @@
       },
       "SettingsResponse": {
         "properties": {
+          "attachments": {
+            "$ref": "#/components/schemas/AttachmentsConfig"
+          },
           "can_restart": {
             "type": "boolean"
           },
@@ -5369,6 +5400,7 @@
           "communication",
           "sessions",
           "memory",
+          "attachments",
           "voice",
           "restart_required",
           "can_restart"

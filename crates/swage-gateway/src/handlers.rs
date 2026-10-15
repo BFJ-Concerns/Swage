@@ -1401,6 +1401,7 @@ pub async fn submit_turn(
         session.id,
         &req.attachments,
     )
+    .await
     .map_err(ApiError::from)?;
     // A message that arrives while a turn is running is held for the next
     // turn, never refused. The persisted check comes first: REST

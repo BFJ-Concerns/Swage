@@ -148,6 +148,7 @@
       communication: settings.communication,
       sessions: settings.sessions,
       memory: settings.memory,
+      attachments: settings.attachments,
       voice: settings.voice,
     });
   }

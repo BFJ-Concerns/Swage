@@ -132,6 +132,7 @@ pub async fn load_settings(state: &AppState) -> Result<SettingsResponse, ApiErro
         communication: try_wire_from_config(config.communication)?,
         sessions: config.sessions,
         memory: config.memory,
+        attachments: config.attachments,
         voice: try_wire_from_config(config.voice)?,
         restart_required: state.restart_required(),
         can_restart: state.managed_gateway,
@@ -160,6 +161,7 @@ pub async fn save_settings(
         communication,
         sessions,
         memory,
+        attachments,
         voice,
     } = request;
 
@@ -234,6 +236,7 @@ pub async fn save_settings(
             communication: communication.clone(),
             sessions: sessions.clone(),
             memory: memory.clone(),
+            attachments: attachments.clone(),
             voice: voice.clone(),
         },
     )?;
@@ -314,6 +317,7 @@ pub async fn save_settings(
         communication.unwrap_or_else(|| runtime_config.communication.clone());
     runtime_config.sessions = sessions.unwrap_or_else(|| runtime_config.sessions.clone());
     runtime_config.memory = memory.unwrap_or_else(|| runtime_config.memory.clone());
+    runtime_config.attachments = attachments.unwrap_or_else(|| runtime_config.attachments.clone());
     runtime_config.voice = voice.unwrap_or_else(|| runtime_config.voice.clone());
 
     let provider = crate::startup::create_provider(&runtime_config, &state.secret_manager).await;
@@ -625,6 +629,7 @@ fn settings_response_from_saved_config(
         communication: wire_from_config(active_config.communication),
         sessions: active_config.sessions,
         memory: active_config.memory,
+        attachments: active_config.attachments,
         voice: wire_from_config(active_config.voice),
         restart_required: true,
         can_restart: state.managed_gateway,
@@ -803,6 +808,7 @@ fn validate_settings_request(request: &SaveSettingsRequest) -> Result<(), ApiErr
     // refuse.
     refuse_declared_section_problems(request.sessions.as_ref())?;
     refuse_declared_section_problems(request.memory.as_ref())?;
+    refuse_declared_section_problems(request.attachments.as_ref())?;
     if let Some(voice) = &request.voice
         && [&voice.transcription_model, &voice.speech_model]
             .into_iter()
@@ -853,6 +859,7 @@ struct RuntimeSectionUpdates {
     communication: Option<swage_config::CommunicationConfig>,
     sessions: Option<swage_config::SessionsConfig>,
     memory: Option<swage_config::MemoryConfig>,
+    attachments: Option<swage_config::AttachmentsConfig>,
     voice: Option<swage_config::VoiceConfig>,
 }
 
@@ -871,11 +878,15 @@ fn apply_runtime_settings_to_partial(
         communication,
         sessions,
         memory,
+        attachments,
         voice,
     } = updates;
     // A declared section's partial is its own `From`: no field is restated.
     if let Some(sessions) = sessions {
         partial.sessions = Some(sessions.into());
+    }
+    if let Some(attachments) = attachments {
+        partial.attachments = Some(attachments.into());
     }
     if let Some(memory) = memory {
         partial.memory = Some(memory.into());
@@ -1939,6 +1950,7 @@ mod tests {
             communication: None,
             sessions: None,
             memory: None,
+            attachments: None,
             voice: None,
         };
 
@@ -2042,6 +2054,7 @@ mod tests {
             communication: None,
             sessions: None,
             memory: None,
+            attachments: None,
             voice,
         }
     }
@@ -2241,6 +2254,7 @@ mod tests {
             communication: None,
             sessions: None,
             memory: None,
+            attachments: None,
             voice: None,
         };
         save_settings(&state, request)
@@ -2398,6 +2412,7 @@ mod tests {
             communication: None,
             sessions: None,
             memory: None,
+            attachments: None,
             voice: None,
         };
 
@@ -2570,6 +2585,7 @@ mod tests {
             communication: Some(wire_from_config(communication.clone())),
             sessions: None,
             memory: None,
+            attachments: None,
             voice: None,
         };
 
@@ -2617,6 +2633,7 @@ mod tests {
             communication: None,
             sessions: None,
             memory: None,
+            attachments: None,
             voice: None,
         };
 
@@ -2745,5 +2762,73 @@ mod tests {
         assert!(body.contains("[context]"));
         assert!(body.contains("assembly = \"compact\""));
         assert!(body.contains("budget = 8192"));
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn image_scheme_settings_save_hot_apply_reload_and_refuse() {
+        let swage_home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::new(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
+                as std::sync::Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        assert_eq!(
+            load_settings(&state)
+                .await
+                .unwrap()
+                .attachments
+                .accepted_schemes,
+            ["https", "data"]
+        );
+        let mut request = voice_settings_request(None);
+        request.attachments = Some(swage_config::AttachmentsConfig {
+            accepted_schemes: vec!["http".into()],
+        });
+        let response = save_settings(&state, request.clone()).await.unwrap();
+        assert_eq!(response.attachments.accepted_schemes, ["http"]);
+        assert_eq!(state.active_config().attachments.accepted_schemes, ["http"]);
+        assert!(!state.restart_required());
+        let reloaded = swage_config::load_resolved_config_from(
+            swage_home.path(),
+            &ScopeLocation::General,
+            "default",
+        )
+        .unwrap();
+        assert_eq!(reloaded.attachments.accepted_schemes, ["http"]);
+        // Exercise the gate with the running setting, rather than only its saved representation.
+        crate::turn::check_attachment_support(
+            &crate::capabilities::WorkflowCapabilities::for_protocol(
+                swage_config::Protocol::OpenAi,
+            ),
+            &state.active_config().attachments,
+            &[swage_protocol::client::turn::MessageAttachment::ImageUrl {
+                url: "http://example.test/a.png".into(),
+            }],
+        )
+        .unwrap();
+        for invalid in [vec![], vec!["https:".into()]] {
+            request.attachments = Some(swage_config::AttachmentsConfig {
+                accepted_schemes: invalid,
+            });
+            let error = save_settings(&state, request.clone())
+                .await
+                .expect_err("invalid policy must be refused");
+            assert!(
+                error.to_string().contains("attachments.accepted_schemes"),
+                "{error}"
+            );
+            assert_eq!(state.active_config().attachments.accepted_schemes, ["http"]);
+            let reloaded = swage_config::load_resolved_config_from(
+                swage_home.path(),
+                &ScopeLocation::General,
+                "default",
+            )
+            .unwrap();
+            assert_eq!(reloaded.attachments.accepted_schemes, ["http"]);
+        }
     }
 }

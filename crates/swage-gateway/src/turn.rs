@@ -307,7 +307,8 @@ pub(super) async fn process_turn_with_composition_and_focus(
         session.selected_model_id.as_deref(),
         session_id,
         &attachments,
-    )?;
+    )
+    .await?;
 
     // Skill discovery, topic memory loading, and assembly search paths all use
     // the root retained when this application state was constructed.

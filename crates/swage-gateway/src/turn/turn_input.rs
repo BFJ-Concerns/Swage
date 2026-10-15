@@ -119,32 +119,59 @@ pub(crate) fn content_parts(text: String, attachments: &[MessageAttachment]) -> 
     parts
 }
 
-/// Refuse a submission whose attachments the selected provider cannot
-/// consume. The check runs before anything is persisted: a part the model
-/// would never see must fail the turn, not ride along silently.
+/// Why an attachment was refused, with the scheme when the operator's rule refused it.
+#[derive(Debug)]
+pub(crate) struct AttachmentRefusal {
+    reason: String,
+    refused_scheme: Option<String>,
+}
+
+impl From<AttachmentRefusal> for GatewayError {
+    fn from(refusal: AttachmentRefusal) -> Self {
+        Self::ValidationError(refusal.reason)
+    }
+}
+
+/// Admit each image reference against the operator's policy before checking
+/// whether the selected provider can consume it. Nothing is persisted yet.
 pub(crate) fn check_attachment_support(
     capabilities: &crate::capabilities::WorkflowCapabilities,
+    policy: &swage_config::AttachmentsConfig,
     attachments: &[MessageAttachment],
-) -> Result<(), GatewayError> {
+) -> Result<(), AttachmentRefusal> {
     for attachment in attachments {
         match attachment {
             MessageAttachment::ImageUrl { url } => {
-                if url.trim().is_empty() {
-                    return Err(GatewayError::ValidationError(
-                        "an image attachment needs a non-empty url".into(),
-                    ));
+                let scheme = url.split_once(':').map(|(scheme, _)| scheme);
+                if !scheme.is_some_and(|scheme| {
+                    policy
+                        .accepted_schemes
+                        .iter()
+                        .any(|accepted| accepted.eq_ignore_ascii_case(scheme))
+                }) {
+                    let scheme = scheme.unwrap_or("<missing>").to_owned();
+                    return Err(AttachmentRefusal {
+                        reason: format!(
+                            "image reference scheme `{scheme}` is not accepted; accepted schemes: {}",
+                            policy.accepted_schemes.join(", ")
+                        ),
+                        refused_scheme: Some(scheme),
+                    });
                 }
-                if !capabilities.vision() {
-                    return Err(GatewayError::ValidationError(
-                        "the selected provider does not accept image attachments".into(),
-                    ));
-                }
-                if !capabilities.accepts_image_reference(url) {
-                    return Err(GatewayError::ValidationError(
-                        "the selected provider cannot resolve this image reference: attach the \
-                         image inline as a base64 data URL"
-                            .into(),
-                    ));
+                let reason = if !capabilities.vision() {
+                    Some("the selected provider does not accept image attachments")
+                } else if !capabilities.accepts_image_reference(url) {
+                    Some(
+                        "the selected provider cannot resolve this image reference: attach the image inline as a base64 data URL",
+                    )
+                } else {
+                    None
+                };
+                if let Some(reason) = reason {
+                    return Err(AttachmentRefusal {
+                        reason: reason.into(),
+                        refused_scheme: None,
+                    });
                 }
             }
         }
@@ -155,7 +182,7 @@ pub(crate) fn check_attachment_support(
 /// Resolve the request's effective model and admit its attachments against
 /// that model's provider protocol. Every entry point uses this seam before it
 /// persists a turn, so the admission decision cannot drift from execution.
-pub(crate) fn resolve_turn_model_and_attachments(
+pub(crate) async fn resolve_turn_model_and_attachments(
     state: &AppState,
     config: swage_config::ResolvedConfig,
     requested_model: Option<&str>,
@@ -183,11 +210,106 @@ pub(crate) fn resolve_turn_model_and_attachments(
     let config = effective_session_config(config, selected_model_id);
     let workflow_capabilities =
         crate::capabilities::WorkflowCapabilities::for_protocol(config.default_provider_protocol());
-    check_attachment_support(&workflow_capabilities, attachments)?;
+    if let Err(refusal) =
+        check_attachment_support(&workflow_capabilities, &config.attachments, attachments)
+    {
+        if let Some(scheme) = &refusal.refused_scheme
+            && let Err(error) = state
+                .storage
+                .create_audit_event(swage_storage::NewAuditEvent {
+                    id: Uuid::new_v4().to_string(),
+                    session_id: Some(session_id),
+                    entity_kind: "session".into(),
+                    entity_id: session_id.to_string(),
+                    event_kind: "image_reference_refused".into(),
+                    summary: refusal.reason.clone(),
+                    metadata: serde_json::json!({ "reason": refusal.reason, "scheme": scheme }),
+                })
+                .await
+        {
+            tracing::error!(%session_id, %error, "image reference refused but recording the refusal in the audit trail failed");
+        }
+        return Err(refusal.into());
+    }
 
     Ok((
         config,
         effective_model_source,
         selected_model_id.map(str::to_owned),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capabilities::WorkflowCapabilities;
+
+    #[test]
+    fn image_scheme_defaults_refuse_before_provider_checks_and_preserve_accepted_references() {
+        let capabilities = WorkflowCapabilities::for_protocol(swage_config::Protocol::OpenAi);
+        let policy = swage_config::AttachmentsConfig::default();
+        for url in [
+            "https://example.test/a.png",
+            "data:image/png;base64,cG5n",
+            "HTTPS://example.test/a.png",
+        ] {
+            let attachments = [MessageAttachment::ImageUrl { url: url.into() }];
+            check_attachment_support(&capabilities, &policy, &attachments).unwrap();
+            assert_eq!(
+                content_parts("look".into(), &attachments)[1],
+                ContentPart::ImageUrl { url: url.into() }
+            );
+        }
+        for (url, scheme) in [
+            ("http://example.test/a.png", "http"),
+            ("file:///private/image", "file"),
+            ("ftp://example.test/a.png", "ftp"),
+            ("relative/image.png", "<missing>"),
+            ("", "<missing>"),
+            (" https://example.test/a.png", " https"),
+        ] {
+            // A text-only provider would also refuse; policy gets first say.
+            let refusal = check_attachment_support(
+                &WorkflowCapabilities::default(),
+                &policy,
+                &[MessageAttachment::ImageUrl { url: url.into() }],
+            )
+            .unwrap_err();
+            assert_eq!(refusal.refused_scheme.as_deref(), Some(scheme));
+            assert!(
+                refusal.reason.contains(scheme) && refusal.reason.contains("https, data"),
+                "{}",
+                refusal.reason
+            );
+        }
+    }
+
+    #[test]
+    fn image_scheme_override_changes_admission_without_relaxing_provider_restrictions() {
+        let capabilities = WorkflowCapabilities::for_protocol(swage_config::Protocol::OpenAi);
+        let policy = swage_config::AttachmentsConfig {
+            accepted_schemes: vec!["HTTP".into()],
+        };
+        let http = [MessageAttachment::ImageUrl {
+            url: "http://example.test/a.png".into(),
+        }];
+        check_attachment_support(&capabilities, &policy, &http).unwrap();
+        assert!(
+            check_attachment_support(
+                &capabilities,
+                &policy,
+                &[MessageAttachment::ImageUrl {
+                    url: "https://example.test/a.png".into()
+                }]
+            )
+            .is_err()
+        );
+        let google = WorkflowCapabilities::for_protocol(swage_config::Protocol::Google);
+        let refusal = check_attachment_support(&google, &policy, &http).unwrap_err();
+        assert!(refusal.refused_scheme.is_none());
+        assert!(refusal.reason.contains("cannot resolve"));
+        let refusal =
+            check_attachment_support(&WorkflowCapabilities::default(), &policy, &http).unwrap_err();
+        assert!(refusal.reason.contains("does not accept image"));
+    }
 }
