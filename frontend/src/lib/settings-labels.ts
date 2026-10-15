@@ -1,4 +1,6 @@
 // Labels displayed by Settings and configuration history.
+const API_KEY_LABEL = "API key";
+
 export const SETTINGS_LABELS: Readonly<Record<string, string>> = {
   "default_model": "Default model",
   "memory.curator_idle_minutes": "Memory curation",
@@ -16,7 +18,10 @@ export const SETTINGS_LABELS: Readonly<Record<string, string>> = {
   "voice.transcription_model": "Transcription model",
   "voice.speech_model": "Speech model",
   "providers.*.base_url": "Base URL",
-  "providers.*.api_key": "API key",
+  "providers.*.api_key": API_KEY_LABEL,
+  "providers.*.api_key_env": API_KEY_LABEL,
+  "providers.*.api_key_secret_ref": "Stored credential",
+  "providers.*.has_credential": "Credential",
   "models.*.default_effort": "Default effort",
   "models.*.generation_preset": "Model compatibility",
   "generation_presets.*.max_tokens": "Max tokens",

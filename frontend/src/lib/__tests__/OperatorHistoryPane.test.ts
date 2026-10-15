@@ -176,8 +176,47 @@ describe("OperatorHistoryPane", () => {
       name: "explicit null value",
       prior: { voice: { speech_model: null } },
       next: { voice: { speech_model: "tts-1" } },
-      rows: [["Speech model", "null", "tts-1"]],
+      rows: [["Speech model", "unset", "tts-1"]],
     },
+    {
+      name: "new null value",
+      prior: { voice: { speech_model: "tts-1" } },
+      next: { voice: { speech_model: null } },
+      rows: [["Speech model", "tts-1", "unset"]],
+    },
+    {
+      name: "provider credential labels",
+      prior: { providers: { google: { api_key_env: "OLD_KEY", api_key_secret_ref: "secret-old", has_credential: false, base_url: "http://a" } } },
+      next: { providers: { google: { api_key_env: "NEW_KEY", api_key_secret_ref: "secret-new", has_credential: true, base_url: "http://b" } } },
+      rows: [
+        ["Providers › google › API key", "OLD_KEY", "NEW_KEY"],
+        ["Providers › google › Stored credential", "secret-old", "secret-new"],
+        ["Providers › google › Base URL", "http://a", "http://b"],
+        ["Providers › google › Credential", "false", "true"],
+      ],
+    },
+    ...(["creation", "deletion"] as const).map((action) => {
+      const snapshot = { providers: { google: {
+        api_key_env: null, api_key_secret_ref: null, base_url: null,
+        command: null, has_credential: false, protocol: "google",
+        state_dir: null, worker_staleness_threshold_ms: null,
+      } } };
+      return {
+        name: `null-valued provider ${action}`,
+        prior: action === "creation" ? null : snapshot,
+        next: action === "creation" ? snapshot : null,
+        rows: [
+          ["API key", "unset"], ["Stored credential", "unset"],
+          ["Base URL", "unset"], ["Command", "unset"],
+          ["Credential", "false"], ["Protocol", "google"],
+          ["State dir", "unset"], ["Worker staleness threshold ms", "unset"],
+        ].map(([label, value]) => [
+          `Providers › google › ${label}`,
+          action === "creation" ? "unset" : value,
+          action === "creation" ? value : "unset",
+        ]),
+      };
+    }),
   ])("renders $name as Settings-labelled field rows", async ({ prior, next, rows }) => {
     vi.mocked(fetchOperatorHistory).mockResolvedValue({
       configuration_changes: [{

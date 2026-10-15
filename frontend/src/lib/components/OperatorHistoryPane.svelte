@@ -39,7 +39,7 @@
   }
 
   function formatValue(value: unknown): string {
-    if (value === undefined) return "unset";
+    if (value == null) return "unset";
     return typeof value === "string" ? value : JSON.stringify(value);
   }
 

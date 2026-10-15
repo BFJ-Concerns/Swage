@@ -43,7 +43,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
-- Configuration history uses Settings’ labels and shows creations, deletions, unchanged saves, arrays and single-field changes without misleading or duplicate field rows.
+- Configuration history uses Settings’ labels, including provider credentials, and shows creations, deletions, unchanged saves, arrays and single-field changes without misleading or duplicate field rows. Null and absent values both read as unset.
 
 - Session previews in the recent list, sidebar, conversation selector, delete controls and Operator deck show plain text without Markdown formatting or link destinations. Operator session summaries are limited to three lines.
 - The workflow-authoring skill states event-kind names as the gateway accepts them: segments are joined by `.`, `:` or `/` only, with `_` and `-` allowed inside a segment but never separating one.
