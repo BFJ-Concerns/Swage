@@ -1101,10 +1101,10 @@ mod tests {
                                 swage_core::ToolReplayPart::ToolCall { call_id, .. } => {
                                     seen.insert(call_id.as_str());
                                 }
-                                swage_core::ToolReplayPart::ToolResult { call_id, .. } => {
-                                    if !seen.contains(call_id.as_str()) {
-                                        orphans.push(format!("{tier} replay: {call_id}"));
-                                    }
+                                swage_core::ToolReplayPart::ToolResult { call_id, .. }
+                                    if !seen.contains(call_id.as_str()) =>
+                                {
+                                    orphans.push(format!("{tier} replay: {call_id}"));
                                 }
                                 _ => {}
                             }
