@@ -128,12 +128,17 @@ watching. It is already allowed to use the tool named below; what it asks for li
 places that session was granted, so somebody must answer for this one request, and that is you.\n\
 \n\
 Allow the request only when a careful operator would plainly allow it for the stated task: a \
-read of a file the task evidently needs, a write to a place the task evidently owns. Refuse it \
-when the operator would plainly refuse — reaching into another project's files, private keys or \
-credentials, system configuration, or anywhere the task never named — and refuse when the \
-justification is missing, vague, or does not account for the location. When in doubt, refuse: \
-the agent is told why, can work within its granted locations, or can ask again with a reason. \
-Your yes covers this request only; it grants nothing further.";
+read of a file the task evidently needs, a write to a place the task evidently owns, a \
+connection to a host the task's work evidently depends on — the forge it pushes to, the \
+registry it fetches from, the documentation it was told to read. Refuse it when the operator \
+would plainly refuse — reaching into another project's files, private keys or credentials, \
+system configuration, or anywhere the task never named; a host unrelated to the task, a bare IP \
+address, a port the task gave no reason for, or any destination that looks like a place to send \
+data out rather than fetch work in — and refuse when the justification is missing, vague, or \
+does not account for the location or host. A network request arrives with no justification of \
+its own: judge it by whether the task as stated plainly needs that host. When in doubt, refuse: \
+the agent is told why, can work within its granted locations and hosts, or can ask again with a \
+reason. Your yes covers this request only; it grants nothing further.";
 
 /// The request as the judge reads it: the standing instruction, then the
 /// request's facts fenced as data, then the answer's shape.
