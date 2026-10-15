@@ -20,6 +20,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- Every scope follows one configuration reload policy. The global layer is the running configuration — loaded when the gateway starts, with its command-line overrides, and replaced by Settings saves — so a hand edit to the global `config.toml` applies at the next start in every session. A topic's or agent's `config.toml` and `instructions/` are read at each turn and overlaid on it, so an edit there applies to the next turn under that scope. Sessions whose topic or agent had a file of its own no longer re-read the global file live, and no longer lose command-line overrides when they do.
 - Swage is licensed under the GNU Affero General Public License, version 3 or any later version (`AGPL-3.0-or-later`), with the full text in `LICENSE` and the licence recorded in every crate and npm package manifest. Pull requests are welcome, contributed under the same licence.
 - A continuation schedule firing during a running turn queues its brief for the next turn, and channel messages for a busy session wait in the same durable queue. The web UI shows queued inputs once, labels them queued, and displays recorded inputs and the drained reply live.
 - A message, channel message or continuation brief reaching an idle session that still has queued messages, as a Stop leaves them, joins the queue and runs after them in the same turn.
