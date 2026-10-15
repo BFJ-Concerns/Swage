@@ -563,7 +563,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
         worker_placement,
     );
 
-    let environment = build_session_environment(&topic, &tool_root, &session);
+    let environment = build_session_environment(&topic, &tool_root, &session, &workspace_policy);
     let available_skills = available_skills_for_agent(&scope, &session.agent_id, Some(swage_root));
 
     let operator_guidance = operator_guidance_rules(Some(swage_root), &workspace_policy);
