@@ -20302,7 +20302,7 @@ async fn orientation_environment_carries_every_readable_workspace_from_resolved_
             )
         })
         .collect::<Vec<_>>();
-    actual.sort();
+    actual.sort_unstable();
     assert_eq!(
         actual,
         vec![
