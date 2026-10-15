@@ -224,9 +224,9 @@ pub(super) async fn process_turn_with_composition_and_focus(
     // and replace the cached write bit before assembly or sandbox creation.
     reauthorise_worker_placement_for_turn(state, &mut session).await?;
 
-    // Load topic-specific config. Missing topic config falls back to the
-    // startup config, but present invalid config fails the turn before any
-    // user message is written.
+    // Overlay the session's topic and agent layers on the running
+    // configuration. A present but invalid scope file fails the turn before
+    // any user message is written.
     let config = load_session_config(state, &scope, &session.agent_id)?;
 
     // A durable agent definition, when one exists for this agent, gives the

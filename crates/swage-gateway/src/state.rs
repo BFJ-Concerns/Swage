@@ -47,6 +47,17 @@ fn declared_execution_boundary_from_env() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Rootless in-process state must never discover the operator's data directory.
+fn application_config_root(
+    root_override: Option<PathBuf>,
+) -> (PathBuf, Option<Arc<tempfile::TempDir>>) {
+    if let Some(root) = root_override {
+        return (root, None);
+    }
+    let root = Arc::new(tempfile::tempdir().expect("temporary application configuration root"));
+    (root.path().to_path_buf(), Some(root))
+}
+
 /// A gate's sender and its claim, retained until the gate settles.
 pub struct ApprovalWaiter {
     pub(crate) sender: Option<oneshot::Sender<ApprovalDecision>>,
@@ -79,6 +90,8 @@ impl ApprovalWaiter {
 pub struct AppState {
     /// Configuration root selected when this gateway instance was constructed.
     pub config_root: PathBuf,
+    /// Keeps an isolated root alive until the last state clone is dropped.
+    _temporary_config_root: Option<Arc<tempfile::TempDir>>,
     /// Persistent storage backend (sessions, threads, turns, messages, tool calls).
     pub storage: Arc<dyn Storage>,
     /// Topic storage backend. Separate from `storage` because `TopicStore` is
@@ -299,6 +312,9 @@ impl AppState {
         })
     }
 
+    /// Construct state under an explicit `SWAGE_HOME`, or an owned temporary
+    /// root when none is supplied. Persistent gateways use
+    /// [`Self::new_with_config_root`] with their startup root.
     pub fn new(
         storage: Arc<dyn Storage>,
         topic_store: Arc<dyn TopicStore>,
@@ -307,9 +323,9 @@ impl AppState {
         tool_dispatcher: ToolDispatcher,
         hook_registry: Option<Arc<HookRegistry>>,
     ) -> Self {
-        let config_root = swage_config::discovery::resolve_root()
-            .unwrap_or_else(|_| swage_config::discovery::effective_root_path());
-        Self::new_with_config_root(
+        let (config_root, temporary_root) =
+            application_config_root(std::env::var_os("SWAGE_HOME").map(PathBuf::from));
+        let mut state = Self::new_with_config_root(
             storage,
             topic_store,
             provider,
@@ -317,7 +333,9 @@ impl AppState {
             tool_dispatcher,
             hook_registry,
             config_root,
-        )
+        );
+        state._temporary_config_root = temporary_root;
+        state
     }
 
     /// Construct application state with a root already selected by the caller.
@@ -366,6 +384,7 @@ impl AppState {
         }
         Self {
             config_root,
+            _temporary_config_root: None,
             storage: storage.clone(),
             topic_store,
             provider: provider.clone(),
@@ -665,6 +684,28 @@ async fn record_codex_runtime_event(
 mod codex_runtime_audit_tests {
     use super::*;
     use swage_storage::SqliteStorage;
+
+    #[test]
+    fn rootless_state_owns_an_isolated_root() {
+        let (path, owner) = application_config_root(None);
+        let other_owner = owner.clone();
+        assert!(path.is_dir());
+        let (other_path, _other_root) = application_config_root(None);
+        assert_ne!(path, other_path);
+        drop(owner);
+        assert!(path.is_dir(), "a clone retains the root");
+        drop(other_owner);
+        assert!(!path.exists(), "the last owner cleans up its root");
+    }
+
+    #[test]
+    fn an_explicit_state_root_is_retained_without_ownership() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (path, owner) = application_config_root(Some(fixture.path().to_path_buf()));
+        assert_eq!(path, fixture.path());
+        assert!(owner.is_none());
+        assert!(path.is_dir());
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn lifecycle_events_are_recorded_at_gateway_grain() {

@@ -475,8 +475,12 @@ pub use swage_protocol::client::settings::ObservabilityConfig;
 pub struct ExperimentationConfig {
     /// Master switch for every experimental variant decision.
     ///
-    /// When false, variant selection helpers must return the default
-    /// implementation and record, at most, that experimentation was disabled.
+    /// Binds the selections made after it is read: when false, a location
+    /// reaching its selection point serves its default implementation and
+    /// records only that experimentation was disabled. A session or task
+    /// that has already recorded a variant keeps serving it for its whole
+    /// life — one draw serves that session or task — so turning the switch
+    /// off changes nothing already drawn.
     #[serde(default = "default_experimentation_enabled")]
     pub enabled: bool,
     /// Per-location controls keyed by stable runtime location id.
