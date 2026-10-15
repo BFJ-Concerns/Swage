@@ -46,7 +46,7 @@ All notable changes to Swage are documented in this file.
 
 - Tool-output creation refuses planted directory and file links, preventing sandboxed commands from redirecting gateway writes outside output storage.
 
-- File search runs off the async runtime, stops on cancellation or a deadline, confines symlinks to the approved root, and retains only the requested result window while counting matches.
+- File search runs off the async runtime, stops on cancellation or a deadline, confines symlinks to the approved root, and retains only the requested result window while counting matches. Case-insensitive matching preserves contextual Unicode lowercase, including Greek final sigma.
 - File reads retain a bounded byte window; binary files whose metadata cannot give their size report an unknown length.
 - File path checks preserve non-UTF-8 roots and accept canonical paths through approved symlink aliases. An untrusted child workspace cannot release a read-only parent's restriction, and device-owned paths outside gateway attachments are checked on the device.
 - Replacing a non-empty file with `file_write` reports the prior byte count.

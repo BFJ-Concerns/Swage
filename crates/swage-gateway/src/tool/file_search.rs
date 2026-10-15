@@ -343,20 +343,7 @@ fn search_into(
     let mut line_window = file_window.clone();
     let mut line_number = 1;
     let mut line_started = false;
-    let mut matched = pattern.is_empty();
-    let needle: Vec<char> = pattern.chars().collect();
-    let mut prefix = vec![0; needle.len()];
-    for i in 1..needle.len() {
-        let mut j = prefix[i - 1];
-        while j > 0 && needle[i] != needle[j] {
-            j = prefix[j - 1];
-        }
-        if needle[i] == needle[j] {
-            j += 1;
-        }
-        prefix[i] = j;
-    }
-    let mut position = 0;
+    let mut matcher = LineMatcher::new(pattern);
     let mut pending_cr = false;
     let mut pending = Vec::with_capacity(8196);
     let mut chunk = [0u8; 8192];
@@ -383,36 +370,21 @@ fn search_into(
                 line_started = true;
             }
             if ch == '\n' {
-                if matched {
+                if matcher.matched() {
                     file_window = line_window.clone();
                     file_window.matches += 1;
                 }
                 line_number += 1;
                 line_started = false;
-                matched = pattern.is_empty();
-                position = 0;
+                matcher.reset();
                 pending_cr = false;
             } else {
                 if pending_cr {
-                    push_search_character(
-                        '\r',
-                        &mut line_window,
-                        &needle,
-                        &prefix,
-                        &mut position,
-                        &mut matched,
-                    );
+                    push_search_character('\r', &mut line_window, &mut matcher);
                 }
                 pending_cr = ch == '\r';
                 if !pending_cr {
-                    push_search_character(
-                        ch,
-                        &mut line_window,
-                        &needle,
-                        &prefix,
-                        &mut position,
-                        &mut matched,
-                    );
+                    push_search_character(ch, &mut line_window, &mut matcher);
                 }
             }
         }
@@ -425,16 +397,9 @@ fn search_into(
         }
     }
     if pending_cr {
-        push_search_character(
-            '\r',
-            &mut line_window,
-            &needle,
-            &prefix,
-            &mut position,
-            &mut matched,
-        );
+        push_search_character('\r', &mut line_window, &mut matcher);
     }
-    if line_started && matched {
+    if line_started && matcher.matched() {
         file_window = line_window;
         file_window.matches += 1;
     }
@@ -442,30 +407,143 @@ fn search_into(
     Ok(())
 }
 
-fn push_search_character(
-    ch: char,
-    window: &mut SearchWindow,
-    needle: &[char],
-    prefix: &[usize],
-    position: &mut usize,
-    matched: &mut bool,
-) {
+fn push_search_character(ch: char, window: &mut SearchWindow, matcher: &mut LineMatcher) {
     window.push(ch.encode_utf8(&mut [0; 4]));
-    if *matched {
-        return;
+    matcher.push(ch);
+}
+
+#[derive(Clone)]
+struct MatchState {
+    position: usize,
+    matched: bool,
+}
+
+impl MatchState {
+    fn push(&mut self, ch: char, needle: &[char], prefix: &[usize]) {
+        if self.matched {
+            return;
+        }
+        while self.position > 0 && needle[self.position] != ch {
+            self.position = prefix[self.position - 1];
+        }
+        if needle[self.position] == ch {
+            self.position += 1;
+        }
+        if self.position == needle.len() {
+            self.matched = true;
+        }
     }
-    for lower in ch.to_lowercase() {
-        while *position > 0 && needle[*position] != lower {
-            *position = prefix[*position - 1];
+}
+
+/// Matches the same lowercase stream as `str::to_lowercase`, without retaining
+/// a line. A sigma after a cased character needs lookahead through arbitrarily
+/// many case-ignorable characters: advance both possible match states until a
+/// cased character, a boundary or line end selects the correct one.
+struct LineMatcher {
+    needle: Vec<char>,
+    prefix: Vec<usize>,
+    current: MatchState,
+    final_sigma: Option<MatchState>,
+    preceding_cased: bool,
+}
+
+impl LineMatcher {
+    fn new(pattern: &str) -> Self {
+        let needle: Vec<char> = pattern.chars().collect();
+        let mut prefix = vec![0; needle.len()];
+        for i in 1..needle.len() {
+            let mut j = prefix[i - 1];
+            while j > 0 && needle[i] != needle[j] {
+                j = prefix[j - 1];
+            }
+            if needle[i] == needle[j] {
+                j += 1;
+            }
+            prefix[i] = j;
         }
-        if needle[*position] == lower {
-            *position += 1;
-        }
-        if *position == needle.len() {
-            *matched = true;
-            break;
+        Self {
+            current: MatchState {
+                position: 0,
+                matched: needle.is_empty(),
+            },
+            needle,
+            prefix,
+            final_sigma: None,
+            preceding_cased: false,
         }
     }
+
+    fn reset(&mut self) {
+        self.current = MatchState {
+            position: 0,
+            matched: self.needle.is_empty(),
+        };
+        self.final_sigma = None;
+        self.preceding_cased = false;
+    }
+
+    fn matched(&self) -> bool {
+        self.final_sigma.as_ref().unwrap_or(&self.current).matched
+    }
+
+    fn push(&mut self, ch: char) {
+        if self.current.matched && self.final_sigma.as_ref().is_none_or(|state| state.matched) {
+            return;
+        }
+        let (ignorable, cased) = case_context(ch);
+        if !ignorable
+            && let Some(final_sigma) = self.final_sigma.take()
+            && !cased
+        {
+            self.current = final_sigma;
+        }
+        if ch == 'Σ' && self.preceding_cased {
+            let mut final_sigma = self.current.clone();
+            final_sigma.push('ς', &self.needle, &self.prefix);
+            self.current.push('σ', &self.needle, &self.prefix);
+            self.final_sigma = Some(final_sigma);
+        } else {
+            for lower in ch.to_lowercase() {
+                self.current.push(lower, &self.needle, &self.prefix);
+                if let Some(final_sigma) = &mut self.final_sigma {
+                    final_sigma.push(lower, &self.needle, &self.prefix);
+                }
+            }
+        }
+        if !ignorable {
+            self.preceding_cased = cased;
+        }
+    }
+}
+
+/// Classifies sigma context with the same Unicode version as pattern lowering.
+/// The stable char API does not expose Case_Ignorable. Two fixed-size lowercase
+/// probes distinguish a cased follower from an ignorable one: in `AΣx`, sigma
+/// is non-final only for a non-ignorable cased x; appending A also makes it
+/// non-final when x is ignorable. For a character that is both, ignorable takes precedence.
+fn case_context(ch: char) -> (bool, bool) {
+    if ch.is_ascii() {
+        return (
+            matches!(ch, '\'' | '.' | ':' | '^' | '`'),
+            ch.is_ascii_alphabetic(),
+        );
+    }
+    let mut probe = [0; 8];
+    probe[..3].copy_from_slice("AΣ".as_bytes());
+    let end = 3 + ch.encode_utf8(&mut probe[3..7]).len();
+    let has_cased_follower = |bytes: &[u8]| {
+        std::str::from_utf8(bytes)
+            .expect("UTF-8 case probe")
+            .to_lowercase()
+            .chars()
+            .nth(1)
+            == Some('σ')
+    };
+    if has_cased_follower(&probe[..end]) {
+        return (false, true);
+    }
+    probe[end] = b'A';
+    (has_cased_follower(&probe[..=end]), false)
 }
 
 #[cfg(test)]
@@ -919,6 +997,98 @@ mod regression_tests {
             "worker did not observe cancellation"
         );
     }
+    #[tokio::test]
+    async fn regression_search_preserves_contextual_unicode_lowercase() {
+        let dir = tempfile::tempdir().unwrap();
+        let words = [
+            "ΟΣ",
+            "ΟΣΑ",
+            "Ο\u{301}Σ",
+            "ΟΣ\u{301}",
+            "ΟΣ\u{301}Α",
+            "Σ",
+            "AΣ'A",
+            "AΣ' ",
+            "ǅΣ",
+            "ªΣ",
+            "ΟΣ\u{345} ",
+            "ΟΣ\u{200d}Α",
+            "ΟΣ.Α",
+            "ΟΣ:Α",
+            "ΟΣ^Α",
+            "ΟΣ`Α",
+            "ΟΣ!Α",
+            "ΟΣΣ",
+            "ΟΣ\u{1ad0}Α",
+            "ΟΣ\u{a7ce}",
+        ];
+        let text = words
+            .map(|word| format!("padding padding padding padding {word}"))
+            .join("\n");
+        std::fs::write(dir.path().join("notes"), &text).unwrap();
+        let mut ctx = swage_tool::context::MockToolContext::new("agent", "session");
+        ctx.working_directory = dir.path().into();
+        for pattern in [
+            "ΟΣ",
+            "ΟΣΑ",
+            "Σ",
+            "Ο\u{301}Σ",
+            "AΣ'A",
+            "ΟΣ\u{345}",
+            "ΟΣ!Α",
+            "ΟΣΣ",
+            "ΟΣ\u{1ad0}Α",
+            "ΟΣ\u{a7ce}",
+        ] {
+            let lower = pattern.to_lowercase();
+            let expected = text
+                .lines()
+                .enumerate()
+                .filter(|(_, line)| line.to_lowercase().contains(&lower))
+                .map(|(i, line)| format!("notes:{}: {line}", i + 1))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !expected.is_empty(),
+                "case has no reference matches: {pattern}"
+            );
+            let result = FileSearchTool {
+                max_output_bytes: 10_000,
+            }
+            .execute(json!({"pattern":pattern}), &ctx)
+            .await
+            .unwrap();
+            assert_eq!(
+                result["output"], expected,
+                "whole-line lowercase changed for {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn regression_search_context_spans_chunks_without_retaining_the_line() {
+        let prefix = "p".repeat(8189);
+        let marks = "\u{301}".repeat(12_000);
+        let text = format!("{prefix}ΟΣ{marks}!\n{prefix}ΟΣ{marks}A\n");
+        for pattern in ["ος", "οσ"] {
+            let expected = text
+                .lines()
+                .enumerate()
+                .filter(|(_, line)| line.to_lowercase().contains(pattern))
+                .map(|(i, line)| format!("notes:{}: {line}", i + 1))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut window = SearchWindow::new(0, 19);
+            search_into(text.as_bytes(), "notes", pattern, &mut window, &control()).unwrap();
+            assert_eq!(
+                window.matches, 1,
+                "context across chunks changed matches for {pattern}"
+            );
+            assert_eq!(window.total_bytes, expected.len());
+            assert_eq!(window.output, expected[..19]);
+        }
+    }
+
     #[tokio::test]
     async fn regression_existing_search_rejects_utf8_error_beyond_sample() {
         let dir = tempfile::tempdir().unwrap();
