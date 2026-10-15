@@ -515,6 +515,19 @@ async fn an_over_threshold_context_runs_on_a_successor_assembled_from_its_elemen
     .await
     .expect("the turn runs on its successor");
 
+    let audit = state
+        .storage
+        .list_audit_events_by_session(session_id)
+        .await
+        .expect("list audit events");
+    assert!(
+        audit.iter().any(|event| {
+            event.entity_id == crate::experimentation::LOCATION_SUCCESSION_SUMMARY_PROMPT
+                && event.event_kind == "variant_selected"
+        }),
+        "the summariser's instruction is a recorded variant of the session"
+    );
+
     let db = storage.db.lock().await;
     let (report_json, _) = db
         .snapshots

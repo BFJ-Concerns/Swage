@@ -39,6 +39,12 @@ pub const LOCATION_TASK_PROMPT: &str = "task.prompt";
 /// under. The authored default is the first variant.
 pub const LOCATION_MEMORY_CURATOR_PROMPT: &str = "prompts.memory_curator";
 
+/// The succession summariser's instruction: the text the hand-over notes
+/// are written under when a session's history outgrows its room. The
+/// authored default carries standing rules forward as rules; the earlier
+/// plain-notes text is the registered alternative.
+pub const LOCATION_SUCCESSION_SUMMARY_PROMPT: &str = "prompts.succession_summary";
+
 /// Why the selected variant was selected. Recorded verbatim; the reasons are
 /// the audit trail's vocabulary, so they name situations, not code paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

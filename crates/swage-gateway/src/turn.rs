@@ -508,6 +508,26 @@ pub(super) async fn process_turn_with_composition_and_focus(
         }
     };
     let assembly_name = context_choices.assembly_name;
+    let summary_instructions = match succession::select_summary_instructions(
+        state,
+        &config.experimentation,
+        session_id,
+        prepared_turn_id,
+    )
+    .await
+    {
+        Ok(instructions) => instructions,
+        Err(error) => {
+            record_terminal_state_and_release(
+                state,
+                session_id,
+                prepared_turn_id,
+                TurnState::Failed,
+            )
+            .await?;
+            return Err(GatewayError::ConfigError(error.to_string()));
+        }
+    };
     let memory_index = if session_carries_memory(&session) {
         Some(
             crate::memory::load_memory_index(swage_root, &scope)
@@ -611,6 +631,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
             threshold: &compaction_threshold(&config),
             model: Some(config.default_model_id()).filter(|model| !model.is_empty()),
             focus: compaction_focus.as_deref(),
+            instructions: summary_instructions,
             variables: &session_variables,
             tokeniser: &tokeniser,
             degradation: succession::recent_degradation(state.storage.as_ref(), thread_id).await,

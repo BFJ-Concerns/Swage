@@ -44,7 +44,8 @@ use swage_context::history::HistoryElement;
 use swage_context::js_assembly::rendered_content;
 use swage_context::report::AssemblyOutput;
 use swage_context::succession::{
-    self, DEGRADATION_STRATEGY, SuccessionError, SuccessionRequest, THRESHOLD_STRATEGY,
+    self, DEGRADATION_STRATEGY, PLAIN_NOTES_INSTRUCTIONS, STANDING_RULES_INSTRUCTIONS,
+    SuccessionError, SuccessionRequest, THRESHOLD_STRATEGY,
 };
 use swage_context::tokeniser::TiktokenTokeniser;
 use swage_core::ChatMessage;
@@ -62,6 +63,9 @@ pub(super) struct SuccessionSite<'a> {
     /// The agent's shaping instructions for the summary, from the turn
     /// request.
     pub focus: Option<&'a str>,
+    /// The summariser's instruction, the variant the session drew at
+    /// `prompts.succession_summary` (`select_summary_instructions`).
+    pub instructions: &'a str,
     /// The session values the assembly renders into opted-in elements; the
     /// summariser is shown elements as the successor will carry them.
     pub variables: &'a BTreeMap<String, String>,
@@ -106,6 +110,55 @@ pub(crate) fn diagnosis_models(
             &config.context.diagnosis_synthesis_model,
         )?,
     })
+}
+
+/// The summariser instruction every pass runs under unless the session drew
+/// the alternative: standing rules carried forward as rules in force.
+pub(crate) const DEFAULT_SUMMARY_INSTRUCTION_VARIANT: &str = "standing-rules";
+/// The earlier text, which gives a rule no different standing from an event.
+const PLAIN_NOTES_SUMMARY_INSTRUCTION_VARIANT: &str = "plain-notes";
+/// The alternatives registered at `prompts.succession_summary` beside the
+/// default; a text here is a second arm in `summary_instructions`.
+pub(crate) const REGISTERED_SUMMARY_INSTRUCTION_VARIANTS: &[&str] =
+    &[PLAIN_NOTES_SUMMARY_INSTRUCTION_VARIANT];
+
+/// The instruction text a variant names. A variant the registry names but
+/// this table does not know serves the default and says so; the recorded
+/// draw still names it.
+pub(crate) fn summary_instructions(variant: &str) -> &'static str {
+    match variant {
+        DEFAULT_SUMMARY_INSTRUCTION_VARIANT => STANDING_RULES_INSTRUCTIONS,
+        PLAIN_NOTES_SUMMARY_INSTRUCTION_VARIANT => PLAIN_NOTES_INSTRUCTIONS,
+        unknown => {
+            tracing::warn!(
+                variant = unknown,
+                "unknown summary instruction variant; serving the default"
+            );
+            STANDING_RULES_INSTRUCTIONS
+        }
+    }
+}
+
+/// The session's summariser instruction: its recorded choice at
+/// `prompts.succession_summary`, or a first draw recorded against `turn_id`.
+/// A forced variant nothing registers is the caller's configuration error.
+pub(super) async fn select_summary_instructions(
+    state: &crate::state::AppState,
+    config: &swage_config::model::ExperimentationConfig,
+    session_id: Uuid,
+    turn_id: Uuid,
+) -> Result<&'static str, crate::experimentation::VariantSelectionError> {
+    let decision = crate::experimentation::select_session_variant(
+        state,
+        config,
+        crate::experimentation::LOCATION_SUCCESSION_SUMMARY_PROMPT,
+        REGISTERED_SUMMARY_INSTRUCTION_VARIANTS,
+        DEFAULT_SUMMARY_INSTRUCTION_VARIANT,
+        session_id,
+        Some(turn_id),
+    )
+    .await?;
+    Ok(summary_instructions(&decision.variant))
 }
 
 /// Return `output` unchanged when the thread ran into no wall and the
@@ -194,6 +247,7 @@ pub(super) async fn succeed_over_threshold(
         CompactionThreshold::TokenCount(_) => None,
     };
     let request = SuccessionRequest {
+        instructions: site.instructions,
         carried: &carried,
         history: &history,
         focus: site.focus,
@@ -600,6 +654,7 @@ async fn succeed_on_degradation(
     };
     if let Some(previous) = degradation.reusable() {
         let request = SuccessionRequest {
+            instructions: site.instructions,
             carried: &[],
             history,
             focus: site.focus,
@@ -639,6 +694,7 @@ async fn diagnose(
         .as_ref()
         .map_err(|error| SuccessionError::Diagnosis(error.clone()))?;
     let request = SuccessionRequest {
+        instructions: site.instructions,
         carried: &[],
         history,
         focus: site.focus,
@@ -824,6 +880,28 @@ fn diagnosis_request(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_summary_instruction_variant_names_its_text_and_an_unknown_one_serves_the_default() {
+        assert_eq!(
+            summary_instructions(DEFAULT_SUMMARY_INSTRUCTION_VARIANT),
+            STANDING_RULES_INSTRUCTIONS
+        );
+        assert_eq!(
+            summary_instructions(PLAIN_NOTES_SUMMARY_INSTRUCTION_VARIANT),
+            PLAIN_NOTES_INSTRUCTIONS
+        );
+        assert_eq!(
+            summary_instructions("no-such-variant"),
+            STANDING_RULES_INSTRUCTIONS
+        );
+        assert!(
+            REGISTERED_SUMMARY_INSTRUCTION_VARIANTS
+                .iter()
+                .all(|variant| summary_instructions(variant) != STANDING_RULES_INSTRUCTIONS),
+            "every registered alternative has a text of its own"
+        );
+    }
 
     fn rounds(outcomes: &[serde_json::Value]) -> Vec<ProviderRoundRecord> {
         outcomes
@@ -1154,6 +1232,7 @@ mod tests {
         let variables = BTreeMap::new();
         let threshold = CompactionThreshold::MessageCount(100);
         let site = SuccessionSite {
+            instructions: STANDING_RULES_INSTRUCTIONS,
             provider: &provider,
             threshold: &threshold,
             model: None,
@@ -1296,6 +1375,7 @@ mod tests {
             let variables = BTreeMap::new();
             let threshold = CompactionThreshold::MessageCount(100);
             let site = SuccessionSite {
+                instructions: STANDING_RULES_INSTRUCTIONS,
                 provider: &provider,
                 threshold: &threshold,
                 model: None,
@@ -1377,6 +1457,7 @@ mod tests {
         };
         let output = assemble(&[Box::new(HistoryElement::new(history.clone()))]);
         let site = SuccessionSite {
+            instructions: STANDING_RULES_INSTRUCTIONS,
             provider: &provider,
             threshold: &threshold,
             model: None,
@@ -1447,6 +1528,7 @@ mod tests {
             let output = assemble(&[Box::new(HistoryElement::new(history.clone()))]);
             let result = succeed_over_threshold(
                 SuccessionSite {
+                    instructions: STANDING_RULES_INSTRUCTIONS,
                     provider: &provider,
                     threshold: &threshold,
                     model: None,
