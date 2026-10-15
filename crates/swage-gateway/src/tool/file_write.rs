@@ -301,6 +301,7 @@ mod regression_tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = crate::tool::workspace::writable_test_context(dir.path(), vec![]);
         std::fs::write(dir.path().join("plan.md"), "# Ferry\nreference\n").unwrap();
+        let mut expected = String::from("# Ferry\nreference\n");
         for i in 0..6 {
             let result = FileWriteTool
                 .execute(
@@ -310,11 +311,8 @@ mod regression_tests {
                 .await
                 .unwrap();
             let content = std::fs::read_to_string(dir.path().join("plan.md")).unwrap();
-            assert!(
-                content.starts_with("# Ferry\nreference\n"),
-                "append erased the existing section: {content}"
-            );
-            assert_eq!(content.lines().count(), 3 + i);
+            expected.push_str(&format!("# Entry {i}\n"));
+            assert_eq!(content, expected, "append lost supplied or earlier content");
             assert!(result["output"].as_str().unwrap().starts_with("Appended"));
         }
     }
