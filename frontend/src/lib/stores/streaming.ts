@@ -78,6 +78,8 @@ export interface StreamingStore {
   // matching the approval UI.
   readonly pendingApproval: PendingApproval | null;
   handleServerEvent(event: ServerEvent, conversationId?: string): void;
+  /** Clear an ownership refusal once that conversation connects successfully. */
+  clearConnectionError(conversationId: string): void;
   reconcileAfterReconnect(
     recoveredTurnGeneration: number,
     conversationId?: string | null,
@@ -626,6 +628,13 @@ export function createStreamingStore(
       }
     },
 
+    clearConnectionError(conversationId: string): void {
+      const stream = streams.get(conversationId);
+      if (stream && get(stream.turnErrorStore)?.code === "already_connected") {
+        stream.turnErrorStore.set(null);
+      }
+    },
+
     reconcileAfterReconnect(
       recoveredTurnGeneration: number,
       conversationId = currentConversationId(),
@@ -773,6 +782,7 @@ export function withConversationAutoCreate(
       return base.pendingApproval;
     },
     handleServerEvent: (event, conversationId) => base.handleServerEvent(event, conversationId),
+    clearConnectionError: (conversationId) => base.clearConnectionError(conversationId),
     reconcileAfterReconnect: (turnGeneration, conversationId, recoveredMessages) =>
       base.reconcileAfterReconnect(turnGeneration, conversationId, recoveredMessages),
     cancelTurn: () => base.cancelTurn(),

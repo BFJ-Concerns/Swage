@@ -193,6 +193,7 @@ function mockStreamingStore(): StreamingStore {
     handleServerEvent: () => {},
     startTurn: () => {},
     cancelTurn: () => {},
+    clearConnectionError: () => {},
     reconcileAfterReconnect: () => {},
   };
 }

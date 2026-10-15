@@ -149,6 +149,7 @@ function makeStreamingStore(
     handleServerEvent: () => {},
     startTurn: () => {},
     cancelTurn: () => {},
+    clearConnectionError: () => {},
     reconcileAfterReconnect: () => {},
   };
 }
