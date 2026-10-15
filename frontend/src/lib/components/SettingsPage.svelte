@@ -176,6 +176,7 @@
       preset.temperature = nullableNumber(preset.temperature);
     }
     settings.hitl.timeout = nullableNumber(settings.hitl.timeout) ?? 0;
+    settings.sessions.max_delegation_depth = Math.max(1, Math.floor(nullableNumber(settings.sessions.max_delegation_depth) ?? 4));
     settings.sessions.archive_after_days = Math.min(3650, settings.sessions.archive_after_days);
     settings.memory.curator_idle_minutes = Math.min(10080, Math.max(1, nullableNumber(settings.memory.curator_idle_minutes) ?? 10));
     settings.context.timeout = nullableNumber(settings.context.timeout) ?? 0;

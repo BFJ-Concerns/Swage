@@ -200,6 +200,7 @@ impl DelegationExecutor {
         started_tx: Option<tokio::sync::oneshot::Sender<DetachedDelegation>>,
         existing_child: Option<DelegatedChildContinuation>,
         working_directory: Option<String>,
+        effort: Option<swage_core::ResolvedEffort>,
     ) -> Result<AgentMessage, AgentError> {
         let target_agent_id = &delegate_msg.recipient_agent_id;
 
@@ -467,7 +468,7 @@ impl DelegationExecutor {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
         let turn_request = TurnRequest {
-            effort: None,
+            effort,
             execution: TurnExecutionContext {
                 session_id: session.id,
                 thread_id: thread.id,
@@ -872,6 +873,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .expect_err("invalid output schema should reject agent construction");
@@ -955,6 +957,7 @@ mod tests {
                 None,
                 serde_json::json!({"dispatch_bound_agent_id": "agent-a"}),
                 tokio_util::sync::CancellationToken::new(),
+                None,
                 None,
                 None,
                 None,

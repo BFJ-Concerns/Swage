@@ -5651,11 +5651,18 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
+        },
+        "max_delegation_depth": {
+          "description": "Maximum number of child levels in a delegation chain.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
         }
       },
       "additionalProperties": false,
       "required": [
-        "archive_after_days"
+        "archive_after_days",
+        "max_delegation_depth"
       ]
     },
     "SettingsResponse": {

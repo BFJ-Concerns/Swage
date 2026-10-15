@@ -483,6 +483,9 @@ settings_section! {
         /// visibility only — nothing is cancelled and nothing queued is blocked.
         #[ts(type = "number")]
         archive_after_days: u64 = 7,
+        /// Maximum number of child levels in a delegation chain.
+        #[ts(type = "number")]
+        max_delegation_depth: u64 = 4,
     }
     problems(section) {
         let mut problems = Vec::new();
@@ -493,6 +496,12 @@ settings_section! {
                     "sessions.archive_after_days must be between 1 and {MAX_ARCHIVE_AFTER_DAYS}, got {}",
                     section.archive_after_days
                 ),
+            });
+        }
+        if section.max_delegation_depth == 0 {
+            problems.push(SettingsProblem {
+                field: "max_delegation_depth",
+                message: "sessions.max_delegation_depth must be at least 1".into(),
             });
         }
         problems
@@ -633,6 +642,53 @@ pub struct RestartStatusResponse {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn delegation_depth_declaration_defaults_overlays_and_validates() {
+        use crate::client::settings_section::SettingsSection;
+        let defaults = super::SessionsConfig::default();
+        assert_eq!(
+            serde_json::to_value(defaults).unwrap()["max_delegation_depth"],
+            4,
+            "four child levels are allowed by default"
+        );
+        let base: super::PartialSessionsConfig =
+            serde_json::from_value(serde_json::json!({"max_delegation_depth": 2})).unwrap();
+        let overlay: super::PartialSessionsConfig =
+            serde_json::from_value(serde_json::json!({"archive_after_days": 12})).unwrap();
+        let resolved = base.overlay(overlay).resolve();
+        assert_eq!(
+            serde_json::to_value(&resolved).unwrap()["max_delegation_depth"],
+            2
+        );
+        assert_eq!(resolved.archive_after_days, 12);
+        let round_trip = super::PartialSessionsConfig::from(resolved.clone()).resolve();
+        assert_eq!(round_trip, resolved);
+        assert!(resolved.problems().is_empty());
+        let invalid: super::SessionsConfig = serde_json::from_value(
+            serde_json::json!({"archive_after_days": 7, "max_delegation_depth": 0}),
+        )
+        .unwrap();
+        assert!(
+            invalid
+                .problems()
+                .iter()
+                .any(|problem| problem.field == "max_delegation_depth"),
+            "the declaration refuses an unbounded zero limit"
+        );
+        assert!(
+            serde_json::from_value::<super::PartialSessionsConfig>(
+                serde_json::json!({"max_delegation_depth": "two"})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<super::PartialSessionsConfig>(
+                serde_json::json!({"delegation_depth": 2})
+            )
+            .is_err()
+        );
+    }
+
     use super::*;
 
     #[test]

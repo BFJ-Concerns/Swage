@@ -2098,6 +2098,72 @@ mod tests {
         assert_eq!(state.active_config().memory.curator_idle_minutes, 45);
     }
 
+    #[tokio::test]
+    async fn delegation_depth_saves_hot_applies_reloads_and_refuses_zero() {
+        let home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::new(
+            storage.clone(),
+            storage,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        assert_eq!(
+            serde_json::to_value(state.active_config().sessions).unwrap()["max_delegation_depth"],
+            4,
+            "the gateway loads the depth default"
+        );
+        let mut request = voice_settings_request(None);
+        request.sessions = Some(
+            serde_json::from_value(
+                serde_json::json!({"archive_after_days": 7, "max_delegation_depth": 2}),
+            )
+            .unwrap(),
+        );
+        let response = save_settings(&state, request.clone()).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(response.sessions).unwrap()["max_delegation_depth"],
+            2
+        );
+        assert_eq!(
+            serde_json::to_value(state.active_config().sessions).unwrap()["max_delegation_depth"],
+            2,
+            "new chains read the saved depth without a restart"
+        );
+        let reloaded = swage_config::load_resolved_config_from(
+            home.path(),
+            &ScopeLocation::General,
+            "default",
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(reloaded.sessions).unwrap()["max_delegation_depth"],
+            2,
+            "the declared setting survives a file reload"
+        );
+        request.sessions = Some(
+            serde_json::from_value(
+                serde_json::json!({"archive_after_days": 7, "max_delegation_depth": 0}),
+            )
+            .unwrap(),
+        );
+        let result = save_settings(&state, request).await;
+        assert!(result.is_err(), "the settings API refuses a zero depth");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("sessions.max_delegation_depth")
+        );
+        assert_eq!(
+            serde_json::to_value(state.active_config().sessions).unwrap()["max_delegation_depth"],
+            2,
+            "a refused save leaves the active setting intact"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn save_settings_hot_applies_voice_model_routes() {
         let swage_home = SwageHomeGuard::new();

@@ -2284,6 +2284,33 @@ allowed_fields = ["user"]
     }
 
     #[test]
+    fn delegation_depth_file_validation_uses_the_declaration() {
+        let valid = validate_toml_string(
+            "[sessions]\nmax_delegation_depth = 2\n",
+            &path("config.toml"),
+        );
+        assert!(
+            valid.is_empty(),
+            "the declared depth is a recognised setting: {valid:?}"
+        );
+        let invalid = validate_toml_string(
+            "[sessions]\nmax_delegation_depth = 0\n",
+            &path("config.toml"),
+        );
+        assert!(
+            invalid
+                .iter()
+                .any(|problem| matches!(&problem.kind, ConfigProblemKind::SemanticError { .. })),
+            "zero is refused by the declaration: {invalid:?}"
+        );
+        let wrong_kind = validate_toml_string(
+            "[sessions]\nmax_delegation_depth = 'two'\n",
+            &path("config.toml"),
+        );
+        assert_eq!(wrong_kind.len(), 1);
+    }
+
+    #[test]
     fn sessions_section_validates_and_rejects_a_zero_delay() {
         let problems = validate_toml_string(
             "[sessions]\narchive_after_days = 14\n",
