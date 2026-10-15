@@ -271,4 +271,15 @@ describe("TopicSettingsPage", () => {
     expect(topicsApi.updateTopic).toHaveBeenCalledWith("topic-1", { tags: ["ops", "daily"] });
     expect(document.body.textContent).toContain("Saved.");
   });
+  it("distinguishes same-name defaults and choices by save time and origin", async () => {
+    const times = ["2026-10-01T10:00:00Z", "2026-10-02T10:00:00Z"];
+    const entries = times.map((updated_at, i) => ({ id: String(i), name: "Plan", description: "Plan", tags: [], updated_at, origin_topic_deleted: false }));
+    vi.mocked(surfacesApi.listLibrary).mockResolvedValue({ entries });
+    vi.mocked(surfacesApi.listTopicDefaultSurfaces).mockResolvedValue({ entries: [entries[0]] });
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "surfaces" } });
+    await flushUi();
+    expect(Array.from(document.querySelectorAll("time")).map(t => t.dateTime)).toEqual(times);
+    expect(document.body.textContent?.match(/General/g)).toHaveLength(2);
+  });
+
 });
