@@ -43,6 +43,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Gateway start reports the daemon’s startup error promptly, and CLI help lists commands with one product summary.
+
 - Saving an agent definition refuses `require_approval` in its tool-permission overlay instead of accepting an ignored approval requirement.
 
 - The web UI serves Bebas Neue, Hanken Grotesk and DM Mono from bundled font files without contacting Google Fonts.
