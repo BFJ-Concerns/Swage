@@ -58,20 +58,19 @@ A complete creation request:
   "tool_permissions": {
     "allow": ["knowledge_search", "knowledge_orient", "docs_read", "file_read", "file_list", "file_search", "url_fetch", "web_search"],
     "deny": [],
-    "bundles": {},
-    "require_approval": []
+    "bundles": {}
   }
 }
 ```
 
 `description` is required. `topic_id` scopes the definition to one topic;
 omit it for a global definition. The `tool_permissions` object carries
-`allow`, `deny`, `bundles`, and `require_approval`. `bundles` maps bundle
+`allow`, `deny`, and `bundles`. `bundles` maps bundle
 names to tool-name arrays — it must be present (use `{}` when no custom
 bundles are needed). The overlay intersects with the config cascade's
-grants, so it can only narrow what the config allows, never widen it; its
-`require_approval` is not applied, and the approval list comes from the
-config files.
+grants, so it can only narrow what the config allows, never widen it.
+An explicit `require_approval` field is refused before saving, including
+an empty list. Set approval requirements in the config files.
 Optional fields not shown above include `model_id`, `skills`,
 `output_schema`, and `output_max_retries`.
 
@@ -260,8 +259,8 @@ is defined in `ToolPermissionConfig::default()` and applies unless a config
 file replaces the approval list — a `require_approval` list in a global,
 topic or agent config file replaces the default list rather than adding to
 it, so `require_approval = []` turns the prompts off. An agent definition's
-permission overlay narrows grants only; its `require_approval` is not
-applied.
+permission overlay narrows grants only; an explicit `require_approval`
+field is refused before saving.
 
 ### Resolution order
 
@@ -322,7 +321,7 @@ Dispatch-bound intersection also handles approval requirements:
 
 - The worker's own `require_approval` entries are pruned to only tools in the
   effective allow set — an explicit filtering step, unlike the agent-definition
-  overlay where inert entries simply remain.
+  overlay, which refuses an explicit approval field before saving.
 - The dispatcher's approval demands carry forward onto the worker for any
   tool that is in the effective allow set and not already approval-gated.
   A tool the dispatcher could only use with approval cannot run approval-free
