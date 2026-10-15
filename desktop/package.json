@@ -9,11 +9,11 @@
     "test": "npm --prefix ../frontend run build && node ./tests/smoke.mjs"
   },
   "devDependencies": {
-    "electron": "42.5.0",
+    "electron": "^42.11.12",
     "playwright": "^1.61.1",
     "ws": "8.21.0"
   },
   "overrides": {
-    "undici": "7.28.0"
+    "undici": "7.30.0"
   }
 }
