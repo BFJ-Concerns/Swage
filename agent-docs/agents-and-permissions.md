@@ -56,20 +56,22 @@ creation request:
   "tool_permissions": {
     "allow": ["knowledge_search", "knowledge_orient", "docs_read", "file_read", "file_list", "file_search", "url_fetch", "web_search"],
     "deny": [],
-    "bundles": {},
-    "require_approval": []
+    "bundles": {}
   }
 }
 ```
 
 `description` is required. `topic_id` scopes the definition to one topic;
 omit it for a global definition. `tool_permissions` is a JSON object with
-`allow`, `deny`, `bundles`, and `require_approval`. `bundles` maps bundle
+`allow`, `deny`, and `bundles`. `bundles` maps bundle
 names to tool-name arrays — it must be present (use `{}` when no custom
 bundles are needed). The overlay intersects with the config cascade's
 grants, so it can only narrow what the config allows. Fields not shown
 above (`model_id`, `skills`, `output_schema`, `output_max_retries`) are
 optional.
+
+A definition request whose `tool_permissions` contains `require_approval`
+is refused with HTTP 422, including when its value is an empty list.
 
 Conversational authoring of agent definitions is not yet available. The
 API routes above are the supported surface.
