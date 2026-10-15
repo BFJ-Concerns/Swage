@@ -273,6 +273,49 @@ describe("OperatorDashboard", () => {
     );
   });
 
+  it("shows the brief a run executed only when the schedule has since changed", async () => {
+    vi.mocked(operatorApi.fetchOperatorOverview)
+      .mockResolvedValueOnce(makeOverview())
+      .mockResolvedValue(makeOverview());
+    const run = {
+      id: "run-current",
+      schedule_id: "schedule-1",
+      trigger: "tick" as const,
+      state: "completed" as const,
+      skip_reason: null,
+      executed_message: "Daily digest",
+      scheduled_for: "2026-04-07T12:05:00Z",
+      session_id: "session-1",
+      turn_id: null,
+      gate: null,
+      output_text: "current output",
+      error_message: null,
+      created_at: "2026-04-07T12:05:00Z",
+      started_at: "2026-04-07T12:05:00Z",
+      completed_at: "2026-04-07T12:05:01Z",
+    };
+    vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValueOnce({
+      runs: [
+        run,
+        { ...run, id: "run-earlier", executed_message: "Review the inbox.", output_text: "earlier output" },
+      ],
+    });
+
+    component = mount(OperatorDashboard, { target: document.body });
+    await settleUi();
+    const runsButton = Array.from(document.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Runs",
+    );
+    flushSync(() => runsButton!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await settleUi();
+
+    const entries = Array.from(document.querySelectorAll(".run-entry"));
+    const earlier = entries.find((node) => node.textContent?.includes("earlier output"));
+    const current = entries.find((node) => node.textContent?.includes("current output"));
+    expect(earlier?.textContent).toContain("Ran an earlier brief: Review the inbox.");
+    expect(current?.textContent).not.toContain("Ran an earlier brief");
+  });
+
   it("explains an empty devices card and how to pair a device", async () => {
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOverview({ devices: [] }));
 
