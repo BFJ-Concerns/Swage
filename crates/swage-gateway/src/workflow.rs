@@ -1709,6 +1709,8 @@ impl GatewayWorkflowLauncher {
         } else {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
+        // Timestamp before the read so a concurrent ending cannot predate this observation.
+        let status_as_of = chrono::Utc::now();
         // The returned state and its worker count share one recorded account.
         let record = self
             .state
@@ -1717,6 +1719,8 @@ impl GatewayWorkflowLauncher {
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "workflow run disappeared".to_string())?;
+        #[cfg(test)]
+        workflow_pause_test_hook::pause("start-snapshot-read", session.id).await;
         let run = run_wire(record).map_err(|error| error.message().to_owned())?;
         let workers_dispatched = run.terminal_account.as_ref().map(|account| {
             let workers = &account.workers;
@@ -1728,7 +1732,7 @@ impl GatewayWorkflowLauncher {
         serde_json::to_value(swage_protocol::client::workflow::WorkflowRunStartResult {
             run,
             workers_dispatched,
-            status_as_of: chrono::Utc::now(),
+            status_as_of,
         })
         .map_err(|error| error.to_string())
     }

@@ -190,6 +190,11 @@
     margin: 0;
   }
 
+  .detail,
+  .reason {
+    text-transform: none;
+  }
+
   ul {
     list-style: none;
     margin: 0;

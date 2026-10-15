@@ -19509,3 +19509,72 @@ async fn review_fix_parent_cancellation_does_not_reuse_an_unclaimed_api_request(
         "a later parent cancellation must not inherit the unclaimed API request"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_fix_start_snapshot_time_precedes_a_concurrent_completion() {
+    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .unwrap();
+    let state = AppState::new(
+        storage.clone(),
+        storage.clone(),
+        Arc::new(GatedRoundProvider {
+            round_opened: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        }),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let pause = workflow_pause_test_hook::install("start-snapshot-read", session.id);
+    let launcher = GatewayWorkflowLauncher::new(state.clone());
+    let start = tokio::spawn(async move {
+        launcher
+            .start_inline(
+                session.id,
+                "return await agent('wait', {maxAttempts: 1});",
+                Value::Null,
+                None,
+                false,
+            )
+            .await
+            .unwrap()
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    let run = storage
+        .list_workflow_runs(topic.id)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    storage
+        .update_workflow_run_state(run.id, "completed", None, None, None)
+        .await
+        .unwrap();
+    let completed = storage
+        .get_workflow_run(run.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .completed_at
+        .unwrap();
+    pause.release.add_permits(1);
+    let result = start.await.unwrap();
+    assert_eq!(result["state"], "running");
+    let observed =
+        chrono::DateTime::parse_from_rfc3339(result["status_as_of"].as_str().unwrap()).unwrap();
+    if let Some(token) = state.active_workflow_runs.lock().await.get(&run.id) {
+        token.cancel();
+    }
+    assert!(
+        observed <= completed,
+        "a running snapshot timestamp must precede the concurrent completion"
+    );
+}

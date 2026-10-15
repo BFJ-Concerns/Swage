@@ -682,7 +682,7 @@ impl WorkflowStore for SqliteStorage {
         let now = Utc::now().to_rfc3339();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
-            let changed = tx.execute("UPDATE workflow_runs SET state=?2, final_output_json=?3, handover_json=?4, error_message=?5, wake_at=NULL, completed_at=CASE WHEN ?2='running' THEN NULL ELSE ?6 END WHERE id=?1 AND state NOT IN ('completed', 'failed', 'cancelled')", params![id.to_string(),state,output,handover,error,now])?;
+            let changed = tx.execute("UPDATE workflow_runs SET state=?2, final_output_json=?3, handover_json=?4, error_message=?5, wake_at=NULL, completed_at=CASE WHEN ?2='running' THEN NULL ELSE ?6 END WHERE id=?1 AND (?2 NOT IN ('completed', 'failed', 'cancelled') OR state NOT IN ('completed', 'failed', 'cancelled'))", params![id.to_string(),state,output,handover,error,now])?;
             if changed > 0 && matches!(state.as_str(), "completed" | "failed" | "cancelled") {
                 tx.execute("UPDATE workflow_run_holds SET state='closed' WHERE run_id=?1 AND state='open'", [id.to_string()])?;
             }

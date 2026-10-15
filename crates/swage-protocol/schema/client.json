@@ -70,6 +70,9 @@
     "create_workspace_attachment_request": {
       "$ref": "#/$defs/CreateWorkspaceAttachmentRequest"
     },
+    "delegation_start_result": {
+      "$ref": "#/$defs/DelegationStartResult"
+    },
     "delete_surface_annotation_response": {
       "$ref": "#/$defs/DeleteSurfaceAnnotationResponse"
     },
@@ -393,6 +396,7 @@
     "workflow_run_ending_notice",
     "answer_workflow_run_hold_response",
     "workflow_run_status_request",
+    "delegation_start_result",
     "workflow_run_start_result",
     "workflow_run_started_event",
     "workflow_entry_event",
@@ -1774,6 +1778,61 @@
       "required": [
         "element",
         "reason"
+      ]
+    },
+    "DelegationStartResult": {
+      "description": "A delegated child's state observed when its start request returns.",
+      "type": "object",
+      "properties": {
+        "child_session_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "child_thread_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "child_turn_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "completion_mode": {
+          "type": "string"
+        },
+        "delegate_message_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "error_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status_as_of": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "target_agent_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "completion_mode",
+        "delegate_message_id",
+        "child_session_id",
+        "child_thread_id",
+        "child_turn_id",
+        "target_agent_id"
       ]
     },
     "DeleteSurfaceAnnotationResponse": {

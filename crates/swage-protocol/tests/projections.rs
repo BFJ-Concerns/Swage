@@ -31,6 +31,8 @@ fn typescript_bindings_are_regenerated() {
     client::workflow::AnswerWorkflowRunHoldResponse::export_all(&cfg)
         .expect("export hold answer response");
     client::workflow::WorkflowRunStatusRequest::export_all(&cfg).expect("export status request");
+    client::workflow::DelegationStartResult::export_all(&cfg)
+        .expect("export delegation start result");
     client::workflow::WorkflowRunStartResult::export_all(&cfg).expect("export run start result");
     client::channel::CreateChannelLinkCodeRequest::export_all(&cfg)
         .expect("export channel link code request");

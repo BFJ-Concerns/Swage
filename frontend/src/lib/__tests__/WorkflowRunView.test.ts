@@ -77,7 +77,10 @@ describe("WorkflowRunView", () => {
   it("run accounts render cancellation provenance", () => {
     const account = emptyAccount({ ending: "cancelled" });
     account.cancellation = { source: "API request", actor: "operator", session_id: "session-1", requested_at: "2026-10-15T10:00:00Z" };
+    account.workers.cut_short.push({ journal_entry_id: "cut-short", seq: 1, label: "worker", agent_definition_id: null, placement: null, worktree: null,
+      termination: { termination: "cut_short", cause: "run_cancelled", detail: "WorkflowCancelledError: run cancelled" } });
     component = render(run(account));
+    expect(getComputedStyle(document.querySelector(".detail")!).textTransform).toBe("none");
     const text = document.querySelector(".ending")?.textContent;
     expect(text).toContain("API request");
     expect(text).toContain("2026-10-15T10:00:00Z");

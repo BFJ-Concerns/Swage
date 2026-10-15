@@ -11289,10 +11289,22 @@ async fn completed_detached_result_reaches_parent_next_turn() {
             .expect("delegate tool result should be stored"),
     )
     .expect("delegate tool result should be JSON");
-    assert_eq!(detached_output["status"], "detached");
     assert_eq!(
-        detached_output["result_delivery"],
-        "The delegated work continues independently. Its durable result message will be stored with correlation_id equal to delegate_message_id when the child finishes."
+        detached_output["status"], "processing",
+        "the gated child is still awaiting its provider"
+    );
+    assert_eq!(detached_output["completion_mode"], "detach");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(
+            detached_output["status_as_of"]
+                .as_str()
+                .expect("observation time")
+        )
+        .is_ok()
+    );
+    assert!(
+        detached_output.get("result_delivery").is_none(),
+        "no static claim about continued execution may contradict the observed state"
     );
 
     let delegate_message_id = detached_output["delegate_message_id"]

@@ -131,6 +131,7 @@ pub struct ClientSurface {
     workflow_run_ending_notice: workflow::WorkflowRunEndingNotice,
     answer_workflow_run_hold_response: workflow::AnswerWorkflowRunHoldResponse,
     workflow_run_status_request: workflow::WorkflowRunStatusRequest,
+    delegation_start_result: workflow::DelegationStartResult,
     workflow_run_start_result: workflow::WorkflowRunStartResult,
     workflow_run_started_event: workflow::WorkflowRunStartedEvent,
     workflow_entry_event: workflow::WorkflowEntryEvent,

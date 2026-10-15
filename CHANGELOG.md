@@ -43,9 +43,10 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Workflow and detached-child start observations take their timestamp before reading run state, so a concurrent completion cannot predate a running observation.
 - Interrupted workflow cancellation is refused plainly, and unclaimed cancellation requests leave no misleading audit record.
 - Workflow run status explains how to acknowledge handled run endings.
-- Workflow starts report their observed state and time, including runs that finish immediately.
+- Workflow and delegated-child starts report their observed state and time, including work that finishes immediately.
 - Open workflow inspection includes the provider-round activity shown on the run page.
 - Workflow author errors retain their classification and identifier case; empty partial results are omitted and engine traces are secondary.
 - API workflow cancellations retain their source and request time in the terminal account.

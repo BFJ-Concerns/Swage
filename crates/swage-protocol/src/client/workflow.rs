@@ -1011,3 +1011,18 @@ impl WorkflowRunStatusRequest {
         serde_json::to_value(schemars::schema_for!(Self)).expect("status request schema serialises")
     }
 }
+
+/// A delegated child's state observed when its start request returns.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct DelegationStartResult {
+    pub status: Option<String>,
+    pub status_as_of: Option<DateTime<Utc>>,
+    pub completion_mode: String,
+    pub delegate_message_id: Uuid,
+    pub child_session_id: Uuid,
+    pub child_thread_id: Uuid,
+    pub child_turn_id: Uuid,
+    pub target_agent_id: String,
+    pub error_message: Option<String>,
+}
