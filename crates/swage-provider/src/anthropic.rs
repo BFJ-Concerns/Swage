@@ -200,6 +200,8 @@ enum ContentBlock {
         /// Parsed argument object for the tool.
         input: serde_json::Value,
     },
+    /// Reasoning blocks carry no completion text or tool invocation.
+    Thinking {},
 }
 
 #[derive(Deserialize)]
@@ -1211,6 +1213,7 @@ impl LlmProvider for AnthropicProvider {
                         arguments: input,
                     });
                 }
+                ContentBlock::Thinking {} => {}
             }
         }
 
@@ -1260,6 +1263,70 @@ impl LlmProvider for AnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn continuity_recorded_proxy_summary_decodes_through_complete() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let fixture = include_str!("../tests/fixtures/claude-succession-response.json");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&mut socket);
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_ne!(body["stream"], true);
+            drop(reader);
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", fixture.len(), fixture).unwrap();
+        });
+        let provider = AnthropicProvider::from_config(ProviderConfig::new(
+            "test-key",
+            "claude-sonnet-5-5",
+            format!("http://{address}"),
+        ));
+        let result = provider
+            .complete(crate::test_support::empty_completion_request())
+            .await;
+        server.join().unwrap();
+        assert!(
+            result.is_ok(),
+            "recorded thinking/text response must decode: {result:?}"
+        );
+        let response = result.unwrap();
+        let recorded: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        let text = recorded["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|block| block["type"] == "text")
+            .map(|block| block["text"].as_str().unwrap())
+            .collect::<String>();
+        assert_eq!(response.content, text);
+        assert_eq!(
+            response.input_tokens,
+            recorded["usage"]["input_tokens"].as_u64().unwrap() as u32
+        );
+        assert_eq!(
+            response.output_tokens,
+            recorded["usage"]["output_tokens"].as_u64().unwrap() as u32
+        );
+        assert_eq!(response.finish_reason, FinishReason::Stop);
+    }
 
     fn event(event_type: &str, data: &str) -> SseEvent {
         SseEvent {
