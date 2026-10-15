@@ -1110,10 +1110,10 @@ impl From<swage_core::StorageError> for RunFailure {
 /// Drive a schedule run to execution, refusal, or durable queueing.
 ///
 /// The pending-run insert is the overlap check (a partial unique index
-/// admits one non-terminal run per schedule); losing that race records a
+/// admits one pending/running non-overlap run per schedule); losing that race records a
 /// terminal overlap skip. Past that point a run row exists, and a single
 /// catch settles every executed or refused run — completed, skipped, or
-/// failed with any output it managed to produce. A queued run stays pending
+/// failed with any output it managed to produce. A waiting fire stays queued
 /// until the drain claims and settles it. The returned run is the outcome: a failure lives on the row, not in an `Err`, so a
 /// manual trigger returns the failed run and the tick loop simply moves on.
 async fn execute_schedule(
@@ -1154,7 +1154,7 @@ async fn execute_schedule(
             .error_message
             .as_deref()
             .unwrap_or("pending fire cap reached");
-        record_overlap_audit(state, schedule, run.id, reason).await?;
+        record_overlap_audit(state, schedule, run.id, SkipReason::PendingCap, reason).await?;
         crate::channel_gateway::record_no_delivery(state, run.id, reason).await?;
         return Ok(run);
     }
@@ -1168,7 +1168,7 @@ async fn drive_recorded_run(
     schedule: &Schedule,
     run: &ScheduleRun,
 ) -> Result<ScheduleRun, GatewayError> {
-    match run_body(state, schedule, &run).await {
+    match run_body(state, schedule, run).await {
         Ok(RunOutcome::Queued) => fetch_run(state, run.id).await,
         Ok(RunOutcome::Completed { output }) => complete_run(state, run.id, output).await,
         Ok(RunOutcome::Skipped {
@@ -1406,7 +1406,7 @@ async fn record_overlap_skip(
             .with_overlap_policy(schedule.overlap_policy),
         )
         .await?;
-    record_overlap_audit(state, schedule, run.id, MESSAGE).await?;
+    record_overlap_audit(state, schedule, run.id, SkipReason::Overlap, MESSAGE).await?;
     crate::channel_gateway::record_no_delivery(state, run.id, MESSAGE).await?;
     tracing::info!(
         schedule_id = %schedule.id,
@@ -1491,11 +1491,28 @@ async fn complete_run(
                 .is_some_and(|status| status != "success")
         })
         .map(|call| {
+            let exit_code = call
+                .result
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .and_then(|value| value.get("exit_code").and_then(serde_json::Value::as_i64));
+            let detail = match exit_code {
+                Some(code) => format!("exit code {code}"),
+                None => {
+                    let model_result = call.model_result.as_deref().unwrap_or("");
+                    let preview =
+                        serde_json::from_str::<swage_core::CompactToolReplay>(model_result)
+                            .map(|replay| replay.preview)
+                            .unwrap_or_else(|_| model_result.to_owned());
+                    preview.chars().take(240).collect()
+                }
+            };
             format!(
-                "{} ({}): {}",
+                "{} ({}): {} — {}",
                 call.tool,
                 call.call_id,
-                call.status.as_deref().unwrap_or("unsettled")
+                call.status.as_deref().unwrap_or("unsettled"),
+                detail
             )
         })
         .collect::<Vec<_>>();
@@ -1625,6 +1642,7 @@ async fn record_overlap_audit(
     state: &AppState,
     schedule: &Schedule,
     run_id: Uuid,
+    reason: SkipReason,
     cause: &str,
 ) -> Result<(), GatewayError> {
     state
@@ -1634,8 +1652,8 @@ async fn record_overlap_audit(
             session_id: None,
             entity_kind: "schedule_run".into(),
             entity_id: run_id.to_string(),
-            event_kind: "overlap_skip".into(),
-            summary: "schedule run skipped: a previous run was still in flight".into(),
+            event_kind: format!("{reason}_skip"),
+            summary: format!("schedule run skipped: {cause}"),
             metadata: serde_json::json!({
                 "schedule_id": schedule.id,
                 "cause": cause,

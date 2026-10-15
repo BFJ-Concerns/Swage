@@ -415,7 +415,7 @@
             >by {describeCreator(schedule.creator)}</span
           >
           {#if schedule.status !== "paused"}
-            <span>{schedule.overlap_policy}{schedule.overlap_policy === "queue" ? ` (cap ${schedule.pending_cap})` : ""}</span>
+            <span>While a run is active: {schedule.overlap_policy}{schedule.overlap_policy === "queue" ? ` (cap ${schedule.pending_cap})` : ""}</span>
             <span>next {formatTime(schedule.next_run_at ?? null)}</span>
           {/if}
         </div>

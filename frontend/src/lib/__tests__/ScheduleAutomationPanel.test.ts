@@ -429,6 +429,7 @@ describe("passed one-shot cards", () => {
     next_run_at: null,
   });
   const older: ScheduleRun = {
+    overlap_policy: "skip",
     id: "older", schedule_id: schedule.id, trigger: "tick", state: "completed",
     executed_message: schedule.message, created_at: "2026-01-01T00:00:00Z",
   };

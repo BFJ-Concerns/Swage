@@ -340,7 +340,7 @@
                 </div>
                 <p class="detail-copy">
                   {describeSpec(schedule)} · {describeSession(schedule)}
-                  · {schedule.overlap_policy}{schedule.overlap_policy === "queue" ? ` (cap ${schedule.pending_cap})` : ""}
+                  · while a run is active: {schedule.overlap_policy}{schedule.overlap_policy === "queue" ? ` (cap ${schedule.pending_cap})` : ""}
                   {#if schedule.gate}
                     · gated by {schedule.gate.model}
                   {/if}

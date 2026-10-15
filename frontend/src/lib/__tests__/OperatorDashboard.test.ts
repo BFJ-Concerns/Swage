@@ -235,7 +235,6 @@ describe("OperatorDashboard", () => {
         {
           id: "run-1",
           overlap_policy: "skip" as const,
-    overlap_policy: "skip" as const,
   schedule_id: "schedule-1",
           trigger: "tick",
           state: "skipped",
@@ -282,7 +281,6 @@ describe("OperatorDashboard", () => {
     const run = {
       id: "run-current",
       overlap_policy: "skip" as const,
-    overlap_policy: "skip" as const,
   schedule_id: "schedule-1",
       trigger: "tick" as const,
       state: "completed" as const,
@@ -368,7 +366,6 @@ describe("OperatorDashboard", () => {
         {
           id: "run-empty",
           overlap_policy: "skip" as const,
-    overlap_policy: "skip" as const,
   schedule_id: "schedule-1",
           trigger: "tick",
           state: "completed_empty",
@@ -529,6 +526,7 @@ describe("passed one-shot cards", () => {
     next_run_at: null,
   });
   const older: ScheduleRun = {
+    overlap_policy: "skip",
     id: "older", schedule_id: schedule.id, trigger: "tick", state: "completed",
     executed_message: schedule.message, created_at: "2026-01-01T00:00:00Z",
   };

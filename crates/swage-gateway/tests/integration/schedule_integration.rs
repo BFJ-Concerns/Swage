@@ -3321,11 +3321,13 @@ async fn outcomes_tool_run(command: &str, refused: bool, queued: bool) {
         false,
     );
 
+    let mut config = swage_config::ResolvedConfig::default();
+    config.tools.permissions.deny = vec!["file_write".into()];
     let state = AppState::new(
         storage.clone(),
         storage,
         Arc::new(provider),
-        swage_config::ResolvedConfig::default(),
+        config,
         dispatcher,
         None,
     );
@@ -3373,6 +3375,29 @@ async fn outcomes_tool_run(command: &str, refused: bool, queued: bool) {
         .list_tool_calls_by_turn(run["turn_id"].as_str().unwrap().parse().unwrap())
         .await
         .unwrap();
+    let outcome = run["task_outcome"].as_str().unwrap();
+    let expected_cause = if refused {
+        "not permitted"
+    } else if command == "exit 23" {
+        "exit code 23"
+    } else {
+        "timed out"
+    };
+    assert!(
+        outcome.contains(expected_cause),
+        "the recorded outcome explains the failed operation: {outcome}"
+    );
+    let result = calls[0].result.as_deref().unwrap_or("");
+    if refused {
+        assert!(result.contains("not permitted"), "{result}");
+    } else if command == "exit 23" {
+        assert_eq!(
+            serde_json::from_str::<Value>(result).unwrap()["exit_code"],
+            23
+        );
+    } else {
+        assert!(result.contains("timed out"), "{result}");
+    }
     assert_ne!(calls[0].status.as_deref(), Some("success"));
 }
 
@@ -3391,4 +3416,115 @@ async fn schedule_outcomes_shell_timeout_is_recorded() {
 #[tokio::test(flavor = "multi_thread")]
 async fn schedule_outcomes_queued_turn_failure_is_recorded() {
     outcomes_tool_run("exit 23", false, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_outcomes_queue_cap_two_preserves_fire_order_and_briefs() {
+    let dir = tempfile::tempdir().unwrap();
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let state = test_state(
+        &dir.path().join("ordered.db"),
+        StallProvider::new("done", started_tx, release_rx),
+    );
+    let router = build_router(state.clone());
+    let id = outcomes_schedule(&router, "queue", 2).await;
+    let held_state = state.clone();
+    let held =
+        tokio::spawn(async move { schedule::trigger_schedule(&held_state, id).await.unwrap() });
+    started_rx.await.unwrap();
+    let mut waiting = Vec::new();
+    for brief in ["first waiting fire", "second waiting fire"] {
+        let (status, _) = request_json(
+            &router,
+            "PUT",
+            &format!("/api/schedules/{id}"),
+            Some(json!({"message":brief})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        waiting.push(schedule::trigger_schedule(&state, id).await.unwrap().run.id);
+    }
+    let over_cap = schedule::trigger_schedule(&state, id).await.unwrap().run;
+    assert_eq!(
+        over_cap
+            .skip_reason
+            .map(|reason| reason.to_string())
+            .as_deref(),
+        Some("pending_cap")
+    );
+    release_tx.send(()).unwrap();
+    held.await.unwrap();
+    let mut previous_end = None;
+    for (run_id, brief) in waiting
+        .into_iter()
+        .zip(["first waiting fire", "second waiting fire"])
+    {
+        let run = state
+            .storage
+            .get_schedule_run(run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state.to_string(), "completed");
+        let turn = state
+            .storage
+            .get_turn(run.turn_id.unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            turn.user_input.as_deref().unwrap_or("").starts_with(brief),
+            "queued fire executes its own brief: {turn:?}"
+        );
+        if let Some(end) = previous_end {
+            assert!(run.started_at.unwrap() >= end);
+        }
+        previous_end = run.completed_at;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_outcomes_policy_edit_keeps_the_active_runs_admission_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let state = test_state(
+        &dir.path().join("policy-edit.db"),
+        StallProvider::new("done", started_tx, release_rx),
+    );
+    let router = build_router(state.clone());
+    let id = outcomes_schedule(&router, "skip", 1).await;
+    let held_state = state.clone();
+    let held =
+        tokio::spawn(async move { schedule::trigger_schedule(&held_state, id).await.unwrap() });
+    started_rx.await.unwrap();
+    request_json(
+        &router,
+        "PUT",
+        &format!("/api/schedules/{id}"),
+        Some(json!({"overlap_policy":"overlap"})),
+    )
+    .await;
+    let concurrent = schedule::trigger_schedule(&state, id).await.unwrap().run;
+    assert_eq!(concurrent.state.to_string(), "completed");
+    request_json(
+        &router,
+        "PUT",
+        &format!("/api/schedules/{id}"),
+        Some(json!({"overlap_policy":"skip"})),
+    )
+    .await;
+    let suppressed = schedule::trigger_schedule(&state, id).await.unwrap().run;
+    assert_eq!(suppressed.state.to_string(), "skipped");
+    release_tx.send(()).unwrap();
+    let first = held.await.unwrap().run;
+    assert_eq!(
+        serde_json::to_value(first).unwrap()["overlap_policy"],
+        "skip"
+    );
+    assert_eq!(
+        serde_json::to_value(concurrent).unwrap()["overlap_policy"],
+        "overlap"
+    );
 }

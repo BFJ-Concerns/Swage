@@ -559,13 +559,15 @@ impl ScheduleStore for SqliteStorage {
                     &run.executed_message,
                     &run.error_message,
                     &created_at,
-                    &completed_at, run.overlap_policy.to_string(),
+                    &completed_at,
+                    run.overlap_policy.to_string(),
                 ],
             )?;
 
             tx.commit()?;
             Ok(ScheduleRun {
- overlap_policy: run.overlap_policy, task_outcome: None,
+                overlap_policy: run.overlap_policy,
+                task_outcome: None,
                 id,
                 schedule_id: run.schedule_id,
                 trigger: run.trigger,
