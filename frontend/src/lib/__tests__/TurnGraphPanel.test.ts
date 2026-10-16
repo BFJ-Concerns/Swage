@@ -31,7 +31,13 @@ const response: TurnGraphResponse = {
       failure: null,
       created_at: "2026-10-16T20:01:00Z",
     },
-    { revision: 2, graph: shipped, activation: "failed", failure: "step 'x': plugin 'absent' is not installed", created_at: "2026-10-16T20:02:00Z" },
+    {
+      revision: 2,
+      graph: { steps: [...shipped.steps, shipped.steps[1]], hooks: [], branches: [] },
+      activation: "failed",
+      failure: "step 'succession' is used twice",
+      created_at: "2026-10-16T20:02:00Z",
+    },
   ],
 };
 
@@ -57,12 +63,12 @@ describe("TurnGraphPanel", () => {
         return jsonResponse({
           from: 0, to: 1, steps_added: [], steps_removed: [], steps_reordered: [],
           steps_refilled: [{ id: "succession", before: { kind: "builtin" }, after: { kind: "plugin", name: "summariser" } }],
-          hooks_attached: [{ point: "tool_call", plugin: "guard", mode: "veto" }], hooks_detached: [],
+          hooks_attached: [{ point: "tool_call", plugin: "guard", mode: "veto" }], hooks_detached: [], hooks_reordered: false,
           branches_added: [{ id: "trial", from: "succession", steps: [] }], branches_removed: [],
         });
       }
       if (url.includes("/diff/1/2")) {
-        return jsonResponse({ from: 1, to: 2, steps_added: [], steps_removed: [], steps_reordered: [], steps_refilled: [], hooks_attached: [], hooks_detached: [], branches_added: [], branches_removed: [] });
+        return jsonResponse({ from: 1, to: 2, steps_added: [], steps_removed: [], steps_reordered: [], steps_refilled: [], hooks_attached: [], hooks_detached: [], hooks_reordered: false, branches_added: [], branches_removed: [] });
       }
       if (init?.method === "POST" && url.endsWith("/revisions/0/activate")) {
         return jsonResponse({ ...response.revisions[0], activation: "active" });
@@ -74,7 +80,7 @@ describe("TurnGraphPanel", () => {
 
     const list = document.querySelector('[aria-label="Turn graph revisions"]')!;
     expect(list.textContent).toContain("Serving");
-    expect(list.textContent).toContain("Failed: step 'x': plugin 'absent' is not installed");
+    expect(list.textContent).toContain("Failed: step 'succession' is used twice");
     await vi.waitFor(() => expect(list.textContent).toContain("succession: the kernel's own → plugin summariser"));
     expect(list.textContent).toContain("hook guard at tool_call (veto)");
     expect(list.textContent).toContain("branch trial from succession");
@@ -84,6 +90,12 @@ describe("TurnGraphPanel", () => {
     expect(detail.textContent).toContain("guard at tool_call — veto");
     expect(detail.textContent).toContain("a shadow, recorded and never served");
     expect(detail.querySelector("button.btn")).toBeNull();
+
+    // A failed revision shows what it declared, duplicate step id and all.
+    const two = Array.from(list.querySelectorAll("button")).find((button) => button.textContent?.includes("Revision 2"))!;
+    flushSync(() => two.click());
+    const twoDetail = document.querySelector('[aria-label="Revision 2 details"]')!;
+    expect(twoDetail.querySelectorAll("ol.plain li")).toHaveLength(3);
 
     const zero = Array.from(list.querySelectorAll("button")).find((button) => button.textContent?.includes("Revision 0"))!;
     flushSync(() => zero.click());

@@ -83,6 +83,7 @@
     if (diff.steps_reordered.length) parts.push("reordered");
     for (const hook of diff.hooks_attached) parts.push(`hook ${hook.plugin} at ${hook.point} (${hook.mode})`);
     if (diff.hooks_detached.length) parts.push(`${diff.hooks_detached.length} hook${diff.hooks_detached.length === 1 ? "" : "s"} detached`);
+    if (diff.hooks_reordered) parts.push("hooks reordered");
     for (const branch of diff.branches_added) parts.push(`branch ${branch.id} from ${branch.from}`);
     if (diff.branches_removed.length) parts.push(`${diff.branches_removed.length} branch${diff.branches_removed.length === 1 ? "" : "es"} removed`);
     return parts.length ? parts.join("; ") : "no change";
@@ -149,7 +150,7 @@
               <dt>Steps</dt>
               <dd>
                 <ol class="plain">
-                  {#each selectedRevision.graph.steps as step (step.id)}
+                  {#each selectedRevision.graph.steps as step, index (index)}
                     <li><code>{step.id}</code> — {step.slot}: {fillerLabel(step.filler)}</li>
                   {/each}
                 </ol>
@@ -162,7 +163,7 @@
                   None
                 {:else}
                   <ul class="plain">
-                    {#each selectedRevision.graph.hooks ?? [] as hook (hook.plugin + hook.point)}
+                    {#each selectedRevision.graph.hooks ?? [] as hook, index (index)}
                       <li><code>{hook.plugin}</code> at {hook.point} — {hook.mode}</li>
                     {/each}
                   </ul>
@@ -176,7 +177,7 @@
                   None
                 {:else}
                   <ul class="plain">
-                    {#each selectedRevision.graph.branches ?? [] as branch (branch.id)}
+                    {#each selectedRevision.graph.branches ?? [] as branch, index (index)}
                       <li><code>{branch.id}</code> from {branch.from}: {branch.steps.map((step) => `${step.slot} by ${fillerLabel(step.filler)}`).join(", ")} — a shadow, recorded and never served</li>
                     {/each}
                   </ul>

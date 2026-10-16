@@ -11,4 +11,10 @@ export type TurnGraphDiff = { from: number, to: number, steps_added: Array<TurnS
 /**
  * Steps present in both whose position in the live path changed.
  */
-steps_reordered: Array<string>, hooks_attached: Array<HookAttachment>, hooks_detached: Array<HookAttachment>, branches_added: Array<TurnBranch>, branches_removed: Array<TurnBranch>, };
+steps_reordered: Array<string>, hooks_attached: Array<HookAttachment>, hooks_detached: Array<HookAttachment>,
+/**
+ * Whether the attachments present in both run in a different order —
+ * order is executable, since each hook at a point sees the event as
+ * the one before left it.
+ */
+hooks_reordered: boolean, branches_added: Array<TurnBranch>, branches_removed: Array<TurnBranch>, };

@@ -91,7 +91,21 @@ pub(crate) enum Summariser {
     Workflow {
         name: String,
         state: Box<AppState>,
+        /// The session the run is dispatched for, so the run's record names
+        /// the turn it served.
+        session_id: Option<Uuid>,
     },
+}
+
+impl Summariser {
+    /// What serves the slot, as the turn's record names it.
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            Summariser::Builtin => "builtin".to_owned(),
+            Summariser::Plugin(slot) => format!("plugin {}", slot.plugin),
+            Summariser::Workflow { name, .. } => format!("workflow {name}"),
+        }
+    }
 }
 
 /// A shadow of the succession step: a branch's filler and the recorder that
@@ -129,7 +143,11 @@ impl Summariser {
                 )
                 .await
             }
-            Summariser::Workflow { name, state } => {
+            Summariser::Workflow {
+                name,
+                state,
+                session_id,
+            } => {
                 succession::succeed_with(
                     request,
                     |completion| async move {
@@ -148,6 +166,7 @@ impl Summariser {
                             name,
                             input,
                             std::time::Duration::from_secs(120),
+                            *session_id,
                         ))
                         .await
                         .map_err(succession::SuccessionError::Summariser)?;

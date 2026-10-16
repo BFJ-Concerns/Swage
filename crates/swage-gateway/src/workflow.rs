@@ -8136,6 +8136,7 @@ pub(crate) async fn run_saved_workflow_for_slot(
     name: &str,
     args: Value,
     wait: std::time::Duration,
+    session_id: Option<Uuid>,
 ) -> Result<Value, String> {
     let general = state
         .topic_store
@@ -8156,7 +8157,7 @@ pub(crate) async fn run_saved_workflow_for_slot(
     let run = start_run(
         state.clone(),
         workflow.topic_id,
-        None,
+        session_id,
         workflow.script_version_id,
         workflow.inline_identity(),
         workflow.source.clone(),
@@ -8192,9 +8193,21 @@ pub(crate) async fn run_saved_workflow_for_slot(
             }
         }
         if started.elapsed() >= wait {
+            // The step has failed; the run does not outlive it — cancelled
+            // so it neither holds a run slot nor delivers to no one later.
+            if let Some(token) = state
+                .active_workflow_runs
+                .lock()
+                .await
+                .get(&run.id)
+                .cloned()
+            {
+                token.cancel();
+            }
             return Err(format!(
-                "workflow '{name}' did not complete within {}s",
-                wait.as_secs()
+                "workflow '{name}' did not complete within {}s; the run {} is cancelled",
+                wait.as_secs(),
+                run.id
             ));
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

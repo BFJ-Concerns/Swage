@@ -155,8 +155,10 @@ pub async fn set_plugin_enablement(
 }
 
 /// `GET /api/turn-graph` — the active revision and every revision recorded.
-pub async fn get_turn_graph(State(state): State<AppState>) -> Json<TurnGraphResponse> {
-    Json(state.turn_graph.list())
+pub async fn get_turn_graph(
+    State(state): State<AppState>,
+) -> Result<Json<TurnGraphResponse>, ApiError> {
+    state.turn_graph.list().map(Json).map_err(turn_graph_error)
 }
 
 /// `POST /api/turn-graph/revisions` — propose a revision: validated against
@@ -185,7 +187,7 @@ pub async fn get_turn_graph_revision(
         .turn_graph
         .revision(number)
         .map(Json)
-        .ok_or_else(|| ApiError::not_found_str("turn graph revision", &revision))
+        .map_err(turn_graph_error)
 }
 
 /// `POST /api/turn-graph/revisions/{revision}/activate` — make a recorded
@@ -227,6 +229,9 @@ fn turn_graph_error(error: crate::turn_graph::TurnGraphError) -> ApiError {
         TurnGraphError::Refused(message) => ApiError::validation(message),
         TurnGraphError::NotFound(revision) => {
             ApiError::not_found_str("turn graph revision", &revision.to_string())
+        }
+        unreadable @ TurnGraphError::Unreadable { .. } => {
+            ApiError::from(GatewayError::ConfigError(unreadable.to_string()))
         }
         TurnGraphError::Storage(error) => ApiError::from(GatewayError::Storage(error)),
     }
@@ -1929,6 +1934,7 @@ async fn execute_external_delegate_message(
             ws_tx: silent_ws_tx.clone(),
             session_id: None,
             turn_id: sender_turn_id,
+            call_hook: None,
         },
         "external delegated turn",
     )

@@ -19,9 +19,10 @@ use serde_json::{Value, json};
 use swage_context::element::ContextElement;
 use swage_context::report::AssemblyOutput;
 use swage_context::succession::SuccessionError;
+use swage_context::tokeniser::Tokeniser;
 use swage_core::{ChatMessage, CompletionRequest, Role};
 use swage_plugin::{HostCallFailure, InvocationContext, PluginHost, PluginRuntime};
-use swage_protocol::client::turn_graph::HookMode;
+use swage_protocol::client::turn_graph::{HookAttachment, HookMode, HookPoint, TurnGraph};
 use swage_storage::model::NewAuditEvent;
 use swage_tool::context::ToolContext;
 use swage_tool::dispatch::{CallHookDecision, ToolCallHook};
@@ -220,33 +221,48 @@ impl PluginSlot {
     }
 
     /// The context-program slot: the turn's elements go to the plugin as
-    /// `{ elements: [{ name, messages: [{ role, content }] }], variables }`,
-    /// and it answers `{ messages: [{ role, content }] }`. The assembly runs
-    /// on the turn's thread synchronously, so the isolate is awaited from
-    /// here; the report is the default assembly's over the same elements,
-    /// with the messages the plugin composed.
+    /// `{ elements: [{ name, messages }], variables }`, each message in the
+    /// conversation's own shape (`role`, `content` parts, a tool result's
+    /// `tool_call_id`, an assistant turn's `tool_calls`), and it answers
+    /// `{ messages }` — each a message handed back as given, or a fresh
+    /// `{ role: system | user | assistant, content: text }`. A message in
+    /// neither shape, or a `tool` message without its call, is the slot's
+    /// failure, never a silent recast. The report is the kernel's over the
+    /// same elements — the elements the program was given — with the
+    /// messages the plugin composed and their own token count.
+    ///
+    /// The assembly runs on the turn's thread synchronously, so the isolate
+    /// is awaited from here through `block_in_place`, which the
+    /// multi-thread runtime the gateway runs on allows; on a
+    /// current-thread runtime the slot cannot run and says so, so the
+    /// kernel's assembly serves there rather than a panic.
     pub fn context_program(
         &self,
         elements: &[Box<dyn ContextElement>],
         variables: &std::collections::BTreeMap<String, String>,
+        tokeniser: &dyn Tokeniser,
         report_of: impl FnOnce() -> AssemblyOutput,
     ) -> Result<AssemblyOutput, String> {
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| format!("{}: no async runtime to run the slot on", self.plugin))?;
+        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
+            return Err(format!(
+                "{}: the context-program slot needs the multi-thread runtime",
+                self.plugin
+            ));
+        }
         let input = json!({
             "elements": elements
                 .iter()
                 .map(|element| json!({
                     "name": element.name(),
-                    "messages": element
-                        .content()
-                        .iter()
-                        .map(|message| json!({ "role": role_name(message.role()), "content": message.text_content() }))
-                        .collect::<Vec<_>>(),
+                    "messages": element.content(),
                 }))
                 .collect::<Vec<_>>(),
             "variables": variables,
         });
         let output = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.runtime.invoke_slot(
+            handle.block_on(self.runtime.invoke_slot(
                 "context_program",
                 &input,
                 &self.context,
@@ -259,26 +275,21 @@ impl PluginSlot {
             .and_then(Value::as_array)
             .ok_or_else(|| format!("{}: the slot answered without messages", self.plugin))?
             .iter()
-            .map(|message| {
-                let role = match message.get("role").and_then(Value::as_str) {
-                    Some("system") => Role::System,
-                    Some("assistant") => Role::Assistant,
-                    _ => Role::User,
-                };
-                ChatMessage::new(
-                    role,
-                    message
-                        .get("content")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned(),
-                )
+            .enumerate()
+            .map(|(index, message)| {
+                composed_message(message).map_err(|reason| {
+                    format!(
+                        "{}: message {index} of the composition {reason}",
+                        self.plugin
+                    )
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         if messages.is_empty() {
             return Err(format!("{}: the slot composed no messages", self.plugin));
         }
         let mut assembled = report_of();
+        assembled.report.total_tokens = tokeniser.count_messages(&messages);
         assembled.messages = messages;
         Ok(assembled)
     }
@@ -331,15 +342,58 @@ fn role_name(role: Role) -> &'static str {
     }
 }
 
+/// A message of a plugin's composition: one of the conversation's own
+/// handed back whole, or a fresh text message under a conversational role.
+fn composed_message(message: &Value) -> Result<ChatMessage, String> {
+    if let Ok(whole) = serde_json::from_value::<ChatMessage>(message.clone()) {
+        return Ok(whole);
+    }
+    let role = match message.get("role").and_then(Value::as_str) {
+        Some("system") => Role::System,
+        Some("user") => Role::User,
+        Some("assistant") => Role::Assistant,
+        Some("tool") => {
+            return Err(
+                "is a tool result without its call: a tool message is handed back as given, never composed afresh"
+                    .into(),
+            );
+        }
+        other => return Err(format!("has no conversational role: {other:?}")),
+    };
+    let content = message
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "has no text content".to_owned())?;
+    Ok(ChatMessage::new(role, content))
+}
+
+/// Who records what a `tool_call` hook rewrote: the audit trail, keyed to
+/// the call the model raised, so the call record (the model's call, with
+/// the result of what ran) and this event together reconstruct the turn.
+pub type RewriteRecorder = Arc<dyn Fn(RewrittenCall) + Send + Sync>;
+
+/// A tool call as the model raised it and as a hook left it.
+#[derive(Debug, Clone)]
+pub struct RewrittenCall {
+    pub call_id: Option<String>,
+    pub plugin: String,
+    pub from_name: String,
+    pub from_arguments: Value,
+    pub to_name: String,
+    pub to_arguments: Value,
+}
+
 /// The plugin hooks attached at `tool_call`, in the revision's order, as
-/// the dispatcher's call hook: each sees the call as the one before left it.
+/// the dispatcher's call hook: each sees the call as the one before left it,
+/// and each rewrite is recorded with the plugin that made it.
 pub struct PluginCallHook {
     hooks: Vec<(HookMode, PluginSlot)>,
+    recorder: Option<RewriteRecorder>,
 }
 
 impl PluginCallHook {
-    pub fn new(hooks: Vec<(HookMode, PluginSlot)>) -> Self {
-        Self { hooks }
+    pub fn new(hooks: Vec<(HookMode, PluginSlot)>, recorder: Option<RewriteRecorder>) -> Self {
+        Self { hooks, recorder }
     }
 }
 
@@ -349,7 +403,7 @@ impl ToolCallHook for PluginCallHook {
         &self,
         tool_name: &str,
         params: Value,
-        _: &dyn ToolContext,
+        ctx: &dyn ToolContext,
     ) -> CallHookDecision {
         let mut name = tool_name.to_owned();
         let mut params = params;
@@ -364,10 +418,23 @@ impl ToolCallHook for PluginCallHook {
             {
                 HookAction::Continue => {}
                 HookAction::Rewrite(event) => {
-                    if let Some(rewritten) = event.get("name").and_then(Value::as_str) {
-                        name = rewritten.to_owned();
+                    let to_name = event
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map_or_else(|| name.clone(), str::to_owned);
+                    let to_arguments = event.get("arguments").cloned().unwrap_or(json!({}));
+                    if let Some(record) = &self.recorder {
+                        record(RewrittenCall {
+                            call_id: ctx.call_id().map(str::to_owned),
+                            plugin: slot.plugin.clone(),
+                            from_name: name.clone(),
+                            from_arguments: params.clone(),
+                            to_name: to_name.clone(),
+                            to_arguments: to_arguments.clone(),
+                        });
                     }
-                    params = event.get("arguments").cloned().unwrap_or(json!({}));
+                    name = to_name;
+                    params = to_arguments;
                 }
                 HookAction::Veto(reason) => {
                     return CallHookDecision::Veto(format!("{}: {reason}", slot.plugin));
@@ -382,13 +449,54 @@ impl ToolCallHook for PluginCallHook {
     }
 }
 
+/// A rewrite recorder writing `tool_call_rewritten` to the audit trail
+/// under `session_id`.
+pub fn audit_rewrite_recorder(state: AppState, session_id: Option<Uuid>) -> RewriteRecorder {
+    Arc::new(move |rewrite: RewrittenCall| {
+        let storage = state.storage.clone();
+        tokio::spawn(async move {
+            if let Err(error) = storage
+                .create_audit_event(NewAuditEvent {
+                    id: Uuid::new_v4().to_string(),
+                    session_id,
+                    entity_kind: "plugin".to_owned(),
+                    entity_id: rewrite.plugin.clone(),
+                    event_kind: "tool_call_rewritten".to_owned(),
+                    summary: format!(
+                        "Plugin {} rewrote the tool call {} to {}",
+                        rewrite.plugin, rewrite.from_name, rewrite.to_name
+                    ),
+                    metadata: json!({
+                        "call_id": rewrite.call_id,
+                        "from": { "name": rewrite.from_name, "arguments": rewrite.from_arguments },
+                        "to": { "name": rewrite.to_name, "arguments": rewrite.to_arguments },
+                    }),
+                })
+                .await
+            {
+                tracing::warn!(%error, "a hook's rewrite of a tool call could not be recorded");
+            }
+        });
+    })
+}
+
+/// What the `message_inbound` hooks left: the content, and the plugins
+/// whose rewrite changed it, in order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InboundOutcome {
+    pub content: String,
+    pub rewritten_by: Vec<String>,
+}
+
 /// The plugin hooks attached at `message_inbound` over the raw content, in
-/// order; a rewrite is the content the next sees, a veto refuses it.
+/// order; a rewrite is the content the next sees, a veto refuses it. An
+/// observer, and a handler that failed, leave no mark on the attribution.
 pub async fn inbound_hooks(
     hooks: &[(HookMode, PluginSlot)],
     content: String,
-) -> Result<String, String> {
+) -> Result<InboundOutcome, String> {
     let mut content = content;
+    let mut rewritten_by = Vec::new();
     for (mode, slot) in hooks {
         match slot
             .hook("message_inbound", *mode, json!({ "content": content }))
@@ -396,14 +504,20 @@ pub async fn inbound_hooks(
         {
             HookAction::Continue => {}
             HookAction::Rewrite(event) => {
-                if let Some(rewritten) = event.get("content").and_then(Value::as_str) {
+                if let Some(rewritten) = event.get("content").and_then(Value::as_str)
+                    && rewritten != content
+                {
                     content = rewritten.to_owned();
+                    rewritten_by.push(slot.plugin.clone());
                 }
             }
             HookAction::Veto(reason) => return Err(format!("{}: {reason}", slot.plugin)),
         }
     }
-    Ok(content)
+    Ok(InboundOutcome {
+        content,
+        rewritten_by,
+    })
 }
 
 /// The plugin hooks at an observe-only point (`turn_start`, `turn_end`):
@@ -414,34 +528,64 @@ pub async fn observe(hooks: &[(HookMode, PluginSlot)], point: &str, event: Value
     }
 }
 
-/// The hooks the active revision attaches at `point`, as slots for one
-/// turn: an attachment whose plugin is not an isolate serving now is
-/// skipped with a warning — the revision validated against what was
-/// installed when it activated, and a plugin gone since is not a veto.
-pub fn hooks_for_turn(
-    state: &AppState,
-    point: swage_protocol::client::turn_graph::HookPoint,
-    context: &InvocationContext,
-) -> Vec<(HookMode, PluginSlot)> {
-    state
-        .turn_graph
-        .hooks_at(point)
-        .into_iter()
-        .filter_map(|attachment| {
-            let slot = slot_for_plugin(state, &attachment.plugin, context)?;
-            Some((attachment.mode, slot))
-        })
-        .collect()
+/// The hooks a revision attaches at one point, as they stand for one turn:
+/// the attachments whose plugin serves, as slots, and the attachments
+/// skipped because their plugin does not — the revision validated against
+/// what was installed when it activated, and a plugin gone or switched off
+/// since is not a veto. A turn reports both.
+#[derive(Default)]
+pub struct TurnHooks {
+    pub attached: Vec<(HookMode, PluginSlot)>,
+    /// The attachments behind `attached`, as declared.
+    pub serving: Vec<HookAttachment>,
+    pub skipped: Vec<HookAttachment>,
 }
 
-/// A plugin's isolate as a slot for one turn, when it is installed and
-/// serving as an isolate.
+/// What a turn reports of its hooks: every attachment that served and every
+/// one skipped, across the points it resolved.
+#[derive(Default, Debug, Clone)]
+pub struct TurnHookAccount {
+    pub attached: Vec<HookAttachment>,
+    pub skipped: Vec<HookAttachment>,
+}
+
+impl TurnHookAccount {
+    pub fn note(&mut self, hooks: &TurnHooks) {
+        self.attached.extend(hooks.serving.iter().cloned());
+        self.skipped.extend(hooks.skipped.iter().cloned());
+    }
+}
+
+/// The hooks `graph` attaches at `point`, for a session in `topic_id`.
+pub fn hooks_for_turn(
+    state: &AppState,
+    graph: &TurnGraph,
+    point: HookPoint,
+    context: &InvocationContext,
+    topic_id: Option<Uuid>,
+) -> TurnHooks {
+    let mut hooks = TurnHooks::default();
+    for attachment in graph.hooks_at(point) {
+        match slot_for_plugin(state, &attachment.plugin, context, topic_id) {
+            Some(slot) => {
+                hooks.attached.push((attachment.mode, slot));
+                hooks.serving.push(attachment);
+            }
+            None => hooks.skipped.push(attachment),
+        }
+    }
+    hooks
+}
+
+/// A plugin's isolate as a slot for one turn, when it is installed,
+/// enabled for the session's scope, and serving as an isolate.
 pub fn slot_for_plugin(
     state: &AppState,
     plugin: &str,
     context: &InvocationContext,
+    topic_id: Option<Uuid>,
 ) -> Option<PluginSlot> {
-    match state.plugins.execution_of(plugin) {
+    match state.plugins.execution_of(plugin, topic_id) {
         Some(crate::plugin::Execution::Isolate(runtime)) => Some(PluginSlot::new(
             plugin.to_owned(),
             runtime,
@@ -462,7 +606,7 @@ pub fn slot_for_plugin(
         None => {
             tracing::warn!(
                 plugin,
-                "the revision names a plugin that is not serving; skipped"
+                "the revision names a plugin that is not serving or not enabled for this scope; skipped"
             );
             None
         }
@@ -569,6 +713,26 @@ mod tests {
         }
     }
 
+    struct History(Vec<ChatMessage>);
+
+    impl ContextElement for History {
+        fn name(&self) -> &str {
+            "history"
+        }
+        fn priority(&self) -> i32 {
+            0
+        }
+        fn content(&self) -> Vec<ChatMessage> {
+            self.0.clone()
+        }
+        fn token_count(&self, _: &dyn swage_context::tokeniser::Tokeniser) -> usize {
+            self.0.len()
+        }
+        fn source(&self) -> String {
+            "test".into()
+        }
+    }
+
     struct Named(&'static str);
 
     #[async_trait]
@@ -626,7 +790,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_plugin_context_program_composes_the_messages_over_the_elements() {
-        let slot = slot(
+        let composer = slot(
             "composer",
             "[[provides.slots]]\nname = \"context_program\"",
             r#"swage.provide.slot("context_program", (input) => ({
@@ -640,27 +804,78 @@ mod tests {
         .await;
         let elements: Vec<Box<dyn ContextElement>> = vec![
             Box::new(Element("prompts", "be brief")),
-            Box::new(Element("history", "hello")),
+            Box::new(History(vec![
+                ChatMessage::new(Role::User, "hello"),
+                ChatMessage::tool_result("call-1", "the tool's answer"),
+            ])),
         ];
         let mut variables = std::collections::BTreeMap::new();
         variables.insert("who".to_owned(), "ben".to_owned());
-        let output = slot
-            .context_program(&elements, &variables, || {
-                swage_context::assembly::default_assembly_with_variables(
-                    &elements,
-                    &swage_config::ResolvedConfig::default().context,
-                    &swage_context::tokeniser::TiktokenTokeniser::new("gpt-4o"),
-                    &variables,
-                )
-            })
+        let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("gpt-4o");
+        let kernel = || {
+            swage_context::assembly::default_assembly_with_variables(
+                &elements,
+                &swage_config::ResolvedConfig::default().context,
+                &tokeniser,
+                &variables,
+            )
+        };
+        let output = composer
+            .context_program(&elements, &variables, &tokeniser, kernel)
             .expect("composes");
-        assert_eq!(output.messages.len(), 3);
+        assert_eq!(output.messages.len(), 4);
         assert_eq!(output.messages[0].role(), Role::System);
         assert_eq!(
             output.messages[0].text_content(),
             "Elements: prompts,history; who=ben"
         );
         assert_eq!(output.messages[2].text_content(), "hello");
+        // A message handed back as given keeps its shape: the tool result
+        // is still a tool result, answering its call.
+        assert_eq!(output.messages[3].role(), Role::Tool);
+        assert_eq!(output.messages[3].tool_call_id(), Some("call-1"));
+        assert_eq!(
+            output.report.total_tokens,
+            tokeniser.count_messages(&output.messages),
+            "the report counts the composed messages"
+        );
+
+        // A composition that invents a tool message, or a role the
+        // conversation has none of, is the slot's failure by position.
+        let lossy = slot(
+            "lossy",
+            "[[provides.slots]]\nname = \"context_program\"",
+            r#"swage.provide.slot("context_program", (input) => ({
+                messages: [{ role: "system", content: "fine" }, { role: "tool", content: "no call" }],
+            }));"#,
+            Arc::new(SummarisingHost::default()),
+        )
+        .await;
+        let error = lossy
+            .context_program(&elements, &variables, &tokeniser, kernel)
+            .expect_err("refused");
+        assert!(
+            error.contains("message 1 of the composition is a tool result without its call"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_a_current_thread_runtime_the_context_program_slot_declines_rather_than_panics() {
+        let slot = slot(
+            "composer",
+            "[[provides.slots]]\nname = \"context_program\"",
+            r#"swage.provide.slot("context_program", (input) => ({ messages: [{ role: "system", content: "x" }] }));"#,
+            Arc::new(SummarisingHost::default()),
+        )
+        .await;
+        let elements: Vec<Box<dyn ContextElement>> = vec![Box::new(Element("prompts", "be brief"))];
+        let variables = std::collections::BTreeMap::new();
+        let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("gpt-4o");
+        let error = slot
+            .context_program(&elements, &variables, &tokeniser, || unreachable!())
+            .expect_err("declines");
+        assert!(error.contains("needs the multi-thread runtime"), "{error}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -677,6 +892,11 @@ mod tests {
             Arc::new(SummarisingHost::default()),
         )
         .await;
+        let rewrites = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&rewrites);
+        let recorder: RewriteRecorder = Arc::new(move |rewrite: RewrittenCall| {
+            recorded.lock().unwrap().push(rewrite);
+        });
         let dispatcher_for = |hooks: Vec<(HookMode, PluginSlot)>| {
             let mut registry = ToolRegistry::new();
             for name in ["probe_shell", "probe_read", "probe_denied", "probe_mark"] {
@@ -694,7 +914,10 @@ mod tests {
                 Arc::new(LeakDetector::default()),
                 false,
             )
-            .with_call_hook(Arc::new(PluginCallHook::new(hooks)))
+            .with_call_hook(Arc::new(PluginCallHook::new(
+                hooks,
+                Some(Arc::clone(&recorder)),
+            )))
         };
         let ctx = MockToolContext::new("agent-a", "session");
 
@@ -720,6 +943,18 @@ mod tests {
             marked.result,
             json!({ "ran": "probe_mark", "with": { "marked": true } })
         );
+        // Each rewrite is recorded with the plugin that made it, from the
+        // call as raised to the call as left.
+        let recorded = rewrites.lock().unwrap();
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded[0].plugin, "guard");
+        assert_eq!(
+            (recorded[0].from_name.as_str(), recorded[0].to_name.as_str()),
+            ("probe_read", "probe_denied")
+        );
+        assert_eq!(recorded[0].from_arguments, json!({ "path": "/etc" }));
+        assert_eq!(recorded[1].to_arguments, json!({ "marked": true }));
+        drop(recorded);
 
         // Attached as an observer, the same handler's rewrites and vetoes are
         // beyond its mode: the calls continue as raised.
@@ -729,5 +964,56 @@ mod tests {
             .await
             .expect("an observer cannot veto");
         assert_eq!(ran.result, json!({ "ran": "probe_shell", "with": {} }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_inbound_rewrite_is_attributed_to_the_plugin_that_made_it_alone() {
+        let hook = |name: &'static str, script: &'static str| async move {
+            slot(
+                name,
+                "[[provides.hooks]]\npoint = \"message_inbound\"\nmode = \"veto\"",
+                script,
+                Arc::new(SummarisingHost::default()),
+            )
+            .await
+        };
+        let watcher = hook(
+            "watcher",
+            r#"swage.provide.hook("message_inbound", (event) => ({ action: "rewrite", event: { content: "watched" } }));"#,
+        )
+        .await;
+        let tidier = hook(
+            "tidier",
+            r#"swage.provide.hook("message_inbound", (event) => ({ action: "rewrite", event: { content: event.content.trim() } }));"#,
+        )
+        .await;
+        let broken = hook(
+            "broken",
+            r#"swage.provide.hook("message_inbound", (event) => { throw new Error("no"); });"#,
+        )
+        .await;
+        let outcome = inbound_hooks(
+            &[
+                (HookMode::Observe, watcher),
+                (HookMode::Rewrite, tidier.clone()),
+                (HookMode::Rewrite, broken),
+            ],
+            "  hello  ".into(),
+        )
+        .await
+        .expect("continues");
+        assert_eq!(outcome.content, "hello");
+        assert_eq!(
+            outcome.rewritten_by,
+            vec!["tidier".to_owned()],
+            "the observer could not rewrite and the failed handler did not"
+        );
+        let unchanged = inbound_hooks(&[(HookMode::Rewrite, tidier)], "hello".into())
+            .await
+            .expect("continues");
+        assert!(
+            unchanged.rewritten_by.is_empty(),
+            "a rewrite to the same content is no rewrite"
+        );
     }
 }

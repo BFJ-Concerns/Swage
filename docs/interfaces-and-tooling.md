@@ -973,8 +973,9 @@ parameters = { type = "object", properties = { url = { type = "string" } }, requ
 ```
 
 A plugin is enabled for the whole install or for one topic (`PUT
-/api/plugins/{name}/enablement`); a session in a scope that does not enable
-it does not see its tools.
+/api/plugins/{name}/enablement`); in a scope that does not enable it the
+plugin serves nothing — a session there does not see its tools, and a turn
+there runs none of its slots or hooks.
 
 ```toml
 name = "echo"
@@ -1015,22 +1016,39 @@ path single.
 
 Revision 0 is the shipped graph. `POST /api/turn-graph/revisions` proposes
 a new one: it is validated against what is installed now — known slots,
-each once on the live path, a plugin that provides the slot, a saved
-workflow by name, a hook mode within what the plugin declares, a branch
-from a live step — recorded either way, and activated when it validates. A
-revision that fails validation is recorded as `failed` with why, and the
-revision that served before keeps serving. `GET /api/turn-graph` lists the
-active revision and every one recorded, `GET /api/turn-graph/revisions/{n}`
-one of them, `GET /api/turn-graph/diff/{from}/{to}` what changed, and
-`POST /api/turn-graph/revisions/{n}/activate` makes an earlier good one
-serve again, re-validated. Settings → Turn graph shows the same.
+each once on the live path, a filler of a kind the slot's kernel point
+runs (`context_program` takes a plugin; `succession` a plugin or a
+workflow; `tool_dispatch`, `curator` and `judge` are the kernel's own
+until their points take one), a plugin that provides the slot, a saved
+workflow by name, a hook mode within what the plugin declares, each
+plugin attached once at a point, a branch of exactly one step from the
+live `succession` step — recorded either way, and activated when it
+validates. A revision that fails validation is recorded as `failed` with
+why, and the revision that served before keeps serving. `GET
+/api/turn-graph` lists the active revision and every one recorded, `GET
+/api/turn-graph/revisions/{n}` one of them, `GET
+/api/turn-graph/diff/{from}/{to}` what changed (a step is the same step
+when its id and slot match; hooks reordered is a change), and `POST
+/api/turn-graph/revisions/{n}/activate` makes an earlier good one serve
+again, re-validated — a refusal there is recorded as a failed revision of
+its own, naming the candidate and why. Settings → Turn graph shows the
+same.
 
 A plugin filling a slot runs in its isolate with the `model` grant's
 `swage.complete({ messages, model? })` answered by the gateway's active
-provider and recorded as the plugin's completion; a hook at `tool_call`
-sees the model's call before the dispatcher's gates, and a rewritten call
-meets them as if the model had raised it. Every turn's assembly report
-names the revision it ran under and what filled its slots.
+provider and recorded as the plugin's completion. The context-program
+slot receives the turn's elements with their messages in the
+conversation's own shape and answers with messages handed back as given
+or composed afresh as `{ role, content }` text; a message in neither
+shape fails the slot and the kernel's assembly serves. A hook at
+`tool_call` sees the model's call before the dispatcher's gates, and a
+rewritten call meets them as if the model had raised it — an approval
+asked for is of the rewritten call, and the rewrite is recorded as
+`tool_call_rewritten` against the call the model raised. A plugin's own
+calls through `swage.callTool` are not hooked. A turn takes the active
+revision once at its start, and its assembly report names that revision
+and what served each slot — the filler, or the kernel's own with why the
+filler did not — and which hooks ran or were skipped.
 
 ```toml
 [[provides.slots]]

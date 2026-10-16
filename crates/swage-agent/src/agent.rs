@@ -2355,24 +2355,28 @@ impl Agent {
                 Ok((result_str, false, "success".to_string()).into())
             }
             Err(swage_core::ToolError::RequiresApproval {
-                name: _,
+                name: gated_name,
+                arguments: gated_arguments,
                 timeout_secs,
                 timeout_policy,
             }) => {
-                // Config-driven approval gate.
+                // Config-driven approval gate. The call the gate paused is
+                // the one the dispatcher's gates saw — a hook may have
+                // rewritten the model's — so the approval, and the approved
+                // dispatch, are of that call rather than the raised one.
                 use crate::approval::{ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS};
                 let gate_timeout = std::time::Duration::from_secs(
                     timeout_secs.unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS),
                 );
                 let policy = timeout_policy.unwrap_or_default();
-                let prompt = format!("Approval required to execute tool: {}", call.name);
+                let prompt = format!("Approval required to execute tool: {gated_name}");
 
                 if approval_scope.should_skip_gate() {
                     match self
                         .race_tool_dispatch(
                             dispatcher.dispatch_approved(
-                                &call.name,
-                                call.arguments.clone(),
+                                &gated_name,
+                                gated_arguments.clone(),
                                 &ctx,
                                 &self.config.agent_id,
                             ),
@@ -2424,8 +2428,8 @@ impl Agent {
                     .handle_approval_gate(
                         execution,
                         swage_storage::model::ApprovalKind::Tool,
-                        Some(call.name.clone()),
-                        Some(call.arguments.clone()),
+                        Some(gated_name.clone()),
+                        Some(gated_arguments.clone()),
                         None,
                         prompt,
                         None,
@@ -2442,8 +2446,8 @@ impl Agent {
                         let result = match self
                             .race_tool_dispatch(
                                 dispatcher.dispatch_approved(
-                                    &call.name,
-                                    call.arguments.clone(),
+                                    &gated_name,
+                                    gated_arguments.clone(),
                                     &ctx,
                                     &self.config.agent_id,
                                 ),

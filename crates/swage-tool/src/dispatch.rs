@@ -28,11 +28,6 @@ type ToolAdvertisementFilter = dyn Fn(&dyn Tool) -> bool + Send + Sync;
 // ToolExecutionStrategy
 // ---------------------------------------------------------------------------
 
-/// Abstracts the tool execution step (step 6 in the dispatch pipeline).
-///
-/// The default behaviour calls `tool.execute()` directly. Injecting a custom
-/// strategy lets the gateway layer interpose sandbox-aware execution, logging,
-/// or other cross-cutting concerns without the ToolDispatcher knowing about them.
 /// What a call hook decided about a call.
 #[derive(Debug, Clone)]
 pub enum CallHookDecision {
@@ -58,6 +53,11 @@ pub trait ToolCallHook: Send + Sync {
     ) -> CallHookDecision;
 }
 
+/// Abstracts the tool execution step (step 6 in the dispatch pipeline).
+///
+/// The default behaviour calls `tool.execute()` directly. Injecting a custom
+/// strategy lets the gateway layer interpose sandbox-aware execution, logging,
+/// or other cross-cutting concerns without the ToolDispatcher knowing about them.
 #[async_trait]
 pub trait ToolExecutionStrategy: Send + Sync {
     /// Execute the tool with the given parameters and context.
@@ -312,6 +312,7 @@ impl ToolDispatcher {
             } => {
                 return Err(ToolError::RequiresApproval {
                     name: tool_name.to_owned(),
+                    arguments: params,
                     timeout_secs,
                     timeout_policy,
                 });
@@ -878,10 +879,12 @@ mod tests {
         match err {
             ToolError::RequiresApproval {
                 name,
+                arguments,
                 timeout_secs,
                 timeout_policy,
             } => {
                 assert_eq!(name, "echo");
+                assert_eq!(arguments, json!({"text": "hi"}));
                 assert_eq!(timeout_secs, Some(300));
                 assert_eq!(timeout_policy, Some(ApprovalTimeoutPolicy::Interrupt));
             }
@@ -1180,6 +1183,10 @@ mod tests {
                     params: json!({ "from": "hook" }),
                 },
                 "hook_vetoed" => CallHookDecision::Veto("not today".into()),
+                "hook_to_gated" => CallHookDecision::Rewrite {
+                    name: "hook_gated".into(),
+                    params: json!({ "from": "hook" }),
+                },
                 _ => CallHookDecision::Continue(params),
             }
         }
@@ -1200,9 +1207,20 @@ mod tests {
         registry
             .register(Arc::new(NamedTool("hook_plain")))
             .unwrap();
+        registry
+            .register(Arc::new(NamedTool("hook_to_gated")))
+            .unwrap();
+        registry
+            .register(Arc::new(NamedTool("hook_gated")))
+            .unwrap();
         let permissions = PermissionConfig {
             allow: vec!["*".into()],
             deny: vec!["hook_denied".into()],
+            require_approval: vec![RequireApprovalEntry {
+                tool_name: "hook_gated".into(),
+                timeout_secs: None,
+                timeout_policy: None,
+            }],
             ..PermissionConfig::default()
         };
         let dispatcher = ToolDispatcher::new(
@@ -1234,6 +1252,20 @@ mod tests {
             .await
             .expect_err("vetoed");
         assert!(vetoed.to_string().contains("not today"), "{vetoed}");
+        // A rewrite that reaches the approval gate is the call the gate
+        // reports: the approval, and the approved dispatch, are of it.
+        let gated = dispatcher
+            .dispatch("hook_to_gated", json!({}), &ctx, "agent")
+            .await
+            .expect_err("the rewrite names a gated tool");
+        assert!(
+            matches!(
+                gated,
+                ToolError::RequiresApproval { ref name, ref arguments, .. }
+                    if name == "hook_gated" && *arguments == json!({ "from": "hook" })
+            ),
+            "{gated:?}"
+        );
     }
 
     struct NamedTool(&'static str);

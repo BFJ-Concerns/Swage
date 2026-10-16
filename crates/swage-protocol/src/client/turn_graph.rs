@@ -16,7 +16,9 @@ pub enum TurnSlot {
     /// Assembles the model's context from the turn's elements.
     ContextProgram,
     /// Summarises history into a successor when the context is over the
-    /// threshold, or after the thread ran into a wall.
+    /// threshold. The successor a thread takes after running into a wall is
+    /// diagnosed by the provider's readers, not summarised, and stays the
+    /// kernel's.
     Succession,
     /// Runs the model's tool calls through the session's gates.
     ToolDispatch,
@@ -159,6 +161,39 @@ impl TurnGraph {
     }
 }
 
+impl TurnGraph {
+    /// The live step carrying `slot`, when the graph has one.
+    pub fn live_step(&self, slot: TurnSlot) -> Option<&TurnStep> {
+        self.steps.iter().find(|step| step.slot == slot)
+    }
+
+    /// What serves `slot`: the kernel's own implementation unless the graph
+    /// fills the slot otherwise.
+    pub fn filler_for(&self, slot: TurnSlot) -> StepFiller {
+        self.live_step(slot)
+            .map(|step| step.filler.clone())
+            .unwrap_or(StepFiller::Builtin)
+    }
+
+    /// The hooks attached at `point`, in order.
+    pub fn hooks_at(&self, point: HookPoint) -> Vec<HookAttachment> {
+        self.hooks
+            .iter()
+            .filter(|hook| hook.point == point)
+            .cloned()
+            .collect()
+    }
+
+    /// The branches shadowing the live step `step_id`.
+    pub fn branches_from(&self, step_id: &str) -> Vec<TurnBranch> {
+        self.branches
+            .iter()
+            .filter(|branch| branch.from == step_id)
+            .cloned()
+            .collect()
+    }
+}
+
 /// Whether a recorded revision serves, failed to activate, or was replaced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -217,32 +252,42 @@ pub struct TurnGraphDiff {
     pub steps_reordered: Vec<String>,
     pub hooks_attached: Vec<HookAttachment>,
     pub hooks_detached: Vec<HookAttachment>,
+    /// Whether the attachments present in both run in a different order —
+    /// order is executable, since each hook at a point sees the event as
+    /// the one before left it.
+    pub hooks_reordered: bool,
     pub branches_added: Vec<TurnBranch>,
     pub branches_removed: Vec<TurnBranch>,
 }
 
 impl TurnGraphDiff {
-    /// The structural difference between two revisions' graphs.
+    /// The structural difference between two revisions' graphs. A step is
+    /// the same step across revisions when its id and its slot match: a
+    /// step whose slot changed is one removed and one added, so no change
+    /// to what a step runs can read as no change.
     pub fn between(from: u32, before: &TurnGraph, to: u32, after: &TurnGraph) -> Self {
         let before_steps: Vec<&TurnStep> = before.steps.iter().collect();
         let after_steps: Vec<&TurnStep> = after.steps.iter().collect();
         let find = |steps: &[&TurnStep], id: &str| {
             steps.iter().find(|step| step.id == id).copied().cloned()
         };
+        let find = |steps: &[&TurnStep], probe: &TurnStep| {
+            find(steps, &probe.id).filter(|found| found.slot == probe.slot)
+        };
         let steps_added = after_steps
             .iter()
-            .filter(|step| find(&before_steps, &step.id).is_none())
+            .filter(|step| find(&before_steps, step).is_none())
             .map(|step| (*step).clone())
             .collect();
         let steps_removed = before_steps
             .iter()
-            .filter(|step| find(&after_steps, &step.id).is_none())
+            .filter(|step| find(&after_steps, step).is_none())
             .map(|step| (*step).clone())
             .collect();
         let steps_refilled = after_steps
             .iter()
             .filter_map(|step| {
-                let earlier = find(&before_steps, &step.id)?;
+                let earlier = find(&before_steps, step)?;
                 (earlier.filler != step.filler).then(|| StepRefilled {
                     id: step.id.clone(),
                     before: earlier.filler,
@@ -252,12 +297,12 @@ impl TurnGraphDiff {
             .collect();
         let shared_before: Vec<&str> = before_steps
             .iter()
-            .filter(|step| find(&after_steps, &step.id).is_some())
+            .filter(|step| find(&after_steps, step).is_some())
             .map(|step| step.id.as_str())
             .collect();
         let shared_after: Vec<&str> = after_steps
             .iter()
-            .filter(|step| find(&before_steps, &step.id).is_some())
+            .filter(|step| find(&before_steps, step).is_some())
             .map(|step| step.id.as_str())
             .collect();
         let steps_reordered = if shared_before == shared_after {
@@ -270,6 +315,16 @@ impl TurnGraphDiff {
                 .map(|(after, _)| (*after).to_owned())
                 .collect()
         };
+        let shared_hooks_before: Vec<&HookAttachment> = before
+            .hooks
+            .iter()
+            .filter(|hook| after.hooks.contains(hook))
+            .collect();
+        let shared_hooks_after: Vec<&HookAttachment> = after
+            .hooks
+            .iter()
+            .filter(|hook| before.hooks.contains(hook))
+            .collect();
         Self {
             from,
             to,
@@ -277,6 +332,7 @@ impl TurnGraphDiff {
             steps_removed,
             steps_refilled,
             steps_reordered,
+            hooks_reordered: shared_hooks_before != shared_hooks_after,
             hooks_attached: after
                 .hooks
                 .iter()

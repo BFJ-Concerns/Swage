@@ -120,6 +120,10 @@ pub(crate) struct GatewayDispatcherRequest<'a> {
     pub(crate) ws_tx: mpsc::UnboundedSender<ServerEvent>,
     pub(crate) session_id: Option<Uuid>,
     pub(crate) turn_id: Option<Uuid>,
+    /// The hook over the model's tool calls the turn's revision attaches at
+    /// `tool_call`, resolved by the turn from the revision it took at its
+    /// start; none when the revision attaches nothing there.
+    pub(crate) call_hook: Option<Arc<dyn swage_tool::dispatch::ToolCallHook>>,
 }
 
 pub(super) struct TurnSandboxBuild {
@@ -454,6 +458,7 @@ pub(crate) async fn build_gateway_dispatcher(
         ws_tx,
         session_id,
         turn_id: _,
+        call_hook,
     } = request;
     #[cfg(test)]
     if state.take_dispatcher_build_failure() {
@@ -504,25 +509,11 @@ pub(crate) async fn build_gateway_dispatcher(
         Arc::new(LeakDetector::default()),
         false,
     );
-    // The plugin hooks the active turn-graph revision attaches at
-    // `tool_call` see every call before the gates — a rewrite is what the
+    // The plugin hooks the turn's revision attaches at `tool_call` see
+    // every call the model raises before the gates — a rewrite is what the
     // gates then check, as if the model had raised it.
-    let call_hooks = crate::plugin::slot::hooks_for_turn(
-        state,
-        swage_protocol::client::turn_graph::HookPoint::ToolCall,
-        &crate::plugin::slot::slot_context(
-            session_id,
-            &agent_config.agent_id,
-            &agent_config.working_directory,
-        ),
-    );
-    let call_hook: Option<Arc<dyn swage_tool::dispatch::ToolCallHook>> = (!call_hooks.is_empty())
-        .then(|| {
-            Arc::new(crate::plugin::slot::PluginCallHook::new(call_hooks))
-                as Arc<dyn swage_tool::dispatch::ToolCallHook>
-        });
-    let dispatcher = match &call_hook {
-        Some(hook) => dispatcher.with_call_hook(Arc::clone(hook)),
+    let dispatcher = match call_hook {
+        Some(hook) => dispatcher.with_call_hook(hook),
         None => dispatcher,
     };
 
@@ -571,7 +562,10 @@ pub(crate) async fn build_gateway_dispatcher(
     // `callTool` — run through a dispatcher of the same registry and
     // permissions over a strategy of the same shape, so they meet the gates
     // the model's own calls meet. It carries no session dispatcher of its
-    // own: a nested call does not nest further.
+    // own: a nested call does not nest further. Nor does it carry the
+    // `tool_call` hook: that point sees the model's calls, and a plugin's
+    // own call waiting on a hook served by the same isolate — which runs
+    // one invocation at a time — would wait on itself.
     let session_dispatcher_base = ToolDispatcher::new(
         registry,
         permissions,
@@ -580,10 +574,6 @@ pub(crate) async fn build_gateway_dispatcher(
         Arc::new(LeakDetector::default()),
         false,
     );
-    let session_dispatcher_base = match &call_hook {
-        Some(hook) => session_dispatcher_base.with_call_hook(Arc::clone(hook)),
-        None => session_dispatcher_base,
-    };
     let session_dispatcher = Arc::new(
         session_dispatcher_base.with_execution_strategy(Arc::new(
             GatewayExecutionStrategy::new(
@@ -652,6 +642,28 @@ pub(crate) async fn record_degraded_execution(
     Ok(())
 }
 
+/// The dispatcher's call hook over the `tool_call` attachments a turn
+/// resolved, in the revision's order, each rewrite recorded to the audit
+/// trail under `session_id`; none when nothing attached serves.
+pub(crate) fn call_hook_for(
+    state: &AppState,
+    hooks: Vec<(
+        swage_protocol::client::turn_graph::HookMode,
+        crate::plugin::slot::PluginSlot,
+    )>,
+    session_id: Option<Uuid>,
+) -> Option<Arc<dyn swage_tool::dispatch::ToolCallHook>> {
+    (!hooks.is_empty()).then(|| {
+        Arc::new(crate::plugin::slot::PluginCallHook::new(
+            hooks,
+            Some(crate::plugin::slot::audit_rewrite_recorder(
+                state.clone(),
+                session_id,
+            )),
+        )) as Arc<dyn swage_tool::dispatch::ToolCallHook>
+    })
+}
+
 pub(crate) async fn build_gateway_dispatcher_for_unattended_execution(
     state: &AppState,
     request: GatewayDispatcherRequest<'_>,
@@ -659,6 +671,28 @@ pub(crate) async fn build_gateway_dispatcher_for_unattended_execution(
 ) -> Result<GatewayDispatcherBuild, swage_core::GatewayError> {
     let session_id = request.session_id;
     let turn_id = request.turn_id;
+    // A build made on a turn's behalf takes the revision serving now: it
+    // has no turn snapshot of its own to read.
+    let request = match request.call_hook {
+        Some(_) => request,
+        None => {
+            let hooks = crate::plugin::slot::hooks_for_turn(
+                state,
+                &state.turn_graph.active().graph,
+                swage_protocol::client::turn_graph::HookPoint::ToolCall,
+                &crate::plugin::slot::slot_context(
+                    session_id,
+                    &request.agent_config.agent_id,
+                    &request.agent_config.working_directory,
+                ),
+                request.topic_id,
+            );
+            GatewayDispatcherRequest {
+                call_hook: call_hook_for(state, hooks.attached, session_id),
+                ..request
+            }
+        }
+    };
     let build = build_gateway_dispatcher(state, request)
         .await
         .map_err(|error| swage_core::GatewayError::ConfigError(error.to_string()))?;
@@ -886,6 +920,7 @@ mod tests {
                 ws_tx,
                 session_id: Some(session_id),
                 turn_id: Some(Uuid::new_v4()),
+                call_hook: None,
             },
             "scheduled turn",
         )
@@ -919,6 +954,7 @@ mod tests {
                 ws_tx,
                 session_id: Some(session_id),
                 turn_id: Some(Uuid::new_v4()),
+                call_hook: None,
             },
             "delegated turn",
         )

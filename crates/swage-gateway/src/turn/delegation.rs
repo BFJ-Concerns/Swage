@@ -839,6 +839,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 ws_tx: silent_ws_tx.clone(),
                 session_id: None,
                 turn_id: Some(sender_turn_id),
+                call_hook: None,
             },
             "delegated turn",
         )

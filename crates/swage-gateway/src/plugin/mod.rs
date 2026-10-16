@@ -78,9 +78,9 @@ struct InstalledPlugin {
 }
 
 impl InstalledPlugin {
-    /// Whether a session in `topic_id` (none: the general scope) may see
-    /// the plugin's tools: the topic's own answer where it gave one, the
-    /// install's otherwise.
+    /// Whether a session in `topic_id` (none: the general scope) may use
+    /// the plugin — its tools, its slots, its hooks: the topic's own answer
+    /// where it gave one, the install's otherwise.
     fn enabled_for(&self, topic_id: Option<Uuid>) -> bool {
         match topic_id {
             Some(topic) if self.enabled_topics.contains(&topic) => true,
@@ -638,11 +638,17 @@ impl PluginService {
         })
     }
 
-    /// How `plugin` runs, when it is installed and serving.
-    pub fn execution_of(&self, plugin: &str) -> Option<Execution> {
-        self.read()
-            .get(plugin)
-            .and_then(|installed| installed.execution.as_ref().ok().cloned())
+    /// How `plugin` runs for a session in `topic_id` (none: the general
+    /// scope), when it is installed, serving, and enabled for that scope.
+    /// Enablement is the person's one switch for a plugin: off, it serves
+    /// nothing there — no tool, no slot, no hook.
+    pub fn execution_of(&self, plugin: &str, topic_id: Option<Uuid>) -> Option<Execution> {
+        self.read().get(plugin).and_then(|installed| {
+            if !installed.enabled_for(topic_id) {
+                return None;
+            }
+            installed.execution.as_ref().ok().cloned()
+        })
     }
 
     /// Whether `tool_name` is provided by an installed plugin.

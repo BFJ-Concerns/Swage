@@ -6680,6 +6680,10 @@
             },
             "type": "array"
           },
+          "hooks_reordered": {
+            "description": "Whether the attachments present in both run in a different order —\norder is executable, since each hook at a point sees the event as\nthe one before left it.",
+            "type": "boolean"
+          },
           "steps_added": {
             "items": {
               "$ref": "#/components/schemas/TurnStep"
@@ -6720,6 +6724,7 @@
           "steps_reordered",
           "hooks_attached",
           "hooks_detached",
+          "hooks_reordered",
           "branches_added",
           "branches_removed"
         ],
@@ -6908,7 +6913,7 @@
           },
           {
             "const": "succession",
-            "description": "Summarises history into a successor when the context is over the\nthreshold, or after the thread ran into a wall.",
+            "description": "Summarises history into a successor when the context is over the\nthreshold. The successor a thread takes after running into a wall is\ndiagnosed by the provider's readers, not summarised, and stays the\nkernel's.",
             "type": "string"
           },
           {

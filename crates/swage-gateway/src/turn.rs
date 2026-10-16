@@ -380,6 +380,53 @@ pub(super) async fn process_turn_with_composition_and_focus(
         Err(error) => tracing::warn!(%error, "failed to unarchive the session for its turn"),
     }
 
+    // The workspace root doubles as the session's working directory in the
+    // orientation baseline and as the working directory a plugin's slot or
+    // hook sees, so it is resolved before the first hook runs.
+    let workspace_policy = load_trusted_workspace_policy(
+        &state.storage,
+        topic_id,
+        session.active_workspace_attachment_id,
+    )
+    .await;
+    let worker_placement = worker_placement_path(session.metadata.as_ref());
+    let (tool_root, mut allowed_paths) = resolve_turn_tool_root(
+        &state.config_root,
+        &workspace_policy,
+        &scope,
+        session.id,
+        worker_placement.clone(),
+    );
+
+    // The turn-graph revision this turn runs under, taken once: every
+    // filler, hook and branch below is read from this snapshot, so a
+    // revision activated while the turn runs changes the next turn and the
+    // record names the one that ran. Each hook point's attachments are
+    // resolved here against what serves this scope; an attachment skipped
+    // — its plugin gone or switched off since the revision validated — is
+    // reported beside the ones that ran.
+    let active_graph = state.turn_graph.active();
+    let slot_context =
+        crate::plugin::slot::slot_context(Some(session_id), &session.agent_id, &tool_root.path);
+    let mut turn_hooks = crate::plugin::slot::TurnHookAccount::default();
+    let mut hooks_at = |point: swage_protocol::client::turn_graph::HookPoint| {
+        let hooks = crate::plugin::slot::hooks_for_turn(
+            state,
+            &active_graph.graph,
+            point,
+            &slot_context,
+            Some(topic_id),
+        );
+        turn_hooks.note(&hooks);
+        hooks.attached
+    };
+    let inbound_plugin_hooks =
+        hooks_at(swage_protocol::client::turn_graph::HookPoint::MessageInbound);
+    let turn_start_hooks = hooks_at(swage_protocol::client::turn_graph::HookPoint::TurnStart);
+    let call_hooks = hooks_at(swage_protocol::client::turn_graph::HookPoint::ToolCall);
+    let turn_end_hooks = hooks_at(swage_protocol::client::turn_graph::HookPoint::TurnEnd);
+    let call_hook = dispatcher::call_hook_for(state, call_hooks, Some(session_id));
+
     // Step 6: Canonicalise inbound content before persisting any thread message.
     let mut before_inbound =
         match dispatch_before_inbound(state.hook_registry.as_ref(), &content).await {
@@ -395,20 +442,10 @@ pub(super) async fn process_turn_with_composition_and_focus(
                 return Err(error);
             }
         };
-    // The plugin hooks the active turn-graph revision attaches at
-    // `message_inbound` see the content after the registry's hooks; a
-    // rewrite is what the turn records, a veto fails the turn as a block
-    // does.
-    let hook_context = crate::plugin::slot::slot_context(
-        Some(session_id),
-        &session.agent_id,
-        std::path::Path::new(&state.config_root),
-    );
-    let inbound_plugin_hooks = crate::plugin::slot::hooks_for_turn(
-        state,
-        swage_protocol::client::turn_graph::HookPoint::MessageInbound,
-        &hook_context,
-    );
+    // The plugin hooks the turn's revision attaches at `message_inbound`
+    // see the content after the registry's hooks; a rewrite is what the
+    // turn records, attributed to the plugin that made it, and a veto
+    // fails the turn as a block does.
     if !inbound_plugin_hooks.is_empty() {
         match Box::pin(crate::plugin::slot::inbound_hooks(
             &inbound_plugin_hooks,
@@ -416,15 +453,11 @@ pub(super) async fn process_turn_with_composition_and_focus(
         ))
         .await
         {
-            Ok(rewritten) => {
-                if rewritten != before_inbound.canonical_content {
-                    before_inbound.canonical_content = rewritten;
-                    before_inbound.modified_by_hooks.extend(
-                        inbound_plugin_hooks
-                            .iter()
-                            .map(|(_, slot)| slot.plugin.clone()),
-                    );
-                }
+            Ok(outcome) => {
+                before_inbound.canonical_content = outcome.content;
+                before_inbound
+                    .modified_by_hooks
+                    .extend(outcome.rewritten_by);
             }
             Err(reason) => {
                 record_terminal_state_and_release(
@@ -441,11 +474,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
         }
     }
     Box::pin(crate::plugin::slot::observe(
-        &crate::plugin::slot::hooks_for_turn(
-            state,
-            swage_protocol::client::turn_graph::HookPoint::TurnStart,
-            &hook_context,
-        ),
+        &turn_start_hooks,
         "turn_start",
         serde_json::json!({ "sessionId": session_id, "turnId": prepared_turn_id }),
     ))
@@ -589,15 +618,6 @@ pub(super) async fn process_turn_with_composition_and_focus(
         .collect();
     session_variables.extend(composition.variables.clone().unwrap_or_default());
 
-    // The workspace root doubles as the session's working directory in the
-    // orientation baseline, so it is resolved before elements are built.
-    let workspace_policy = load_trusted_workspace_policy(
-        &state.storage,
-        topic_id,
-        session.active_workspace_attachment_id,
-    )
-    .await;
-    let worker_placement = worker_placement_path(session.metadata.as_ref());
     if attendance == TurnAttendance::Unattended
         && worker_placement.is_none()
         && workspace_policy.active_workspace.is_none()
@@ -610,13 +630,6 @@ pub(super) async fn process_turn_with_composition_and_focus(
             state.config_root.display()
         )));
     }
-    let (tool_root, mut allowed_paths) = resolve_turn_tool_root(
-        &state.config_root,
-        &workspace_policy,
-        &scope,
-        session.id,
-        worker_placement,
-    );
 
     let environment = build_session_environment(&topic, &tool_root, &session);
     let available_skills = available_skills_for_agent(&scope, &session.agent_id, Some(swage_root));
@@ -644,17 +657,25 @@ pub(super) async fn process_turn_with_composition_and_focus(
     // built-in implementation. JS assemblies fail open to the default with
     // the error recorded in the report.
     // The context-program slot: the kernel's assembly, or the plugin the
-    // active turn-graph revision filled it with, which composes the
-    // messages over the same elements and fails open to the kernel's.
-    let active_graph = state.turn_graph.active();
-    let slot_context =
-        crate::plugin::slot::slot_context(Some(session_id), &session.agent_id, &tool_root.path);
-    let context_program_filler = state
-        .turn_graph
+    // turn's revision filled it with, which composes the messages over the
+    // same elements and fails open to the kernel's — with the fallback, and
+    // what served, recorded in the report rather than a log line alone.
+    let context_program_filler = active_graph
+        .graph
         .filler_for(swage_protocol::client::turn_graph::TurnSlot::ContextProgram);
+    let context_program_served = std::sync::Mutex::new(SlotService::builtin());
     let context_program_plugin = match &context_program_filler {
         swage_protocol::client::turn_graph::StepFiller::Plugin { name } => {
-            crate::plugin::slot::slot_for_plugin(state, name, &slot_context)
+            let slot =
+                crate::plugin::slot::slot_for_plugin(state, name, &slot_context, Some(topic_id));
+            if slot.is_none() {
+                *context_program_served
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = SlotService::fallback(format!(
+                    "plugin '{name}' is not serving or not enabled for this scope"
+                ));
+            }
+            slot
         }
         _ => None,
     };
@@ -672,17 +693,39 @@ pub(super) async fn process_turn_with_composition_and_focus(
             )
         };
         match &context_program_plugin {
-            Some(slot) => match slot.context_program(elements, &session_variables, kernel) {
-                Ok(output) => output,
-                Err(error) => {
-                    tracing::warn!(%error, "the context-program plugin failed; the kernel's assembly serves");
-                    kernel()
+            Some(slot) => {
+                match slot.context_program(elements, &session_variables, &tokeniser, kernel) {
+                    Ok(output) => {
+                        *context_program_served
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) =
+                            SlotService::served(format!("plugin {}", slot.plugin));
+                        output
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "the context-program plugin failed; the kernel's assembly serves");
+                        *context_program_served
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) = SlotService::fallback(error);
+                        kernel()
+                    }
                 }
-            },
+            }
             None => kernel(),
         }
     };
     let output = assemble(&elements);
+    let succession_filler = active_graph
+        .graph
+        .filler_for(swage_protocol::client::turn_graph::TurnSlot::Succession);
+    let summariser = summariser_for(
+        state,
+        &succession_filler,
+        &slot_context,
+        Some(topic_id),
+        Some(session_id),
+    );
+    let succession_served = summariser.describe();
     // Over the compaction threshold, or after the thread's recent turns kept
     // hitting walls, the turn runs on a successor: the same elements rendered
     // afresh, the older history summarised against them or diagnosed from
@@ -697,19 +740,15 @@ pub(super) async fn process_turn_with_composition_and_focus(
             tokeniser: &tokeniser,
             degradation: succession::recent_degradation(state.storage.as_ref(), thread_id).await,
             diagnosis_models: succession::diagnosis_models(&config),
-            summariser: summariser_for(
-                state,
-                &state
-                    .turn_graph
-                    .filler_for(swage_protocol::client::turn_graph::TurnSlot::Succession),
-                &slot_context,
-            ),
+            summariser,
             shadows: Box::pin(succession_shadows(
                 state,
+                &active_graph.graph,
                 &config,
                 session_id,
                 prepared_turn_id,
                 &slot_context,
+                Some(topic_id),
             ))
             .await,
         },
@@ -722,13 +761,27 @@ pub(super) async fn process_turn_with_composition_and_focus(
     assembly_report.tool_scope = Some(serde_json::json!({
         "effective_root": tool_root.path,
     }));
+    // The revision the turn ran under and what actually served each slot
+    // and point: a filler the revision names and a fallback the turn took
+    // are both here, so the record is of the turn, not of the declaration.
+    let context_program_served = context_program_served
+        .into_inner()
+        .unwrap_or_else(|e| e.into_inner());
     assembly_report.turn_graph = Some(serde_json::json!({
         "revision": active_graph.revision,
-        "context_program": context_program_filler,
-        "succession": state
-            .turn_graph
-            .filler_for(swage_protocol::client::turn_graph::TurnSlot::Succession),
-        "hooks": active_graph.graph.hooks,
+        "context_program": {
+            "filler": context_program_filler,
+            "served": context_program_served.served,
+            "fallback": context_program_served.fallback,
+        },
+        "succession": {
+            "filler": succession_filler,
+            "served": succession_served,
+        },
+        "hooks": {
+            "attached": turn_hooks.attached,
+            "skipped": turn_hooks.skipped,
+        },
         "branches": active_graph.graph.branches.iter().map(|branch| &branch.id).collect::<Vec<_>>(),
     }));
 
@@ -799,6 +852,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
             agent_id: &session.agent_id,
             attendance,
             cancel_token: &cancel_token,
+            call_hook,
         },
     )
     .await?
@@ -872,16 +926,6 @@ pub(super) async fn process_turn_with_composition_and_focus(
     )
     .await;
 
-    Box::pin(crate::plugin::slot::observe(
-        &crate::plugin::slot::hooks_for_turn(
-            state,
-            swage_protocol::client::turn_graph::HookPoint::TurnEnd,
-            &slot_context,
-        ),
-        "turn_end",
-        serde_json::json!({ "sessionId": session_id, "turnId": turn_id }),
-    ))
-    .await;
     // Wait for the agent task to finish and surface any panic or error.
     let mut terminal_account = None;
     match agent_handle.await {
@@ -1002,11 +1046,53 @@ pub(super) async fn process_turn_with_composition_and_focus(
         .flatten()
         .map(|turn| turn.state)
         .unwrap_or(TurnState::Completed);
+    // The turn's end, as recorded: the hooks at `turn_end` see the state
+    // the turn settled in, after every terminal write.
+    Box::pin(crate::plugin::slot::observe(
+        &turn_end_hooks,
+        "turn_end",
+        serde_json::json!({
+            "sessionId": session_id,
+            "turnId": turn_id.unwrap_or(prepared_turn_id),
+            "state": final_state,
+        }),
+    ))
+    .await;
     if crate::turn_queue::drains_queue_after(final_state) {
         crate::turn_queue::spawn_drain(state.clone(), session_id);
     }
 
     Ok(())
+}
+
+/// What served a slot on one turn: the filler that ran, or the kernel's
+/// own with why the named filler did not.
+struct SlotService {
+    served: String,
+    fallback: Option<String>,
+}
+
+impl SlotService {
+    fn builtin() -> Self {
+        Self {
+            served: "builtin".to_owned(),
+            fallback: None,
+        }
+    }
+
+    fn served(filler: String) -> Self {
+        Self {
+            served: filler,
+            fallback: None,
+        }
+    }
+
+    fn fallback(reason: String) -> Self {
+        Self {
+            served: "builtin".to_owned(),
+            fallback: Some(reason),
+        }
+    }
 }
 
 /// Cancel the active turn for a session.
@@ -1036,47 +1122,54 @@ pub(crate) mod tests;
 // Tests
 // ---------------------------------------------------------------------------
 
-/// What fills the succession slot under the active turn-graph revision.
+/// What fills the succession slot under the turn's revision: the kernel's
+/// own when the named plugin is not serving this scope.
 fn summariser_for(
     state: &AppState,
     filler: &swage_protocol::client::turn_graph::StepFiller,
     context: &swage_plugin::InvocationContext,
+    topic_id: Option<Uuid>,
+    session_id: Option<Uuid>,
 ) -> succession::Summariser {
     use swage_protocol::client::turn_graph::StepFiller;
     match filler {
         StepFiller::Builtin => succession::Summariser::Builtin,
-        StepFiller::Plugin { name } => crate::plugin::slot::slot_for_plugin(state, name, context)
-            .map(succession::Summariser::Plugin)
-            .unwrap_or(succession::Summariser::Builtin),
+        StepFiller::Plugin { name } => {
+            crate::plugin::slot::slot_for_plugin(state, name, context, topic_id)
+                .map(succession::Summariser::Plugin)
+                .unwrap_or(succession::Summariser::Builtin)
+        }
         StepFiller::Workflow { name } => succession::Summariser::Workflow {
             name: name.clone(),
             state: Box::new(state.clone()),
+            session_id,
         },
     }
 }
 
-/// The branches shadowing the succession step this turn: each is an
+/// The branches shadowing the succession step this turn — those `graph`
+/// runs from the live step carrying that slot, whatever its id: each is an
 /// experiment location `turn_graph.<branch>` drawn through the seam, so
 /// experimentation off for the location keeps the path single and a drawn
 /// shadow is recorded with what it answered beside the live summary.
 async fn succession_shadows(
     state: &AppState,
+    graph: &swage_protocol::client::turn_graph::TurnGraph,
     config: &swage_config::ResolvedConfig,
     session_id: Uuid,
     turn_id: Uuid,
     context: &swage_plugin::InvocationContext,
+    topic_id: Option<Uuid>,
 ) -> Vec<succession::Shadow> {
     use swage_protocol::client::turn_graph::TurnSlot;
     let mut shadows = Vec::new();
-    for branch in state
-        .turn_graph
-        .branches_from(TurnSlot::Succession.as_str())
-    {
-        let Some(step) = branch
-            .steps
-            .iter()
-            .find(|step| step.slot == TurnSlot::Succession)
-        else {
+    let Some(live) = graph.live_step(TurnSlot::Succession) else {
+        return shadows;
+    };
+    for branch in graph.branches_from(&live.id) {
+        // Validation admits a branch as exactly one step of the live step's
+        // slot; a recorded revision shaped otherwise shadows nothing.
+        let [step] = branch.steps.as_slice() else {
             continue;
         };
         let location = format!("turn_graph.{}", branch.id);
@@ -1132,7 +1225,7 @@ async fn succession_shadows(
             });
         shadows.push(succession::Shadow {
             branch: branch.id.clone(),
-            summariser: summariser_for(state, &step.filler, context),
+            summariser: summariser_for(state, &step.filler, context, topic_id, Some(session_id)),
             record,
         });
     }

@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 
 use swage_core::StorageError;
 use swage_protocol::client::turn_graph::{
-    HookAttachment, HookMode, HookPoint, RevisionActivation, StepFiller, TurnGraph, TurnGraphDiff,
+    HookMode, HookPoint, RevisionActivation, StepFiller, TurnGraph, TurnGraphDiff,
     TurnGraphResponse, TurnGraphRevision, TurnSlot, TurnStep,
 };
 use swage_storage::model::{NewAuditEvent, NewTurnGraphRevision, TurnGraphRevisionRecord};
@@ -34,11 +34,17 @@ pub enum TurnGraphError {
     Refused(String),
     #[error("no turn graph revision {0} is recorded")]
     NotFound(u32),
+    /// A recorded revision's graph no longer reads as a declaration — the
+    /// declaration's shape moved under it. Nothing is guessed in its place.
+    #[error("turn graph revision {revision} does not read as a declaration: {reason}")]
+    Unreadable { revision: u32, reason: String },
     #[error("{0}")]
     Storage(#[from] StorageError),
 }
 
-/// The revision serving now, parsed once.
+/// The revision serving now, parsed once. A turn takes one of these at its
+/// start and reads every filler, hook and branch from it, so a revision
+/// activated mid-turn changes the next turn, never the one under way.
 #[derive(Debug, Clone)]
 pub struct ActiveGraph {
     pub revision: u32,
@@ -130,63 +136,30 @@ impl TurnGraphService {
         )
     }
 
-    /// What serves `slot` under the active revision: the kernel's own
-    /// implementation unless a revision filled the slot otherwise.
-    pub fn filler_for(&self, slot: TurnSlot) -> StepFiller {
-        self.active()
-            .graph
-            .steps
-            .iter()
-            .find(|step| step.slot == slot)
-            .map(|step| step.filler.clone())
-            .unwrap_or(StepFiller::Builtin)
-    }
-
-    /// The hooks attached at `point` under the active revision, in order.
-    pub fn hooks_at(&self, point: HookPoint) -> Vec<HookAttachment> {
-        self.active()
-            .graph
-            .hooks
-            .iter()
-            .filter(|hook| hook.point == point)
-            .cloned()
-            .collect()
-    }
-
-    /// The branches shadowing the live step `step_id` under the active
-    /// revision.
-    pub fn branches_from(
-        &self,
-        step_id: &str,
-    ) -> Vec<swage_protocol::client::turn_graph::TurnBranch> {
-        self.active()
-            .graph
-            .branches
-            .iter()
-            .filter(|branch| branch.from == step_id)
-            .cloned()
-            .collect()
-    }
-
     /// The graph as it stands: the active revision and every one recorded.
-    pub fn list(&self) -> TurnGraphResponse {
-        TurnGraphResponse {
+    pub fn list(&self) -> Result<TurnGraphResponse, TurnGraphError> {
+        Ok(TurnGraphResponse {
             active: self.active().revision,
-            revisions: self.read_revisions().iter().map(revision_view).collect(),
-        }
+            revisions: self
+                .read_revisions()
+                .iter()
+                .map(revision_view)
+                .collect::<Result<Vec<_>, _>>()?,
+        })
     }
 
-    pub fn revision(&self, revision: u32) -> Option<TurnGraphRevision> {
+    pub fn revision(&self, revision: u32) -> Result<TurnGraphRevision, TurnGraphError> {
         self.read_revisions()
             .iter()
             .find(|record| record.revision == revision)
             .map(revision_view)
+            .unwrap_or(Err(TurnGraphError::NotFound(revision)))
     }
 
     /// What changed from revision `from` to revision `to`.
     pub fn diff(&self, from: u32, to: u32) -> Result<TurnGraphDiff, TurnGraphError> {
-        let before = self.revision(from).ok_or(TurnGraphError::NotFound(from))?;
-        let after = self.revision(to).ok_or(TurnGraphError::NotFound(to))?;
+        let before = self.revision(from)?;
+        let after = self.revision(to)?;
         Ok(TurnGraphDiff::between(
             from,
             &before.graph,
@@ -205,12 +178,7 @@ impl TurnGraphService {
         session_id: Option<Uuid>,
     ) -> Result<TurnGraphRevision, TurnGraphError> {
         let _changing = self.change_lock.lock().await;
-        let next = self
-            .read_revisions()
-            .iter()
-            .map(|record| record.revision)
-            .max()
-            .map_or(0, |last| last + 1);
+        let next = self.next_revision_number();
         let verdict = self.validate(&graph).await;
         let graph_json = serde_json::to_value(&graph)
             .map_err(|error| TurnGraphError::Refused(error.to_string()))?;
@@ -260,23 +228,46 @@ impl TurnGraphService {
                 .await;
             }
         }
-        Ok(revision_view(&record))
+        revision_view(&record)
     }
 
     /// Make a recorded revision the one that serves, re-validated against
-    /// what is installed now.
+    /// what is installed now. A refusal is recorded as it is at `propose`:
+    /// a new failed revision carrying the candidate's graph and why it
+    /// cannot serve now, returned in the refused case, with the revision
+    /// that served before still serving.
     pub async fn activate(
         &self,
         revision: u32,
         session_id: Option<Uuid>,
     ) -> Result<TurnGraphRevision, TurnGraphError> {
         let _changing = self.change_lock.lock().await;
-        let candidate = self
-            .revision(revision)
-            .ok_or(TurnGraphError::NotFound(revision))?;
-        self.validate(&candidate.graph)
-            .await
-            .map_err(TurnGraphError::Refused)?;
+        let candidate = self.revision(revision)?;
+        if let Err(reason) = self.validate(&candidate.graph).await {
+            let next = self.next_revision_number();
+            let record = self
+                .storage
+                .record_turn_graph_revision(NewTurnGraphRevision {
+                    revision: next,
+                    graph: serde_json::to_value(&candidate.graph)
+                        .map_err(|error| TurnGraphError::Refused(error.to_string()))?,
+                    activation: "failed".into(),
+                    failure: Some(format!(
+                        "activation of revision {revision} refused: {reason}"
+                    )),
+                })
+                .await?;
+            self.write_revisions().push(record.clone());
+            self.record_event(
+                session_id,
+                next,
+                "turn_graph_revision_failed",
+                format!("Turn graph revision {revision} could not be re-activated: {reason}"),
+                serde_json::json!({ "revision": next, "candidate": revision, "reason": reason, "serving": self.active().revision }),
+            )
+            .await;
+            return revision_view(&record);
+        }
         self.storage.activate_turn_graph_revision(revision).await?;
         {
             let mut revisions = self.write_revisions();
@@ -303,7 +294,14 @@ impl TurnGraphService {
         )
         .await;
         self.revision(revision)
-            .ok_or(TurnGraphError::NotFound(revision))
+    }
+
+    fn next_revision_number(&self) -> u32 {
+        self.read_revisions()
+            .iter()
+            .map(|record| record.revision)
+            .max()
+            .map_or(0, |last| last + 1)
     }
 
     /// Whether `graph` can serve now: every rule names what it refuses.
@@ -325,7 +323,15 @@ impl TurnGraphService {
             }
             self.validate_filler(step).await?;
         }
+        let mut attachments = std::collections::HashSet::new();
         for hook in &graph.hooks {
+            if !attachments.insert((hook.plugin.as_str(), hook.point)) {
+                return Err(format!(
+                    "hook at '{}': plugin '{}' is attached there twice",
+                    hook.point.as_str(),
+                    hook.plugin
+                ));
+            }
             let declared = self
                 .plugins
                 .hook_mode(&hook.plugin, hook.point.as_str())
@@ -351,26 +357,55 @@ impl TurnGraphService {
             if !branch_ids.insert(branch.id.as_str()) {
                 return Err(format!("branch id '{}' is used twice", branch.id));
             }
-            if !graph.steps.iter().any(|step| step.id == branch.from) {
+            let Some(from) = graph.steps.iter().find(|step| step.id == branch.from) else {
                 return Err(format!(
                     "branch '{}' runs from '{}', which is not a step of the live path",
                     branch.id, branch.from
                 ));
+            };
+            if !shadowed(from.slot) {
+                return Err(format!(
+                    "branch '{}' runs from '{}', and the kernel runs no shadow of slot '{}'",
+                    branch.id,
+                    branch.from,
+                    from.slot.as_str()
+                ));
             }
-            if branch.steps.is_empty() {
-                return Err(format!("branch '{}' has no steps", branch.id));
+            let [step] = branch.steps.as_slice() else {
+                return Err(format!(
+                    "branch '{}' must carry exactly one step, the shadow of '{}'",
+                    branch.id, branch.from
+                ));
+            };
+            if step.slot != from.slot {
+                return Err(format!(
+                    "branch '{}' shadows '{}' with a step of slot '{}', not '{}'",
+                    branch.id,
+                    branch.from,
+                    step.slot.as_str(),
+                    from.slot.as_str()
+                ));
             }
-            for step in &branch.steps {
-                if !ids.insert(step.id.as_str()) {
-                    return Err(format!("step id '{}' is used twice", step.id));
-                }
-                self.validate_filler(step).await?;
+            if !ids.insert(step.id.as_str()) {
+                return Err(format!("step id '{}' is used twice", step.id));
             }
+            self.validate_filler(step).await?;
         }
         Ok(())
     }
 
+    /// Whether `step`'s filler can serve: the kind its slot's kernel point
+    /// takes, and the plugin or workflow it names installed now.
     async fn validate_filler(&self, step: &TurnStep) -> Result<(), String> {
+        if !takes(step.slot, &step.filler) {
+            return Err(format!(
+                "step '{}': slot '{}' takes {} — the kernel's point there runs no {} filler",
+                step.id,
+                step.slot.as_str(),
+                takes_description(step.slot),
+                filler_kind(&step.filler)
+            ));
+        }
         match &step.filler {
             StepFiller::Builtin => Ok(()),
             StepFiller::Plugin { name } => {
@@ -450,14 +485,55 @@ impl TurnGraphService {
     }
 }
 
-fn revision_view(record: &TurnGraphRevisionRecord) -> TurnGraphRevision {
-    TurnGraphRevision {
+/// What the kernel's point for `slot` runs besides its own implementation:
+/// the context-program point composes through a plugin's isolate on the
+/// turn's thread; the succession point takes a plugin or a saved workflow;
+/// the other points take no filler yet, and a declaration naming one for
+/// them is refused rather than recorded as serving.
+fn takes(slot: TurnSlot, filler: &StepFiller) -> bool {
+    matches!(
+        (slot, filler),
+        (_, StepFiller::Builtin)
+            | (TurnSlot::ContextProgram, StepFiller::Plugin { .. })
+            | (
+                TurnSlot::Succession,
+                StepFiller::Plugin { .. } | StepFiller::Workflow { .. }
+            )
+    )
+}
+
+fn takes_description(slot: TurnSlot) -> &'static str {
+    match slot {
+        TurnSlot::ContextProgram => "the kernel's own or a plugin",
+        TurnSlot::Succession => "the kernel's own, a plugin or a saved workflow",
+        TurnSlot::ToolDispatch | TurnSlot::Curator | TurnSlot::Judge => "the kernel's own only",
+    }
+}
+
+fn filler_kind(filler: &StepFiller) -> &'static str {
+    match filler {
+        StepFiller::Builtin => "builtin",
+        StepFiller::Plugin { .. } => "plugin",
+        StepFiller::Workflow { .. } => "workflow",
+    }
+}
+
+/// The slots whose kernel point runs a branch's shadow beside the live
+/// step.
+fn shadowed(slot: TurnSlot) -> bool {
+    matches!(slot, TurnSlot::Succession)
+}
+
+fn revision_view(record: &TurnGraphRevisionRecord) -> Result<TurnGraphRevision, TurnGraphError> {
+    let graph = serde_json::from_value(record.graph.clone()).map_err(|error| {
+        TurnGraphError::Unreadable {
+            revision: record.revision,
+            reason: error.to_string(),
+        }
+    })?;
+    Ok(TurnGraphRevision {
         revision: record.revision,
-        graph: serde_json::from_value(record.graph.clone()).unwrap_or_else(|_| TurnGraph {
-            steps: Vec::new(),
-            hooks: Vec::new(),
-            branches: Vec::new(),
-        }),
+        graph,
         activation: match record.activation.as_str() {
             "active" => RevisionActivation::Active,
             "failed" => RevisionActivation::Failed,
@@ -465,7 +541,7 @@ fn revision_view(record: &TurnGraphRevisionRecord) -> TurnGraphRevision {
         },
         failure: record.failure.clone(),
         created_at: record.created_at.to_rfc3339(),
-    }
+    })
 }
 
 fn mode_rank(mode: HookMode) -> u8 {
@@ -513,10 +589,10 @@ pub fn known_hook_point(name: &str) -> bool {
 mod tests {
     use super::*;
     use std::path::Path;
-    use swage_protocol::client::turn_graph::TurnBranch;
+    use swage_protocol::client::turn_graph::{HookAttachment, TurnBranch};
     use swage_storage::SqliteStorage;
     use swage_storage::model::NewWorkflowScript;
-    use swage_storage::store::{AuditStore, WorkflowStore};
+    use swage_storage::store::{AuditStore, TurnGraphStore, WorkflowStore};
 
     fn write_plugin(root: &Path, name: &str, provides: &str, script: &str) {
         std::fs::create_dir_all(root).unwrap();
@@ -575,12 +651,21 @@ mod tests {
     async fn an_install_starts_on_the_shipped_graph_as_revision_zero() {
         let dir = tempfile::tempdir().unwrap();
         let (graph, storage, _) = service(dir.path()).await;
-        let listed = graph.list();
+        let listed = graph.list().unwrap();
         assert_eq!(listed.active, 0);
         assert_eq!(listed.revisions.len(), 1);
         assert_eq!(listed.revisions[0].graph, TurnGraph::shipped());
-        assert_eq!(graph.filler_for(TurnSlot::Succession), StepFiller::Builtin);
-        assert!(graph.hooks_at(HookPoint::ToolCall).is_empty());
+        assert_eq!(
+            graph.active().graph.filler_for(TurnSlot::Succession),
+            StepFiller::Builtin
+        );
+        assert!(
+            graph
+                .active()
+                .graph
+                .hooks_at(HookPoint::ToolCall)
+                .is_empty()
+        );
         // A second load reads the record back rather than seeding again.
         let again = TurnGraphService::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
@@ -591,7 +676,7 @@ mod tests {
             )),
         );
         again.load().await.unwrap();
-        assert_eq!(again.list().revisions.len(), 1);
+        assert_eq!(again.list().unwrap().revisions.len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -614,8 +699,11 @@ mod tests {
             "{proposed:?}"
         );
         assert_eq!(graph.active().revision, 0, "the shipped graph still serves");
-        assert_eq!(graph.filler_for(TurnSlot::Succession), StepFiller::Builtin);
-        let listed = graph.list();
+        assert_eq!(
+            graph.active().graph.filler_for(TurnSlot::Succession),
+            StepFiller::Builtin
+        );
+        let listed = graph.list().unwrap();
         assert_eq!(listed.revisions[0].activation, RevisionActivation::Active);
         assert_eq!(listed.revisions[1].activation, RevisionActivation::Failed);
         let events = storage.list_audit_events().await.unwrap();
@@ -647,7 +735,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_plugin_that_provides_the_slot_fills_it_and_a_later_revision_can_be_rolled_back() {
         let dir = tempfile::tempdir().unwrap();
-        let (graph, _, plugins) = service(dir.path()).await;
+        let (graph, storage, plugins) = service(dir.path()).await;
         write_plugin(
             &dir.path().join("summariser"),
             "summariser",
@@ -670,7 +758,7 @@ mod tests {
         assert_eq!(filled.activation, RevisionActivation::Active);
         assert_eq!(graph.active().revision, 1);
         assert_eq!(
-            graph.filler_for(TurnSlot::Succession),
+            graph.active().graph.filler_for(TurnSlot::Succession),
             StepFiller::Plugin {
                 name: "summariser".into()
             }
@@ -715,12 +803,27 @@ mod tests {
             graph.activate(9, None).await,
             Err(TurnGraphError::NotFound(9))
         ));
+        // Re-activating a revision that does not validate now is recorded
+        // as a failed revision of its own, naming the candidate and why,
+        // and the one serving keeps serving.
+        let refused_again = graph.activate(2, None).await.unwrap();
+        assert_eq!(refused_again.revision, 3);
+        assert_eq!(refused_again.activation, RevisionActivation::Failed);
         assert!(
-            matches!(
-                graph.activate(2, None).await,
-                Err(TurnGraphError::Refused(_))
-            ),
-            "a failed revision stays refused"
+            refused_again
+                .failure
+                .as_deref()
+                .unwrap()
+                .starts_with("activation of revision 2 refused: step 'curator'"),
+            "{refused_again:?}"
+        );
+        assert_eq!(graph.active().revision, 0);
+        let events = storage.list_audit_events().await.unwrap();
+        assert!(
+            events.iter().any(|event| event.entity_kind == "turn_graph"
+                && event.entity_id == "3"
+                && event.event_kind == "turn_graph_revision_failed"),
+            "{events:?}"
         );
     }
 
@@ -752,20 +855,14 @@ mod tests {
             .await
             .unwrap();
 
-        let mut proposed = TurnGraph::shipped();
+        let mut proposed = with_succession(StepFiller::Workflow {
+            name: "curate".into(),
+        });
         proposed.hooks.push(HookAttachment {
             point: HookPoint::ToolCall,
             plugin: "guard".into(),
             mode: HookMode::Rewrite,
         });
-        proposed
-            .steps
-            .iter_mut()
-            .find(|s| s.slot == TurnSlot::Curator)
-            .unwrap()
-            .filler = StepFiller::Workflow {
-            name: "curate".into(),
-        };
         proposed.branches.push(TurnBranch {
             id: "trial".into(),
             from: "succession".into(),
@@ -781,11 +878,132 @@ mod tests {
             RevisionActivation::Active,
             "{recorded:?}"
         );
-        assert_eq!(graph.hooks_at(HookPoint::ToolCall).len(), 1);
-        assert_eq!(graph.branches_from("succession").len(), 1);
+        let active = graph.active();
+        assert_eq!(active.graph.hooks_at(HookPoint::ToolCall).len(), 1);
+        assert_eq!(active.graph.branches_from("succession").len(), 1);
         let diff = graph.diff(0, 1).unwrap();
         assert_eq!(diff.hooks_attached.len(), 1);
         assert_eq!(diff.branches_added.len(), 1);
+        assert!(!diff.hooks_reordered);
+
+        // A filler at a slot whose kernel point takes none is refused, not
+        // recorded as serving: nothing would run it.
+        let mut inert = TurnGraph::shipped();
+        inert
+            .steps
+            .iter_mut()
+            .find(|s| s.slot == TurnSlot::Curator)
+            .unwrap()
+            .filler = StepFiller::Workflow {
+            name: "curate".into(),
+        };
+        let refused = graph.propose(inert, None).await.unwrap();
+        assert_eq!(refused.activation, RevisionActivation::Failed);
+        assert!(
+            refused
+                .failure
+                .as_deref()
+                .unwrap()
+                .contains("slot 'curator' takes the kernel's own only"),
+            "{refused:?}"
+        );
+        let mut composed = TurnGraph::shipped();
+        composed
+            .steps
+            .iter_mut()
+            .find(|s| s.slot == TurnSlot::ContextProgram)
+            .unwrap()
+            .filler = StepFiller::Workflow {
+            name: "curate".into(),
+        };
+        let refused = graph.propose(composed, None).await.unwrap();
+        assert!(
+            refused
+                .failure
+                .as_deref()
+                .unwrap()
+                .contains("runs no workflow filler"),
+            "{refused:?}"
+        );
+
+        // One plugin attached twice at a point, and a branch from a step the
+        // kernel runs no shadow of, are refused by name.
+        let mut twice = TurnGraph::shipped();
+        for _ in 0..2 {
+            twice.hooks.push(HookAttachment {
+                point: HookPoint::ToolCall,
+                plugin: "guard".into(),
+                mode: HookMode::Observe,
+            });
+        }
+        let refused = graph.propose(twice, None).await.unwrap();
+        assert!(
+            refused
+                .failure
+                .as_deref()
+                .unwrap()
+                .contains("attached there twice"),
+            "{refused:?}"
+        );
+        let mut unshadowed = TurnGraph::shipped();
+        unshadowed.branches.push(TurnBranch {
+            id: "trial".into(),
+            from: "curator".into(),
+            steps: vec![step(
+                "trial-curator",
+                TurnSlot::Curator,
+                StepFiller::Builtin,
+            )],
+        });
+        let refused = graph.propose(unshadowed, None).await.unwrap();
+        assert!(
+            refused
+                .failure
+                .as_deref()
+                .unwrap()
+                .contains("runs no shadow of slot 'curator'"),
+            "{refused:?}"
+        );
+        let mut mismatched = TurnGraph::shipped();
+        mismatched.branches.push(TurnBranch {
+            id: "trial".into(),
+            from: "succession".into(),
+            steps: vec![step(
+                "trial-curator",
+                TurnSlot::Curator,
+                StepFiller::Builtin,
+            )],
+        });
+        let refused = graph.propose(mismatched, None).await.unwrap();
+        assert!(
+            refused
+                .failure
+                .as_deref()
+                .unwrap()
+                .contains("with a step of slot 'curator', not 'succession'"),
+            "{refused:?}"
+        );
+
+        // A revision whose recorded graph no longer reads is an error by
+        // revision, never an empty graph.
+        storage
+            .record_turn_graph_revision(NewTurnGraphRevision {
+                revision: 99,
+                graph: serde_json::json!({ "steps": [{ "id": "x", "slot": "gone", "filler": { "kind": "builtin" } }] }),
+                activation: "failed".into(),
+                failure: None,
+            })
+            .await
+            .unwrap();
+        graph.load().await.unwrap();
+        assert!(matches!(
+            graph.revision(99),
+            Err(TurnGraphError::Unreadable { revision: 99, .. })
+        ));
+        assert!(matches!(
+            graph.list(),
+            Err(TurnGraphError::Unreadable { revision: 99, .. })
+        ));
 
         let mut too_strong = TurnGraph::shipped();
         too_strong.hooks.push(HookAttachment {
@@ -802,15 +1020,9 @@ mod tests {
                 .contains("does not allow 'veto'"),
             "{refused:?}"
         );
-        let mut unknown_workflow = TurnGraph::shipped();
-        unknown_workflow
-            .steps
-            .iter_mut()
-            .find(|s| s.slot == TurnSlot::Judge)
-            .unwrap()
-            .filler = StepFiller::Workflow {
+        let unknown_workflow = with_succession(StepFiller::Workflow {
             name: "missing".into(),
-        };
+        });
         let refused = graph.propose(unknown_workflow, None).await.unwrap();
         assert!(
             refused
