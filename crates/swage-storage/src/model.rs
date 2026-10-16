@@ -1753,6 +1753,26 @@ pub struct NewPluginRevision {
     pub install_dir: String,
 }
 
+/// One recorded revision of the turn graph: the declaration as proposed,
+/// and whether it serves, failed validation, or was replaced.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TurnGraphRevisionRecord {
+    pub revision: u32,
+    pub graph: serde_json::Value,
+    /// `active`, `failed` or `superseded`.
+    pub activation: String,
+    pub failure: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewTurnGraphRevision {
+    pub revision: u32,
+    pub graph: serde_json::Value,
+    pub activation: String,
+    pub failure: Option<String>,
+}
+
 /// Whether a plugin is enabled for one scope: the install (`topic_id` absent)
 /// or one topic. A scope with no row defers: a topic without one takes the
 /// install's answer.

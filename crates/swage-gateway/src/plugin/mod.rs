@@ -14,6 +14,7 @@
 //! other agents.
 
 pub mod process;
+pub mod slot;
 pub mod tool;
 
 use std::collections::{BTreeMap, HashSet};
@@ -27,7 +28,7 @@ use swage_plugin::{
 };
 use swage_protocol::client::plugin::{
     PluginListResponse, PluginProvides, PluginRevision, PluginSecret, PluginServiceState,
-    PluginSummary, ProvidedTool,
+    PluginSummary, ProvidedHook, ProvidedTool,
 };
 use swage_protocol::plugin::PluginProcessStopReason;
 use swage_storage::model::{NewAuditEvent, NewPluginRevision, PluginRevisionRecord};
@@ -107,6 +108,23 @@ impl InstalledPlugin {
                     .map(|tool| ProvidedTool {
                         name: tool.name.clone(),
                         description: tool.description.clone(),
+                    })
+                    .collect(),
+                slots: self
+                    .manifest
+                    .provides
+                    .slots
+                    .iter()
+                    .map(|slot| slot.name.clone())
+                    .collect(),
+                hooks: self
+                    .manifest
+                    .provides
+                    .hooks
+                    .iter()
+                    .map(|hook| ProvidedHook {
+                        point: hook.point.clone(),
+                        mode: hook.mode.clone(),
                     })
                     .collect(),
             },
@@ -336,6 +354,29 @@ impl PluginService {
         let package =
             read_package(source).map_err(|error| PluginServiceError::Refused(error.to_string()))?;
         let name = package.manifest.name.clone();
+        // A slot or hook point the gateway does not have is refused here,
+        // as a kind the kernel cannot load is refused at parse.
+        for slot in &package.manifest.provides.slots {
+            if !crate::turn_graph::known_slot(&slot.name) {
+                return Err(PluginServiceError::Refused(format!(
+                    "slot '{}' is not a step of the turn; the slots are {}",
+                    slot.name,
+                    swage_protocol::client::turn_graph::TurnSlot::ALL
+                        .iter()
+                        .map(|slot| slot.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+        }
+        for hook in &package.manifest.provides.hooks {
+            if !crate::turn_graph::known_hook_point(&hook.point) {
+                return Err(PluginServiceError::Refused(format!(
+                    "hook point '{}' is not a point of the turn; the points are message_inbound, tool_call, turn_start, turn_end",
+                    hook.point
+                )));
+            }
+        }
         let next_revision = {
             let installed = self.read();
             for tool in &package.manifest.provides.tools {
@@ -565,6 +606,43 @@ impl PluginService {
                     .map(|tool| tool.name.clone())
             })
             .collect()
+    }
+
+    /// Whether `plugin` is installed, serving, and provides the slot `slot`.
+    pub fn provides_slot(&self, plugin: &str, slot: &str) -> bool {
+        self.read().get(plugin).is_some_and(|installed| {
+            installed.execution.is_ok()
+                && installed
+                    .manifest
+                    .provides
+                    .slots
+                    .iter()
+                    .any(|declared| declared.name == slot)
+        })
+    }
+
+    /// The mode `plugin` declares for its hook at `point`, when it is
+    /// installed, serving, and attaches one there.
+    pub fn hook_mode(&self, plugin: &str, point: &str) -> Option<String> {
+        self.read().get(plugin).and_then(|installed| {
+            if installed.execution.is_err() {
+                return None;
+            }
+            installed
+                .manifest
+                .provides
+                .hooks
+                .iter()
+                .find(|declared| declared.point == point)
+                .map(|declared| declared.mode.clone())
+        })
+    }
+
+    /// How `plugin` runs, when it is installed and serving.
+    pub fn execution_of(&self, plugin: &str) -> Option<Execution> {
+        self.read()
+            .get(plugin)
+            .and_then(|installed| installed.execution.as_ref().ok().cloned())
     }
 
     /// Whether `tool_name` is provided by an installed plugin.

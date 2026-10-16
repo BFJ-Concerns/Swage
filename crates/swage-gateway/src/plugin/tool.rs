@@ -126,6 +126,8 @@ impl Tool for PluginTool {
             plugin: self.plugin.clone(),
             nested,
             plugins,
+            state: gateway_ctx.app_state().cloned(),
+            session_id: ctx.session_id().parse::<Uuid>().ok(),
         });
         let context = InvocationContext {
             session_id: ctx.session_id().to_owned(),
@@ -199,6 +201,9 @@ struct GatewayPluginHost {
     /// The installed plugins, to refuse a call to another plugin's tool —
     /// a check that must be made, so the host is not built without it.
     plugins: Arc<super::PluginService>,
+    /// The live gateway, for a completion under the `model` grant.
+    state: Option<crate::state::AppState>,
+    session_id: Option<Uuid>,
 }
 
 #[async_trait]
@@ -225,6 +230,16 @@ impl PluginHost for GatewayPluginHost {
                 name: "ToolError".to_owned(),
                 message: error.message,
             })
+    }
+
+    async fn complete(&self, request: Value) -> Result<Value, HostCallFailure> {
+        let Some(state) = &self.state else {
+            return Err(HostCallFailure {
+                name: "HostUnavailableError".into(),
+                message: "the gateway's provider is not reachable from this call".into(),
+            });
+        };
+        super::slot::complete_via_provider(state, &self.plugin, self.session_id, request).await
     }
 
     fn log(&self, message: &str) {

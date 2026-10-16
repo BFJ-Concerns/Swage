@@ -995,3 +995,57 @@ swage.provide.tool("echo", async (params, context) => {
   return { echoed: params.text };
 });
 ```
+
+### The turn graph
+
+The turn pipeline is a versioned graph the gateway's kernel executes. Its
+declaration names the turn's steps in order — `context_program`,
+`succession`, `tool_dispatch`, `curator`, `judge` — and what fills each:
+`builtin` (the kernel's own implementation), `plugin` (an installed plugin
+that provides the slot with `swage.provide.slot(name, handler)`), or
+`workflow` (a saved workflow in the general scope, run with the step's
+input as its arguments and its return value as the step's output). It also
+names the hooks attached — a plugin's `swage.provide.hook(point, handler)`
+at `message_inbound`, `tool_call`, `turn_start` or `turn_end`, in mode
+`observe`, `rewrite` or `veto` — and the branches that shadow a live step:
+a branch runs the same input beside the live step and is only recorded,
+drawn per session through the experimentation location
+`turn_graph.<branch>`, so experimentation off for that location keeps the
+path single.
+
+Revision 0 is the shipped graph. `POST /api/turn-graph/revisions` proposes
+a new one: it is validated against what is installed now — known slots,
+each once on the live path, a plugin that provides the slot, a saved
+workflow by name, a hook mode within what the plugin declares, a branch
+from a live step — recorded either way, and activated when it validates. A
+revision that fails validation is recorded as `failed` with why, and the
+revision that served before keeps serving. `GET /api/turn-graph` lists the
+active revision and every one recorded, `GET /api/turn-graph/revisions/{n}`
+one of them, `GET /api/turn-graph/diff/{from}/{to}` what changed, and
+`POST /api/turn-graph/revisions/{n}/activate` makes an earlier good one
+serve again, re-validated. Settings → Turn graph shows the same.
+
+A plugin filling a slot runs in its isolate with the `model` grant's
+`swage.complete({ messages, model? })` answered by the gateway's active
+provider and recorded as the plugin's completion; a hook at `tool_call`
+sees the model's call before the dispatcher's gates, and a rewritten call
+meets them as if the model had raised it. Every turn's assembly report
+names the revision it ran under and what filled its slots.
+
+```toml
+[[provides.slots]]
+name = "succession"
+
+[[provides.hooks]]
+point = "tool_call"
+mode = "veto"
+```
+
+```js
+swage.provide.slot("succession", async (input) => {
+  const reply = await swage.complete({ messages: input.messages, model: input.model });
+  return { summary: reply.content };
+});
+swage.provide.hook("tool_call", (event) =>
+  event.name === "shell" ? { action: "veto", reason: "no shells here" } : { action: "continue" });
+```

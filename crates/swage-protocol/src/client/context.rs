@@ -28,6 +28,12 @@ pub struct AssemblyReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "Record<string, unknown>")]
     pub tool_scope: Option<serde_json::Value>,
+    /// The turn-graph revision the turn ran under and what filled its
+    /// slots — the kernel's own implementation, a plugin, or a workflow —
+    /// with the hooks attached and the branches that shadowed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "Record<string, unknown>")]
+    pub turn_graph: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "Record<string, unknown>")]
     pub provider_visible: Option<serde_json::Value>,
@@ -49,6 +55,7 @@ impl AssemblyReport {
             declared_omissions: Vec::new(),
             effective_tool_permissions: None,
             tool_scope: None,
+            turn_graph: None,
             provider_visible: None,
             duration: std::time::Duration::ZERO,
         }

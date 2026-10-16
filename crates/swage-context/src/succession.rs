@@ -75,6 +75,9 @@ pub enum SuccessionError {
     TooShort(usize),
     #[error("the summarising provider failed: {0}")]
     Provider(#[from] ProviderError),
+    /// The summariser that filled the slot failed; the message is its own.
+    #[error("the summariser failed: {0}")]
+    Summariser(String),
     #[error("the summarising provider returned an empty summary")]
     EmptySummary,
     #[error("the diagnosis could not be written: {0}")]
@@ -92,6 +95,11 @@ pub struct SuccessionElement {
 }
 
 impl SuccessionElement {
+    /// The summary that stands in for the summarised history.
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+
     pub fn new(summary: impl Into<String>, summarised: usize, retained: usize) -> Self {
         Self {
             summary: summary.into(),
@@ -156,15 +164,42 @@ pub async fn succeed(
     provider: &dyn LlmProvider,
     tokeniser: &dyn Tokeniser,
 ) -> Result<Succession, SuccessionError> {
+    succeed_with(
+        request,
+        |completion| async move {
+            provider
+                .complete(completion)
+                .await
+                .map(|response| response.content)
+                .map_err(SuccessionError::from)
+        },
+        tokeniser,
+    )
+    .await
+}
+
+/// The succession pass with the summariser as a seam: `summarise` is given
+/// the completion request the provider would get — the carried context,
+/// the history to summarise, the focus — and answers with the summary.
+/// The split, the element, the retained history and the record are the
+/// same whoever summarises; that is what makes a summariser a slot.
+pub async fn succeed_with<F, Fut>(
+    request: SuccessionRequest<'_>,
+    summarise: F,
+    tokeniser: &dyn Tokeniser,
+) -> Result<Succession, SuccessionError>
+where
+    F: FnOnce(CompletionRequest) -> Fut,
+    Fut: std::future::Future<Output = Result<String, SuccessionError>>,
+{
     let summarised = split_point(&request)?;
-    let response = provider
-        .complete(summary_request(
-            request.carried,
-            &request.history[..summarised],
-            request.focus,
-        ))
-        .await?;
-    successor(&request, response.content, THRESHOLD_STRATEGY, tokeniser)
+    let summary = summarise(summary_request(
+        request.carried,
+        &request.history[..summarised],
+        request.focus,
+    ))
+    .await?;
+    successor(&request, summary, THRESHOLD_STRATEGY, tokeniser)
 }
 
 /// Where `request`'s history splits into the summarised part and the part

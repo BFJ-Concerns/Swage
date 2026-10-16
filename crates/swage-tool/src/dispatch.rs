@@ -33,6 +33,31 @@ type ToolAdvertisementFilter = dyn Fn(&dyn Tool) -> bool + Send + Sync;
 /// The default behaviour calls `tool.execute()` directly. Injecting a custom
 /// strategy lets the gateway layer interpose sandbox-aware execution, logging,
 /// or other cross-cutting concerns without the ToolDispatcher knowing about them.
+/// What a call hook decided about a call.
+#[derive(Debug, Clone)]
+pub enum CallHookDecision {
+    /// The call goes on, with these parameters (unchanged, or as the hook
+    /// returned them).
+    Continue(Value),
+    /// The call is replaced by this one, which the gates check afresh.
+    Rewrite { name: String, params: Value },
+    /// The call does not happen; the reason reaches the model.
+    Veto(String),
+}
+
+/// A hook over the model's tool calls, consulted before the dispatcher's
+/// gates: whatever it returns is what the gates then check, so a rewrite
+/// never slips past the permissions the original would have met.
+#[async_trait]
+pub trait ToolCallHook: Send + Sync {
+    async fn before_dispatch(
+        &self,
+        tool_name: &str,
+        params: Value,
+        ctx: &dyn ToolContext,
+    ) -> CallHookDecision;
+}
+
 #[async_trait]
 pub trait ToolExecutionStrategy: Send + Sync {
     /// Execute the tool with the given parameters and context.
@@ -104,6 +129,8 @@ pub struct ToolDispatcher {
     /// `tool_definitions` advertise the same broad tool surface that dispatch
     /// can actually execute for the current turn.
     advertisement_filter: Option<Arc<ToolAdvertisementFilter>>,
+    /// Sees every call before the gates: a plugin's hook at `tool_call`.
+    call_hook: Option<Arc<dyn ToolCallHook>>,
 }
 
 impl ToolDispatcher {
@@ -124,6 +151,7 @@ impl ToolDispatcher {
             leak_detector,
             debug_mode,
             execution_strategy: None,
+            call_hook: None,
             advertisement_filter: None,
         }
     }
@@ -153,6 +181,7 @@ impl ToolDispatcher {
             leak_detector: Arc::new(LeakDetector::default()),
             debug_mode: false,
             execution_strategy: None,
+            call_hook: None,
             advertisement_filter: None,
         }
     }
@@ -183,6 +212,12 @@ impl ToolDispatcher {
     /// When set, `dispatch()` delegates to `strategy.execute()` instead of
     /// calling `tool.execute()` directly. This is the injection point for
     /// sandbox-aware execution in the gateway layer.
+    /// Attach a hook that sees every call before the dispatcher's gates.
+    pub fn with_call_hook(mut self, hook: Arc<dyn ToolCallHook>) -> Self {
+        self.call_hook = Some(hook);
+        self
+    }
+
     pub fn with_execution_strategy(mut self, strategy: Arc<dyn ToolExecutionStrategy>) -> Self {
         self.execution_strategy = Some(strategy);
         self
@@ -238,6 +273,23 @@ impl ToolDispatcher {
         ctx: &dyn ToolContext,
         agent_id: &str,
     ) -> Result<ToolOutput, ToolError> {
+        // Step 0: The call hook sees the call before any gate. A rewrite is
+        // the call the gates then check, as if the model had raised it; a
+        // veto ends it here with the reason.
+        let (tool_name, params) = match &self.call_hook {
+            Some(hook) => match hook.before_dispatch(tool_name, params, ctx).await {
+                CallHookDecision::Continue(params) => (tool_name.to_owned(), params),
+                CallHookDecision::Rewrite { name, params } => (name, params),
+                CallHookDecision::Veto(reason) => {
+                    return Err(ToolError::ExecutionFailed {
+                        name: tool_name.to_owned(),
+                        message: format!("the call was vetoed by a hook: {reason}"),
+                    });
+                }
+            },
+            None => (tool_name.to_owned(), params),
+        };
+        let tool_name = tool_name.as_str();
         // Step 1: Registry lookup — reject unknown tools immediately.
         let tool = self
             .registry
@@ -428,7 +480,7 @@ mod tests {
     use swage_core::{PermissionDeniedReason, ToolError};
     use swage_safety::LeakDetector;
 
-    use super::ToolDispatcher;
+    use super::{CallHookDecision, ToolCallHook, ToolDispatcher};
     use crate::context::{MockToolContext, ToolContext};
     use crate::permission::{PermissionConfig, RequireApprovalEntry};
     use crate::rate_limit::{RateLimitConfig, RateLimiter};
@@ -1109,5 +1161,96 @@ mod tests {
             matches!(err, ToolError::InvalidParameters { .. }),
             "expected InvalidParameters, got: {err:?}"
         );
+    }
+
+    /// A hook that rewrites one tool to another and vetoes a third.
+    struct RoutingHook;
+
+    #[async_trait]
+    impl ToolCallHook for RoutingHook {
+        async fn before_dispatch(
+            &self,
+            tool_name: &str,
+            params: Value,
+            _: &dyn ToolContext,
+        ) -> CallHookDecision {
+            match tool_name {
+                "hook_rewritten" => CallHookDecision::Rewrite {
+                    name: "hook_denied".into(),
+                    params: json!({ "from": "hook" }),
+                },
+                "hook_vetoed" => CallHookDecision::Veto("not today".into()),
+                _ => CallHookDecision::Continue(params),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_call_hook_s_rewrite_meets_the_gates_and_its_veto_ends_the_call() {
+        let mut registry = crate::registry::ToolRegistry::new();
+        registry
+            .register(Arc::new(NamedTool("hook_rewritten")))
+            .unwrap();
+        registry
+            .register(Arc::new(NamedTool("hook_denied")))
+            .unwrap();
+        registry
+            .register(Arc::new(NamedTool("hook_vetoed")))
+            .unwrap();
+        registry
+            .register(Arc::new(NamedTool("hook_plain")))
+            .unwrap();
+        let permissions = PermissionConfig {
+            allow: vec!["*".into()],
+            deny: vec!["hook_denied".into()],
+            ..PermissionConfig::default()
+        };
+        let dispatcher = ToolDispatcher::new(
+            Arc::new(registry),
+            permissions,
+            Arc::new(RateLimiter::new()),
+            RateLimitConfig::default(),
+            Arc::new(LeakDetector::default()),
+            false,
+        )
+        .with_call_hook(Arc::new(RoutingHook));
+        let ctx = MockToolContext::new("agent", "session");
+
+        let plain = dispatcher
+            .dispatch("hook_plain", json!({}), &ctx, "agent")
+            .await
+            .expect("an untouched call runs");
+        assert_eq!(plain.result, json!({ "ran": "hook_plain" }));
+        let rewritten = dispatcher
+            .dispatch("hook_rewritten", json!({}), &ctx, "agent")
+            .await
+            .expect_err("the rewrite names a denied tool, so the gate refuses it");
+        assert!(
+            matches!(rewritten, ToolError::PermissionDenied { ref name, .. } if name == "hook_denied"),
+            "{rewritten:?}"
+        );
+        let vetoed = dispatcher
+            .dispatch("hook_vetoed", json!({}), &ctx, "agent")
+            .await
+            .expect_err("vetoed");
+        assert!(vetoed.to_string().contains("not today"), "{vetoed}");
+    }
+
+    struct NamedTool(&'static str);
+
+    #[async_trait]
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            "a named tool"
+        }
+        fn parameters(&self) -> Value {
+            json!({ "type": "object" })
+        }
+        async fn execute(&self, _: Value, _: &dyn ToolContext) -> Result<Value, ToolError> {
+            Ok(json!({ "ran": self.0 }))
+        }
     }
 }

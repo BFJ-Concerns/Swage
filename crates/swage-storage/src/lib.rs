@@ -25,18 +25,19 @@ pub use model::{
     NewLibraryEntryModule, NewMaterial, NewMessage, NewOrientationCard, NewPluginRevision,
     NewSchedule, NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation, NewSurface,
     NewSurfaceAnnotation, NewSurfaceModule, NewTaskDefinition, NewThread, NewToolCall, NewTopic,
-    NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowRunHold,
-    NewWorkflowRunHoldRejection, NewWorkflowScript, NewWorkspaceAttachment, ObservationOrigin,
-    OrientationCard, OrientationCardLifecycle, OrientationCardLifecycleKind, PendingChannelOrigin,
-    PluginEnablementRecord, PluginRevisionRecord, ProviderRoundRecord, RemovedSurfaceModule,
-    Schedule, ScheduleCreator, ScheduleKind, ScheduleRun, ScheduleRunState, ScheduleRunTrigger,
-    ScheduleRunUpdate, ScheduleStatus, SecretRecord, Session, SessionActivity, SessionListing,
-    SessionOrigin, SessionPolicy, SessionVariable, SkipReason, SourceCapture, SourceObservation,
-    Surface, SurfaceAnnotation, SurfaceModule, TaskDefinition, Thread, ThreadBranch, ThreadState,
-    ToolCallRecord, Topic, TopicSlug, Turn, TurnIsolation, TurnState, UpdateSchedule,
-    WorkflowHoldSettlement, WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunHoldAnswer,
-    WorkflowRunHoldRecord, WorkflowRunHoldRejectionRecord, WorkflowRunRecord,
-    WorkflowRunWorkerPlacement, WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
+    NewTurn, NewTurnGraphRevision, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent,
+    NewWorkflowRunHold, NewWorkflowRunHoldRejection, NewWorkflowScript, NewWorkspaceAttachment,
+    ObservationOrigin, OrientationCard, OrientationCardLifecycle, OrientationCardLifecycleKind,
+    PendingChannelOrigin, PluginEnablementRecord, PluginRevisionRecord, ProviderRoundRecord,
+    RemovedSurfaceModule, Schedule, ScheduleCreator, ScheduleKind, ScheduleRun, ScheduleRunState,
+    ScheduleRunTrigger, ScheduleRunUpdate, ScheduleStatus, SecretRecord, Session, SessionActivity,
+    SessionListing, SessionOrigin, SessionPolicy, SessionVariable, SkipReason, SourceCapture,
+    SourceObservation, Surface, SurfaceAnnotation, SurfaceModule, TaskDefinition, Thread,
+    ThreadBranch, ThreadState, ToolCallRecord, Topic, TopicSlug, Turn, TurnGraphRevisionRecord,
+    TurnIsolation, TurnState, UpdateSchedule, WorkflowHoldSettlement, WorkflowJournalRecord,
+    WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
+    WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowRunWorkerPlacement,
+    WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
 };
 pub use sqlite::SqliteStorage;
 pub use store::{
@@ -45,8 +46,8 @@ pub use store::{
     CurationAssertionStore, DeliveryStore, MaterialStore, MessageStore, ObservationStore,
     OrientationCardStore, PluginStore, ProviderRoundStore, ScheduleStore, SecretStore,
     SessionStore, SessionVariableStore, SkillActivationStore, Storage, SurfaceAnnotationStore,
-    SurfaceStore, TaskDefinitionStore, ThreadStore, ToolCallStore, TopicStore, TurnStore,
-    WorkflowStore, WorkspaceAttachmentStore,
+    SurfaceStore, TaskDefinitionStore, ThreadStore, ToolCallStore, TopicStore, TurnGraphStore,
+    TurnStore, WorkflowStore, WorkspaceAttachmentStore,
 };
 
 // The turn queue: messages held behind a running turn.

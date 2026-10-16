@@ -15,17 +15,17 @@ use crate::model::{
     NewLibraryEntry, NewLibraryEntryModule, NewMaterial, NewMessage, NewOrientationCard,
     NewPluginRevision, NewSchedule, NewScheduleRun, NewSecretRecord, NewSession,
     NewSourceObservation, NewSurface, NewSurfaceAnnotation, NewSurfaceModule, NewTaskDefinition,
-    NewThread, NewToolCall, NewTopic, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun,
-    NewWorkflowRunEvent, NewWorkflowRunHold, NewWorkflowRunHoldRejection, NewWorkflowScript,
-    NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle, PendingChannelOrigin,
-    PluginEnablementRecord, PluginRevisionRecord, ProviderRoundRecord, RemovedSurfaceModule,
-    Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SessionActivity,
-    SessionListing, SessionVariable, SourceCapture, SourceObservation, Surface, SurfaceAnnotation,
-    SurfaceModule, TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord, Topic,
-    TopicSlug, Turn, TurnIsolation, TurnState, UpdateSchedule, WorkflowHoldSettlement,
-    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
-    WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
-    WorkspaceAttachment,
+    NewThread, NewToolCall, NewTopic, NewTurn, NewTurnGraphRevision, NewWorkflowJournalIntent,
+    NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowRunHold, NewWorkflowRunHoldRejection,
+    NewWorkflowScript, NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle,
+    PendingChannelOrigin, PluginEnablementRecord, PluginRevisionRecord, ProviderRoundRecord,
+    RemovedSurfaceModule, Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session,
+    SessionActivity, SessionListing, SessionVariable, SourceCapture, SourceObservation, Surface,
+    SurfaceAnnotation, SurfaceModule, TaskDefinition, Thread, ThreadBranch, ThreadState,
+    ToolCallRecord, Topic, TopicSlug, Turn, TurnGraphRevisionRecord, TurnIsolation, TurnState,
+    UpdateSchedule, WorkflowHoldSettlement, WorkflowJournalRecord, WorkflowRunEventRecord,
+    WorkflowRunHoldAnswer, WorkflowRunHoldRecord, WorkflowRunHoldRejectionRecord,
+    WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
 };
 use crate::model::{NewQueuedTurnInput, QueuedTurnInput};
 
@@ -924,6 +924,22 @@ pub trait PluginStore: Send + Sync {
     async fn list_plugin_enablement(&self) -> Result<Vec<PluginEnablementRecord>, StorageError>;
 }
 
+/// The turn graph's revisions: recorded in order, one active at a time.
+#[async_trait]
+pub trait TurnGraphStore: Send + Sync {
+    /// Record a revision as proposed, with its activation as decided.
+    async fn record_turn_graph_revision(
+        &self,
+        revision: NewTurnGraphRevision,
+    ) -> Result<TurnGraphRevisionRecord, StorageError>;
+    /// Every revision, oldest first.
+    async fn list_turn_graph_revisions(&self)
+    -> Result<Vec<TurnGraphRevisionRecord>, StorageError>;
+    /// Make `revision` the active one: the revision active before becomes
+    /// superseded, in one transaction.
+    async fn activate_turn_graph_revision(&self, revision: u32) -> Result<(), StorageError>;
+}
+
 /// Store for human-in-the-loop approval requests.
 ///
 /// Each approval request is created when an agent turn hits an approval gate
@@ -1657,6 +1673,7 @@ pub trait Storage:
     + SurfaceStore
     + SurfaceAnnotationStore
     + PluginStore
+    + TurnGraphStore
     + Send
     + Sync
 {
@@ -1697,6 +1714,7 @@ impl<T> Storage for T where
         + SurfaceStore
         + SurfaceAnnotationStore
         + PluginStore
+        + TurnGraphStore
         + Send
         + Sync
 {
@@ -2812,6 +2830,24 @@ mod tests {
             &self,
         ) -> Result<Vec<PluginEnablementRecord>, StorageError> {
             unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl TurnGraphStore for StubStorage {
+        async fn record_turn_graph_revision(
+            &self,
+            _: NewTurnGraphRevision,
+        ) -> Result<TurnGraphRevisionRecord, StorageError> {
+            Err(StorageError::QueryFailed("stub".into()))
+        }
+        async fn list_turn_graph_revisions(
+            &self,
+        ) -> Result<Vec<TurnGraphRevisionRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+        async fn activate_turn_graph_revision(&self, _: u32) -> Result<(), StorageError> {
+            Err(StorageError::QueryFailed("stub".into()))
         }
     }
 

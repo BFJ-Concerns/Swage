@@ -38,7 +38,7 @@ use swage_storage::{
         AgentDefinitionStore, AgentMessageStore, ApprovalStore, AttachmentStore, AuditStore,
         BackgroundJobStore, ChannelLinkStore, ContextSnapshotStore, DeviceStore, MaterialStore,
         MessageStore, PluginStore, ScheduleStore, SessionStore, SkillActivationStore,
-        TaskDefinitionStore, ThreadStore, ToolCallStore, TopicStore, TurnStore,
+        TaskDefinitionStore, ThreadStore, ToolCallStore, TopicStore, TurnGraphStore, TurnStore,
         WorkspaceAttachmentStore,
     },
 };
@@ -4994,6 +4994,24 @@ impl PluginStore for MockStorage {
     }
     async fn list_plugin_enablement(&self) -> Result<Vec<PluginEnablementRecord>, StorageError> {
         Ok(vec![])
+    }
+}
+
+#[async_trait]
+impl TurnGraphStore for MockStorage {
+    async fn record_turn_graph_revision(
+        &self,
+        _: swage_storage::model::NewTurnGraphRevision,
+    ) -> Result<swage_storage::model::TurnGraphRevisionRecord, StorageError> {
+        Err(StorageError::QueryFailed("mock".into()))
+    }
+    async fn list_turn_graph_revisions(
+        &self,
+    ) -> Result<Vec<swage_storage::model::TurnGraphRevisionRecord>, StorageError> {
+        Ok(Vec::new())
+    }
+    async fn activate_turn_graph_revision(&self, _: u32) -> Result<(), StorageError> {
+        Err(StorageError::QueryFailed("mock".into()))
     }
 }
 

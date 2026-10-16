@@ -37,6 +37,9 @@ pub enum HostGrant {
     /// Call the session's tools through the host, under the session's own
     /// grants, approvals and record: `swage.callTool(name, arguments)`.
     Tools,
+    /// Ask the session's model for a completion through the host, recorded
+    /// as the plugin's: `swage.complete({ messages, model? })`.
+    Model,
 }
 
 impl HostGrant {
@@ -44,6 +47,7 @@ impl HostGrant {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Tools => "tools",
+            Self::Model => "model",
         }
     }
 }
@@ -68,17 +72,40 @@ pub struct ToolDeclaration {
     pub parameters: serde_json::Value,
 }
 
+/// A named step of the turn the plugin fills: the embedder names the
+/// slots it has, and refuses a plugin that fills one it does not.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SlotDeclaration {
+    pub name: String,
+}
+
+/// A point at which the plugin sees a platform event before the embedder
+/// acts on it, and what it may do there.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookDeclaration {
+    pub point: String,
+    /// `observe`, `rewrite` or `veto`.
+    pub mode: String,
+}
+
 /// What the plugin provides, by kind. A kind the kernel cannot load is an
 /// unknown field here, refused at parse.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Provides {
     pub tools: Vec<ToolDeclaration>,
+    /// Turn slots the script fills with `swage.provide.slot(name, handler)`.
+    pub slots: Vec<SlotDeclaration>,
+    /// Hook points the script attaches to with
+    /// `swage.provide.hook(point, handler)`.
+    pub hooks: Vec<HookDeclaration>,
 }
 
 impl Provides {
     pub fn is_empty(&self) -> bool {
-        self.tools.is_empty()
+        self.tools.is_empty() && self.slots.is_empty() && self.hooks.is_empty()
     }
 }
 
@@ -251,9 +278,52 @@ impl PluginManifest {
         }
         if self.provides.is_empty() {
             return Err(ManifestError::Invalid(
-                "the plugin provides nothing: declare at least one tool under [[provides.tools]]"
+                "the plugin provides nothing: declare a tool, a slot or a hook under [provides]"
                     .into(),
             ));
+        }
+        if self.process.is_some()
+            && !(self.provides.slots.is_empty() && self.provides.hooks.is_empty())
+        {
+            return Err(ManifestError::Invalid(
+                "a process plugin provides tools only; slots and hooks run in an isolate".into(),
+            ));
+        }
+        let mut seen_slots = std::collections::HashSet::new();
+        for slot in &self.provides.slots {
+            validate_tool_name(&slot.name).map_err(|_| {
+                ManifestError::Invalid(format!(
+                    "slot name '{}' must match [a-z][a-z0-9_]*",
+                    slot.name
+                ))
+            })?;
+            if !seen_slots.insert(slot.name.as_str()) {
+                return Err(ManifestError::Invalid(format!(
+                    "slot '{}' is declared twice",
+                    slot.name
+                )));
+            }
+        }
+        let mut seen_hooks = std::collections::HashSet::new();
+        for hook in &self.provides.hooks {
+            validate_tool_name(&hook.point).map_err(|_| {
+                ManifestError::Invalid(format!(
+                    "hook point '{}' must match [a-z][a-z0-9_]*",
+                    hook.point
+                ))
+            })?;
+            if !matches!(hook.mode.as_str(), "observe" | "rewrite" | "veto") {
+                return Err(ManifestError::Invalid(format!(
+                    "hook mode '{}' must be observe, rewrite or veto",
+                    hook.mode
+                )));
+            }
+            if !seen_hooks.insert(hook.point.as_str()) {
+                return Err(ManifestError::Invalid(format!(
+                    "hook point '{}' is declared twice",
+                    hook.point
+                )));
+            }
         }
         let mut seen = std::collections::HashSet::new();
         for grant in &self.grants {

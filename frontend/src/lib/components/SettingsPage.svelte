@@ -22,6 +22,7 @@
   import RecoverySettingsPanel from "./settings/RecoverySettingsPanel.svelte";
   import MemoryPanel from "./MemoryPanel.svelte";
   import PluginsPanel from "./PluginsPanel.svelte";
+import TurnGraphPanel from "./TurnGraphPanel.svelte";
   import type { MemoryPageAddress } from "../router";
   import SkillsPanel from "./SkillsPanel.svelte";
   import VoiceSettingsPanel from "./settings/VoiceSettingsPanel.svelte";
@@ -37,6 +38,7 @@
     | "generation"
     | "automation"
     | "plugins"
+    | "turn-graph"
     | "channels"
     | "devices"
     | "voice"
@@ -248,6 +250,10 @@
       title: "Plugins",
       sub: "Installed plugins: what each provides, the grants and secrets it holds, its revisions, and where it is enabled — for the install, or for the selected topic.",
     },
+    "turn-graph": {
+      title: "Turn graph",
+      sub: "The versioned declaration of the turn's steps: which revision serves, what each revision changed, what fills each step, the hooks attached and the branches that shadow it.",
+    },
     channels: {
       title: "Channels",
       sub: "External delivery integrations the gateway can route conversations through.",
@@ -285,6 +291,7 @@
     "commands",
     "skills",
     "plugins",
+    "turn-graph",
     "channels",
     "devices",
     "voice",
@@ -367,6 +374,8 @@
       <MemoryPanel {topics} page={memoryPage} />
     {:else if tab === "plugins"}
       <PluginsPanel {topicId} />
+    {:else if tab === "turn-graph"}
+      <TurnGraphPanel />
     {:else if tab === "channels"}
       <!--
         The operator overview lists channels read-only; there is no channel

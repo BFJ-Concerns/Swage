@@ -16,6 +16,7 @@ export type SettingsTab =
   | "generation"
   | "automation"
   | "plugins"
+  | "turn-graph"
   | "channels"
   | "devices"
   | "voice"
@@ -147,7 +148,7 @@ export function parseRoute(location: string): Route {
     };
   }
   const settingsMatch = pathname.match(
-    /^\/settings(?:\/(providers|agents|commands|skills|generation|automation|plugins|channels|devices|voice|memory|recovery|display|account))?$/,
+    /^\/settings(?:\/(providers|agents|commands|skills|generation|automation|plugins|turn-graph|channels|devices|voice|memory|recovery|display|account))?$/,
   );
   if (settingsMatch) {
     const settingsTab = (settingsMatch[1] as SettingsTab | undefined) ?? "providers";

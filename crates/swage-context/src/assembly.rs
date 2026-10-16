@@ -202,6 +202,7 @@ fn default_assembly_inner(
         declared_omissions: Vec::new(),
         effective_tool_permissions: None,
         tool_scope: None,
+        turn_graph: None,
         provider_visible: None,
         duration,
     };

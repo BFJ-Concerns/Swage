@@ -29,6 +29,7 @@ pub mod thread;
 pub mod tool_call;
 pub mod topic;
 pub mod turn;
+pub mod turn_graph;
 pub mod turn_queue;
 pub mod workflow;
 pub mod workspace_attachment;

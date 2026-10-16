@@ -8126,6 +8126,81 @@ fn source_hash(source: &str) -> String {
         .collect()
 }
 
+/// Run the saved workflow named `name` in the general scope with `args` and
+/// wait for its result: a turn-graph step filled by a workflow. The run is
+/// an ordinary run — recorded, budgeted, inspectable — whose return value
+/// is the step's output; a run that does not complete within `wait`, or
+/// ends any other way, is the step's failure.
+pub(crate) async fn run_saved_workflow_for_slot(
+    state: AppState,
+    name: &str,
+    args: Value,
+    wait: std::time::Duration,
+) -> Result<Value, String> {
+    let general = state
+        .topic_store
+        .general_scope()
+        .await
+        .map_err(|error| error.to_string())?;
+    let script = state
+        .storage
+        .list_workflow_scripts(general.id)
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|script| script.name == name)
+        .ok_or_else(|| format!("no saved workflow named '{name}' in the general scope"))?;
+    let workflow = resolve_workflow_by_id(&state, script.id, None)
+        .await?
+        .ok_or_else(|| format!("workflow '{name}' could not be resolved"))?;
+    let run = start_run(
+        state.clone(),
+        workflow.topic_id,
+        None,
+        workflow.script_version_id,
+        workflow.inline_identity(),
+        workflow.source.clone(),
+        workflow.argument_schema.clone(),
+        None,
+        args,
+        WorkflowBudget::default(),
+        workflow.delivery_grant.clone(),
+        workflow.carrying_skill.clone(),
+        Vec::new(),
+        Vec::new(),
+        None,
+        None,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let started = std::time::Instant::now();
+    loop {
+        let record = state
+            .storage
+            .get_workflow_run(run.id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("run {} vanished", run.id))?;
+        match record.state.as_str() {
+            "running" | "parked" => {}
+            "completed" => return Ok(record.final_output.unwrap_or(Value::Null)),
+            other => {
+                return Err(format!(
+                    "workflow '{name}' ended {other}: {}",
+                    record.error_message.unwrap_or_default()
+                ));
+            }
+        }
+        if started.elapsed() >= wait {
+            return Err(format!(
+                "workflow '{name}' did not complete within {}s",
+                wait.as_secs()
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 async fn start_run(
     state: AppState,
     topic_id: Uuid,

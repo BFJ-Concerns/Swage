@@ -381,20 +381,75 @@ pub(super) async fn process_turn_with_composition_and_focus(
     }
 
     // Step 6: Canonicalise inbound content before persisting any thread message.
-    let before_inbound = match dispatch_before_inbound(state.hook_registry.as_ref(), &content).await
-    {
-        Ok(result) => result,
-        Err(error) => {
-            record_terminal_state_and_release(
-                state,
-                session_id,
-                prepared_turn_id,
-                TurnState::Failed,
-            )
-            .await?;
-            return Err(error);
+    let mut before_inbound =
+        match dispatch_before_inbound(state.hook_registry.as_ref(), &content).await {
+            Ok(result) => result,
+            Err(error) => {
+                record_terminal_state_and_release(
+                    state,
+                    session_id,
+                    prepared_turn_id,
+                    TurnState::Failed,
+                )
+                .await?;
+                return Err(error);
+            }
+        };
+    // The plugin hooks the active turn-graph revision attaches at
+    // `message_inbound` see the content after the registry's hooks; a
+    // rewrite is what the turn records, a veto fails the turn as a block
+    // does.
+    let hook_context = crate::plugin::slot::slot_context(
+        Some(session_id),
+        &session.agent_id,
+        std::path::Path::new(&state.config_root),
+    );
+    let inbound_plugin_hooks = crate::plugin::slot::hooks_for_turn(
+        state,
+        swage_protocol::client::turn_graph::HookPoint::MessageInbound,
+        &hook_context,
+    );
+    if !inbound_plugin_hooks.is_empty() {
+        match Box::pin(crate::plugin::slot::inbound_hooks(
+            &inbound_plugin_hooks,
+            before_inbound.canonical_content.clone(),
+        ))
+        .await
+        {
+            Ok(rewritten) => {
+                if rewritten != before_inbound.canonical_content {
+                    before_inbound.canonical_content = rewritten;
+                    before_inbound.modified_by_hooks.extend(
+                        inbound_plugin_hooks
+                            .iter()
+                            .map(|(_, slot)| slot.plugin.clone()),
+                    );
+                }
+            }
+            Err(reason) => {
+                record_terminal_state_and_release(
+                    state,
+                    session_id,
+                    prepared_turn_id,
+                    TurnState::Failed,
+                )
+                .await?;
+                return Err(GatewayError::ConfigError(format!(
+                    "a plugin hook vetoed the inbound message: {reason}"
+                )));
+            }
         }
-    };
+    }
+    Box::pin(crate::plugin::slot::observe(
+        &crate::plugin::slot::hooks_for_turn(
+            state,
+            swage_protocol::client::turn_graph::HookPoint::TurnStart,
+            &hook_context,
+        ),
+        "turn_start",
+        serde_json::json!({ "sessionId": session_id, "turnId": prepared_turn_id }),
+    ))
+    .await;
 
     if !before_inbound.modified_by_hooks.is_empty() {
         record_failed_turn_and_release_on_error(
@@ -588,24 +643,51 @@ pub(super) async fn process_turn_with_composition_and_focus(
     // assembly from the config hierarchy; "default" (or empty) runs the
     // built-in implementation. JS assemblies fail open to the default with
     // the error recorded in the report.
+    // The context-program slot: the kernel's assembly, or the plugin the
+    // active turn-graph revision filled it with, which composes the
+    // messages over the same elements and fails open to the kernel's.
+    let active_graph = state.turn_graph.active();
+    let slot_context =
+        crate::plugin::slot::slot_context(Some(session_id), &session.agent_id, &tool_root.path);
+    let context_program_filler = state
+        .turn_graph
+        .filler_for(swage_protocol::client::turn_graph::TurnSlot::ContextProgram);
+    let context_program_plugin = match &context_program_filler {
+        swage_protocol::client::turn_graph::StepFiller::Plugin { name } => {
+            crate::plugin::slot::slot_for_plugin(state, name, &slot_context)
+        }
+        _ => None,
+    };
     let assemble = |elements: &[Box<dyn ContextElement>]| {
-        execute_context_assembly(
-            &assembly_name,
-            &config,
-            elements,
-            &tokeniser,
-            Some(swage_root),
-            &scope,
-            &session.agent_id,
-            &session_variables,
-        )
+        let kernel = || {
+            execute_context_assembly(
+                &assembly_name,
+                &config,
+                elements,
+                &tokeniser,
+                Some(swage_root),
+                &scope,
+                &session.agent_id,
+                &session_variables,
+            )
+        };
+        match &context_program_plugin {
+            Some(slot) => match slot.context_program(elements, &session_variables, kernel) {
+                Ok(output) => output,
+                Err(error) => {
+                    tracing::warn!(%error, "the context-program plugin failed; the kernel's assembly serves");
+                    kernel()
+                }
+            },
+            None => kernel(),
+        }
     };
     let output = assemble(&elements);
     // Over the compaction threshold, or after the thread's recent turns kept
     // hitting walls, the turn runs on a successor: the same elements rendered
     // afresh, the older history summarised against them or diagnosed from
     // outside (turn/succession.rs). Otherwise the first assembly stands.
-    let output = succession::succeed_over_threshold(
+    let output = Box::pin(succession::succeed_over_threshold(
         succession::SuccessionSite {
             provider: state.provider.as_ref(),
             threshold: &compaction_threshold(&config),
@@ -615,15 +697,39 @@ pub(super) async fn process_turn_with_composition_and_focus(
             tokeniser: &tokeniser,
             degradation: succession::recent_degradation(state.storage.as_ref(), thread_id).await,
             diagnosis_models: succession::diagnosis_models(&config),
+            summariser: summariser_for(
+                state,
+                &state
+                    .turn_graph
+                    .filler_for(swage_protocol::client::turn_graph::TurnSlot::Succession),
+                &slot_context,
+            ),
+            shadows: Box::pin(succession_shadows(
+                state,
+                &config,
+                session_id,
+                prepared_turn_id,
+                &slot_context,
+            ))
+            .await,
         },
         elements,
         output,
         assemble,
-    )
+    ))
     .await;
     let (assembled_messages, mut assembly_report) = (output.messages, output.report);
     assembly_report.tool_scope = Some(serde_json::json!({
         "effective_root": tool_root.path,
+    }));
+    assembly_report.turn_graph = Some(serde_json::json!({
+        "revision": active_graph.revision,
+        "context_program": context_program_filler,
+        "succession": state
+            .turn_graph
+            .filler_for(swage_protocol::client::turn_graph::TurnSlot::Succession),
+        "hooks": active_graph.graph.hooks,
+        "branches": active_graph.graph.branches.iter().map(|branch| &branch.id).collect::<Vec<_>>(),
     }));
 
     tracing::debug!(
@@ -766,6 +872,16 @@ pub(super) async fn process_turn_with_composition_and_focus(
     )
     .await;
 
+    Box::pin(crate::plugin::slot::observe(
+        &crate::plugin::slot::hooks_for_turn(
+            state,
+            swage_protocol::client::turn_graph::HookPoint::TurnEnd,
+            &slot_context,
+        ),
+        "turn_end",
+        serde_json::json!({ "sessionId": session_id, "turnId": turn_id }),
+    ))
+    .await;
     // Wait for the agent task to finish and surface any panic or error.
     let mut terminal_account = None;
     match agent_handle.await {
@@ -919,3 +1035,106 @@ pub(crate) mod tests;
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// What fills the succession slot under the active turn-graph revision.
+fn summariser_for(
+    state: &AppState,
+    filler: &swage_protocol::client::turn_graph::StepFiller,
+    context: &swage_plugin::InvocationContext,
+) -> succession::Summariser {
+    use swage_protocol::client::turn_graph::StepFiller;
+    match filler {
+        StepFiller::Builtin => succession::Summariser::Builtin,
+        StepFiller::Plugin { name } => crate::plugin::slot::slot_for_plugin(state, name, context)
+            .map(succession::Summariser::Plugin)
+            .unwrap_or(succession::Summariser::Builtin),
+        StepFiller::Workflow { name } => succession::Summariser::Workflow {
+            name: name.clone(),
+            state: Box::new(state.clone()),
+        },
+    }
+}
+
+/// The branches shadowing the succession step this turn: each is an
+/// experiment location `turn_graph.<branch>` drawn through the seam, so
+/// experimentation off for the location keeps the path single and a drawn
+/// shadow is recorded with what it answered beside the live summary.
+async fn succession_shadows(
+    state: &AppState,
+    config: &swage_config::ResolvedConfig,
+    session_id: Uuid,
+    turn_id: Uuid,
+    context: &swage_plugin::InvocationContext,
+) -> Vec<succession::Shadow> {
+    use swage_protocol::client::turn_graph::TurnSlot;
+    let mut shadows = Vec::new();
+    for branch in state
+        .turn_graph
+        .branches_from(TurnSlot::Succession.as_str())
+    {
+        let Some(step) = branch
+            .steps
+            .iter()
+            .find(|step| step.slot == TurnSlot::Succession)
+        else {
+            continue;
+        };
+        let location = format!("turn_graph.{}", branch.id);
+        let decision = match crate::experimentation::select_session_variant(
+            state,
+            &config.experimentation,
+            &location,
+            &["shadow"],
+            "live",
+            session_id,
+            Some(turn_id),
+        )
+        .await
+        {
+            Ok(decision) => decision,
+            Err(error) => {
+                tracing::warn!(%error, branch = %branch.id, "the shadow branch could not be drawn; the path stays single");
+                continue;
+            }
+        };
+        if decision.variant != "shadow" {
+            continue;
+        }
+        let storage = state.storage.clone();
+        let record: std::sync::Arc<dyn Fn(succession::ShadowOutcome) + Send + Sync> =
+            std::sync::Arc::new(move |outcome: succession::ShadowOutcome| {
+                let storage = storage.clone();
+                let branch_id = outcome.branch.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = storage
+                        .create_audit_event(swage_storage::model::NewAuditEvent {
+                            id: Uuid::new_v4().to_string(),
+                            session_id: Some(session_id),
+                            entity_kind: "turn_graph".to_owned(),
+                            entity_id: branch_id.clone(),
+                            event_kind: "turn_graph_shadow".to_owned(),
+                            summary: format!(
+                                "Turn graph branch {branch_id} shadowed the succession step for turn {turn_id}"
+                            ),
+                            metadata: serde_json::json!({
+                                "turn_id": turn_id,
+                                "step": "succession",
+                                "live_summary": outcome.live_summary,
+                                "shadow_summary": outcome.shadow_summary.as_ref().ok(),
+                                "shadow_failure": outcome.shadow_summary.as_ref().err(),
+                            }),
+                        })
+                        .await
+                    {
+                        tracing::warn!(%error, "the shadow outcome could not be recorded");
+                    }
+                });
+            });
+        shadows.push(succession::Shadow {
+            branch: branch.id.clone(),
+            summariser: summariser_for(state, &step.filler, context),
+            record,
+        });
+    }
+    shadows
+}

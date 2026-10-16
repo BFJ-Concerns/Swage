@@ -126,6 +126,9 @@
             "minimum": 0,
             "type": "integer"
           },
+          "turn_graph": {
+            "description": "The turn-graph revision the turn ran under and what filled its\nslots — the kernel's own implementation, a plugin, or a workflow —\nwith the hooks attached and the branches that shadowed it."
+          },
           "warnings": {
             "items": {
               "type": "string"
@@ -2078,6 +2081,68 @@
         ],
         "type": "object"
       },
+      "HookAttachment": {
+        "description": "A plugin's hook attached at a point.",
+        "properties": {
+          "mode": {
+            "$ref": "#/components/schemas/HookMode"
+          },
+          "plugin": {
+            "type": "string"
+          },
+          "point": {
+            "$ref": "#/components/schemas/HookPoint"
+          }
+        },
+        "required": [
+          "point",
+          "plugin",
+          "mode"
+        ],
+        "type": "object"
+      },
+      "HookMode": {
+        "description": "What a hook may do with the event it sees.",
+        "oneOf": [
+          {
+            "const": "observe",
+            "description": "Sees the event; cannot change it.",
+            "type": "string"
+          },
+          {
+            "const": "rewrite",
+            "description": "May return a rewritten event, which the kernel then checks as if it\nhad been raised fresh.",
+            "type": "string"
+          },
+          {
+            "const": "veto",
+            "description": "May refuse the event with a reason.",
+            "type": "string"
+          }
+        ]
+      },
+      "HookPoint": {
+        "description": "A point at which a hook sees a platform event before the kernel acts.",
+        "oneOf": [
+          {
+            "enum": [
+              "turn_start",
+              "turn_end"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "message_inbound",
+            "description": "A message arriving for the session, before it is persisted.",
+            "type": "string"
+          },
+          {
+            "const": "tool_call",
+            "description": "A tool call the model raised, before the dispatcher's gates.",
+            "type": "string"
+          }
+        ]
+      },
       "InstallPluginRequest": {
         "description": "Install a plugin package from a directory on the gateway's host. A\npackage already installed under its name becomes a new revision.",
         "properties": {
@@ -2942,6 +3007,22 @@
       "PluginProvides": {
         "description": "What a plugin provides, by kind.",
         "properties": {
+          "hooks": {
+            "default": [],
+            "description": "Hook points the plugin attaches to, with the mode it declares.",
+            "items": {
+              "$ref": "#/components/schemas/ProvidedHook"
+            },
+            "type": "array"
+          },
+          "slots": {
+            "default": [],
+            "description": "Turn slots the plugin fills, by the slot's name.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "tools": {
             "items": {
               "$ref": "#/components/schemas/ProvidedTool"
@@ -3224,6 +3305,35 @@
         "required": [
           "scope_kind",
           "relative_path"
+        ],
+        "type": "object"
+      },
+      "ProposeTurnGraphRequest": {
+        "description": "Propose a new revision: validated, recorded, and activated if valid.",
+        "properties": {
+          "graph": {
+            "$ref": "#/components/schemas/TurnGraph"
+          }
+        },
+        "required": [
+          "graph"
+        ],
+        "type": "object"
+      },
+      "ProvidedHook": {
+        "description": "A hook a plugin attaches: where, and what it may do there.",
+        "properties": {
+          "mode": {
+            "description": "`observe`, `rewrite` or `veto`.",
+            "type": "string"
+          },
+          "point": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "point",
+          "mode"
         ],
         "type": "object"
       },
@@ -3803,6 +3913,15 @@
           "guidance"
         ],
         "type": "object"
+      },
+      "RevisionActivation": {
+        "description": "Whether a recorded revision serves, failed to activate, or was replaced.",
+        "enum": [
+          "active",
+          "failed",
+          "superseded"
+        ],
+        "type": "string"
       },
       "SandboxConfig": {
         "additionalProperties": false,
@@ -5839,6 +5958,78 @@
         ],
         "type": "object"
       },
+      "StepFiller": {
+        "description": "What runs in a slot's place.",
+        "oneOf": [
+          {
+            "description": "The kernel's own implementation.",
+            "properties": {
+              "kind": {
+                "const": "builtin",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "An installed plugin that provides the slot.",
+            "properties": {
+              "kind": {
+                "const": "plugin",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A saved workflow script, run with the step's input as its arguments;\nits return value is the step's output.",
+            "properties": {
+              "kind": {
+                "const": "workflow",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "name"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "StepRefilled": {
+        "description": "A step whose filler changed between two revisions.",
+        "properties": {
+          "after": {
+            "$ref": "#/components/schemas/StepFiller"
+          },
+          "before": {
+            "$ref": "#/components/schemas/StepFiller"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "before",
+          "after"
+        ],
+        "type": "object"
+      },
       "SubmitTurnRequest": {
         "additionalProperties": false,
         "properties": {
@@ -6388,6 +6579,30 @@
         ],
         "type": "object"
       },
+      "TurnBranch": {
+        "description": "A sub-path that runs beside the live path from one of its steps — a\nshadow: its outputs are recorded and compared, never served.",
+        "properties": {
+          "from": {
+            "description": "The live step this branch runs beside.",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/TurnStep"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "from",
+          "steps"
+        ],
+        "type": "object"
+      },
       "TurnContextResponse": {
         "properties": {
           "report": {
@@ -6401,6 +6616,166 @@
         "required": [
           "turn_id",
           "report"
+        ],
+        "type": "object"
+      },
+      "TurnGraph": {
+        "description": "The declaration: the live path in order, the hooks attached, and the\nbranches that shadow it.",
+        "properties": {
+          "branches": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TurnBranch"
+            },
+            "type": "array"
+          },
+          "hooks": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/HookAttachment"
+            },
+            "type": "array"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/TurnStep"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "steps"
+        ],
+        "type": "object"
+      },
+      "TurnGraphDiff": {
+        "description": "What changed from one revision to another.",
+        "properties": {
+          "branches_added": {
+            "items": {
+              "$ref": "#/components/schemas/TurnBranch"
+            },
+            "type": "array"
+          },
+          "branches_removed": {
+            "items": {
+              "$ref": "#/components/schemas/TurnBranch"
+            },
+            "type": "array"
+          },
+          "from": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "hooks_attached": {
+            "items": {
+              "$ref": "#/components/schemas/HookAttachment"
+            },
+            "type": "array"
+          },
+          "hooks_detached": {
+            "items": {
+              "$ref": "#/components/schemas/HookAttachment"
+            },
+            "type": "array"
+          },
+          "steps_added": {
+            "items": {
+              "$ref": "#/components/schemas/TurnStep"
+            },
+            "type": "array"
+          },
+          "steps_refilled": {
+            "items": {
+              "$ref": "#/components/schemas/StepRefilled"
+            },
+            "type": "array"
+          },
+          "steps_removed": {
+            "items": {
+              "$ref": "#/components/schemas/TurnStep"
+            },
+            "type": "array"
+          },
+          "steps_reordered": {
+            "description": "Steps present in both whose position in the live path changed.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "to": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "steps_added",
+          "steps_removed",
+          "steps_refilled",
+          "steps_reordered",
+          "hooks_attached",
+          "hooks_detached",
+          "branches_added",
+          "branches_removed"
+        ],
+        "type": "object"
+      },
+      "TurnGraphResponse": {
+        "description": "The graph as it stands: the active revision and every revision recorded.",
+        "properties": {
+          "active": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revisions": {
+            "items": {
+              "$ref": "#/components/schemas/TurnGraphRevision"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "active",
+          "revisions"
+        ],
+        "type": "object"
+      },
+      "TurnGraphRevision": {
+        "description": "A recorded revision of the graph.",
+        "properties": {
+          "activation": {
+            "$ref": "#/components/schemas/RevisionActivation"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "failure": {
+            "description": "Why a failed revision was refused.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "graph": {
+            "$ref": "#/components/schemas/TurnGraph"
+          },
+          "revision": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision",
+          "graph",
+          "activation",
+          "created_at"
         ],
         "type": "object"
       },
@@ -6523,6 +6898,36 @@
         ],
         "type": "object"
       },
+      "TurnSlot": {
+        "description": "A named step of the turn the kernel runs: what a plugin fills or\nreplaces.",
+        "oneOf": [
+          {
+            "const": "context_program",
+            "description": "Assembles the model's context from the turn's elements.",
+            "type": "string"
+          },
+          {
+            "const": "succession",
+            "description": "Summarises history into a successor when the context is over the\nthreshold, or after the thread ran into a wall.",
+            "type": "string"
+          },
+          {
+            "const": "tool_dispatch",
+            "description": "Runs the model's tool calls through the session's gates.",
+            "type": "string"
+          },
+          {
+            "const": "curator",
+            "description": "Writes memory pages from what the conversation said.",
+            "type": "string"
+          },
+          {
+            "const": "judge",
+            "description": "Judges a request the session's grants do not cover.",
+            "type": "string"
+          }
+        ]
+      },
       "TurnState": {
         "enum": [
           "pending",
@@ -6536,6 +6941,27 @@
           "delegating"
         ],
         "type": "string"
+      },
+      "TurnStep": {
+        "description": "One step of the graph.",
+        "properties": {
+          "filler": {
+            "$ref": "#/components/schemas/StepFiller"
+          },
+          "id": {
+            "description": "The step's own name in the graph, unique across the live path and\nits branches.",
+            "type": "string"
+          },
+          "slot": {
+            "$ref": "#/components/schemas/TurnSlot"
+          }
+        },
+        "required": [
+          "id",
+          "slot",
+          "filler"
+        ],
+        "type": "object"
       },
       "UpdateScheduleRequest": {
         "description": "Partially update a schedule.\n\nThe session policy is fixed at creation — delete and recreate to change\nwhere runs execute.",
@@ -11013,6 +11439,161 @@
           }
         },
         "summary": "Relink a topic workspace attachment to a moved folder."
+      }
+    },
+    "/api/turn-graph": {
+      "get": {
+        "operationId": "get_turn_graph",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnGraphResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "The turn graph: the active revision and every revision recorded."
+      }
+    },
+    "/api/turn-graph/diff/{from}/{to}": {
+      "get": {
+        "operationId": "diff_turn_graph",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "from",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "to",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnGraphDiff"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "What changed from one revision of the turn graph to another."
+      }
+    },
+    "/api/turn-graph/revisions": {
+      "post": {
+        "operationId": "propose_turn_graph",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProposeTurnGraphRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnGraphRevision"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Propose a revision of the turn graph: validated, recorded, and activated if valid; a failed revision is recorded and the last good one keeps serving."
+      }
+    },
+    "/api/turn-graph/revisions/{revision}": {
+      "get": {
+        "operationId": "get_turn_graph_revision",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "revision",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnGraphRevision"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "One recorded revision of the turn graph."
+      }
+    },
+    "/api/turn-graph/revisions/{revision}/activate": {
+      "post": {
+        "operationId": "activate_turn_graph_revision",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "revision",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TurnGraphRevision"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Make a recorded revision the one that serves, re-validated against what is installed now."
       }
     },
     "/api/turns/{id}/context": {

@@ -151,6 +151,8 @@ pub struct AppState {
     pub hook_registry: Option<Arc<HookRegistry>>,
     /// The installed plugins: their isolates, tools and enablement.
     pub plugins: Arc<crate::plugin::PluginService>,
+    /// The turn graph's revisions and the one that serves.
+    pub turn_graph: Arc<crate::turn_graph::TurnGraphService>,
     /// Session routing map for external channels.
     pub channel_routes: Arc<AsyncMutex<HashMap<ChannelOrigin, Uuid>>>,
     /// Runtime presence for recent clients and registered devices.
@@ -359,6 +361,11 @@ impl AppState {
             storage.clone(),
             config_root.join(crate::plugin::PLUGINS_DIR),
         ));
+        let turn_graph = Arc::new(crate::turn_graph::TurnGraphService::new(
+            storage.clone(),
+            topic_store.clone(),
+            Arc::clone(&plugins),
+        ));
         let mut codex_runtime_events = codex_supervisor.subscribe_runtime();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let audit_storage = storage.clone();
@@ -394,6 +401,7 @@ impl AppState {
             session_approval_grants: Arc::new(Mutex::new(HashSet::new())),
             hook_registry,
             plugins,
+            turn_graph,
             channel_routes: Arc::new(AsyncMutex::new(HashMap::new())),
             presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
             devices: Arc::new(AsyncMutex::new(DeviceRuntime::default())),

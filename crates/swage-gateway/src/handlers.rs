@@ -20,6 +20,9 @@ use swage_protocol::{
         },
         schedule as schedule_wire,
         skill::{SkillItem, SkillListResponse},
+        turn_graph::{
+            ProposeTurnGraphRequest, TurnGraphDiff, TurnGraphResponse, TurnGraphRevision,
+        },
     },
     hosting::{
         AgentDefinitionListResponse, AgentDefinitionMutationResponse, AgentDefinitionResponse,
@@ -149,6 +152,84 @@ pub async fn set_plugin_enablement(
         .await
         .map_err(plugin_service_error)?;
     Ok(Json(summary))
+}
+
+/// `GET /api/turn-graph` — the active revision and every revision recorded.
+pub async fn get_turn_graph(State(state): State<AppState>) -> Json<TurnGraphResponse> {
+    Json(state.turn_graph.list())
+}
+
+/// `POST /api/turn-graph/revisions` — propose a revision: validated against
+/// what is installed, recorded either way, and activated if it validates.
+/// The record comes back in both cases; a failed one carries why, and the
+/// revision that served before keeps serving.
+pub async fn propose_turn_graph(
+    State(state): State<AppState>,
+    Json(request): Json<ProposeTurnGraphRequest>,
+) -> Result<Json<TurnGraphRevision>, ApiError> {
+    let revision = state
+        .turn_graph
+        .propose(request.graph, None)
+        .await
+        .map_err(turn_graph_error)?;
+    Ok(Json(revision))
+}
+
+/// `GET /api/turn-graph/revisions/{revision}` — one recorded revision.
+pub async fn get_turn_graph_revision(
+    State(state): State<AppState>,
+    Path(revision): Path<String>,
+) -> Result<Json<TurnGraphRevision>, ApiError> {
+    let number = parse_revision(&revision)?;
+    state
+        .turn_graph
+        .revision(number)
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found_str("turn graph revision", &revision))
+}
+
+/// `POST /api/turn-graph/revisions/{revision}/activate` — make a recorded
+/// revision the one that serves, re-validated against what is installed now.
+pub async fn activate_turn_graph_revision(
+    State(state): State<AppState>,
+    Path(revision): Path<String>,
+) -> Result<Json<TurnGraphRevision>, ApiError> {
+    let number = parse_revision(&revision)?;
+    let revision = state
+        .turn_graph
+        .activate(number, None)
+        .await
+        .map_err(turn_graph_error)?;
+    Ok(Json(revision))
+}
+
+/// `GET /api/turn-graph/diff/{from}/{to}` — what changed between two revisions.
+pub async fn diff_turn_graph(
+    State(state): State<AppState>,
+    Path((from, to)): Path<(String, String)>,
+) -> Result<Json<TurnGraphDiff>, ApiError> {
+    let diff = state
+        .turn_graph
+        .diff(parse_revision(&from)?, parse_revision(&to)?)
+        .map_err(turn_graph_error)?;
+    Ok(Json(diff))
+}
+
+fn parse_revision(text: &str) -> Result<u32, ApiError> {
+    text.trim()
+        .parse::<u32>()
+        .map_err(|_| ApiError::validation(format!("'{text}' is not a revision number")))
+}
+
+fn turn_graph_error(error: crate::turn_graph::TurnGraphError) -> ApiError {
+    use crate::turn_graph::TurnGraphError;
+    match error {
+        TurnGraphError::Refused(message) => ApiError::validation(message),
+        TurnGraphError::NotFound(revision) => {
+            ApiError::not_found_str("turn graph revision", &revision.to_string())
+        }
+        TurnGraphError::Storage(error) => ApiError::from(GatewayError::Storage(error)),
+    }
 }
 
 fn plugin_service_error(error: crate::plugin::PluginServiceError) -> ApiError {

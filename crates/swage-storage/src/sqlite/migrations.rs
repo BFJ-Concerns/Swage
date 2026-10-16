@@ -108,6 +108,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("065_turn_execution_isolation", ADD_TURN_EXECUTION_ISOLATION),
         ("066_turn_failure_message", ADD_TURN_FAILURE_MESSAGE),
         ("067_plugins", CREATE_PLUGIN_TABLES),
+        ("068_turn_graph", CREATE_TURN_GRAPH_REVISIONS),
     ]
 }
 
@@ -152,6 +153,20 @@ const CREATE_PLUGIN_TABLES: &str = "
 /// The explanation a turn that ended without a reply carried to the person
 /// (the provider or request error), kept so the conversation shows it after
 /// a reload as it did live.
+/// The turn graph's revisions: the declaration as proposed, one active at a
+/// time, a failed one kept with why.
+const CREATE_TURN_GRAPH_REVISIONS: &str = "
+    CREATE TABLE turn_graph_revisions (
+        revision   INTEGER NOT NULL PRIMARY KEY,
+        graph      TEXT    NOT NULL,
+        activation TEXT    NOT NULL CHECK (activation IN ('active', 'failed', 'superseded')),
+        failure    TEXT,
+        created_at TEXT    NOT NULL
+    );
+    CREATE UNIQUE INDEX turn_graph_revisions_one_active
+        ON turn_graph_revisions(activation) WHERE activation = 'active';
+";
+
 const ADD_TURN_FAILURE_MESSAGE: &str = "
     ALTER TABLE turns ADD COLUMN failure_message TEXT;
 ";

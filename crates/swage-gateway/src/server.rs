@@ -191,6 +191,23 @@ pub fn build_router(state: AppState) -> Router {
             "/api/plugins/{name}/enablement",
             put(handlers::set_plugin_enablement),
         )
+        .route("/api/turn-graph", get(handlers::get_turn_graph))
+        .route(
+            "/api/turn-graph/revisions",
+            post(handlers::propose_turn_graph),
+        )
+        .route(
+            "/api/turn-graph/revisions/{revision}",
+            get(handlers::get_turn_graph_revision),
+        )
+        .route(
+            "/api/turn-graph/revisions/{revision}/activate",
+            post(handlers::activate_turn_graph_revision),
+        )
+        .route(
+            "/api/turn-graph/diff/{from}/{to}",
+            get(handlers::diff_turn_graph),
+        )
         .route("/api/capabilities", get(handlers::workflow_capabilities))
         // External communication channel gateway.
         .route(

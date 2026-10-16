@@ -23,6 +23,7 @@ pub mod skill;
 pub mod surface;
 pub mod topic;
 pub mod turn;
+pub mod turn_graph;
 pub mod typescript_client;
 pub mod voice;
 pub mod websocket;
@@ -98,6 +99,9 @@ pub struct ClientSurface {
     plugin_list: plugin::PluginListResponse,
     install_plugin_request: plugin::InstallPluginRequest,
     plugin_enablement_request: plugin::PluginEnablementRequest,
+    turn_graph: turn_graph::TurnGraphResponse,
+    propose_turn_graph_request: turn_graph::ProposeTurnGraphRequest,
+    turn_graph_diff: turn_graph::TurnGraphDiff,
     save_settings: settings::SaveSettingsRequest,
     model_discovery: settings::ModelDiscoveryResponse,
     save_provider_settings: settings::SaveProviderSettings,

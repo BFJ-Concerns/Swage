@@ -219,6 +219,12 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         std::process::exit(1);
     }
     crate::plugin::refresh_tool_dispatcher(&state);
+    // The turn graph's revisions come up from their records; an install
+    // with none starts on the shipped graph.
+    if let Err(error) = state.turn_graph.load().await {
+        eprintln!("Failed to load the turn graph: {error}");
+        std::process::exit(1);
+    }
     // The Codex CLI's auth store lives under a Swage-owned state directory;
     // registering it as file-backed secrets brings the harness's own tokens
     // under governance — audited resolution and redaction — without moving

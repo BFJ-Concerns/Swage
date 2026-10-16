@@ -45,6 +45,17 @@ pub trait PluginHost: Send + Sync {
     /// the gate: grants, approvals and the record apply here, and a refusal
     /// comes back as a failure the script can catch.
     async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, HostCallFailure>;
+    /// Ask the session's model for a completion on the plugin's behalf:
+    /// `request` is `{ messages: [{ role, content }], model? }`, the reply
+    /// `{ content, input_tokens, output_tokens }`. The host records it as
+    /// the plugin's. A host with no model refuses by name.
+    async fn complete(&self, request: Value) -> Result<Value, HostCallFailure> {
+        let _ = request;
+        Err(HostCallFailure {
+            name: "HostCapabilityError".into(),
+            message: "this host answers no completions".into(),
+        })
+    }
     /// A line the plugin wants in the host's log.
     fn log(&self, message: &str);
 }
@@ -90,7 +101,27 @@ pub enum PluginRuntimeState {
     Terminated(Termination),
 }
 
+/// What a plugin is asked to run: a tool for the model, a turn slot in the
+/// kernel's place, or a hook over a platform event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvocationKind {
+    Tool,
+    Slot,
+    Hook,
+}
+
+impl InvocationKind {
+    fn entry(self) -> &'static str {
+        match self {
+            InvocationKind::Tool => "invokeTool",
+            InvocationKind::Slot => "invokeSlot",
+            InvocationKind::Hook => "invokeHook",
+        }
+    }
+}
+
 struct Invocation {
+    kind: InvocationKind,
     tool: String,
     params_json: String,
     context_json: String,
@@ -187,6 +218,7 @@ impl PluginRuntime {
                         host_calls.enter(invocation.host, invocation.caller);
                         let result = invoke(
                             live,
+                            invocation.kind,
                             &invocation.tool,
                             &invocation.params_json,
                             &invocation.context_json,
@@ -232,9 +264,48 @@ impl PluginRuntime {
         context: &InvocationContext,
         host: Arc<dyn PluginHost>,
     ) -> Result<Value, PluginError> {
+        self.invoke(InvocationKind::Tool, tool, params, context, host)
+            .await
+    }
+
+    /// Run the handler the script registered for the turn slot `slot` with
+    /// the step's `input`; its result is the step's output.
+    pub async fn invoke_slot(
+        &self,
+        slot: &str,
+        input: &Value,
+        context: &InvocationContext,
+        host: Arc<dyn PluginHost>,
+    ) -> Result<Value, PluginError> {
+        self.invoke(InvocationKind::Slot, slot, input, context, host)
+            .await
+    }
+
+    /// Run the handler the script attached at `point` over `event`; the
+    /// result is `{ action: "continue" | "rewrite" | "veto", event?, reason? }`.
+    pub async fn invoke_hook(
+        &self,
+        point: &str,
+        event: &Value,
+        context: &InvocationContext,
+        host: Arc<dyn PluginHost>,
+    ) -> Result<Value, PluginError> {
+        self.invoke(InvocationKind::Hook, point, event, context, host)
+            .await
+    }
+
+    async fn invoke(
+        &self,
+        kind: InvocationKind,
+        tool: &str,
+        params: &Value,
+        context: &InvocationContext,
+        host: Arc<dyn PluginHost>,
+    ) -> Result<Value, PluginError> {
         let (reply, response) = oneshot::channel();
         self.invocations
             .send(Invocation {
+                kind,
                 tool: tool.to_owned(),
                 params_json: params.to_string(),
                 context_json: serde_json::to_string(context).expect("a context serialises"),
@@ -248,6 +319,14 @@ impl PluginRuntime {
             PluginError::Engine(format!("the handler's result was not JSON: {error}"))
         })
     }
+}
+
+/// What the script registered, by kind, as `__swagePlugin.provided()` lists it.
+#[derive(Deserialize)]
+struct ProvidedHandlers {
+    tools: Vec<String>,
+    slots: Vec<String>,
+    hooks: Vec<String>,
 }
 
 fn set_state(state: &Mutex<PluginRuntimeState>, next: PluginRuntimeState) {
@@ -273,16 +352,32 @@ fn load_program(
     program.execute("swage:plugin", script.to_owned())?;
     let provided = program.execute_for_string(
         "swage:plugin-provided",
-        "__swagePlugin.providedTools()".to_owned(),
+        "__swagePlugin.provided()".to_owned(),
     )?;
-    let provided: Vec<String> = serde_json::from_str(&provided).map_err(|error| {
-        PluginError::Engine(format!("the provided-tools list was not JSON: {error}"))
+    let provided: ProvidedHandlers = serde_json::from_str(&provided).map_err(|error| {
+        PluginError::Engine(format!("the provided-handlers list was not JSON: {error}"))
     })?;
     for tool in &manifest.provides.tools {
-        if !provided.contains(&tool.name) {
+        if !provided.tools.contains(&tool.name) {
             return Err(PluginError::Script(format!(
                 "the manifest declares tool '{}' but the script provides no handler for it: call swage.provide.tool(\"{}\", handler)",
                 tool.name, tool.name
+            )));
+        }
+    }
+    for slot in &manifest.provides.slots {
+        if !provided.slots.contains(&slot.name) {
+            return Err(PluginError::Script(format!(
+                "the manifest declares slot '{}' but the script provides no handler for it: call swage.provide.slot(\"{}\", handler)",
+                slot.name, slot.name
+            )));
+        }
+    }
+    for hook in &manifest.provides.hooks {
+        if !provided.hooks.contains(&hook.point) {
+            return Err(PluginError::Script(format!(
+                "the manifest declares a hook at '{}' but the script attaches none: call swage.provide.hook(\"{}\", handler)",
+                hook.point, hook.point
             )));
         }
     }
@@ -291,6 +386,7 @@ fn load_program(
 
 async fn invoke(
     program: &mut Program,
+    kind: InvocationKind,
     tool: &str,
     params_json: &str,
     context_json: &str,
@@ -299,7 +395,8 @@ async fn invoke(
     let pending = program.execute(
         "swage:plugin-call",
         format!(
-            "__swagePlugin.invokeTool({}, {}, {})",
+            "__swagePlugin.{}({}, {}, {})",
+            kind.entry(),
             literal(tool),
             literal(params_json),
             literal(context_json)
@@ -331,14 +428,19 @@ fn host_shim(manifest: &PluginManifest) -> String {
         throw error;
     };
     const handlers = Object.create(null);
+    const slots = Object.create(null);
+    const hooks = Object.create(null);
+    const register = (table, what, name, handler) => {
+        if (typeof name !== "string" || typeof handler !== "function") {
+            throw new TypeError(`swage.provide.${what}(name, handler) takes a name and a function`);
+        }
+        table[name] = handler;
+    };
     const swage = {
         provide: Object.freeze({
-            tool(name, handler) {
-                if (typeof name !== "string" || typeof handler !== "function") {
-                    throw new TypeError("swage.provide.tool(name, handler) takes a tool name and a function");
-                }
-                handlers[name] = handler;
-            },
+            tool(name, handler) { register(handlers, "tool", name, handler); },
+            slot(name, handler) { register(slots, "slot", name, handler); },
+            hook(point, handler) { register(hooks, "hook", point, handler); },
         }),
         log(message) {
             unwrap(door.callSync("log", JSON.stringify(String(message))));
@@ -348,23 +450,38 @@ fn host_shim(manifest: &PluginManifest) -> String {
         swage.callTool = async (name, args) =>
             unwrap(await door.call("callTool", JSON.stringify({ name, arguments: args === undefined ? {} : args })));
     }
+    if (__GRANT_MODEL__) {
+        swage.complete = async (request) =>
+            unwrap(await door.call("complete", JSON.stringify(request === undefined ? {} : request)));
+    }
     Object.defineProperty(globalThis, "swage", {
         value: Object.freeze(swage), configurable: false, enumerable: false, writable: false,
     });
+    const run = async (table, what, name, inputJson, contextJson) => {
+        const handler = table[name];
+        if (typeof handler !== "function") {
+            const error = new Error(`the plugin provides no ${what} named '${name}'`);
+            error.name = "PluginHandlerError";
+            throw error;
+        }
+        const result = await handler(JSON.parse(inputJson), JSON.parse(contextJson));
+        return JSON.stringify(result === undefined ? null : result);
+    };
     Object.defineProperty(globalThis, "__swagePlugin", {
         value: Object.freeze({
             async invokeTool(name, paramsJson, contextJson) {
-                const handler = handlers[name];
-                if (typeof handler !== "function") {
-                    const error = new Error(`the plugin provides no tool named '${name}'`);
-                    error.name = "PluginToolError";
-                    throw error;
-                }
-                const result = await handler(JSON.parse(paramsJson), JSON.parse(contextJson));
-                return JSON.stringify(result === undefined ? null : result);
+                return run(handlers, "tool", name, paramsJson, contextJson);
             },
-            providedTools() {
-                return JSON.stringify(Object.keys(handlers));
+            async invokeSlot(name, inputJson, contextJson) {
+                return run(slots, "slot", name, inputJson, contextJson);
+            },
+            async invokeHook(point, eventJson, contextJson) {
+                return run(hooks, "hook", point, eventJson, contextJson);
+            },
+            provided() {
+                return JSON.stringify({
+                    tools: Object.keys(handlers), slots: Object.keys(slots), hooks: Object.keys(hooks),
+                });
             },
         }),
         configurable: false, enumerable: false, writable: false,
@@ -374,6 +491,14 @@ fn host_shim(manifest: &PluginManifest) -> String {
     SHIM.replace(
         "__GRANT_TOOLS__",
         if manifest.grants(HostGrant::Tools) {
+            "true"
+        } else {
+            "false"
+        },
+    )
+    .replace(
+        "__GRANT_MODEL__",
+        if manifest.grants(HostGrant::Model) {
             "true"
         } else {
             "false"
@@ -486,6 +611,16 @@ pub(crate) async fn answer_host_call(
                 Err(refusal) => failure(&refusal.name, refusal.message),
             }
         }
+        "complete" if grants.contains(&HostGrant::Model) => {
+            let request: Value = match serde_json::from_str(payload) {
+                Ok(request) => request,
+                Err(error) => return failure("TypeError", error.to_string()),
+            };
+            match host.complete(request).await {
+                Ok(value) => ok(value),
+                Err(refusal) => failure(&refusal.name, refusal.message),
+            }
+        }
         "log" => {
             let message: String =
                 serde_json::from_str(payload).unwrap_or_else(|_| payload.to_owned());
@@ -568,10 +703,11 @@ mod tests {
     }
 
     /// A host that answers every tool call with what it was asked, records
-    /// the calls, and refuses a tool named `refused`.
+    /// the calls and completions, and refuses a tool named `refused`.
     #[derive(Default)]
     struct RecordingHost {
         calls: Mutex<Vec<(String, Value)>>,
+        completions: Mutex<Vec<Value>>,
         logged: Mutex<Vec<String>>,
     }
 
@@ -590,6 +726,11 @@ mod tests {
                 });
             }
             Ok(json!({ "ran": name, "with": arguments }))
+        }
+
+        async fn complete(&self, request: Value) -> Result<Value, HostCallFailure> {
+            self.completions.lock().unwrap().push(request.clone());
+            Ok(json!({ "content": "a summary", "input_tokens": 3, "output_tokens": 2 }))
         }
 
         fn log(&self, message: &str) {
@@ -905,5 +1046,129 @@ mod tests {
         })
         .await
         .expect("the host's work is abandoned once nothing waits for it");
+    }
+
+    fn manifest_providing(grants: &str, provides: &str) -> PluginManifest {
+        PluginManifest::parse(&format!(
+            r#"
+            name = "probe"
+            version = "1"
+            description = "A probe."
+            script = "plugin.js"
+            grants = [{grants}]
+            {provides}
+            "#
+        ))
+        .expect("manifest")
+    }
+
+    #[tokio::test]
+    async fn a_slot_handler_runs_in_the_step_s_place_and_may_ask_the_model() {
+        let runtime = PluginRuntime::start(
+            manifest_providing(r#""model""#, "[[provides.slots]]\nname = \"succession\""),
+            r#"swage.provide.slot("succession", async (input) => {
+                const reply = await swage.complete({ messages: [{ role: "user", content: "Summarise: " + input.history.join(" ") }] });
+                return { summary: reply.content, kept: input.retain };
+            });"#
+            .to_owned(),
+        )
+        .await
+        .expect("starts");
+        let host = Arc::new(RecordingHost::default());
+        let output = runtime
+            .invoke_slot(
+                "succession",
+                &json!({ "history": ["one", "two"], "retain": 1 }),
+                &context(),
+                host.clone(),
+            )
+            .await
+            .expect("serves");
+        assert_eq!(output, json!({ "summary": "a summary", "kept": 1 }));
+        let asked = host.completions.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0]["messages"][0]["content"], "Summarise: one two");
+        let no_tool = runtime
+            .invoke_tool("succession", &json!({}), &context(), host.clone())
+            .await
+            .expect_err("a slot is not a tool");
+        assert!(no_tool.to_string().contains("no tool named"), "{no_tool}");
+    }
+
+    #[tokio::test]
+    async fn a_hook_handler_answers_with_an_action_and_complete_is_absent_without_the_grant() {
+        let runtime = PluginRuntime::start(
+            manifest_providing("", "[[provides.hooks]]\npoint = \"tool_call\"\nmode = \"rewrite\""),
+            r#"swage.provide.hook("tool_call", (event) => {
+                if (event.name === "shell") return { action: "veto", reason: "no shells here" };
+                if (event.name === "file_read") return { action: "rewrite", event: { ...event, arguments: { ...event.arguments, path: "/safe" } } };
+                return { action: "continue", hasComplete: typeof swage.complete };
+            });"#
+            .to_owned(),
+        )
+        .await
+        .expect("starts");
+        let host = Arc::new(RecordingHost::default());
+        let veto = runtime
+            .invoke_hook(
+                "tool_call",
+                &json!({ "name": "shell", "arguments": {} }),
+                &context(),
+                host.clone(),
+            )
+            .await
+            .expect("serves");
+        assert_eq!(
+            veto,
+            json!({ "action": "veto", "reason": "no shells here" })
+        );
+        let rewrite = runtime
+            .invoke_hook(
+                "tool_call",
+                &json!({ "name": "file_read", "arguments": { "path": "/etc" } }),
+                &context(),
+                host.clone(),
+            )
+            .await
+            .expect("serves");
+        assert_eq!(rewrite["action"], "rewrite");
+        assert_eq!(rewrite["event"]["arguments"]["path"], "/safe");
+        let other = runtime
+            .invoke_hook(
+                "tool_call",
+                &json!({ "name": "echo", "arguments": {} }),
+                &context(),
+                host,
+            )
+            .await
+            .expect("serves");
+        assert_eq!(
+            other,
+            json!({ "action": "continue", "hasComplete": "undefined" })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_declared_slot_or_hook_without_a_handler_fails_the_start() {
+        let error = PluginRuntime::start(
+            manifest_providing("", "[[provides.slots]]\nname = \"curator\""),
+            "1;".to_owned(),
+        )
+        .await
+        .expect_err("refused");
+        assert!(error.to_string().contains("slot 'curator'"), "{error}");
+        let error = PluginRuntime::start(
+            manifest_providing(
+                "",
+                "[[provides.hooks]]\npoint = \"turn_start\"\nmode = \"observe\"",
+            ),
+            "1;".to_owned(),
+        )
+        .await
+        .expect_err("refused");
+        assert!(
+            error.to_string().contains("hook at 'turn_start'"),
+            "{error}"
+        );
     }
 }

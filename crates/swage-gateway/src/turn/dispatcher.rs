@@ -504,6 +504,27 @@ pub(crate) async fn build_gateway_dispatcher(
         Arc::new(LeakDetector::default()),
         false,
     );
+    // The plugin hooks the active turn-graph revision attaches at
+    // `tool_call` see every call before the gates — a rewrite is what the
+    // gates then check, as if the model had raised it.
+    let call_hooks = crate::plugin::slot::hooks_for_turn(
+        state,
+        swage_protocol::client::turn_graph::HookPoint::ToolCall,
+        &crate::plugin::slot::slot_context(
+            session_id,
+            &agent_config.agent_id,
+            &agent_config.working_directory,
+        ),
+    );
+    let call_hook: Option<Arc<dyn swage_tool::dispatch::ToolCallHook>> = (!call_hooks.is_empty())
+        .then(|| {
+            Arc::new(crate::plugin::slot::PluginCallHook::new(call_hooks))
+                as Arc<dyn swage_tool::dispatch::ToolCallHook>
+        });
+    let dispatcher = match &call_hook {
+        Some(hook) => dispatcher.with_call_hook(Arc::clone(hook)),
+        None => dispatcher,
+    };
 
     let sandbox_build =
         build_turn_sandbox(state, config, agent_config, workspace_policy.as_ref()).await?;
@@ -551,16 +572,20 @@ pub(crate) async fn build_gateway_dispatcher(
     // permissions over a strategy of the same shape, so they meet the gates
     // the model's own calls meet. It carries no session dispatcher of its
     // own: a nested call does not nest further.
+    let session_dispatcher_base = ToolDispatcher::new(
+        registry,
+        permissions,
+        Arc::new(RateLimiter::new()),
+        RateLimitConfig::default(),
+        Arc::new(LeakDetector::default()),
+        false,
+    );
+    let session_dispatcher_base = match &call_hook {
+        Some(hook) => session_dispatcher_base.with_call_hook(Arc::clone(hook)),
+        None => session_dispatcher_base,
+    };
     let session_dispatcher = Arc::new(
-        ToolDispatcher::new(
-            registry,
-            permissions,
-            Arc::new(RateLimiter::new()),
-            RateLimitConfig::default(),
-            Arc::new(LeakDetector::default()),
-            false,
-        )
-        .with_execution_strategy(Arc::new(
+        session_dispatcher_base.with_execution_strategy(Arc::new(
             GatewayExecutionStrategy::new(
                 inner_strategy.clone(),
                 ws_tx.clone(),

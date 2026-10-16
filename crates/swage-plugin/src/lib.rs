@@ -26,8 +26,9 @@ pub mod process;
 pub mod runtime;
 
 pub use manifest::{
-    HostGrant, IsolateLimitsDeclaration, MANIFEST_FILE, ManifestError, PluginManifest,
-    ProcessDeclaration, Profile, Provides, SecretDeclaration, ToolDeclaration,
+    HookDeclaration, HostGrant, IsolateLimitsDeclaration, MANIFEST_FILE, ManifestError,
+    PluginManifest, ProcessDeclaration, Profile, Provides, SecretDeclaration, SlotDeclaration,
+    ToolDeclaration,
 };
 pub use package::{PackageError, PluginPackage, install_dir, install_package, read_package};
 pub use process::{

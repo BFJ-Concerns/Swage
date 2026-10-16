@@ -29,6 +29,7 @@ import type { MoveSurfaceModuleRequest } from "./MoveSurfaceModuleRequest";
 import type { PluginEnablementRequest } from "./PluginEnablementRequest";
 import type { PluginListResponse } from "./PluginListResponse";
 import type { PluginSummary } from "./PluginSummary";
+import type { ProposeTurnGraphRequest } from "./ProposeTurnGraphRequest";
 import type { ProviderSignInState } from "./ProviderSignInState";
 import type { RecentSessionsResponse } from "./RecentSessionsResponse";
 import type { RelinkWorkspaceAttachmentRequest } from "./RelinkWorkspaceAttachmentRequest";
@@ -46,6 +47,9 @@ import type { TopicDefaultSurfaceRequest } from "./TopicDefaultSurfaceRequest";
 import type { TopicListResponse } from "./TopicListResponse";
 import type { TopicResponse } from "./TopicResponse";
 import type { TurnContextResponse } from "./TurnContextResponse";
+import type { TurnGraphDiff } from "./TurnGraphDiff";
+import type { TurnGraphResponse } from "./TurnGraphResponse";
+import type { TurnGraphRevision } from "./TurnGraphRevision";
 import type { UpdateSurfaceAnnotationRequest } from "./UpdateSurfaceAnnotationRequest";
 import type { UpdateTopicRequest } from "./UpdateTopicRequest";
 import type { WorkspaceAttachmentResponse } from "./WorkspaceAttachmentResponse";
@@ -204,6 +208,31 @@ export async function listPlugins(): Promise<PluginListResponse> {
 /** Install a plugin package from a directory on the gateway's host; an installed name takes a new revision. */
 export async function installPlugin(body: InstallPluginRequest): Promise<PluginSummary> {
   return request<PluginSummary>("POST", `/api/plugins`, body);
+}
+
+/** The turn graph: the active revision and every revision recorded. */
+export async function getTurnGraph(): Promise<TurnGraphResponse> {
+  return request<TurnGraphResponse>("GET", `/api/turn-graph`);
+}
+
+/** Propose a revision of the turn graph: validated, recorded, and activated if valid; a failed revision is recorded and the last good one keeps serving. */
+export async function proposeTurnGraph(body: ProposeTurnGraphRequest): Promise<TurnGraphRevision> {
+  return request<TurnGraphRevision>("POST", `/api/turn-graph/revisions`, body);
+}
+
+/** One recorded revision of the turn graph. */
+export async function getTurnGraphRevision(revision: string): Promise<TurnGraphRevision> {
+  return request<TurnGraphRevision>("GET", `/api/turn-graph/revisions/${encodeURIComponent(revision)}`);
+}
+
+/** Make a recorded revision the one that serves, re-validated against what is installed now. */
+export async function activateTurnGraphRevision(revision: string): Promise<TurnGraphRevision> {
+  return request<TurnGraphRevision>("POST", `/api/turn-graph/revisions/${encodeURIComponent(revision)}/activate`);
+}
+
+/** What changed from one revision of the turn graph to another. */
+export async function diffTurnGraph(from: string, to: string): Promise<TurnGraphDiff> {
+  return request<TurnGraphDiff>("GET", `/api/turn-graph/diff/${encodeURIComponent(from)}/${encodeURIComponent(to)}`);
 }
 
 /** Enable or disable a plugin for the install, or for one topic. */

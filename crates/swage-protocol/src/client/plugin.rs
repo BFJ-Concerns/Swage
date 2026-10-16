@@ -16,6 +16,23 @@ pub struct ProvidedTool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 pub struct PluginProvides {
     pub tools: Vec<ProvidedTool>,
+    /// Turn slots the plugin fills, by the slot's name.
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub slots: Vec<String>,
+    /// Hook points the plugin attaches to, with the mode it declares.
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub hooks: Vec<ProvidedHook>,
+}
+
+/// A hook a plugin attaches: where, and what it may do there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct ProvidedHook {
+    pub point: String,
+    /// `observe`, `rewrite` or `veto`.
+    pub mode: String,
 }
 
 /// A secret a plugin declares it holds.

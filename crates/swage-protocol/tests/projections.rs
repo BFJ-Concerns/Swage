@@ -71,6 +71,10 @@ fn typescript_bindings_are_regenerated() {
     client::plugin::PluginListResponse::export_all(&cfg).expect("export plugin list");
     client::plugin::InstallPluginRequest::export_all(&cfg).expect("export install plugin");
     client::plugin::PluginEnablementRequest::export_all(&cfg).expect("export plugin enablement");
+    client::turn_graph::TurnGraphResponse::export_all(&cfg).expect("export turn graph");
+    client::turn_graph::ProposeTurnGraphRequest::export_all(&cfg)
+        .expect("export propose turn graph");
+    client::turn_graph::TurnGraphDiff::export_all(&cfg).expect("export turn graph diff");
     client::topic::WorkspaceAttachmentListResponse::export_all(&cfg).expect("export workspaces");
     client::conversation::ConversationListResponse::export_all(&cfg).expect("export conversations");
     client::conversation::RecentSessionsResponse::export_all(&cfg).expect("export recent sessions");

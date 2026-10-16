@@ -228,7 +228,7 @@
           ]
         },
         {
-          "description": "The process is being stopped and has the gateway's grace period to\nexit; after it the process is killed.",
+          "description": "The process is being stopped and has the gateway's grace period to\nexit on its own; after it the process is signalled, and killed a\nmoment later if it ignores that.",
           "type": "object",
           "properties": {
             "kind": {

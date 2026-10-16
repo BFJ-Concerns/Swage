@@ -5,6 +5,15 @@ All notable changes to Swage are documented in this file.
 ## Unreleased
 
 ### Added
+- The turn pipeline is a versioned graph: a declaration of the turn's steps and
+  what fills each — the kernel's own, an installed plugin's slot, or a saved
+  workflow — with hooks a plugin attaches at the inbound message, a tool call,
+  turn start and turn end, and branches that shadow a live step through the
+  experimentation seam. A proposed revision is validated against what is
+  installed, recorded either way, and activated when valid, the last good one
+  serving otherwise; every revision is inspectable and diffable over
+  `/api/turn-graph` and in Settings → Turn graph. Plugins gain `provides.slots`,
+  `provides.hooks` and the `model` grant (`swage.complete`).
 - A plugin can run as a brokered process instead of a script: a `[process]` in
   `plugin.toml` names a command the gateway starts per session on first use,
   stops when the session closes, after an idle period or at gateway stop, and

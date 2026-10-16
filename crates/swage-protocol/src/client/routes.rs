@@ -44,6 +44,7 @@ use super::{
         CreateTopicRequest, RelinkWorkspaceAttachmentRequest, TopicListResponse, TopicResponse,
         UpdateTopicRequest, WorkspaceAttachmentResponse,
     },
+    turn_graph::{ProposeTurnGraphRequest, TurnGraphDiff, TurnGraphResponse, TurnGraphRevision},
 };
 
 /// HTTP method, as the OpenAPI document spells it.
@@ -582,6 +583,96 @@ pub fn routes() -> Vec<Route> {
             response: Response {
                 status: 200,
                 body: schema::<PluginSummary>(),
+            },
+        },
+        Route {
+            operation_id: "get_turn_graph",
+            method: Method::Get,
+            path: "/api/turn-graph",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "The turn graph: the active revision and every revision recorded.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<TurnGraphResponse>(),
+            },
+        },
+        Route {
+            operation_id: "propose_turn_graph",
+            method: Method::Post,
+            path: "/api/turn-graph/revisions",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "Propose a revision of the turn graph: validated, recorded, and activated if valid; a failed revision is recorded and the last good one keeps serving.",
+            request_optional: false,
+
+            request: schema::<ProposeTurnGraphRequest>(),
+            response: Response {
+                status: 200,
+                body: schema::<TurnGraphRevision>(),
+            },
+        },
+        Route {
+            operation_id: "get_turn_graph_revision",
+            method: Method::Get,
+            path: "/api/turn-graph/revisions/{revision}",
+            path_parameters: vec![Parameter {
+                name: "revision",
+                kind: ParameterType::String,
+            }],
+            query_parameters: vec![],
+            summary: "One recorded revision of the turn graph.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<TurnGraphRevision>(),
+            },
+        },
+        Route {
+            operation_id: "activate_turn_graph_revision",
+            method: Method::Post,
+            path: "/api/turn-graph/revisions/{revision}/activate",
+            path_parameters: vec![Parameter {
+                name: "revision",
+                kind: ParameterType::String,
+            }],
+            query_parameters: vec![],
+            summary: "Make a recorded revision the one that serves, re-validated against what is installed now.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<TurnGraphRevision>(),
+            },
+        },
+        Route {
+            operation_id: "diff_turn_graph",
+            method: Method::Get,
+            path: "/api/turn-graph/diff/{from}/{to}",
+            path_parameters: vec![
+                Parameter {
+                    name: "from",
+                    kind: ParameterType::String,
+                },
+                Parameter {
+                    name: "to",
+                    kind: ParameterType::String,
+                },
+            ],
+            query_parameters: vec![],
+            summary: "What changed from one revision of the turn graph to another.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<TurnGraphDiff>(),
             },
         },
         Route {

@@ -12,7 +12,7 @@ function plugin(name: string, overrides: Partial<PluginSummary> = {}): PluginSum
     description: `The ${name} plugin.`,
     version: "1.0.0",
     revision: 1,
-    provides: { tools: [{ name: `${name}_tool`, description: `Run ${name}.` }] },
+    provides: { tools: [{ name: `${name}_tool`, description: `Run ${name}.` }], slots: [], hooks: [] },
     grants: ["tools"],
     secrets: [],
     variant_of: null,
