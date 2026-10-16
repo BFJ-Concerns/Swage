@@ -1048,7 +1048,9 @@ asked for is of the rewritten call, and the rewrite is recorded as
 calls through `swage.callTool` are not hooked. A turn takes the active
 revision once at its start, and its assembly report names that revision
 and what served each slot — the filler, or the kernel's own with why the
-filler did not — and which hooks ran or were skipped.
+filler did not; the succession step's summariser is named as having
+served only on a turn the step ran — and which hooks ran or were
+skipped. The turn's context inspector shows the same under "Turn graph".
 
 ```toml
 [[provides.slots]]

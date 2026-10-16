@@ -20298,3 +20298,118 @@ async fn approval_scope_expired_live_waiter_interrupts_turn() {
 async fn approval_scope_expired_live_waiter_records_expired_feedback() {
     expired_live_waiter(false).await;
 }
+
+/// A branch from the succession step is a shadow only where the
+/// experimentation seam draws it: off for the location, or off altogether,
+/// the path stays single; forced to the shadow variant, the branch runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shadow_branch_is_absent_where_experimentation_is_off_for_its_location() {
+    use swage_protocol::client::turn_graph::{
+        StepFiller, TurnBranch, TurnGraph, TurnSlot, TurnStep,
+    };
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let topic = storage.general_scope().await.expect("general scope");
+    let session = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .expect("session");
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
+        Arc::new(PendingProvider),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    state.turn_graph.load().await.expect("revision 0");
+    let mut graph = TurnGraph::shipped();
+    graph.branches.push(TurnBranch {
+        id: "trial".into(),
+        from: TurnSlot::Succession.as_str().into(),
+        steps: vec![TurnStep {
+            id: "trial-succession".into(),
+            slot: TurnSlot::Succession,
+            filler: StepFiller::Builtin,
+        }],
+    });
+    let proposed = state
+        .turn_graph
+        .propose(graph.clone(), None)
+        .await
+        .expect("proposed");
+    assert_eq!(
+        proposed.activation,
+        swage_protocol::client::turn_graph::RevisionActivation::Active
+    );
+    let context = crate::plugin::slot::slot_context(
+        Some(session.id),
+        "agent-a",
+        std::path::Path::new("/work"),
+    );
+
+    let mut off = swage_config::ResolvedConfig::default();
+    off.experimentation.enabled = false;
+    let shadows = super::succession_shadows(
+        &state,
+        &graph,
+        &off,
+        session.id,
+        Uuid::new_v4(),
+        &context,
+        Some(topic.id),
+    )
+    .await;
+    assert!(
+        shadows.is_empty(),
+        "experimentation off keeps the path single"
+    );
+
+    let mut location_off = swage_config::ResolvedConfig::default();
+    location_off.experimentation.locations.insert(
+        "turn_graph.trial".into(),
+        swage_config::model::ExperimentLocationConfig {
+            enabled: false,
+            forced_variant: None,
+        },
+    );
+    let shadows = super::succession_shadows(
+        &state,
+        &graph,
+        &location_off,
+        session.id,
+        Uuid::new_v4(),
+        &context,
+        Some(topic.id),
+    )
+    .await;
+    assert!(
+        shadows.is_empty(),
+        "experimentation off for the branch's location keeps the path single"
+    );
+
+    let mut forced = swage_config::ResolvedConfig::default();
+    forced.experimentation.locations.insert(
+        "turn_graph.trial".into(),
+        swage_config::model::ExperimentLocationConfig {
+            enabled: true,
+            forced_variant: Some("shadow".into()),
+        },
+    );
+    // A fresh session: the draws above recorded "live" for the first one.
+    let second = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .expect("second session");
+    let shadows = super::succession_shadows(
+        &state,
+        &graph,
+        &forced,
+        second.id,
+        Uuid::new_v4(),
+        &context,
+        Some(topic.id),
+    )
+    .await;
+    assert_eq!(shadows.len(), 1, "the forced variant draws the shadow");
+    assert_eq!(shadows[0].branch, "trial");
+}

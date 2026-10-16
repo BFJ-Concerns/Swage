@@ -8,6 +8,19 @@
   what was durably recorded.
 -->
 <script lang="ts">
+  import type { StepFiller } from "../protocol/StepFiller";
+  import type { HookAttachment } from "../protocol/HookAttachment";
+  // The report's `turn_graph` is the coordinator's account of the revision
+  // the turn ran under and what served each slot and point; its shape is
+  // the coordinator's JSON (crates/swage-gateway/src/turn.rs), read here
+  // by name.
+  interface TurnGraphAccount {
+    revision: number;
+    context_program: { filler: StepFiller; served: string; fallback: string | null };
+    succession: { filler: StepFiller; summariser: string; served: string | null };
+    hooks: { attached: HookAttachment[]; skipped: HookAttachment[] };
+    branches: string[];
+  }
   import {
     fetchTurnContext,
     type TurnContextReport,
@@ -45,6 +58,20 @@
   });
 
   const totalTokens = $derived(report?.total_tokens ?? 0);
+  const turnGraph = $derived(
+    (report?.turn_graph as TurnGraphAccount | undefined) ?? null,
+  );
+
+  function fillerLabel(filler: StepFiller): string {
+    switch (filler.kind) {
+      case "builtin":
+        return "the kernel's own";
+      case "plugin":
+        return `plugin ${filler.name}`;
+      case "workflow":
+        return `workflow ${filler.name}`;
+    }
+  }
   const durationMs = $derived(
     report
       ? Math.round(
@@ -102,6 +129,43 @@
         {/each}
       </tbody>
     </table>
+
+    {#if turnGraph}
+      <section class="turn-graph">
+        <h3>Turn graph</h3>
+        <p>Revision {turnGraph.revision}</p>
+        <ul>
+          <li>
+            context program: {fillerLabel(turnGraph.context_program.filler)}; served by
+            {turnGraph.context_program.served}{turnGraph.context_program.fallback
+              ? ` — fell back: ${turnGraph.context_program.fallback}`
+              : ""}
+          </li>
+          <li>
+            succession: {fillerLabel(turnGraph.succession.filler)}; {turnGraph.succession.served
+              ? `served by ${turnGraph.succession.served}`
+              : "not run this turn"}
+          </li>
+          {#if turnGraph.hooks.attached.length > 0}
+            <li>
+              hooks: {turnGraph.hooks.attached
+                .map((hook) => `${hook.plugin} at ${hook.point} (${hook.mode})`)
+                .join(", ")}
+            </li>
+          {/if}
+          {#if turnGraph.hooks.skipped.length > 0}
+            <li>
+              hooks skipped (plugin not serving): {turnGraph.hooks.skipped
+                .map((hook) => `${hook.plugin} at ${hook.point}`)
+                .join(", ")}
+            </li>
+          {/if}
+          {#if turnGraph.branches.length > 0}
+            <li>branches: {turnGraph.branches.join(", ")}</li>
+          {/if}
+        </ul>
+      </section>
+    {/if}
 
     {#if report.compaction_applied.length > 0}
       <section>

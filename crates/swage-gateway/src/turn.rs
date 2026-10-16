@@ -725,7 +725,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
         Some(topic_id),
         Some(session_id),
     );
-    let succession_served = summariser.describe();
+    let succession_summariser = summariser.describe();
     // Over the compaction threshold, or after the thread's recent turns kept
     // hitting walls, the turn runs on a successor: the same elements rendered
     // afresh, the older history summarised against them or diagnosed from
@@ -776,7 +776,14 @@ pub(super) async fn process_turn_with_composition_and_focus(
         },
         "succession": {
             "filler": succession_filler,
-            "served": succession_served,
+            "summariser": succession_summariser,
+            // What served is named only on a turn the succession step ran:
+            // a turn under the threshold ran no summariser at all.
+            "served": assembly_report
+                .compaction_applied
+                .iter()
+                .any(|record| record.actual_strategy.starts_with("succession"))
+                .then_some(&succession_summariser),
         },
         "hooks": {
             "attached": turn_hooks.attached,
