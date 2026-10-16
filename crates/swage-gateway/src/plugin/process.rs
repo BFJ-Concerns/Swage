@@ -65,10 +65,22 @@ impl ProcessLauncher for GatewayProcessLauncher {
         spec: &ProcessSpec,
         socket: &Path,
     ) -> Result<tokio::process::Command, PluginError> {
+        // The turn's rules name the session's paths, not the plugin's: the
+        // installed package joins them read-only, so the sandbox can mount
+        // it and the rules let the program be read and executed from it.
+        let with_install = |config: &SandboxConfig| {
+            let mut config = config.clone();
+            if let Some(install) = spec.command.parent() {
+                config.read_only_mounts.push(install.to_path_buf());
+                config.landlock_read_paths.push(install.to_path_buf());
+            }
+            config
+        };
         match &*self.placement {
             ProcessPlacement::Sandboxed(config) => {
+                let config = with_install(config);
                 let mut command = swage_sandbox::build_bwrap_command_for(
-                    config,
+                    &config,
                     socket,
                     PLUGIN_SOCKET_ENV,
                     &spec.command,
@@ -81,8 +93,9 @@ impl ProcessLauncher for GatewayProcessLauncher {
                 Ok(command)
             }
             ProcessPlacement::Fallback(config) => {
+                let config = with_install(config);
                 let mut command =
-                    swage_sandbox::governed_command(config, &spec.command, &spec.args)
+                    swage_sandbox::governed_command(&config, &spec.command, &spec.args)
                         .map_err(|error| PluginError::Process(error.to_string()))?;
                 command.env(PLUGIN_SOCKET_ENV, socket);
                 command.stdin(std::process::Stdio::null());
@@ -257,10 +270,14 @@ mod tests {
                 )
             })
             .collect();
+        let rules = env
+            .iter()
+            .find(|(name, _)| name == swage_sandbox::SANDBOX_CONFIG_ENV)
+            .and_then(|(_, value)| value.clone())
+            .expect("the rules travel in the environment");
         assert!(
-            env.iter()
-                .any(|(name, value)| name == swage_sandbox::SANDBOX_CONFIG_ENV && value.is_some()),
-            "the rules travel in the environment: {env:?}"
+            rules.contains("/data/plugins/driver/1"),
+            "the rules let the program be read and run from its install directory: {rules}"
         );
         assert!(env.iter().any(|(name, value)| name == PLUGIN_SOCKET_ENV
             && value.as_deref() == Some("/run/swage/plugin.sock")));
@@ -275,6 +292,11 @@ mod tests {
                 );
                 let args = args_of(&sandboxed);
                 assert!(args.iter().any(|arg| arg == "--clearenv"));
+                assert!(
+                    args.windows(2)
+                        .any(|pair| pair[0] == "--ro-bind" && pair[1] == "/data/plugins/driver/1"),
+                    "the install directory is bound in: {args:?}"
+                );
                 assert!(args.iter().any(|arg| arg == "--sandboxed-exec"));
                 assert_eq!(args.last().map(String::as_str), Some("--serve"));
             }
