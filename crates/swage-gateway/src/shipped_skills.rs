@@ -264,8 +264,14 @@ mod tests {
             "and names the inline gathering it forbids"
         );
         assert!(
-            skill.contains("`workflow_run_status` with the run reference as `run_id` returns the ended run with its `final_output`"),
-            "a finished sweep is delivered from the run record"
+            skill.contains(
+                "a detached run delivers its report into the conversation on its own when it ends"
+            ),
+            "a finished sweep's report is posted to the conversation, not fetched"
+        );
+        assert!(
+            skill.contains("`workflow_run_status` with the run reference as `run_id` is for inspection and recovery, not delivery"),
+            "the run record recovers a report already delivered rather than delivering it"
         );
         assert!(
             skill.contains("The findings are never rebuilt from the knowledge base"),

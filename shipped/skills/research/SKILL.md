@@ -56,18 +56,24 @@ Start the carried `research-sweep` workflow with `workflow_run`:
 - `maxSources` — optional ceiling on sources gathered (default 8).
 
 Leave `wait` unset unless the user needs the findings in this turn: a
-sweep takes minutes, and a detached run reports through the run record.
+sweep takes minutes, and a detached run delivers its report into the
+conversation on its own when it ends.
 
 ## Reading the result
 
-A detached run's result is on its record: `workflow_run_status` with the
-run reference as `run_id` returns the ended run with its `final_output`,
-and that one call is how a later turn — "show the findings" — delivers a
-finished sweep. The findings are never rebuilt from the knowledge base,
-re-cited, or sought through the HTTP API or the file system: the record
-holds the synthesis the sweep made, and anything assembled another way
-is a different document presented under the sweep's name. A run that is
-still going reads as not ended, and the reply says so. A run that has
+A finished sweep's findings arrive in the conversation as the run's
+report, posted when the run ends — nothing fetches them, and a later
+"show the findings" points at the report already delivered rather than
+reproducing it. `workflow_run_status` with the run reference as `run_id`
+is for inspection and recovery, not delivery: it returns the ended run
+with its `final_output` when the report is wanted again — the
+conversation was reloaded without it, a turn ran before it arrived, the
+operator asks for the record — and reads a run that is still going as
+not ended, so the reply says so. The findings are never rebuilt from the
+knowledge base, re-cited, or sought through the HTTP API or the file
+system: the record holds the synthesis the sweep made, and anything
+assembled another way is a different document presented under the
+sweep's name. A run that has
 ended with no `final_output` — `state` failed or cancelled, or
 `error_message` set — produced no findings: say that the sweep did not
 complete, give its `error_message`, and present nothing as its findings.
