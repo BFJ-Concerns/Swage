@@ -60,6 +60,59 @@ mod tests {
     }
 
     #[test]
+    fn model_error_rendering_distinguishes_post_work_rejection_from_refusal() {
+        let _root = tempfile::tempdir().unwrap();
+        for (name, detail) in [
+            (
+                "url_fetch",
+                "offset_bytes is only supported for text and JSON responses",
+            ),
+            (
+                "file_read",
+                "offset_bytes must be a valid UTF-8 byte boundary",
+            ),
+        ] {
+            let refusal = ToolError::InvalidParameters {
+                name: name.to_string(),
+                message: detail.to_string(),
+            };
+            let before = format_tool_error_for_model(&refusal);
+            assert_eq!(
+                before,
+                format!(
+                    "Tool error: invalid parameters for `{name}`: {detail}. Correct the arguments and retry."
+                )
+            );
+            let after = format_tool_error_for_model(&refusal.after_execution());
+            assert!(
+                after.contains("operation ran before its result was rejected"),
+                "{name}: {after}"
+            );
+            assert!(
+                after.contains(&before),
+                "source detail and advice lost: {after}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_error_rendering_preserves_uncertain_execution() {
+        let _root = tempfile::tempdir().unwrap();
+        let source = ToolError::Timeout {
+            name: "shell".to_string(),
+            duration: Duration::from_secs(30),
+        };
+        let detail = format_tool_error_for_model(&source);
+        let rendered = format_tool_error_for_model(&source.execution_uncertain());
+        assert!(rendered.contains("operation may have run"), "{rendered}");
+        assert!(
+            rendered.contains(&detail),
+            "source detail and advice lost: {rendered}"
+        );
+        assert!(!rendered.contains("operation ran before"), "{rendered}");
+    }
+
+    #[test]
     fn format_tool_error_for_model_labels_permission_denial() {
         let error = ToolError::PermissionDenied {
             name: "shell".to_string(),
@@ -2277,9 +2330,14 @@ pub fn format_tool_error_for_model(error: &swage_core::ToolError) -> String {
     use swage_core::ToolError;
 
     match error {
-        ToolError::AfterExecution { source } | ToolError::ExecutionUncertain { source } => {
+        ToolError::AfterExecution { source } => format!(
+            "The operation ran before its result was rejected. {}",
             format_tool_error_for_model(source)
-        }
+        ),
+        ToolError::ExecutionUncertain { source } => format!(
+            "The operation may have run; completion is unconfirmed. {}",
+            format_tool_error_for_model(source)
+        ),
         ToolError::NotFound { name } => format!(
             "Tool error: `{name}` is not available. Use one of the advertised tools or continue without it."
         ),

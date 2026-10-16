@@ -47,7 +47,7 @@ All notable changes to Swage are documented in this file.
 
 - Approval expiry under the interrupt policy records an unexecuted, expired tool call and names the timeout in live notices and replay; it does not report a person stopping the turn.
 
-- Tool records and completion events distinguish operation failure, refusal, cancellation with unconfirmed completion, and validation after execution. Signal-terminated shell commands report failure; approval feedback preserves whether execution began.
+- Tool records and completion events distinguish operation failure, refusal, cancellation with unconfirmed completion, and validation after execution. Signal-terminated shell commands report failure; approval feedback preserves whether execution began. Model-visible errors state when the operation ran before its result was rejected, or may have run, while retaining the source detail and advice.
 - Stop keeps calls and their turn cancelled in live views, conversation readback and subsequent context.
 - Approval decisions retain their waiter after a failed settlement, honour accepted answers when timers are ready, and apply the configured expiry policy through both client routes.
 - Failed turns retain their cause in polling, history and queued schedule records. Provider overload remains distinct from rate limiting.

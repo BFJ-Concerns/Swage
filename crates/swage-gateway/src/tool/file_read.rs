@@ -341,9 +341,12 @@ mod tests {
             assert_eq!(execution.outcome, ToolOutcome::Rejected);
             assert_eq!(execution.stage, ToolExecutionStage::Finished);
             assert_eq!(execution.completion, ToolCompletion::Confirmed);
+            let rendered = swage_agent::agent::format_tool_error_for_model(&error);
+            assert!(rendered.contains("valid UTF-8 byte boundary"));
+            assert!(rendered.contains("Correct the arguments and retry"));
             assert!(
-                swage_agent::agent::format_tool_error_for_model(&error)
-                    .contains("valid UTF-8 byte boundary")
+                rendered.contains("operation ran before its result was rejected"),
+                "post-read rejection must disclose execution: {rendered}"
             );
         }
     }
