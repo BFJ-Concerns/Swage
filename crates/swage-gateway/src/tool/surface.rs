@@ -674,7 +674,7 @@ impl SurfaceWriteTool {
         {
             let before = prior.source.chars().count();
             let after = source.chars().count();
-            if after < before / 2 {
+            if after < before.div_ceil(2) {
                 result["removed_extent"] = json!({"prior_characters": before, "new_characters": after, "net_characters_removed": before - after});
             }
         }
@@ -1157,17 +1157,34 @@ mod tests {
         let (ctx, _, _) = session_ctx().await;
         for (prior, source, destructive) in [
             ("é🌿x", "é", true),
-            ("A long register with many unrelated risks and decisions", "Risk 13", true),
+            (
+                "A long register with many unrelated risks and decisions",
+                "Risk 13",
+                true,
+            ),
             ("abcd", "ab", false),
         ] {
             let (id, modules) = surface_with(&ctx, &[prior]).await;
             let result = SurfaceWriteTool.execute(json!({"surface_id": id, "module_id": modules[0], "expected_revision": 0, "source": source}), &ctx).await.unwrap();
             assert_eq!(result["outcome"], "written");
-            assert_eq!(result.get("removed_extent").is_some(), destructive, "{result}");
+            assert_eq!(
+                result.get("removed_extent").is_some(),
+                destructive,
+                "{result}"
+            );
             if destructive {
-                assert_eq!(result["removed_extent"]["prior_characters"], prior.chars().count());
-                assert_eq!(result["removed_extent"]["new_characters"], source.chars().count());
-                assert_eq!(result["removed_extent"]["net_characters_removed"], prior.chars().count() - source.chars().count());
+                assert_eq!(
+                    result["removed_extent"]["prior_characters"],
+                    prior.chars().count()
+                );
+                assert_eq!(
+                    result["removed_extent"]["new_characters"],
+                    source.chars().count()
+                );
+                assert_eq!(
+                    result["removed_extent"]["net_characters_removed"],
+                    prior.chars().count() - source.chars().count()
+                );
             }
         }
     }

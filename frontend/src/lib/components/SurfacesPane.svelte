@@ -153,7 +153,7 @@
         cursor = start + token.raw.length;
         if (token.type === "blockquote") {
           const mapped = mappedLines(token.raw, token.text, start, positions);
-          if (mapped) visit(token.tokens, token.text, mapped);
+          if (mapped && token.tokens) visit(token.tokens, token.text, mapped);
         }
         if (token.type !== "list") continue;
         let itemCursor = start;
