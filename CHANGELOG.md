@@ -43,6 +43,9 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Queued scheduled turns acknowledge workflow endings only after successful settlement; failed turns leave them available.
+
+- Schedule gates acknowledge workflow endings after a successful outcome is durable, keeping failed attempts visible to the next gate.
 - Workflow and detached-child start observations capture their state and timestamp in the same storage read.
 - Interrupted workflow cancellation is refused plainly, and unclaimed cancellation requests leave no misleading audit record.
 - Workflow run status explains how to acknowledge handled run endings.
