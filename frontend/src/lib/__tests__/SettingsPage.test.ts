@@ -213,6 +213,23 @@ describe("SettingsPage", () => {
     vi.clearAllMocks();
   });
 
+  it("labels the provider password input as API key", async () => {
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue({
+      ...emptySettings(),
+      providers: { google: {
+        protocol: "google", base_url: null, api_key: "", api_key_env: null,
+        has_credential: false,
+      } },
+      default_provider: "google",
+    });
+    component = mount(SettingsPage, { target: document.body, props: { tab: "providers" } });
+    await flushUi();
+
+    const input = document.querySelector<HTMLInputElement>('.provider-section input[type="password"]');
+    expect(input).not.toBeNull();
+    expect(input?.closest(".field")?.querySelector(".key")?.firstChild?.textContent).toBe("API key");
+  });
+
   it("refuses invalid provider URL drafts before autosave and accepts corrections or clearing", async () => {
     const originalUrl = "https://api.example.org/v1";
     vi.mocked(settingsApi.fetchSettings).mockResolvedValue({

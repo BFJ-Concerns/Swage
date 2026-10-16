@@ -45,6 +45,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Settings labels the provider credential input “API key”; history labels credential environment variables separately.
+
 - Configuration history uses Settings’ labels, including provider credentials, and shows creations, deletions, unchanged saves, arrays and single-field changes without misleading or duplicate field rows. Null and absent values both read as unset.
 - Browser navigation keeps working after settings or grant changes, retaining the logged-in profile; startup timeouts explain how to recover.
 
