@@ -246,9 +246,9 @@ unconfined:
 enabled = false
 ```
 
-Tools that act outside the conversation — `shell`, `file_edit`, `file_write`,
-`python_execute` and the browser's click, type, select and scroll actions —
-ask for your approval before each call in a session you are attending.
+By default, `shell`, `file_edit`, `file_write` and `python_execute` ask for
+your approval before each call in a session you are attending. Browser
+clicks, typing, selections and scrolling do not ask for approval by default.
 Scheduled, channel and delegated work runs on its grants alone.
 [Agents and permissions](docs/agents-and-permissions.md#sandbox-isolation)
 covers what the sandbox confines, how approvals work and how to change which

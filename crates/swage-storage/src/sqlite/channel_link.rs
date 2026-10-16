@@ -68,15 +68,14 @@ fn row_to_channel_link(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChannelLink>
     })
 }
 
-#[async_trait]
-impl ChannelLinkStore for SqliteStorage {
-    async fn upsert_channel_link(&self, link: NewChannelLink) -> Result<ChannelLink, StorageError> {
-        let home_target_json = serialise_json(link.home_target.as_ref())
-            .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
-        self.with_conn(move |conn| {
-            let now = Utc::now();
-            let now_str = now.to_rfc3339();
-            conn.execute(
+fn write_channel_link(
+    conn: &rusqlite::Connection,
+    link: NewChannelLink,
+) -> rusqlite::Result<ChannelLink> {
+    let home_target_json = serialise_json(link.home_target.as_ref())?;
+    let now = Utc::now();
+    let now_str = now.to_rfc3339();
+    conn.execute(
                 "INSERT INTO channel_links
                  (integration, account, conversation, topic_id, agent_id, session_id, home_target_json, linked_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
@@ -98,26 +97,70 @@ impl ChannelLinkStore for SqliteStorage {
                 ],
             )?;
 
-            let linked_at: String = conn.query_row(
-                "SELECT linked_at FROM channel_links
+    let linked_at: String = conn.query_row(
+        "SELECT linked_at FROM channel_links
                  WHERE integration = ?1 AND account = ?2 AND conversation = ?3",
-                params![&link.integration, &link.account, &link.conversation],
-                |row| row.get(0),
-            )?;
+        params![&link.integration, &link.account, &link.conversation],
+        |row| row.get(0),
+    )?;
 
-            Ok(ChannelLink {
-                integration: link.integration,
-                account: link.account,
-                conversation: link.conversation,
-                topic_id: link.topic_id,
-                agent_id: link.agent_id,
-                session_id: link.session_id,
-                home_target: link.home_target,
-                linked_at: parse_dt(&linked_at)?,
-                updated_at: now,
-            })
-        })
-        .await
+    Ok(ChannelLink {
+        integration: link.integration,
+        account: link.account,
+        conversation: link.conversation,
+        topic_id: link.topic_id,
+        agent_id: link.agent_id,
+        session_id: link.session_id,
+        home_target: link.home_target,
+        linked_at: parse_dt(&linked_at)?,
+        updated_at: now,
+    })
+}
+
+#[async_trait]
+impl ChannelLinkStore for SqliteStorage {
+    async fn save_channel_link_code(
+        &self,
+        code: crate::model::ChannelLinkCode,
+    ) -> Result<(), StorageError> {
+        let home_target = serialise_json(code.home_target.as_ref())
+            .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
+        self.with_conn(move |conn| {
+            conn.execute("INSERT INTO channel_link_codes (code, integration, topic_id, agent_id, home_target_json, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![code.code, code.integration, code.topic_id.map(|id| id.to_string()), code.agent_id, home_target, code.expires_at.to_rfc3339()])?;
+            Ok(())
+        }).await
+    }
+
+    async fn list_channel_link_codes(
+        &self,
+    ) -> Result<Vec<crate::model::ChannelLinkCode>, StorageError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare("SELECT code, integration, topic_id, agent_id, home_target_json, expires_at FROM channel_link_codes WHERE expires_at > ?1 ORDER BY expires_at DESC, code")?;
+            stmt.query_map([Utc::now().to_rfc3339()], |row| Ok(crate::model::ChannelLinkCode {
+                code: row.get(0)?, integration: row.get(1)?, topic_id: row.get::<_, Option<String>>(2)?.as_deref().map(parse_uuid).transpose()?, agent_id: row.get(3)?, home_target: parse_json(row.get::<_, Option<String>>(4)?.as_deref())?, expires_at: parse_dt(&row.get::<_, String>(5)?)?,
+            }))?.collect()
+        }).await
+    }
+
+    async fn redeem_channel_link_code(
+        &self,
+        code: &str,
+        link: NewChannelLink,
+    ) -> Result<Option<ChannelLink>, StorageError> {
+        let code = code.to_owned();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let claimed = tx.execute("DELETE FROM channel_link_codes WHERE code = ?1 AND expires_at > ?2 AND integration = ?3", params![code, Utc::now().to_rfc3339(), link.integration])?;
+            if claimed == 0 { return Ok(None); }
+            let saved = write_channel_link(&tx, link)?;
+            tx.commit()?;
+            Ok(Some(saved))
+        }).await
+    }
+
+    async fn upsert_channel_link(&self, link: NewChannelLink) -> Result<ChannelLink, StorageError> {
+        self.with_conn(move |conn| write_channel_link(conn, link))
+            .await
     }
 
     async fn get_channel_link(
