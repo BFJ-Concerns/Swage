@@ -3528,3 +3528,37 @@ async fn schedule_outcomes_policy_edit_keeps_the_active_runs_admission_policy() 
         "overlap"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn skip_after_overlap_suppresses_fire_until_predecessor_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let state = test_state(
+        &dir.path().join("overlap-to-skip.db"),
+        StallProvider::new("done", started_tx, release_rx),
+    );
+    let router = build_router(state.clone());
+    let id = outcomes_schedule(&router, "overlap", 1).await;
+    let held_state = state.clone();
+    let held =
+        tokio::spawn(async move { schedule::trigger_schedule(&held_state, id).await.unwrap() });
+    started_rx.await.unwrap();
+    let (status, _) = request_json(
+        &router,
+        "PUT",
+        &format!("/api/schedules/{id}"),
+        Some(json!({"overlap_policy":"skip"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let fire = schedule::trigger_schedule(&state, id).await.unwrap().run;
+    release_tx.send(()).unwrap();
+    held.await.unwrap();
+    assert_eq!(
+        fire.state.to_string(),
+        "skipped",
+        "skip fire must be suppressed while an overlap predecessor is active"
+    );
+    assert_eq!(fire.skip_reason.unwrap().to_string(), "overlap");
+}

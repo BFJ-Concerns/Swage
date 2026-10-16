@@ -45,6 +45,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Skip and queue policies respect every active predecessor after a schedule is changed from overlap.
 - Schedule request schemas require a pending fire cap of at least one, matching API validation.
 - Operator run history retains assistant output alongside failed-call details.
 - Scheduled turns containing failed or refused tool calls show a distinct completed-with-errors outcome naming the calls in run history, the operator dashboard and the run API.

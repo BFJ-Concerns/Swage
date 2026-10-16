@@ -1179,7 +1179,75 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn one_in_flight_run_per_schedule_is_enforced_by_the_index() {
+    async fn queue_after_overlap_waits_for_every_active_predecessor() {
+        let (storage, topic_id, _) = make_storage_with_session().await;
+        let mut definition = fresh_schedule(topic_id);
+        definition.overlap_policy = OverlapPolicy::Overlap;
+        let schedule = storage.create_schedule(definition).await.unwrap();
+        let mut predecessors = Vec::new();
+        for state in [ScheduleRunState::Pending, ScheduleRunState::Running] {
+            let mut fire =
+                NewScheduleRun::pending(schedule.id, ScheduleRunTrigger::Tick, None, "work")
+                    .with_overlap_policy(OverlapPolicy::Overlap);
+            fire.state = state;
+            predecessors.push(storage.create_schedule_run(fire).await.unwrap());
+        }
+        storage
+            .update_schedule(
+                schedule.id,
+                UpdateSchedule {
+                    overlap_policy: Some(OverlapPolicy::Queue),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let waiting = storage
+            .create_schedule_run(
+                NewScheduleRun::pending(schedule.id, ScheduleRunTrigger::Tick, None, "waiting")
+                    .with_overlap_policy(OverlapPolicy::Queue),
+            )
+            .await
+            .unwrap();
+        assert_eq!(waiting.state, ScheduleRunState::Queued);
+        for predecessor in predecessors {
+            assert!(
+                storage
+                    .claim_queued_schedule_run(schedule.id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "queued fire must wait for every active overlap predecessor"
+            );
+            storage
+                .update_schedule_run(
+                    predecessor.id,
+                    ScheduleRunUpdate {
+                        state: Some(ScheduleRunState::Completed),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let claimed = storage
+            .claim_queued_schedule_run(schedule.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.id, waiting.id);
+        assert_eq!(claimed.state, ScheduleRunState::Pending);
+        assert!(
+            storage
+                .claim_queued_schedule_run(schedule.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_in_flight_run_per_schedule_is_enforced_by_storage() {
         let (storage, topic_id, _) = make_storage_with_session().await;
         let schedule = storage
             .create_schedule(fresh_schedule(topic_id))
@@ -1198,7 +1266,7 @@ mod tests {
             .unwrap();
 
         // A second in-flight run for the same schedule is refused by the
-        // partial unique index — the insert *is* the overlap check.
+        // admission trigger — the insert *is* the overlap check.
         let clash = storage
             .create_schedule_run(NewScheduleRun::pending(
                 schedule.id,
@@ -1212,7 +1280,7 @@ mod tests {
             "a second in-flight run must trip the guard, got {clash:?}"
         );
 
-        // A run born terminal (an overlap skip) sits outside the predicate,
+        // A run born terminal (an overlap skip) needs no admission,
         // so it coexists with the live run freely.
         storage
             .create_schedule_run(NewScheduleRun::skipped_overlap(

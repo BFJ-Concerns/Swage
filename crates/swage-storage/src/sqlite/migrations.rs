@@ -1094,16 +1094,33 @@ const COMPLETE_SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS idx_schedule_runs_state
         ON schedule_runs(schedule_id, state);
 
-    -- At most one non-overlap in-flight run per schedule. This partial unique index is
-    -- the overlap guard itself: the pending-run insert either succeeds
-    -- (this run owns the schedule) or trips the constraint (a predecessor is
-    -- still running), which the scheduler turns into a deliberate skip.
-    -- Waiting fires and overlap-policy runs are outside the predicate.
-    -- Terminal rows fall outside the predicate, so any number of finished
-    -- runs — including skipped-for-overlap ones — coexist freely.
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_runs_one_active
-        ON schedule_runs(schedule_id)
-        WHERE state IN ('pending', 'running') AND overlap_policy != 'overlap';
+    -- A restrictive fire waits for every active predecessor, including runs
+    -- admitted under overlap. The incoming fire's policy decides admission;
+    -- an overlap fire can still start while a restrictive run is active.
+    -- Both insertion and promotion from the queue enforce the same rule.
+    CREATE TRIGGER IF NOT EXISTS schedule_runs_admit_insert
+    BEFORE INSERT ON schedule_runs
+    WHEN NEW.state IN ('pending', 'running') AND NEW.overlap_policy != 'overlap'
+    BEGIN
+        SELECT RAISE(ABORT, 'a previous run of this schedule is still active')
+        WHERE EXISTS (
+            SELECT 1 FROM schedule_runs
+            WHERE schedule_id = NEW.schedule_id AND state IN ('pending', 'running')
+        );
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS schedule_runs_admit_update
+    BEFORE UPDATE OF state ON schedule_runs
+    WHEN NEW.state IN ('pending', 'running') AND OLD.state NOT IN ('pending', 'running')
+        AND NEW.overlap_policy != 'overlap'
+    BEGIN
+        SELECT RAISE(ABORT, 'a previous run of this schedule is still active')
+        WHERE EXISTS (
+            SELECT 1 FROM schedule_runs
+            WHERE schedule_id = NEW.schedule_id AND state IN ('pending', 'running')
+                AND id != NEW.id
+        );
+    END;
 
     -- Threads: a conversation thread within a session, owned by an agent.
     -- State defaults to 'idle'; transitions are managed by the agent runtime.
