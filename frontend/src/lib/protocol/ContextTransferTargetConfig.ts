@@ -2,4 +2,8 @@
 import type { ContextTransferField } from "./ContextTransferField";
 import type { ContextTransferMode } from "./ContextTransferMode";
 
-export type ContextTransferTargetConfig = { mode: ContextTransferMode, allowed_fields: Array<ContextTransferField>, summary_budget?: number | null, };
+/**
+ * A target's own context-transfer fields; an unset one inherits the
+ * policy's default at use.
+ */
+export type ContextTransferTargetConfig = { mode?: ContextTransferMode | null, allowed_fields?: Array<ContextTransferField> | null, summary_budget?: number | null, };
