@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
   import { discoverModels, fetchProviderSecrets, fetchProviderSignIn, signOutProvider, startProviderSignIn } from "../../api/settings";
   import type { DiscoveredModel, ModelSettings, SettingsResponse } from "../../types";
   import type { ProviderSignInState } from "../../protocol/ProviderSignInState";
@@ -30,6 +30,34 @@
 
   let secrets = $state<import("../../protocol/SecretResponse").SecretResponse[]>([]);
   let secretsError = $state("");
+  let secretsRequested = false;
+  let secretsRequest = 0;
+
+  // SettingsPage replaces savedProviderIds after each successful save. Read
+  // missing records then, rather than reacting to unsaved credential edits.
+  $effect(() => {
+    const savedIds = savedProviderIds;
+    untrack(() => {
+      const hasMissingCredential = [...savedIds].some((id) => {
+        const reference = settings.providers[id]?.api_key_secret_ref;
+        return reference && !secrets.some((secret) => secret.reference === reference);
+      });
+      if (!secretsRequested || hasMissingCredential) void loadSecrets();
+    });
+  });
+
+  async function loadSecrets(): Promise<void> {
+    secretsRequested = true;
+    const request = ++secretsRequest;
+    try {
+      const response = await fetchProviderSecrets();
+      if (request !== secretsRequest) return;
+      secrets = response.secrets.filter((secret) => secret.material_kind === "provider_key" && secret.status === "active").sort((a, b) => a.name.localeCompare(b.name));
+      secretsError = "";
+    } catch {
+      if (request === secretsRequest) secretsError = "Could not load stored credentials. Reload to try again, or paste a key.";
+    }
+  }
 
   const PROVIDER_KINDS = [
     { description: "Use the OpenAI Chat Completions API.", id: "OpenAi", label: "OpenAI", protocol: "openai" },
@@ -56,9 +84,6 @@
 
 
   onMount(() => {
-    void fetchProviderSecrets().then((response) => {
-      secrets = response.secrets.filter((secret) => secret.material_kind === "provider_key" && secret.status === "active").sort((a, b) => a.name.localeCompare(b.name));
-    }).catch(() => { secretsError = "Could not load stored credentials. Reload to try again, or paste a key."; });
     selectedProvider = settings.default_provider || providerIds[0] || "";
     if (selectedProvider) void loadModels();
     if (selectedProvider) void loadSignInState(selectedProvider);

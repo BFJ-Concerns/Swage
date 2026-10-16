@@ -45,6 +45,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Provider settings refresh missing credential records after saving, so a newly stored key is labelled correctly and can be rotated without reloading.
+
 - Provider settings label governed environment and file credentials by their source and direct updates there, while retaining pasted rotation for stored credentials.
 
 - Pasted provider keys only rotate managed credentials; file and environment credentials explain where to update them.

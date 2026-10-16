@@ -176,6 +176,7 @@ describe("SettingsPage", () => {
 
   beforeEach(() => {
     window.localStorage.clear();
+    vi.mocked(settingsApi.fetchProviderSecrets).mockReset().mockResolvedValue({ secrets: [], managed_backend: { status: "ready", detail: "", key_source: null } });
     vi.mocked(settingsApi.fetchSettings).mockResolvedValue(emptySettings());
     vi.mocked(settingsApi.saveSettings).mockImplementation(async (payload: SettingsPayload) => ({
       providers: payload.providers,
@@ -273,6 +274,53 @@ describe("SettingsPage", () => {
     const sent = vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].providers.proxy;
     expect(sent.api_key_secret_ref).toBe("secret:existing");
     expect(sent.api_key).toBe("replacement-key");
+  });
+
+  it.each(["available", "missing", "failed"] as const)("loads the newly stored credential after saving a first key: %s record", async (record) => {
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(configuredProvider());
+    const reference = "secret://managed/00000000-0000-4000-8000-000000000004";
+    const managedBackend = { status: "ready", detail: "", key_source: null };
+    vi.mocked(settingsApi.fetchProviderSecrets)
+      .mockResolvedValueOnce({ secrets: [], managed_backend: managedBackend })
+      .mockResolvedValue({ secrets: [{ id: "00000000-0000-4000-8000-000000000004", name: "provider:proxy:api-key", reference, material_kind: "provider_key", owner_kind: "provider", backend_kind: "managed", scope_kind: "global", scope_id: null, metadata: { provider_id: "proxy" }, status: "active", created_at: "2026-01-01", updated_at: "2026-01-01" }], managed_backend: managedBackend });
+    if (record === "missing") vi.mocked(settingsApi.fetchProviderSecrets).mockResolvedValue({ secrets: [], managed_backend: managedBackend });
+    if (record === "failed") vi.mocked(settingsApi.fetchProviderSecrets).mockRejectedValue(new Error("List unavailable"));
+    const save = vi.mocked(settingsApi.saveSettings).getMockImplementation()!;
+    vi.mocked(settingsApi.saveSettings).mockImplementation(async (payload) => {
+      const response = JSON.parse(JSON.stringify(await save(payload))) as SettingsResponse;
+      response.providers.proxy = { ...response.providers.proxy, api_key_secret_ref: reference, api_key_env: null, has_credential: true };
+      delete response.providers.proxy.api_key;
+      return response;
+    });
+    component = mount(SettingsPage, { target: document.body, props: { tab: "providers" } });
+    await flushUi();
+    expect(settingsApi.fetchProviderSecrets).toHaveBeenCalledTimes(1);
+    expect(document.querySelector(".provider-collapse")?.textContent).toContain("No credential");
+    const input = document.querySelector<HTMLInputElement>('input[type="password"]')!;
+    input.value = "first-key"; input.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall(); await flushUi();
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls[0][0].providers.proxy.api_key).toBe("first-key");
+    if (record !== "available") {
+      expect(document.querySelector(".provider-collapse")?.textContent).toContain("Governed credential");
+      expect(input.disabled).toBe(true);
+      expect(settingsApi.fetchProviderSecrets).toHaveBeenCalledTimes(2);
+      if (record === "failed") expect(document.body.textContent).toContain("Could not load stored credentials.");
+      const select = document.querySelector<HTMLSelectElement>(".provider-body select")!;
+      select.value = ""; select.dispatchEvent(new Event("change", { bubbles: true }));
+      await flushUi();
+      expect(input.disabled).toBe(false);
+      return;
+    }
+    expect(document.querySelector(".provider-collapse")?.textContent).toContain("Stored credential");
+    expect(settingsApi.fetchProviderSecrets).toHaveBeenCalledTimes(2);
+    expect(input.value).toBe("");
+    expect(input.placeholder).toBe("Stored credential");
+    expect(input.disabled).toBe(false);
+    vi.mocked(settingsApi.saveSettings).mockClear();
+    input.value = "replacement-key"; input.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall(); await flushUi();
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls[0][0].providers.proxy).toMatchObject({ api_key_secret_ref: reference, api_key: "replacement-key" });
+    expect(settingsApi.fetchProviderSecrets).toHaveBeenCalledTimes(2);
   });
 
   it("keeps the chosen provider name through creation and autosave", async () => {
