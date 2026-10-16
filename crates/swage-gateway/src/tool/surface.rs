@@ -251,9 +251,12 @@ impl SurfaceReadTool {
         let state = gateway_state(READ_TOOL, ctx)?;
         if params.get("surface_id").is_some() || params.get("surface_name").is_some() {
             let surface_id = surface_in_session(READ_TOOL, state, ctx, &params).await?;
-            let response = surface::surface_response(state, surface_id)
+            let mut response = surface::surface_response(state, surface_id)
                 .await
                 .map_err(|error| failed(READ_TOOL, error))?;
+            for module in &mut response.modules {
+                module.annotations.retain(|note| note.resolved_at.is_none());
+            }
             return serde_json::to_value(&response).map_err(|error| failed(READ_TOOL, error));
         }
         let session = calling_session(READ_TOOL, state, ctx).await?;
@@ -1212,7 +1215,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn workspace_resolved_notes_remain_in_read_and_record_the_actor() {
+    async fn workspace_resolved_notes_leave_tool_read_but_remain_in_http_and_record() {
         let (ctx, state, _) = session_ctx().await;
         let (id, modules) = surface_with(&ctx, &["# Content"]).await;
         let note = SurfaceWriteTool
@@ -1234,8 +1237,20 @@ mod tests {
             .execute(json!({"surface_id": id}), &ctx)
             .await
             .unwrap();
-        assert!(read["modules"][0]["annotations"][0]["resolved_at"].is_string());
-        assert_eq!(read["modules"][0]["annotations"][0]["body"], "Do this");
+        let http = surface::get_surface_handler(
+            axum::extract::State(state.clone()),
+            crate::error::Path(id),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(http.modules[0].annotations[0].resolved_at.is_some());
+        assert_eq!(http.modules[0].annotations[0].body, "Do this");
+        assert_eq!(
+            read["modules"][0]["annotations"],
+            json!([]),
+            "resolved notes leave the tool working view"
+        );
         assert!(
             signals.try_recv().is_ok(),
             "resolving must refresh open surfaces"
