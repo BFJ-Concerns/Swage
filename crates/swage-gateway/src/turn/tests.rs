@@ -19203,6 +19203,21 @@ async fn operation_outcome_turn(
     Vec<ServerEvent>,
     Vec<CompletionRequest>,
 ) {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.tools.permissions.require_approval.clear();
+    operation_outcome_turn_with_config(calls, config, TurnAttendance::Attended).await
+}
+
+async fn operation_outcome_turn_with_config(
+    calls: Vec<(&str, &str, serde_json::Value)>,
+    config: swage_config::ResolvedConfig,
+    attendance: TurnAttendance,
+) -> (
+    Arc<swage_storage::SqliteStorage>,
+    Uuid,
+    Vec<ServerEvent>,
+    Vec<CompletionRequest>,
+) {
     let root = SwageHomeGuard::new();
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
     let topic = storage.general_scope().await.unwrap();
@@ -19238,10 +19253,6 @@ async fn operation_outcome_turn(
             },
         ],
     ]);
-    // Record operation outcomes without pausing the attended turn on the
-    // default shell approval.
-    let mut config = swage_config::ResolvedConfig::default();
-    config.tools.permissions.require_approval.clear();
     let mut state = AppState::new_with_config_root(
         storage.clone(),
         storage.clone(),
@@ -19263,13 +19274,20 @@ async fn operation_outcome_turn(
     // Exercise host tools without depending on an installed sandbox backend.
     state.declared_execution_boundary = Some("container".into());
     let (tx, mut rx) = mpsc::unbounded_channel();
-    process_turn(
+    process_turn_with_composition(
         &state,
         session.id,
         None,
         "Run the operations".to_string(),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        attendance,
+        DispatchContextComposition::default(),
         None,
     )
     .await
@@ -20987,4 +21005,82 @@ async fn settlement_post_read_rejection_agrees_in_record_event_and_model_result(
         .any(|part| matches!(part, ToolReplayPart::ToolResult { call_id, content, is_error: true }
             if call_id == "reject-offset" && content.contains("valid UTF-8 byte boundary"))),
         "the next provider request must carry the file reader's rejection");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settlement_unattended_approval_bypass_keeps_shell_outcomes() {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.tools.permissions.require_approval =
+        vec![swage_config::RequireApprovalEntry::Simple("shell".into())];
+    let (storage, turn, events, requests) = operation_outcome_turn_with_config(
+        vec![
+            (
+                "before",
+                "shell",
+                serde_json::json!({"command":"printf before"}),
+            ),
+            (
+                "signal",
+                "shell",
+                serde_json::json!({"command":"kill -TERM $$"}),
+            ),
+            (
+                "after",
+                "shell",
+                serde_json::json!({"command":"printf after"}),
+            ),
+        ],
+        config,
+        TurnAttendance::Unattended,
+    )
+    .await;
+    let calls = storage.list_tool_calls_by_turn(turn).await.unwrap();
+    assert_eq!(calls.len(), 3, "each requested command runs exactly once");
+    let replay: Vec<_> = requests
+        .last()
+        .unwrap()
+        .messages
+        .iter()
+        .flat_map(|message| message.tool_replay().unwrap_or_default())
+        .collect();
+    for call in calls {
+        let failed = call.call_id == "signal";
+        let payload: serde_json::Value =
+            serde_json::from_str(call.result.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["success"], !failed, "real shell result: {call:?}");
+        if failed {
+            assert!(
+                payload["exit_code"].is_null(),
+                "a signal is not an exit code: {payload}"
+            );
+        }
+        let expected = if failed {
+            swage_protocol::client::conversation::ToolExecution::failed()
+        } else {
+            swage_protocol::client::conversation::ToolExecution::succeeded()
+        };
+        let status = if failed { "error" } else { "success" };
+        assert_eq!(
+            (call.execution, call.status.as_deref()),
+            (Some(expected), Some(status)),
+            "approval bypass must preserve the operation's outcome: {call:?}"
+        );
+        assert!(events.iter().any(|event| matches!(event,
+            ServerEvent::ToolEnd { call_id, status: actual_status, execution: Some(execution), .. }
+                if call_id == &call.call_id && actual_status == status && *execution == expected
+        )), "ToolEnd must agree with storage: {events:?}");
+        assert!(
+            replay.iter().any(|part| matches!(part,
+                ToolReplayPart::ToolResult { call_id, is_error, .. }
+                    if call_id == &call.call_id && *is_error == failed
+            )),
+            "the next provider request must preserve failure: {replay:?}"
+        );
+    }
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ServerEvent::ApprovalRequired { .. })),
+        "unattended execution must not ask for approval"
+    );
 }

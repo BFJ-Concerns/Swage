@@ -2646,11 +2646,7 @@ impl Agent {
                         )
                         .await?
                     {
-                        Ok(output) => {
-                            let result_str =
-                                serde_json::to_string(&output.result).unwrap_or_default();
-                            return Ok((result_str, false, "success".to_string()).into());
-                        }
+                        Ok(output) => return tool_dispatch_result(Ok(output)),
                         Err(swage_core::ToolError::RequiresLocationApproval {
                             path,
                             access,
