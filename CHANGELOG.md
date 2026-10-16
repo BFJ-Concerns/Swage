@@ -52,6 +52,11 @@ All notable changes to Swage are documented in this file.
 - Developer channel messages join the durable session queue during a turn. Telegram polling continues while the assistant answers; queued inputs retain their thread destinations, replies are delivered once per target, and deleting a session settles its waiting scheduled work. Delayed queue acknowledgements cannot restore drained messages.
 - Telegram linking codes last 24 hours, survive application-state reconstruction, and remain readable through the channel onboarding API until successful single-use redemption. Invalid destinations leave their codes available.
 
+- Supervised gateway restart bounds complete health probes by its readiness deadline while preserving service-manager ownership.
+- Gateway start reports the daemon’s startup error promptly, and CLI help lists commands with one product summary.
+- Saving an agent definition refuses `require_approval` in its tool-permission overlay instead of accepting an ignored approval requirement.
+- The web UI serves Bebas Neue, Hanken Grotesk and DM Mono from bundled font files without contacting Google Fonts.
+- LAN installation accepts a host and port, saves valid gateway defaults, and finds release artefacts under a custom Cargo target directory.
 - Browser navigation keeps working after settings or grant changes, retaining the logged-in profile; startup timeouts explain how to recover.
 
 - Oversized browser snapshots retain the article’s opening paragraph through ignored accessibility wrappers and preceding infobox tables instead of eliding it.
