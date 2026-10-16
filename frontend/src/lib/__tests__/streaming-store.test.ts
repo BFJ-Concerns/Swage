@@ -1422,3 +1422,26 @@ describe("output-limit completion", () => {
     expect(store.isStreaming).toBe(false);
   });
 });
+
+describe("queued turn model identity", () => {
+  it("uses the last drained submission and clears it before an unrelated turn", () => {
+    const conv = createMockConversationStore();
+    const conn = createMockConnectionStore();
+    const store = createStreamingStore({ conversationStore: conv, connectionStore: conn });
+    store.startTurn("Active", "active-model");
+    for (const [id, model] of [["q-1", "first-queued"], ["q-2", "last-queued"]]) {
+      store.startTurn(id, model);
+      const clientId = conn.sendMessage.mock.calls.at(-1)![5] as string;
+      store.handleServerEvent({ type: "message_queued", session_id: "test-conversation", queued: {
+        id, client_id: clientId, origin: "user", content: id, queued_at: "2026-10-15T12:00:00Z",
+      } });
+    }
+    store.handleServerEvent({ type: "turn_complete", turn_id: "active" });
+    store.handleServerEvent({ type: "queue_drained", session_id: "test-conversation", turn_id: "queued", queued_ids: ["q-1", "q-2"] });
+    store.handleServerEvent({ type: "error", code: "provider_error", message: "Rejected" });
+    expect(store.turnError?.selectedModelId).toBe("last-queued");
+    store.handleServerEvent({ type: "queue_drained", session_id: "test-conversation", turn_id: "external", queued_ids: ["external-q"] });
+    store.handleServerEvent({ type: "error", code: "provider_error", message: "Rejected" });
+    expect(store.turnError?.selectedModelId).toBeUndefined();
+  });
+});

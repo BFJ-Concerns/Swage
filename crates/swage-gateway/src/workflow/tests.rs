@@ -4372,6 +4372,7 @@ fn held_worker_route_config(threshold_ms: Option<u64>) -> swage_config::Resolved
     config.providers.entries.insert(
         "local".to_string(),
         swage_config::ProviderEndpointConfig {
+            display_name: None,
             worker_staleness_threshold_ms: threshold_ms,
             protocol: swage_config::Protocol::OpenAi,
             base_url: Some("http://127.0.0.1:65535/v1".to_string()),

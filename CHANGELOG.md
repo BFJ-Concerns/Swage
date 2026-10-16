@@ -6,6 +6,8 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Provider settings offer existing governed credentials alongside paste-in keys and explain when to use each provider kind.
+
 - Settings has a Memory tab listing every memory page, general and per topic, to read; a chat box there changes memory by instructing the curator, showing its reply and each page it changed. The curator's notice links open the page they name.
 - Settings edits the web search provider and applies saved changes to new turns.
 - The compaction threshold is configurable: `[context] compaction_threshold = { messages = N }` or `{ tokens = N }`, resolved through the configuration cascade (default: 100 messages). A session that keeps hitting walls — the same tool call failing again and again, or failed tool calls and failed turns piling up across its recent turns, provider timeouts and rate limits excluded — continues on a successor built from a blind diagnosis: separate readers each locate what went wrong in part of the history, a synthesis names the problems, and the successor starts from those notes with only the newest message kept verbatim. Every turn runs on such a successor while the walls remain among the recent turns: a turn whose recent walls are the ones the previous diagnosis answered starts from that diagnosis again, with every message since its split kept verbatim, new walls get a fresh diagnosis, and a turn with no wall left in view gets its full history back. The readers and the synthesis run on the session's model unless `[context] diagnosis_reader_model` or `diagnosis_synthesis_model` names a model entry or alias. The turn-context inspector shows the pass as a compaction with requested strategy `succession-degradation`, its diagnosis recording the walls answered and each model call's model, usage and report. It retains compaction decisions from the first assembly and the successor in pass order, even when their names match. Transient provider failures, including HTTP 5xx responses and malformed streams, do not trigger wall succession; provider refusals of the agent’s request still count as walls. If any diagnosis reader or the synthesis fails or returns an empty report, the turn falls back to the threshold path and compacts only when its context exceeds the threshold, retaining the failed diagnosis and call in its context record. Settings saves reject invalid compaction thresholds and diagnosis model names, including retained references to a removed model, before writing the configuration.
@@ -45,6 +47,21 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Provider settings refresh missing credential records after saving, so a newly stored key is labelled correctly and can be rotated without reloading.
+
+- Provider settings label governed environment and file credentials by their source and direct updates there, while retaining pasted rotation for stored credentials.
+
+- Pasted provider keys only rotate managed credentials; file and environment credentials explain where to update them.
+
+- Failure notices retain the submitted model for turns queued behind a running response.
+
+- Provider edits and pending saves keep unload protection after switching settings tabs.
+
+- Provider credentials rotate using their governed references, and provider-scoped keys appear only for their owning provider alongside global keys. Rejected settings saves wait for another edit before retrying.
+- Model chips use a font with lower-case glyphs. Failure notices name the submitted turn’s model and the provider reported in its diagnostic, preserving the original reported cause.
+
+- Provider settings preserve chosen names and pending edits, distinguish stored and environment credentials, show save status and default-model readiness, and keep readable model choices in a stable order.
+- Opening provider settings directly retains application navigation. Conversation failures preserve identifier case, wrap diagnostics behind a disclosure, and offer Retry and Provider settings.
 - Browser navigation keeps working after settings or grant changes, retaining the logged-in profile; startup timeouts explain how to recover.
 
 - Oversized browser snapshots retain the opening paragraph of main article content instead of eliding it.

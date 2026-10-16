@@ -531,6 +531,7 @@ mod tests {
     fn provider_config_try_from_missing_env_var() {
         // Use a name that is extremely unlikely to be set.
         let provider = swage_config::ProviderEndpointConfig {
+            display_name: None,
             protocol: swage_config::Protocol::Anthropic,
             api_key_secret_ref: None,
             api_key_env: Some("TEVIK_TEST_KEY_DEFINITELY_NOT_SET_XYZ".into()),
@@ -560,6 +561,7 @@ mod tests {
     #[test]
     fn provider_config_try_from_resolves_env_var() {
         let provider = swage_config::ProviderEndpointConfig {
+            display_name: None,
             protocol: swage_config::Protocol::Anthropic,
             api_key_secret_ref: None,
             api_key_env: Some("TEVIK_TEST_API_KEY_XYZ".into()),

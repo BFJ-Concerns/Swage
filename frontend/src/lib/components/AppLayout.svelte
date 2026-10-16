@@ -220,7 +220,7 @@
   }
 </script>
 
-{#if inScope}
+{#if inScope || settingsMode}
   <header class="topbar">
     <button type="button" class="sessions-btn" onclick={() => onOpenSessions?.()}>All sessions</button>
     <span class="scope" aria-label="Session scope">

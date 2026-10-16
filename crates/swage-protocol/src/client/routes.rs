@@ -861,6 +861,20 @@ pub fn routes() -> Vec<Route> {
             },
         },
         Route {
+            operation_id: "list_secrets",
+            method: Method::Get,
+            path: "/api/secrets",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "List governed secrets without revealing values.",
+            request_optional: false,
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<crate::hosting::SecretListResponse>(),
+            },
+        },
+        Route {
             operation_id: "get_settings",
             method: Method::Get,
             path: "/api/settings",

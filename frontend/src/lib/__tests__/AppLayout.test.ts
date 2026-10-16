@@ -316,6 +316,12 @@ describe("AppLayout shell navigation", () => {
     vi.restoreAllMocks();
   });
 
+  it("shows application navigation when providers are loaded without a session", () => {
+    component = mountLayout({ conversationStore: mockConversationStore(), pendingStart: null, hasCurrentTopic: false, routePath: "/settings/providers" });
+    expect(document.querySelector('nav[aria-label="Surface"]')).not.toBeNull();
+    expect([...document.querySelectorAll("button")].some((button) => button.textContent === "All sessions")).toBe(true);
+  });
+
   it("shows the recent-sessions front door with the session-start control when nothing is in view", () => {
     component = mountLayout({ hasCurrentTopic: false, pendingStart: null });
 
