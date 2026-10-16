@@ -1782,11 +1782,15 @@ mod tests {
             .iter()
             .find(|e| e["name"] == "working_norms")
             .unwrap();
-        assert!(
-            norms["full_text"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("Working norms")
+        let restored_norms = output
+            .messages
+            .iter()
+            .find(|message| message.text_content().contains("## Working norms"))
+            .expect("restored working norms message");
+        assert_eq!(
+            norms["full_text"],
+            restored_norms.text_content(),
+            "the report must retain the complete restored working norms"
         );
     }
 }

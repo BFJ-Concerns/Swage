@@ -202,6 +202,16 @@ pub struct ProviderAttemptRecord {
     pub id: String,
     pub round: usize,
     pub attempt: u32,
+    /// Provider adapter that opened this attempt (for example, `anthropic`).
+    pub provider: String,
+    pub model_id: String,
+    /// Stable position in the provider chain, independent of retry number and
+    /// cooldown order. A standalone provider uses `direct`.
+    pub route_id: String,
+    /// Concrete provider-visible request for this attempt, omitted if secret
+    /// redaction could not be completed.
+    #[ts(optional, type = "unknown")]
+    pub request: Option<serde_json::Value>,
     #[ts(type = "number")]
     pub started_at_ms: u64,
     #[ts(optional, type = "number | null")]

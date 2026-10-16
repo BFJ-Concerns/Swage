@@ -372,6 +372,18 @@ impl LlmProvider for FailoverProvider {
                     chunk = stream.next() => chunk,
                 } {
                     match chunk {
+                        StreamChunk::ProviderAttempt(mut record) => {
+                            // Use the configured slot, not the current try order:
+                            // cooldowns must not rename a provider's route.
+                            record.route_id = if record.route_id == "direct" {
+                                idx.to_string()
+                            } else {
+                                format!("{idx}/{}", record.route_id)
+                            };
+                            if tx.send(StreamChunk::ProviderAttempt(record)).is_err() {
+                                return;
+                            }
+                        }
                         StreamChunk::Error { message } if !output_started => {
                             retryable_error = Some((message, false));
                             break;

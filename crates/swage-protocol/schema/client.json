@@ -3401,13 +3401,27 @@
         "id": {
           "type": "string"
         },
+        "model_id": {
+          "type": "string"
+        },
         "outcome": {
           "$ref": "#/$defs/ProviderAttemptOutcome"
+        },
+        "provider": {
+          "description": "Provider adapter that opened this attempt (for example, `anthropic`).",
+          "type": "string"
+        },
+        "request": {
+          "description": "Concrete provider-visible request for this attempt, omitted if secret\nredaction could not be completed."
         },
         "round": {
           "type": "integer",
           "format": "uint",
           "minimum": 0
+        },
+        "route_id": {
+          "description": "Stable position in the provider chain, independent of retry number and\ncooldown order. A standalone provider uses `direct`.",
+          "type": "string"
         },
         "started_at_ms": {
           "type": "integer",
@@ -3419,6 +3433,9 @@
         "id",
         "round",
         "attempt",
+        "provider",
+        "model_id",
+        "route_id",
         "started_at_ms",
         "outcome"
       ]

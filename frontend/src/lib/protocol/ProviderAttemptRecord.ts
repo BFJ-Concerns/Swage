@@ -4,4 +4,18 @@ import type { ProviderAttemptOutcome } from "./ProviderAttemptOutcome";
 /**
  * One actual stream attempt, including the initial request and any retries.
  */
-export type ProviderAttemptRecord = { id: string, round: number, attempt: number, started_at_ms: number, ended_at_ms?: number | null, outcome: ProviderAttemptOutcome, error?: string | null, };
+export type ProviderAttemptRecord = { id: string, round: number, attempt: number,
+/**
+ * Provider adapter that opened this attempt (for example, `anthropic`).
+ */
+provider: string, model_id: string,
+/**
+ * Stable position in the provider chain, independent of retry number and
+ * cooldown order. A standalone provider uses `direct`.
+ */
+route_id: string,
+/**
+ * Concrete provider-visible request for this attempt, omitted if secret
+ * redaction could not be completed.
+ */
+request?: unknown, started_at_ms: number, ended_at_ms?: number | null, outcome: ProviderAttemptOutcome, error?: string | null, };

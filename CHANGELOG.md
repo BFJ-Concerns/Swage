@@ -45,6 +45,12 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Cancelling a turn while its initial provider attempt is queued retains that attempt as interrupted in the turn record.
+
+- The turn inspector shows the final provider attempt’s full request for each round and keeps failed attempts’ requests beside their entries, including cross-protocol failover.
+
+- Provider attempt records and the turn inspector identify each attempt’s provider adapter, model and stable route through failover, so separate providers’ first attempts are distinguishable.
+
 - Turn inspector instruction summaries count each configured file at its original hierarchy level, including topic instructions.
 
 - Turn records retain every provider stream attempt, including the initial request and retries, with start and end times and redacted failure details.

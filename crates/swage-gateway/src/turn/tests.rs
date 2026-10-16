@@ -20563,6 +20563,9 @@ async fn inspector_snapshot_keeps_attempts_across_provider_failover() {
     assert_eq!(attempts[2]["outcome"], "succeeded");
     assert_eq!(attempts[0]["attempt"], attempts[2]["attempt"]);
     assert_ne!(attempts[0]["id"], attempts[2]["id"]);
+    assert_eq!(attempts[0]["route_id"], attempts[1]["route_id"]);
+    assert_eq!(attempts[0]["route_id"], "0");
+    assert_eq!(attempts[2]["route_id"], "1");
 }
 
 #[tokio::test]
@@ -20624,4 +20627,134 @@ async fn inspector_snapshot_settles_an_attempt_when_the_turn_is_cancelled() {
         attempts[0]["ended_at_ms"].as_u64().unwrap()
             >= attempts[0]["started_at_ms"].as_u64().unwrap()
     );
+}
+
+/// Real protocol conversion with controlled stream outcomes; no network calls.
+struct InspectorProtocolProvider {
+    adapter: Box<dyn LlmProvider>,
+    stream: MultiRoundMockProvider,
+}
+
+#[async_trait]
+impl LlmProvider for InspectorProtocolProvider {
+    fn model_id(&self) -> &str {
+        self.adapter.model_id()
+    }
+    fn provider_request_snapshot(
+        &self,
+        request: &CompletionRequest,
+        stream: bool,
+    ) -> serde_json::Value {
+        self.adapter.provider_request_snapshot(request, stream)
+    }
+    async fn complete(&self, _: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        unreachable!()
+    }
+    async fn complete_with_tools(
+        &self,
+        _: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unreachable!()
+    }
+    fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        self.stream.stream(request)
+    }
+}
+
+async fn inspector_cross_protocol_failover_report() -> serde_json::Value {
+    let primary = InspectorProtocolProvider {
+        adapter: Box::new(swage_provider::openai::OpenAiProvider::from_config(
+            swage_provider::ProviderConfig::keyless("primary-model", "http://unused.invalid/v1"),
+        )),
+        stream: MultiRoundMockProvider::new(vec![vec![StreamChunk::Error {
+            message: "primary unavailable".into(),
+        }]]),
+    };
+    let secondary = InspectorProtocolProvider {
+        adapter: Box::new(swage_provider::anthropic::AnthropicProvider::new(
+            "unused-key",
+            "secondary-model",
+        )),
+        stream: MultiRoundMockProvider::new(vec![vec![
+            StreamChunk::Delta {
+                content: "secondary answer".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]]),
+    };
+    let retry = swage_provider::retry::RetryConfig {
+        max_retries: 0,
+        initial_backoff: Duration::ZERO,
+        max_backoff: Duration::ZERO,
+    };
+    let failover = swage_provider::failover::FailoverProvider::with_defaults(vec![
+        Arc::new(swage_provider::retry::RetryProvider::new(
+            primary,
+            retry.clone(),
+        )),
+        Arc::new(swage_provider::retry::RetryProvider::new(secondary, retry)),
+    ]);
+    let (state, session_id, storage) =
+        make_state_with_tool_provider_and_storage(Arc::new(failover)).await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("answer through failover"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .unwrap();
+    let turn_id = std::iter::from_fn(|| rx.try_recv().ok())
+        .find_map(|e| match e {
+            ServerEvent::ContextAssembled { turn_id, .. } => Some(turn_id),
+            _ => None,
+        })
+        .unwrap();
+    serde_json::from_str(&storage.get_snapshot(turn_id).await.unwrap().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn inspector_cross_protocol_failover_identifies_each_attempt() {
+    let report = inspector_cross_protocol_failover_report().await;
+    let attempts = report["provider_attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(
+        attempts[0]["provider"], "openai",
+        "the primary attempt must identify its provider"
+    );
+    assert_eq!(attempts[1]["provider"], "anthropic");
+    assert_eq!(attempts[0]["model_id"], "primary-model");
+    assert_eq!(attempts[1]["model_id"], "secondary-model");
+    assert_ne!(attempts[0]["route_id"], attempts[1]["route_id"]);
+    assert!(attempts[0]["route_id"].is_string());
+    assert!(attempts[1]["route_id"].is_string());
+}
+
+#[tokio::test]
+async fn inspector_cross_protocol_failover_records_each_request() {
+    let report = inspector_cross_protocol_failover_report().await;
+    let requests = report["provider_visible"]["requests"].as_array().unwrap();
+    assert_eq!(
+        requests.len(),
+        2,
+        "both concrete provider requests must be recorded"
+    );
+    assert_eq!(requests[0]["request"]["provider"], "openai");
+    assert_eq!(requests[1]["request"]["provider"], "anthropic");
+    assert_eq!(requests[0]["request"]["body"]["model"], "primary-model");
+    assert_eq!(requests[1]["request"]["body"]["model"], "secondary-model");
+    let attempts = report["provider_attempts"].as_array().unwrap();
+    for (attempt, request) in attempts.iter().zip(requests) {
+        assert_eq!(attempt["request"], request["request"]);
+        assert_eq!(attempt["id"], request["attempt_id"]);
+    }
 }

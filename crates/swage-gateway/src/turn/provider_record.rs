@@ -84,6 +84,35 @@ pub(crate) async fn apply_provider_snapshot_event(
     };
     match event {
         AgentEvent::ProviderAttempt { mut record, .. } => {
+            if let Some(request) = record.request.take() {
+                record.request = match redact_provider_visible_request(state, request).await {
+                    Ok(request) => Some(request),
+                    Err(_) => {
+                        append_provider_visible_capture_error(report_json, record.round);
+                        None
+                    }
+                };
+                let requests = provider_visible_array(report_json, "requests");
+                // Replace the provisional pre-stream snapshot with concrete
+                // attempts. Settlements update the same entry, preserving the
+                // order in which attempts ran, even if capture failed.
+                requests.retain(|entry| {
+                    entry["round"] != record.round || !entry["attempt_id"].is_null()
+                });
+                let value = serde_json::json!({
+                    "round": record.round,
+                    "attempt_id": record.id,
+                    "request": record.request,
+                });
+                if let Some(previous) = requests
+                    .iter_mut()
+                    .find(|entry| entry["attempt_id"] == record.id)
+                {
+                    *previous = value;
+                } else {
+                    requests.push(value);
+                }
+            }
             if let Some(error) = &mut record.error {
                 match known_secret_values(state).await {
                     Ok(secrets) => redact_text(error, &secrets),

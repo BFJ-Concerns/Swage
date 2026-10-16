@@ -80,6 +80,9 @@
   const model = $derived(object(visible.effective_model));
   const effort = $derived(object(visible.effort));
   const requests = $derived(list(visible.requests).map(object));
+  // The final concrete attempt in each round is the request that served it
+  // (or the last request tried when the whole round failed).
+  const fullRequests = $derived(Array.from(new Map(requests.map(request => [request.round, request])).values()));
   const totalTokens = $derived(report?.total_tokens ?? 0);
   const durationMs = $derived(
     report
@@ -128,14 +131,18 @@
       </section>
     {/if}
 
-    {#if requests.length > 0}
+    {#if fullRequests.length > 0}
       <section aria-label="Provider requests">
         <h3>Provider requests</h3>
-        {#each requests as request}
-          <details>
-            <summary>Full request · round {String(request.round)}</summary>
-            <pre>{JSON.stringify(blind(request.request), null, 2)}</pre>
-          </details>
+        {#each fullRequests as request}
+          {#if request.request != null}
+            <details>
+              <summary>Full request · round {String(request.round)}</summary>
+              <pre>{JSON.stringify(blind(request.request), null, 2)}</pre>
+            </details>
+          {:else}
+            <p>Full request unavailable · round {String(request.round)}</p>
+          {/if}
           {#if list(object(request.request).divergences).length > 0}
             <section aria-label="Request divergences">
               <h4>Request divergences · round {String(request.round)}</h4>
@@ -152,9 +159,16 @@
         <ol>
           {#each report.provider_attempts as attempt}
             <li>Round {attempt.round}, attempt {attempt.attempt}: {attempt.outcome}
+              <div>{attempt.provider} · {attempt.model_id} · route {attempt.route_id}</div>
               <div>Started: {new Date(attempt.started_at_ms).toISOString()}</div>
               <div>Ended: {attempt.ended_at_ms == null ? "Outstanding" : new Date(attempt.ended_at_ms).toISOString()}</div>
               {#if attempt.error}<pre>{attempt.error}</pre>{/if}
+              {#if attempt.request}
+                <details>
+                  <summary>Attempt request</summary>
+                  <pre>{JSON.stringify(blind(attempt.request), null, 2)}</pre>
+                </details>
+              {/if}
             </li>
           {/each}
         </ol>

@@ -128,7 +128,7 @@ function recordedRequest() {
       variant_id: "private-draw-identifier", variant_name: "private-draw-name" } }],
     },
     provider_attempts: [{ id: "recorded-attempt", round: 1, attempt: 1, started_at_ms: 1000, ended_at_ms: 2000,
-      outcome: "failed" as const, error: "Recorded temporary failure" }],
+      outcome: "failed" as const, error: "Recorded temporary failure", provider: "openai", model_id: "serving-model", route_id: "direct" }],
   };
 }
 
@@ -154,4 +154,46 @@ it("keeps assignment metadata out of an opened provider request", async () => {
   expect(document.body.textContent).toContain("Complete provider context");
   expect(document.body.textContent).not.toContain("private-draw-identifier");
   expect(document.body.textContent).not.toContain("private-draw-name");
+});
+
+function failoverReport() {
+  const report = recordedRequest();
+  return { ...report,
+    provider_attempts: [
+      { id: "primary-attempt", round: 1, attempt: 1, started_at_ms: 1000, ended_at_ms: 2000, outcome: "failed" as const, error: "Unavailable", provider: "openai", model_id: "primary-model", route_id: "0" },
+      { id: "secondary-attempt", round: 1, attempt: 1, started_at_ms: 2000, ended_at_ms: 3000, outcome: "succeeded" as const, error: null, provider: "anthropic", model_id: "secondary-model", route_id: "1" },
+    ],
+  };
+}
+
+it("distinguishes providers and routes for attempts with the same local number", async () => {
+  vi.mocked(fetchTurnContext).mockResolvedValue(failoverReport());
+  component = mount(TurnContextInspector, { target: document.body, props: { turnId: "failover", onClose: () => {} } });
+  await vi.waitFor(() => expect(document.querySelector("table.elements")).not.toBeNull());
+  const attempts = document.querySelector('[aria-label="Provider attempts"]');
+  expect(attempts?.textContent).toContain("openai · primary-model · route 0");
+  expect(attempts?.textContent).toContain("anthropic · secondary-model · route 1");
+});
+
+
+it("opens the serving attempt's full request and retains failed requests beside their attempts", async () => {
+  const report = failoverReport();
+  const primary = { provider: "openai", body: { model: "primary-model", messages: [{ role: "user", content: "Primary wire body" }] } };
+  const secondary = { provider: "anthropic", body: { model: "secondary-model", messages: [{ role: "user", content: "Secondary wire body" }] } };
+  vi.mocked(fetchTurnContext).mockResolvedValue({ ...report,
+    provider_visible: { ...report.provider_visible, requests: [
+      { round: 1, attempt_id: "primary-attempt", request: primary },
+      { round: 1, attempt_id: "secondary-attempt", request: secondary },
+    ] },
+    provider_attempts: report.provider_attempts.map((attempt, index) => ({ ...attempt, request: index === 0 ? primary : secondary })),
+  });
+  component = mount(TurnContextInspector, { target: document.body, props: { turnId: "failover", onClose: () => {} } });
+  await vi.waitFor(() => expect(document.querySelector("table.elements")).not.toBeNull());
+  const fullRequests = [...document.querySelectorAll('[aria-label="Provider requests"] details')];
+  expect(fullRequests[0]?.textContent).toContain("Secondary wire body");
+  expect(fullRequests).toHaveLength(1);
+  expect(fullRequests[0]?.textContent).not.toContain("Primary wire body");
+  const attempts = document.querySelectorAll('[aria-label="Provider attempts"] li');
+  expect(attempts[0]?.querySelector("details")?.textContent).toContain("Primary wire body");
+  expect(attempts[1]?.querySelector("details")?.textContent).toContain("Secondary wire body");
 });

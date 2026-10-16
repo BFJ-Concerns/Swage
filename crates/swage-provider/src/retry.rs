@@ -251,7 +251,19 @@ impl LlmProvider for RetryProvider {
                 if tx.is_closed() {
                     return;
                 }
+                let snapshot = inner.provider_request_snapshot(&request, true);
                 let mut attempt_record = ProviderAttemptRecord {
+                    provider: snapshot["provider"]
+                        .as_str()
+                        .unwrap_or("generic")
+                        .to_owned(),
+                    model_id: snapshot["body"]["model"]
+                        .as_str()
+                        .or(request.model.as_deref())
+                        .unwrap_or_else(|| inner.model_id())
+                        .to_owned(),
+                    route_id: "direct".into(),
+                    request: Some(snapshot),
                     id: format!("{:032x}", rand::random::<u128>()),
                     round: 0,
                     attempt: attempt + 1,
