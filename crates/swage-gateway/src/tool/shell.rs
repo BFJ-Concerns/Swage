@@ -463,7 +463,7 @@ mod tests {
         let result = tokio::time::timeout(
             Duration::from_secs(1),
             t.execute(
-                json!({"command": "echo $$ > shell.pid; exec 1>&- 2>&-; sleep 2; touch finished"}),
+                json!({"command": "echo $$ > shell.pid; exec 1>&- 2>&-; sh -c 'echo $$ > descendant.pid; sleep 2; touch finished' & wait"}),
                 &context,
             ),
         )
@@ -484,6 +484,10 @@ mod tests {
         assert_eq!(
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::ESRCH)
+        );
+        assert!(
+            workspace.path().join("descendant.pid").exists(),
+            "the descendant must actually start before the deadline"
         );
         tokio::time::sleep(Duration::from_millis(2100)).await;
         assert!(
