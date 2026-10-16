@@ -125,16 +125,13 @@ fn parse_surface_id(tool: &str, params: &Value) -> Result<Uuid, ToolError> {
         .map_err(|_| invalid(tool, "surface_id must be a surface id from surface_read"))
 }
 
+/// The call's tags in the one canonical form (`swage_core::tags`), so what
+/// the model saves or filters by is what the library holds.
 fn parse_tags(params: &Value) -> Vec<String> {
     params
         .get("tags")
         .and_then(Value::as_array)
-        .map(|tags| {
-            tags.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
+        .map(|tags| swage_core::tags::canonical_tags(tags.iter().filter_map(Value::as_str)))
         .unwrap_or_default()
 }
 
