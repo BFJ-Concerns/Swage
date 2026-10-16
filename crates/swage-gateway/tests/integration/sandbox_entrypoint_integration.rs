@@ -238,6 +238,11 @@ async fn bubblewrap_sandbox_reads_broadly_masks_private_paths_and_reaches_the_ne
     )
     .unwrap();
     std::fs::write(home.path().join("notes.txt"), "readable").unwrap();
+    // A top-level temporary symlink must still resolve through the mask,
+    // rather than bind the unmasked host target at the alias's path.
+    let ssh_alias = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+    std::fs::remove_file(&ssh_alias).unwrap();
+    std::os::unix::fs::symlink(&ssh, &ssh_alias).unwrap();
     let workspace = home.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let outside = home.path().join("outside");
@@ -282,10 +287,11 @@ async fn bubblewrap_sandbox_reads_broadly_masks_private_paths_and_reaches_the_ne
 
     // Reads are broad: a file beside the masks is readable; the masks are not.
     let reads = shell(format!(
-        "cat {notes}; echo; ls -A {ssh} | wc -l; cat {netrc} | wc -c; cat {ssh}/id_ed25519 2>&1 || true",
+        "cat {notes}; echo; ls -A {ssh} | wc -l; cat {netrc} | wc -c; cat {ssh}/id_ed25519 2>&1 || true; cat {ssh_alias}/id_ed25519 2>&1 || true",
         notes = home.path().join("notes.txt").display(),
         ssh = ssh.display(),
         netrc = home.path().join(".netrc").display(),
+        ssh_alias = ssh_alias.display(),
     ))
     .await;
     assert!(reads.contains("readable"), "{reads}");
@@ -300,6 +306,15 @@ async fn bubblewrap_sandbox_reads_broadly_masks_private_paths_and_reaches_the_ne
     assert!(
         !reads.contains("secret"),
         "the token file must read as empty: {reads}"
+    );
+
+    // Scratch created at /tmp belongs to the sandbox, not the host.
+    let scratch = shell("mktemp /tmp/swage-private-XXXXXXXXXX".to_owned()).await;
+    let scratch = std::path::Path::new(scratch.trim());
+    assert!(scratch.starts_with("/tmp"), "{scratch:?}");
+    assert!(
+        !scratch.exists(),
+        "sandbox scratch must not appear on the host: {scratch:?}"
     );
 
     // Writes: the workspace yes, the sibling outside the write set no.
