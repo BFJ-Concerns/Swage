@@ -42,7 +42,18 @@
     lastBaseUrl = value;
     provider.base_url = value || null;
   }
-  const credentialSource = $derived(provider.api_key_secret_ref ? "Stored credential" : provider.api_key_env ? "Environment credential" : "No credential");
+  const selectedSecret = $derived(secrets.find((secret) => secret.reference === provider.api_key_secret_ref));
+  const credentialSource = $derived(provider.api_key_secret_ref
+    ? selectedSecret?.backend_kind === "managed" ? "Stored credential"
+      : selectedSecret?.backend_kind === "env" ? "Environment credential"
+      : selectedSecret?.backend_kind === "file" ? "File credential" : "Governed credential"
+    : provider.api_key_env ? "Environment credential" : "No credential");
+  const canPasteCredential = $derived(!provider.api_key_secret_ref || selectedSecret?.backend_kind === "managed");
+  const credentialGuidance = $derived(canPasteCredential
+    ? "Paste a new value to store or rotate this provider's credential."
+    : selectedSecret?.backend_kind === "env" ? "Update this credential in its environment variable."
+    : selectedSecret?.backend_kind === "file" ? "Update this credential in its source file."
+    : "Credential source unavailable. Choose another credential or clear the selection to store a new key.");
   function selectSecret(event: Event): void {
     provider.api_key_secret_ref = (event.currentTarget as HTMLSelectElement).value || null;
     provider.api_key_env = null;
@@ -64,15 +75,15 @@
     <div class="provider-body">
       {#if provider.protocol !== "codex"}
         <div class="field"><div class="key">Base URL<small>Override the provider's canonical endpoint when needed.</small></div><div class="val"><input type="text" class="text" aria-label={`Base URL for ${displayName}`} aria-invalid={!!baseUrlError} aria-describedby={baseUrlError ? `provider-${id}-base-url-error` : undefined} value={baseUrlDraft} oninput={editBaseUrl} placeholder="Provider default" autocomplete="off" />{#if baseUrlError}<p id={`provider-${id}-base-url-error`} class="field-error" role="alert">{baseUrlError}</p>{/if}</div></div>
-        <div class="field"><div class="key">Stored credential<small>Choose an existing governed provider credential.</small></div><div class="val">
-          <select class="text" aria-label={`Stored credential for ${displayName}`} value={provider.api_key_secret_ref ?? ""} onchange={selectSecret}>
-            <option value="">No stored credential selected</option>
+        <div class="field"><div class="key">Governed credential<small>Choose an existing governed provider credential.</small></div><div class="val">
+          <select class="text" aria-label={`Governed credential for ${displayName}`} value={provider.api_key_secret_ref ?? ""} onchange={selectSecret}>
+            <option value="">No governed credential selected</option>
             {#if provider.api_key_secret_ref && !secrets.some((secret) => secret.reference === provider.api_key_secret_ref)}<option value={provider.api_key_secret_ref}>Current credential</option>{/if}
             {#each secrets.filter((secret) => secret.scope_kind === "global" || (secret.scope_kind === "provider" && secret.scope_id === id)) as secret (secret.id)}<option value={secret.reference}>{secret.name}</option>{/each}
           </select>
           {#if secretsError}<p role="status">{secretsError}</p>{/if}
         </div></div>
-        <div class="field"><div class="key">API key<small>Paste a new value to store or rotate this provider's credential.</small></div><div class="val key-val"><input aria-label={`API key for ${displayName}`} type="password" class="text" bind:value={provider.api_key} placeholder={provider.api_key_secret_ref ? "Stored credential" : provider.api_key_env ? "Resolved from environment" : "Paste to store"} autocomplete="off" /><span class="credential-status" class:set={!!provider.api_key_secret_ref || !!provider.api_key_env}>{provider.api_key ? isPersisting ? "Saving credential" : "Credential not saved" : credentialSource}</span></div></div>
+        <div class="field"><div class="key">API key<small>{credentialGuidance}</small></div><div class="val key-val"><input aria-label={`API key for ${displayName}`} type="password" class="text" disabled={!canPasteCredential} bind:value={provider.api_key} placeholder={provider.api_key_secret_ref ? credentialSource : provider.api_key_env ? "Resolved from environment" : "Paste to store"} autocomplete="off" /><span class="credential-status" class:set={!!provider.api_key_secret_ref || !!provider.api_key_env}>{provider.api_key ? isPersisting ? "Saving credential" : "Credential not saved" : credentialSource}</span></div></div>
         {#if models.some(([key]) => key === defaultModel) && !provider.api_key_secret_ref && !provider.api_key_env}<p class="readiness-note" role="status">Authenticated turns cannot run with this default model until a credential is set.</p>{/if}
       {:else}
         <CodexProviderAuthentication providerId={id} {saved} state={signInState} {deviceCode} {onbegin} {oncheck} {oncopy} {onend} />

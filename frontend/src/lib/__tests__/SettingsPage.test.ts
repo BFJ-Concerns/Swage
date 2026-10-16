@@ -227,6 +227,7 @@ describe("SettingsPage", () => {
 
   it.each(["environment", "stored", "none"] as const)("reports %s credential source truthfully", async (source) => {
     vi.mocked(settingsApi.fetchSettings).mockResolvedValue(configuredProvider(source));
+    vi.mocked(settingsApi.fetchProviderSecrets).mockResolvedValue({ secrets: source === "stored" ? [{ id: "existing", name: "Stored key", reference: "secret:existing", material_kind: "provider_key", owner_kind: "provider", backend_kind: "managed", scope_kind: "global", metadata: {}, status: "active", created_at: "2026-01-01", updated_at: "2026-01-01" }] : [], managed_backend: { status: "ready", detail: "", key_source: null } });
     component = mount(SettingsPage, { target: document.body, props: { tab: "providers" } });
     await flushUi();
     const header = document.querySelector(".provider-collapse")!;
@@ -234,6 +235,44 @@ describe("SettingsPage", () => {
     const input = document.querySelector<HTMLInputElement>('input[type="password"]')!;
     expect(input.placeholder).toBe(source === "environment" ? "Resolved from environment" : source === "stored" ? "Stored credential" : "Paste to store");
     if (source === "none") expect(document.body.textContent).toContain("Authenticated turns cannot run");
+  });
+
+  it.each(["env", "file"] as const)("renders governed %s credentials without offering pasted rotation", async (backend) => {
+    const settings = configuredProvider("stored");
+    const reference = "secret://" + backend + "/chosen";
+    settings.providers.proxy.api_key_secret_ref = reference;
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(settings);
+    vi.mocked(settingsApi.fetchProviderSecrets).mockResolvedValue({ secrets: [{ id: "chosen", name: "Proxy credential", reference, material_kind: "provider_key", owner_kind: "provider", backend_kind: backend, scope_kind: "global", scope_id: null, metadata: {}, status: "active", created_at: "2026-01-01", updated_at: "2026-01-01" }], managed_backend: { status: "ready", detail: "", key_source: null } });
+    component = mount(SettingsPage, { target: document.body, props: { tab: "providers" } });
+    await flushUi();
+    const source = backend === "env" ? "Environment credential" : "File credential";
+    expect(document.querySelector(".provider-collapse")?.textContent).toContain(source);
+    expect(document.body.textContent).toContain(backend === "env" ? "Update this credential in its environment variable." : "Update this credential in its source file.");
+    expect(document.body.textContent).not.toContain("Paste a new value to store or rotate");
+    expect(document.querySelector('input[type="password"]:not(:disabled)')).toBeNull();
+    expect(document.querySelector<HTMLInputElement>('input[type="password"]')?.placeholder).toBe(source);
+    expect([...document.querySelectorAll(".credential-status")].every((badge) => badge.textContent === source)).toBe(true);
+    const select = document.querySelector<HTMLSelectElement>(".provider-body select")!;
+    select.value = ""; select.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUi();
+    expect(document.querySelector<HTMLInputElement>('input[type="password"]')?.disabled).toBe(false);
+  });
+
+  it("keeps managed credential labels and pasted rotation", async () => {
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(configuredProvider("stored"));
+    vi.mocked(settingsApi.fetchProviderSecrets).mockResolvedValue({ secrets: [{ id: "existing", name: "Stored key", reference: "secret:existing", material_kind: "provider_key", owner_kind: "provider", backend_kind: "managed", scope_kind: "global", metadata: {}, status: "active", created_at: "2026-01-01", updated_at: "2026-01-01" }], managed_backend: { status: "ready", detail: "", key_source: null } });
+    component = mount(SettingsPage, { target: document.body, props: { tab: "providers" } });
+    await flushUi();
+    expect(document.querySelector(".provider-collapse")?.textContent).toContain("Stored credential");
+    const input = document.querySelector<HTMLInputElement>('input[type="password"]')!;
+    expect(input.disabled).toBe(false);
+    expect(input.placeholder).toBe("Stored credential");
+    expect(document.body.textContent).toContain("Paste a new value to store or rotate");
+    input.value = "replacement-key"; input.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    const sent = vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].providers.proxy;
+    expect(sent.api_key_secret_ref).toBe("secret:existing");
+    expect(sent.api_key).toBe("replacement-key");
   });
 
   it("keeps the chosen provider name through creation and autosave", async () => {
@@ -367,7 +406,7 @@ describe("SettingsPage", () => {
     vi.mocked(settingsApi.fetchSettings).mockResolvedValue(configuredProvider("environment"));
     vi.mocked(settingsApi.fetchProviderSecrets).mockResolvedValue({ secrets: [{ id: "chosen", name: "Proxy credential", reference: "secret:chosen", material_kind: "provider_key", owner_kind: "provider", backend_kind: "managed", scope_kind: "global", scope_id: null, metadata: {}, status: "active", created_at: "2026-01-01", updated_at: "2026-01-01", revoked_at: null, revealed_value: null }], managed_backend: { status: "ready", detail: "", key_source: null } });
     component = mount(SettingsPage, { target: document.body, props: { tab: "providers" } }); await flushUi();
-    const select = document.querySelector<HTMLSelectElement>('select[aria-label="Stored credential for Homelab proxy"]');
+    const select = document.querySelector<HTMLSelectElement>('select[aria-label="Governed credential for Homelab proxy"]');
     expect(select).not.toBeNull();
     select!.value = "secret:chosen"; select!.dispatchEvent(new Event("change", { bubbles: true }));
     await waitForSaveCall(); await flushUi();
@@ -382,7 +421,7 @@ describe("SettingsPage", () => {
     const owned = { ...global, id: "owned", name: "Owned key", reference: "secret://file/00000000-0000-4000-8000-000000000002", backend_kind: "file", scope_kind: "provider", scope_id: "proxy" };
     vi.mocked(settingsApi.fetchProviderSecrets).mockResolvedValue({ secrets: [global, owned, { ...owned, id: "other", name: "Other provider key", scope_id: "other" }, { ...owned, id: "revoked", name: "Revoked key", status: "revoked" }], managed_backend: { status: "ready", detail: "", key_source: null } });
     component = mount(SettingsPage, { target: document.body, props: { tab: "providers" } }); await flushUi();
-    const select = document.querySelector<HTMLSelectElement>('select[aria-label="Stored credential for Homelab proxy"]')!;
+    const select = document.querySelector<HTMLSelectElement>('select[aria-label="Governed credential for Homelab proxy"]')!;
     const labels = [...select.options].map((option) => option.textContent);
     expect(labels).toContain("Owned key"); expect(labels).toContain("Global key");
     expect(labels).not.toContain("Other provider key"); expect(labels).not.toContain("Revoked key");
