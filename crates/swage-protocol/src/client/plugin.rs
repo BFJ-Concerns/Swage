@@ -41,7 +41,8 @@ pub struct PluginRevision {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum PluginServiceState {
-    /// The isolate serves calls.
+    /// The isolate serves calls — or, for a process plugin, the gateway
+    /// starts a session's process on its first call.
     Serving,
     /// The last call ended the isolate at a limit; the next call rebuilds it.
     Terminated { reason: String },
@@ -74,6 +75,11 @@ pub struct PluginSummary {
     /// Topics that disable it on their own, over the install's answer.
     pub disabled_topics: Vec<Uuid>,
     pub service: PluginServiceState,
+    /// How the plugin runs: `isolate` (a script in a V8 isolate the kernel
+    /// builds) or `process` (a process the gateway brokers per session).
+    pub profile: String,
+    /// For a process plugin, the sessions with a process serving now.
+    pub sessions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]

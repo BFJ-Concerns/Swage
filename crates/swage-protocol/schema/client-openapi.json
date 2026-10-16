@@ -3006,7 +3006,7 @@
         "description": "Whether the plugin's isolate is up.",
         "oneOf": [
           {
-            "description": "The isolate serves calls.",
+            "description": "The isolate serves calls — or, for a process plugin, the gateway\nstarts a session's process on its first call.",
             "properties": {
               "state": {
                 "const": "serving",
@@ -3090,6 +3090,10 @@
           "name": {
             "type": "string"
           },
+          "profile": {
+            "description": "How the plugin runs: `isolate` (a script in a V8 isolate the kernel\nbuilds) or `process` (a process the gateway brokers per session).",
+            "type": "string"
+          },
           "provides": {
             "$ref": "#/components/schemas/PluginProvides"
           },
@@ -3113,6 +3117,13 @@
           },
           "service": {
             "$ref": "#/components/schemas/PluginServiceState"
+          },
+          "sessions": {
+            "description": "For a process plugin, the sessions with a process serving now.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "variant_of": {
             "description": "The function this plugin is a variant of, when it declares one.",
@@ -3138,7 +3149,9 @@
           "enabled_for_install",
           "enabled_topics",
           "disabled_topics",
-          "service"
+          "service",
+          "profile",
+          "sessions"
         ],
         "type": "object"
       },

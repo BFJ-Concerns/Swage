@@ -21,6 +21,8 @@ function plugin(name: string, overrides: Partial<PluginSummary> = {}): PluginSum
     enabled_topics: [],
     disabled_topics: [],
     service: { state: "serving" },
+    profile: "isolate",
+    sessions: [],
     ...overrides,
   };
 }
@@ -58,7 +60,7 @@ describe("PluginsPanel", () => {
       enabled_for_install: true,
       service: { state: "terminated", reason: "heap_limit" },
     });
-    const quiet = plugin("quiet", { grants: [], service: { state: "failed", reason: "SyntaxError: bad" } });
+    const quiet = plugin("quiet", { grants: [], service: { state: "failed", reason: "SyntaxError: bad" }, profile: "process", sessions: ["s1", "s2"] });
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({ plugins: [echo, quiet] }));
     component = mount(PluginsPanel, { target: document.body, props: { topicId: null } });
     await vi.waitFor(() => expect(document.body.textContent).toContain("echo"));
@@ -70,6 +72,7 @@ describe("PluginsPanel", () => {
     expect(detail?.textContent).toContain("api_key");
     expect(detail?.textContent).toContain("tools.echo");
     expect(detail?.textContent).toContain("Terminated: heap_limit");
+    expect(detail?.textContent).toContain("A script in its own isolate");
     expect(detail?.textContent).toContain("revision 1");
     const installToggle = detail?.querySelector<HTMLInputElement>('input[type="checkbox"]');
     expect(installToggle?.checked).toBe(true);
@@ -79,6 +82,7 @@ describe("PluginsPanel", () => {
     expect(quietButton?.textContent).toContain("Failed to load: SyntaxError: bad");
     flushSync(() => quietButton?.click());
     expect(document.querySelector('[aria-label="quiet details"]')?.textContent).toContain("Grants");
+    expect(document.querySelector('[aria-label="quiet details"]')?.textContent).toContain("serving 2 sessions");
   });
 
   it("enables a plugin for the selected topic through the enablement route", async () => {

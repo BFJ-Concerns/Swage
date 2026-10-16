@@ -16,7 +16,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use swage_isolate::{HostCalls, IsolateError, Program, Termination};
 use tokio::sync::{mpsc, oneshot};
@@ -24,15 +24,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::manifest::{HostGrant, PluginManifest};
 
-/// What a handler is told about the call it serves, as the script reads it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InvocationContext {
-    pub session_id: String,
-    pub agent_id: String,
-    pub call_id: Option<String>,
-    pub working_directory: String,
-}
+/// Where a tool call comes from, as the handler sees it (`sessionId`,
+/// `agentId`, `callId`, `workingDirectory`): the plugin-process contract's
+/// context, shared with the isolate.
+pub use swage_protocol::plugin::PluginCallContext as InvocationContext;
 
 /// A host call the host refused or that failed. `name` is the error name
 /// the script catches; `message` is what it reads.
@@ -68,6 +63,13 @@ pub enum PluginError {
     /// The runtime's thread is gone, so nothing can serve the call.
     #[error("the plugin runtime is no longer serving")]
     Stopped,
+    /// The plugin's process could not be started or spoken to.
+    #[error("the plugin's process failed: {0}")]
+    Process(String),
+    /// The plugin's process ended while a call was in flight; the next
+    /// call starts a fresh one.
+    #[error("the plugin's process exited: {0}")]
+    ProcessExited(String),
 }
 
 impl From<IsolateError> for PluginError {
@@ -461,31 +463,58 @@ fn ungranted(name: &str) -> String {
     )
 }
 
+/// Answer one host call for a plugin under `grants`: `callTool` runs
+/// `host.call_tool` (only under the `tools` grant), `log` writes to the
+/// host's log, and any other name is refused. The reply is the envelope
+/// every door speaks — `{"ok": true, "value"}` or
+/// `{"ok": false, "error": {"name", "message"}}` — shared by the isolate's
+/// door and the brokered process's socket.
+pub(crate) async fn answer_host_call(
+    grants: &[HostGrant],
+    host: &dyn PluginHost,
+    name: &str,
+    payload: &str,
+) -> String {
+    match name {
+        "callTool" if grants.contains(&HostGrant::Tools) => {
+            let request: CallToolRequest = match serde_json::from_str(payload) {
+                Ok(request) => request,
+                Err(error) => return failure("TypeError", error.to_string()),
+            };
+            match host.call_tool(&request.name, request.arguments).await {
+                Ok(value) => ok(value),
+                Err(refusal) => failure(&refusal.name, refusal.message),
+            }
+        }
+        "log" => {
+            let message: String =
+                serde_json::from_str(payload).unwrap_or_else(|_| payload.to_owned());
+            host.log(&message);
+            ok(Value::Null)
+        }
+        other => ungranted(other),
+    }
+}
+
 #[async_trait]
 impl HostCalls for PluginHostCalls {
     async fn call(&self, name: &str, payload: String) -> String {
         let Some(serving) = self.serving() else {
             return failure("HostUnavailableError", "no call is being served");
         };
-        match name {
-            "callTool" if self.grants.contains(&HostGrant::Tools) => {
-                let request: CallToolRequest = match serde_json::from_str(&payload) {
-                    Ok(request) => request,
-                    Err(error) => return failure("TypeError", error.to_string()),
-                };
-                let host = serving.host;
-                let mut task =
-                    AbortOnDrop(serving.caller.spawn(async move {
-                        host.call_tool(&request.name, request.arguments).await
-                    }));
-                let outcome = (&mut task.0).await;
-                match outcome {
-                    Ok(Ok(value)) => ok(value),
-                    Ok(Err(refusal)) => failure(&refusal.name, refusal.message),
-                    Err(error) => failure("HostUnavailableError", error.to_string()),
-                }
-            }
-            other => ungranted(other),
+        let grants = self.grants.clone();
+        let host = serving.host;
+        let name = name.to_owned();
+        // The host's work runs on the caller's runtime; the isolate's
+        // thread only waits for it, and stops waiting if the program is
+        // cancelled — the task goes with the wait.
+        let mut task =
+            AbortOnDrop(serving.caller.spawn(async move {
+                answer_host_call(&grants, host.as_ref(), &name, &payload).await
+            }));
+        match (&mut task.0).await {
+            Ok(reply) => reply,
+            Err(error) => failure("HostUnavailableError", error.to_string()),
         }
     }
 

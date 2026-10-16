@@ -13,6 +13,7 @@
 //! enable the plugin — as a platform agent's held tool is withheld from
 //! other agents.
 
+pub mod process;
 pub mod tool;
 
 use std::collections::{BTreeMap, HashSet};
@@ -21,13 +22,14 @@ use std::sync::{Arc, RwLock};
 
 use swage_core::StorageError;
 use swage_plugin::{
-    HostGrant, PluginManifest, PluginRuntime, PluginRuntimeState, install_dir, install_package,
-    read_package,
+    HostGrant, PluginManifest, PluginPackage, PluginRuntime, PluginRuntimeState, ProcessPlugin,
+    ProcessSpec, Profile, install_dir, install_package, read_package,
 };
 use swage_protocol::client::plugin::{
     PluginListResponse, PluginProvides, PluginRevision, PluginSecret, PluginServiceState,
     PluginSummary, ProvidedTool,
 };
+use swage_protocol::plugin::PluginProcessStopReason;
 use swage_storage::model::{NewAuditEvent, NewPluginRevision, PluginRevisionRecord};
 use swage_storage::store::Storage;
 use uuid::Uuid;
@@ -53,13 +55,21 @@ pub enum PluginServiceError {
     Unrecorded(String),
 }
 
+/// How an installed plugin runs: in the kernel's isolate, built at install
+/// and load, or as a process brokered per session, started on first use.
+#[derive(Clone)]
+pub enum Execution {
+    Isolate(Arc<PluginRuntime>),
+    Process(Arc<ProcessPlugin>),
+}
+
 /// A plugin as the gateway holds it: its active revision, the manifest that
-/// revision declares, its isolate (or why it could not be loaded), every
+/// revision declares, how it runs (or why it could not be loaded), every
 /// revision recorded, and where it is enabled.
 struct InstalledPlugin {
     active: PluginRevisionRecord,
     manifest: PluginManifest,
-    runtime: Result<Arc<PluginRuntime>, String>,
+    execution: Result<Execution, String>,
     revisions: Vec<PluginRevisionRecord>,
     enabled_for_install: bool,
     enabled_topics: HashSet<Uuid>,
@@ -130,16 +140,22 @@ impl InstalledPlugin {
             enabled_for_install: self.enabled_for_install,
             enabled_topics,
             disabled_topics,
-            service: match &self.runtime {
-                Ok(runtime) => match runtime.state() {
+            service: match &self.execution {
+                Ok(Execution::Isolate(runtime)) => match runtime.state() {
                     PluginRuntimeState::Serving => PluginServiceState::Serving,
                     PluginRuntimeState::Terminated(termination) => PluginServiceState::Terminated {
                         reason: termination.reason().to_owned(),
                     },
                 },
+                Ok(Execution::Process(_)) => PluginServiceState::Serving,
                 Err(reason) => PluginServiceState::Failed {
                     reason: reason.clone(),
                 },
+            },
+            profile: self.manifest.profile().as_str().to_owned(),
+            sessions: match &self.execution {
+                Ok(Execution::Process(plugin)) => plugin.serving_sessions(),
+                _ => Vec::new(),
             },
         }
     }
@@ -172,6 +188,66 @@ impl PluginService {
         &self.plugins_root
     }
 
+    /// Bring a package up the way its manifest says: an isolate, built now
+    /// and refused if its script does not load; or a process plugin, whose
+    /// processes start on each session's first call.
+    async fn start_execution(&self, package: &PluginPackage) -> Result<Execution, String> {
+        match package.manifest.profile() {
+            Profile::Isolate => {
+                let script = package
+                    .script
+                    .clone()
+                    .ok_or_else(|| "the package names no script".to_owned())?;
+                PluginRuntime::start(package.manifest.clone(), script)
+                    .await
+                    .map(Execution::Isolate)
+                    .map_err(|error| error.to_string())
+            }
+            Profile::Process => {
+                let spec = ProcessSpec::new(&package.manifest, &package.root)
+                    .ok_or_else(|| "the package names no process".to_owned())?;
+                Ok(Execution::Process(ProcessPlugin::new(
+                    spec,
+                    Arc::new(process::AuditingObserver::new(Arc::clone(&self.storage))),
+                )))
+            }
+        }
+    }
+
+    /// The session has closed: stop every process plugin's process for it.
+    pub async fn stop_session(&self, session_id: Uuid) {
+        for plugin in self.process_plugins() {
+            plugin.stop_session(&session_id.to_string()).await;
+        }
+    }
+
+    /// Stop every process that has sat idle for its manifest's period.
+    pub async fn sweep_idle(&self) {
+        let now = std::time::Instant::now();
+        for plugin in self.process_plugins() {
+            plugin.sweep_idle(now).await;
+        }
+    }
+
+    /// The gateway is stopping: every process is told so and stopped.
+    pub async fn shutdown(&self) {
+        for plugin in self.process_plugins() {
+            plugin
+                .stop_all(PluginProcessStopReason::GatewayStopping)
+                .await;
+        }
+    }
+
+    fn process_plugins(&self) -> Vec<Arc<ProcessPlugin>> {
+        self.read()
+            .values()
+            .filter_map(|plugin| match &plugin.execution {
+                Ok(Execution::Process(process)) => Some(Arc::clone(process)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Bring every recorded plugin up from its active revision's install
     /// directory. A plugin whose package no longer reads or whose script no
     /// longer loads stays listed as failed, with the reason, and serves no
@@ -192,13 +268,10 @@ impl PluginService {
                 tracing::warn!(plugin = %name, "plugin has revisions recorded but none active; it serves nothing");
                 continue;
             };
-            let (manifest, runtime) = match read_package(Path::new(&active.install_dir)) {
+            let (manifest, execution) = match read_package(Path::new(&active.install_dir)) {
                 Ok(package) => {
-                    let manifest = package.manifest.clone();
-                    let runtime = PluginRuntime::start(package.manifest, package.script)
-                        .await
-                        .map_err(|error| error.to_string());
-                    (manifest, runtime)
+                    let execution = self.start_execution(&package).await;
+                    (package.manifest, execution)
                 }
                 Err(error) => {
                     let manifest = match serde_json::from_value::<PluginManifest>(
@@ -213,13 +286,13 @@ impl PluginService {
                     (manifest, Err(error.to_string()))
                 }
             };
-            if let Err(reason) = &runtime {
+            if let Err(reason) = &execution {
                 tracing::warn!(plugin = %name, reason, "plugin failed to load; it serves nothing until a revision that loads is installed");
             }
             let mut plugin = InstalledPlugin {
                 active,
                 manifest,
-                runtime,
+                execution,
                 revisions,
                 enabled_for_install: false,
                 enabled_topics: HashSet::new(),
@@ -296,17 +369,12 @@ impl PluginService {
         let installed_package = install_package(&package, &self.plugins_root, next_revision)
             .map_err(|error| PluginServiceError::Refused(error.to_string()))?;
         let target = install_dir(&self.plugins_root, &name, next_revision);
-        let runtime = match PluginRuntime::start(
-            installed_package.manifest.clone(),
-            installed_package.script.clone(),
-        )
-        .await
-        {
-            Ok(runtime) => runtime,
+        let execution = match self.start_execution(&installed_package).await {
+            Ok(execution) => execution,
             Err(error) => {
                 let _ = std::fs::remove_dir_all(&target);
                 return Err(PluginServiceError::Refused(format!(
-                    "the plugin's script failed to load: {error}"
+                    "the plugin failed to load: {error}"
                 )));
             }
         };
@@ -327,19 +395,19 @@ impl PluginService {
         {
             Ok(record) => record,
             Err(error) => {
-                drop(runtime);
+                drop(execution);
                 let _ = std::fs::remove_dir_all(&target);
                 return Err(PluginServiceError::Storage(error));
             }
         };
-        let summary = {
+        let (summary, superseded) = {
             let mut installed = self.write();
             let plugin = installed
                 .entry(name.clone())
                 .or_insert_with(|| InstalledPlugin {
                     active: record.clone(),
                     manifest: installed_package.manifest.clone(),
-                    runtime: Err(String::new()),
+                    execution: Err(String::new()),
                     revisions: Vec::new(),
                     enabled_for_install: false,
                     enabled_topics: HashSet::new(),
@@ -351,9 +419,14 @@ impl PluginService {
             plugin.revisions.push(record.clone());
             plugin.active = record.clone();
             plugin.manifest = installed_package.manifest.clone();
-            plugin.runtime = Ok(runtime);
-            plugin.summary()
+            let superseded = std::mem::replace(&mut plugin.execution, Ok(execution));
+            (plugin.summary(), superseded)
         };
+        // The earlier revision's processes are told a newer one took over;
+        // an earlier isolate simply goes when its last reference does.
+        if let Ok(Execution::Process(earlier)) = superseded {
+            earlier.stop_all(PluginProcessStopReason::Superseded).await;
+        }
         self.record_event(
             session_id,
             &name,
@@ -449,12 +522,12 @@ impl PluginService {
             .values()
             .filter_map(|plugin| {
                 plugin
-                    .runtime
+                    .execution
                     .as_ref()
                     .ok()
-                    .map(|runtime| (plugin, runtime))
+                    .map(|execution| (plugin, execution))
             })
-            .flat_map(|(plugin, runtime)| {
+            .flat_map(|(plugin, execution)| {
                 plugin
                     .manifest
                     .provides
@@ -465,7 +538,7 @@ impl PluginService {
                             plugin.manifest.name.clone(),
                             declaration.clone(),
                             plugin.manifest.grants(HostGrant::Tools),
-                            Arc::clone(runtime),
+                            execution.clone(),
                         )) as Arc<dyn Tool>
                     })
             })
@@ -779,5 +852,252 @@ mod tests {
             listed[0].service
         );
         assert!(third.tools().is_empty(), "a failed plugin serves no tool");
+    }
+}
+
+#[cfg(test)]
+mod process_tests {
+    //! A process plugin end to end through the gateway: installed, started
+    //! on a session's first call where the turn places it, stopped with
+    //! the session. The process is a small Python program written against
+    //! the plugin-process contract, as the Python tool tests need Python.
+
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::state::AppState;
+    use crate::tool::ToolDispatcher;
+    use crate::tool_executor::GatewayExecutionStrategy;
+    use swage_storage::SqliteStorage;
+    use swage_storage::store::{AuditStore, SessionStore, Storage, TopicStore};
+    use swage_tool::context::MockToolContext;
+    use swage_tool::dispatch::ToolExecutionStrategy;
+
+    const MANIFEST: &str = r#"
+        name = "counter"
+        version = "1.0.0"
+        description = "Counts its calls in a process per session."
+        [process]
+        command = "counter.py"
+        idle_secs = 60
+        [[provides.tools]]
+        name = "count"
+        description = "How many times this session has called."
+        parameters = { type = "object" }
+    "#;
+
+    const PROCESS: &str = r#"#!/usr/bin/env python3
+import json, os, socket, sys
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(os.environ["SWAGE_PLUGIN_SOCKET"])
+stream = sock.makefile("rw")
+def send(message):
+    stream.write(json.dumps(message) + "\n"); stream.flush()
+send({"kind": "ready", "tools": ["count"]})
+count = 0
+for line in stream:
+    request = json.loads(line)
+    if request["kind"] == "invoke":
+        count += 1
+        send({"kind": "result", "id": request["id"], "value": {"count": count, "pid": os.getpid(), "session": request["context"]["sessionId"]}})
+    elif request["kind"] == "stop":
+        sys.exit(0)
+"#;
+
+    fn write_package(root: &Path) {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join("plugin.toml"), MANIFEST).unwrap();
+        let script = root.join("counter.py");
+        std::fs::write(&script, PROCESS).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_process_plugin_serves_a_session_where_the_turn_places_it_and_stops_with_the_session()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let state = AppState::new_with_config_root(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(Vec::new())),
+            swage_config::ResolvedConfig::default(),
+            ToolDispatcher::allow_all(Vec::new()),
+            None,
+            dir.path().to_path_buf(),
+        );
+        let source = dir.path().join("src");
+        write_package(&source);
+        let summary = state
+            .plugins
+            .install(&source, &[], None)
+            .await
+            .expect("installs without starting a process");
+        assert_eq!(summary.profile, "process");
+        assert!(summary.sessions.is_empty());
+        assert_eq!(summary.service, PluginServiceState::Serving);
+
+        let tools = state.plugins.tools();
+        assert_eq!(tools.len(), 1);
+        let count = Arc::clone(&tools[0]);
+        let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
+        let strategy = GatewayExecutionStrategy::new(
+            None,
+            ws_tx,
+            None,
+            Arc::new(crate::secret::SecretManager::new(
+                Arc::clone(&storage) as Arc<dyn Storage>
+            )),
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Some(state.clone()),
+        )
+        .with_process_placement(Arc::new(process::ProcessPlacement::plain()));
+        // Real sessions: the process events name the session they served.
+        let topic = storage.general_scope().await.unwrap();
+        let session_a = storage
+            .create_session(swage_storage::fixtures::new_session(topic.id))
+            .await
+            .unwrap()
+            .id;
+        let session_b = storage
+            .create_session(swage_storage::fixtures::new_session(topic.id))
+            .await
+            .unwrap()
+            .id;
+        let call = |session: Uuid| {
+            let mut ctx = MockToolContext::new("agent-a", session.to_string());
+            ctx.call_id = Some("call-count".into());
+            ctx
+        };
+
+        let first = strategy
+            .execute(
+                count.as_ref(),
+                "count",
+                &serde_json::json!({}),
+                &call(session_a),
+            )
+            .await
+            .expect("the session's process serves");
+        let second = strategy
+            .execute(
+                count.as_ref(),
+                "count",
+                &serde_json::json!({}),
+                &call(session_a),
+            )
+            .await
+            .expect("serves again");
+        let other = strategy
+            .execute(
+                count.as_ref(),
+                "count",
+                &serde_json::json!({}),
+                &call(session_b),
+            )
+            .await
+            .expect("the other session's process serves");
+        assert_eq!(first["count"], 1);
+        assert_eq!(second["count"], 2);
+        assert_eq!(other["count"], 1);
+        assert_eq!(first["session"], session_a.to_string());
+        assert_ne!(first["pid"], other["pid"]);
+        let listed = state.plugins.summary("counter").unwrap();
+        assert_eq!(listed.sessions.len(), 2);
+
+        state.plugins.stop_session(session_a).await;
+        assert_eq!(
+            state.plugins.summary("counter").unwrap().sessions,
+            vec![session_b.to_string()]
+        );
+        state.plugins.shutdown().await;
+        assert!(
+            state
+                .plugins
+                .summary("counter")
+                .unwrap()
+                .sessions
+                .is_empty()
+        );
+
+        // The events: a start for each session, a stop for the closed
+        // session and one for the shutdown. They are written off the call
+        // path, so wait for them.
+        let events = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let events = storage
+                    .list_audit_events_by_session(session_a)
+                    .await
+                    .unwrap();
+                let kinds: Vec<&str> = events
+                    .iter()
+                    .map(|event| event.event_kind.as_str())
+                    .collect();
+                if kinds.contains(&"plugin_process_stopped") {
+                    break kinds
+                        .iter()
+                        .map(|kind| (*kind).to_owned())
+                        .collect::<Vec<_>>();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the process events are recorded");
+        assert!(
+            events.contains(&"plugin_process_started".to_owned()),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_process_plugin_is_refused_outside_a_turn_s_placement() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let state = AppState::new_with_config_root(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(Vec::new())),
+            swage_config::ResolvedConfig::default(),
+            ToolDispatcher::allow_all(Vec::new()),
+            None,
+            dir.path().to_path_buf(),
+        );
+        let source = dir.path().join("src");
+        write_package(&source);
+        state
+            .plugins
+            .install(&source, &[], None)
+            .await
+            .expect("installs");
+        let count = Arc::clone(&state.plugins.tools()[0]);
+        let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
+        let strategy = GatewayExecutionStrategy::new(
+            None,
+            ws_tx,
+            None,
+            Arc::new(crate::secret::SecretManager::new(
+                Arc::clone(&storage) as Arc<dyn Storage>
+            )),
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Some(state.clone()),
+        );
+        let mut ctx = MockToolContext::new("agent-a", Uuid::new_v4().to_string());
+        ctx.call_id = Some("call-count".into());
+        let error = strategy
+            .execute(count.as_ref(), "count", &serde_json::json!({}), &ctx)
+            .await
+            .expect_err("refused");
+        assert!(error.to_string().contains("process placement"), "{error}");
+        assert!(
+            state
+                .plugins
+                .summary("counter")
+                .unwrap()
+                .sessions
+                .is_empty()
+        );
     }
 }

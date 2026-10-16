@@ -935,6 +935,41 @@ that call, and a failure in it is that call's failure. An isolate that
 crosses a limit is terminated, the termination recorded, and the plugin
 starts afresh on its next call.
 
+A plugin that needs a real runtime — packages, native code, a long-lived
+driver — declares a `[process]` instead of a script: a command in the
+package the gateway starts for a session on its first call to one of the
+plugin's tools, keeps for that session, and stops when the session closes,
+after `idle_secs` without a call (300 by default), or when the gateway
+stops — each stop announced to the process with its reason, and recorded
+as `plugin_process_started`, `plugin_process_stopped` and
+`plugin_process_exited` audit events. The process runs inside the same
+sandbox the session's turn runs its commands in, and speaks the
+plugin-process contract over the Unix socket named in
+`SWAGE_PLUGIN_SOCKET`: one JSON object per line — it announces its tools
+(`{"kind":"ready","tools":[…]}`), answers each `invoke` with a `result` or
+a `failure`, and asks the gateway for anything it needs with a `call`
+(`callTool`, `log`) that is answered under the plugin's grants exactly as
+the isolate's door is. The contract is the `plugin-process` schema under
+`crates/swage-protocol/schema/`; `crates/swage-plugin/src/bin/
+swage-plugin-fixture.rs` is a complete process written against it.
+
+```toml
+name = "driver"
+version = "1.0.0"
+description = "Drives a browser it keeps for the session."
+grants = ["tools"]
+
+[process]
+command = "driver"
+args = ["--serve"]
+idle_secs = 600
+
+[[provides.tools]]
+name = "driver_open"
+description = "Open a page in the session's browser."
+parameters = { type = "object", properties = { url = { type = "string" } }, required = ["url"] }
+```
+
 A plugin is enabled for the whole install or for one topic (`PUT
 /api/plugins/{name}/enablement`); a session in a scope that does not enable
 it does not see its tools.

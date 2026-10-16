@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use ts_rs::TS;
 
-use swage_protocol::{channel, client, device, hosting};
+use swage_protocol::{channel, client, device, hosting, plugin};
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -429,6 +429,11 @@ fn channel_schema_is_regenerated() {
 #[test]
 fn hosting_schema_is_regenerated() {
     write_schema::<hosting::HostingSurface>("hosting.json");
+}
+
+#[test]
+fn plugin_process_schema_is_regenerated() {
+    write_schema::<plugin::PluginProcessSurface>("plugin-process.json");
 }
 
 fn write_schema<T: schemars::JsonSchema>(name: &str) {

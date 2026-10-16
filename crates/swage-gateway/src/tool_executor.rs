@@ -39,6 +39,10 @@ pub struct GatewayToolContext {
     /// session's behalf: the turn's registry, permissions and execution
     /// strategy, so a nested call meets the gates the model's own would.
     session_dispatcher: Option<Arc<ToolDispatcher>>,
+    /// Where the turn places a process started on the session's behalf (a
+    /// plugin's brokered process): the sandbox its commands run in, or
+    /// none where the turn runs without one.
+    process_placement: Option<Arc<crate::plugin::process::ProcessPlacement>>,
 }
 
 impl GatewayToolContext {
@@ -53,7 +57,24 @@ impl GatewayToolContext {
             storage,
             app_state: None,
             session_dispatcher: None,
+            process_placement: None,
         }
+    }
+
+    /// Attach where the turn places processes started on the session's
+    /// behalf.
+    pub fn with_process_placement(
+        mut self,
+        placement: Option<Arc<crate::plugin::process::ProcessPlacement>>,
+    ) -> Self {
+        self.process_placement = placement;
+        self
+    }
+
+    /// Where the turn places processes started on the session's behalf,
+    /// when this context was built inside a turn.
+    pub fn process_placement(&self) -> Option<&Arc<crate::plugin::process::ProcessPlacement>> {
+        self.process_placement.as_ref()
     }
 
     /// Attach the live gateway state to a context. Used on the host turn path
@@ -200,6 +221,8 @@ pub struct GatewayExecutionStrategy {
     /// own dispatcher, over a strategy of this shape. Set by the turn's
     /// build; `None` where no nested call can be gated, which refuses it.
     session_dispatcher: Option<Arc<ToolDispatcher>>,
+    /// Where this turn places processes started on the session's behalf.
+    process_placement: Option<Arc<crate::plugin::process::ProcessPlacement>>,
 }
 
 impl GatewayExecutionStrategy {
@@ -219,12 +242,22 @@ impl GatewayExecutionStrategy {
             storage,
             app_state,
             session_dispatcher: None,
+            process_placement: None,
         }
     }
 
     /// Hand host-side tools a dispatcher for the session's own calls.
     pub fn with_session_dispatcher(mut self, dispatcher: Arc<ToolDispatcher>) -> Self {
         self.session_dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Where this turn places processes started on the session's behalf.
+    pub fn with_process_placement(
+        mut self,
+        placement: Arc<crate::plugin::process::ProcessPlacement>,
+    ) -> Self {
+        self.process_placement = Some(placement);
         self
     }
 }
@@ -246,7 +279,8 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
         let gateway_ctx =
             GatewayToolContext::new(ctx, self.ws_tx.clone(), Arc::clone(&self.storage))
                 .with_app_state(self.app_state.clone())
-                .with_session_dispatcher(self.session_dispatcher.clone());
+                .with_session_dispatcher(self.session_dispatcher.clone())
+                .with_process_placement(self.process_placement.clone());
 
         if let Some(device) = self
             .device

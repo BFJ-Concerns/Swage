@@ -292,6 +292,24 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         state.clone(),
         background_shutdown.clone(),
     );
+    // A plugin's brokered process that has sat idle for its manifest's
+    // period is stopped here; session close and gateway stop are the other
+    // two ends.
+    let plugin_idle_handle = {
+        let state = state.clone();
+        crate::background_loop::spawn_periodic_loop(
+            std::time::Duration::from_secs(30),
+            background_shutdown.clone(),
+            "plugin process idle sweep failed",
+            move || {
+                let state = state.clone();
+                async move {
+                    state.plugins.sweep_idle().await;
+                    Ok(())
+                }
+            },
+        )
+    };
     let browser_idle_handle = browser_host.clone().map(|browser_host| {
         crate::background_loop::spawn_periodic_loop(
             std::time::Duration::from_secs(30),
@@ -387,6 +405,10 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         }
     }
 
+    if let Err(error) = plugin_idle_handle.await {
+        warn!(%error, "background plugin idle loop did not shut down cleanly");
+    }
+    state.plugins.shutdown().await;
     if let Some(browser_host) = browser_host {
         browser_host.shutdown().await;
     }

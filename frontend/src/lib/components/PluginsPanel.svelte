@@ -97,6 +97,17 @@
     return plugin.enabled_for_install ? "enabled by the install" : "not enabled";
   }
 
+  /** How the plugin runs, and for a process plugin which sessions have one. */
+  function runsAs(plugin: PluginSummary): string {
+    if (plugin.profile === "process") {
+      const count = plugin.sessions.length;
+      return count === 0
+        ? "A process per session, started on the session's first call; none serving now"
+        : `A process per session; serving ${count} ${count === 1 ? "session" : "sessions"}`;
+    }
+    return "A script in its own isolate";
+  }
+
   function serviceLabel(plugin: PluginSummary): string {
     switch (plugin.service.state) {
       case "serving":
@@ -193,6 +204,7 @@
 
           <dl>
             <div><dt>Description</dt><dd>{selected.description || "Not provided"}</dd></div>
+            <div><dt>Runs as</dt><dd>{runsAs(selected)}</dd></div>
             <div><dt>Service</dt><dd>{serviceLabel(selected)}</dd></div>
             <div>
               <dt>Tools</dt>

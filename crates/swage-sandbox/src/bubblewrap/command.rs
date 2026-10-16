@@ -71,6 +71,78 @@ pub(crate) fn build_bwrap_command_with_path(
     socket_path: &Path,
     agent_binary: &Path,
 ) -> Result<Command, SandboxError> {
+    let mut cmd = bwrap_command_prefix(bwrap_path, config, socket_path);
+    // Expose the IPC socket path to the agent process via the environment.
+    cmd.arg("--setenv")
+        .arg("SWAGE_IPC_SOCKET")
+        .arg(socket_path.as_os_str());
+    let config_json = serde_json::to_string(config).map_err(|error| SandboxError::SpawnFailed {
+        message: format!("failed to serialise sandbox config for child Landlock setup: {error}"),
+    })?;
+    cmd.arg("--setenv")
+        .arg("SWAGE_SANDBOX_CONFIG_JSON")
+        .arg(config_json);
+
+    // Separator then the agent binary, instructing it to enter sandbox mode.
+    cmd.arg("--").arg(agent_binary).arg("--sandbox-mode");
+
+    Ok(cmd)
+}
+
+/// The `bwrap` command that runs `program` with `args` inside the sandbox
+/// `config` describes — the same namespaces, read-only root, virtual
+/// filesystems and mounts the agent gets — with the socket at
+/// `socket_path` bound in and named as `socket_env` in the environment,
+/// `env` set, and the program's own directory as its working directory:
+/// for a process that is not the agent, such as a plugin's brokered
+/// process.
+pub fn build_bwrap_command_for(
+    config: &SandboxConfig,
+    socket_path: &Path,
+    socket_env: &str,
+    program: &Path,
+    args: &[String],
+    env: &[(String, String)],
+) -> Result<Command, SandboxError> {
+    let bwrap_path = find_bwrap()?;
+    Ok(build_bwrap_command_for_with_path(
+        &bwrap_path,
+        config,
+        socket_path,
+        socket_env,
+        program,
+        args,
+        env,
+    ))
+}
+
+pub(crate) fn build_bwrap_command_for_with_path(
+    bwrap_path: &Path,
+    config: &SandboxConfig,
+    socket_path: &Path,
+    socket_env: &str,
+    program: &Path,
+    args: &[String],
+    env: &[(String, String)],
+) -> Command {
+    let mut cmd = bwrap_command_prefix(bwrap_path, config, socket_path);
+    cmd.arg("--setenv")
+        .arg(socket_env)
+        .arg(socket_path.as_os_str());
+    for (name, value) in env {
+        cmd.arg("--setenv").arg(name).arg(value);
+    }
+    if let Some(root) = program.parent() {
+        cmd.arg("--chdir").arg(root);
+    }
+    cmd.arg("--").arg(program).args(args);
+    cmd
+}
+
+/// The sandbox itself — namespaces, the read-only root, the virtual
+/// filesystems, the socket file, the working directory and the mounts —
+/// before the program it will run.
+fn bwrap_command_prefix(bwrap_path: &Path, config: &SandboxConfig, socket_path: &Path) -> Command {
     let mut cmd = Command::new(bwrap_path);
 
     // Isolate all namespaces (PID, network, mount, user, IPC, UTS).
@@ -112,21 +184,7 @@ pub(crate) fn build_bwrap_command_with_path(
         cmd.arg("--ro-bind").arg(p).arg(p);
     }
 
-    // Expose the IPC socket path to the agent process via the environment.
-    cmd.arg("--setenv")
-        .arg("SWAGE_IPC_SOCKET")
-        .arg(socket_path.as_os_str());
-    let config_json = serde_json::to_string(config).map_err(|error| SandboxError::SpawnFailed {
-        message: format!("failed to serialise sandbox config for child Landlock setup: {error}"),
-    })?;
-    cmd.arg("--setenv")
-        .arg("SWAGE_SANDBOX_CONFIG_JSON")
-        .arg(config_json);
-
-    // Separator then the agent binary, instructing it to enter sandbox mode.
-    cmd.arg("--").arg(agent_binary).arg("--sandbox-mode");
-
-    Ok(cmd)
+    cmd
 }
 
 // ---------------------------------------------------------------------------

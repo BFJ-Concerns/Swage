@@ -1,5 +1,6 @@
-//! A plugin package on disk: the manifest and the script it names, read from
-//! a directory and copied into an install root by name and revision.
+//! A plugin package on disk: the manifest and the script or process command
+//! it names, read from a directory and copied into an install root by name
+//! and revision.
 
 use std::path::{Path, PathBuf};
 
@@ -15,6 +16,10 @@ pub enum PackageError {
     NotADirectory { path: PathBuf },
     #[error("plugin package {path} names script {script}, which is not a file in the package")]
     MissingScript { path: PathBuf, script: String },
+    #[error(
+        "plugin package {path} names process command {command}, which is not a file in the package"
+    )]
+    MissingCommand { path: PathBuf, command: String },
     #[error("plugin {name} revision {revision} is already installed at {path}")]
     AlreadyInstalled {
         name: String,
@@ -27,16 +32,29 @@ pub enum PackageError {
     SymbolicLink { path: PathBuf, link: PathBuf },
 }
 
-/// A package read from a directory: its manifest and script source.
+/// A package read from a directory: its manifest and, for an isolate
+/// plugin, its script source. A process plugin's command is a file under
+/// `root`, checked here and run from the installed copy.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PluginPackage {
     pub root: PathBuf,
     pub manifest: PluginManifest,
-    pub script: String,
+    pub script: Option<String>,
+}
+
+impl PluginPackage {
+    /// The process command's path under this package's root, for a process
+    /// plugin.
+    pub fn command_path(&self) -> Option<PathBuf> {
+        self.manifest
+            .process
+            .as_ref()
+            .map(|process| self.root.join(&process.command))
+    }
 }
 
 /// Read the package at `root`: the manifest at [`MANIFEST_FILE`], validated,
-/// and the script it names.
+/// and the script or process command it names.
 pub fn read_package(root: &Path) -> Result<PluginPackage, PackageError> {
     if !root.is_dir() {
         return Err(PackageError::NotADirectory {
@@ -49,17 +67,32 @@ pub fn read_package(root: &Path) -> Result<PluginPackage, PackageError> {
             message: error.to_string(),
         })?;
     let manifest = PluginManifest::parse(&manifest_text)?;
-    let script_path = root.join(&manifest.script);
-    if !script_path.is_file() {
-        return Err(PackageError::MissingScript {
+    let script = match &manifest.script {
+        Some(script) => {
+            let script_path = root.join(script);
+            if !script_path.is_file() {
+                return Err(PackageError::MissingScript {
+                    path: root.to_path_buf(),
+                    script: script.clone(),
+                });
+            }
+            Some(
+                std::fs::read_to_string(&script_path).map_err(|error| PackageError::Io {
+                    path: script_path,
+                    message: error.to_string(),
+                })?,
+            )
+        }
+        None => None,
+    };
+    if let Some(process) = &manifest.process
+        && !root.join(&process.command).is_file()
+    {
+        return Err(PackageError::MissingCommand {
             path: root.to_path_buf(),
-            script: manifest.script.clone(),
+            command: process.command.clone(),
         });
     }
-    let script = std::fs::read_to_string(&script_path).map_err(|error| PackageError::Io {
-        path: script_path,
-        message: error.to_string(),
-    })?;
     Ok(PluginPackage {
         root: root.to_path_buf(),
         manifest,
@@ -163,7 +196,37 @@ mod tests {
         write_package(dir.path());
         let package = read_package(dir.path()).expect("reads");
         assert_eq!(package.manifest.name, "echo");
-        assert!(package.script.contains("swage.provide.tool"));
+        assert!(
+            package
+                .script
+                .as_deref()
+                .unwrap()
+                .contains("swage.provide.tool")
+        );
+        assert_eq!(package.command_path(), None);
+    }
+
+    #[test]
+    fn a_process_package_names_a_command_that_must_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        write_package(dir.path());
+        std::fs::write(
+            dir.path().join(MANIFEST_FILE),
+            MANIFEST.replace(
+                r#"script = "src/plugin.js""#,
+                "[process]\ncommand = \"src/server\"\n",
+            ),
+        )
+        .unwrap();
+        let error = read_package(dir.path()).expect_err("refused");
+        assert!(
+            matches!(&error, PackageError::MissingCommand { command, .. } if command == "src/server"),
+            "{error}"
+        );
+        std::fs::write(dir.path().join("src/server"), "#!/bin/sh\n").unwrap();
+        let package = read_package(dir.path()).expect("reads");
+        assert_eq!(package.script, None);
+        assert_eq!(package.command_path(), Some(dir.path().join("src/server")));
     }
 
     #[test]

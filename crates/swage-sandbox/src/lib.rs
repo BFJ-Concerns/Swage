@@ -38,6 +38,7 @@ pub(crate) fn resolve_agent_binary() -> Result<PathBuf, SandboxError> {
 
 pub use agent_loop::run_agent_loop;
 pub use bubblewrap::BubblewrapSandbox;
+pub use bubblewrap::build_bwrap_command_for;
 pub use bubblewrap::find_bwrap;
 pub use config::{SandboxConfig, SandboxConfigError};
 pub use fallback::FallbackSandbox;

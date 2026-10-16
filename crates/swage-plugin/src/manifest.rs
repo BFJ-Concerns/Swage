@@ -119,6 +119,48 @@ impl IsolateLimitsDeclaration {
     }
 }
 
+/// A process the gateway starts for a session on its first call and stops
+/// when the session closes, after `idle_secs` without a call, or when the
+/// gateway stops.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessDeclaration {
+    /// The executable, relative to the package root.
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// How long the process may go without a call before it is stopped.
+    #[serde(default = "default_idle_secs")]
+    pub idle_secs: u64,
+}
+
+fn default_idle_secs() -> u64 {
+    300
+}
+
+impl ProcessDeclaration {
+    pub fn idle(&self) -> Duration {
+        Duration::from_secs(self.idle_secs)
+    }
+}
+
+/// How a plugin runs: in an isolate the kernel builds, or as a process the
+/// gateway brokers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Profile {
+    Isolate,
+    Process,
+}
+
+impl Profile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Profile::Isolate => "isolate",
+            Profile::Process => "process",
+        }
+    }
+}
+
 /// `plugin.toml`, parsed and validated.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -127,8 +169,15 @@ pub struct PluginManifest {
     pub name: String,
     pub version: String,
     pub description: String,
-    /// The script file, relative to the package root.
-    pub script: String,
+    /// The script file, relative to the package root: the plugin runs in an
+    /// isolate. Exactly one of `script` and `process` is declared.
+    #[serde(default)]
+    pub script: Option<String>,
+    /// A process the gateway brokers per session: the plugin runs as that
+    /// process, which speaks the plugin-process contract over a socket.
+    /// Exactly one of `script` and `process` is declared.
+    #[serde(default)]
+    pub process: Option<ProcessDeclaration>,
     #[serde(default)]
     pub grants: Vec<HostGrant>,
     #[serde(default)]
@@ -158,6 +207,15 @@ impl PluginManifest {
         self.grants.contains(&grant)
     }
 
+    /// How the plugin runs; validation guarantees exactly one declaration.
+    pub fn profile(&self) -> Profile {
+        if self.process.is_some() {
+            Profile::Process
+        } else {
+            Profile::Isolate
+        }
+    }
+
     fn validate(&self) -> Result<(), ManifestError> {
         validate_plugin_name(&self.name)?;
         if self.version.trim().is_empty() {
@@ -168,7 +226,29 @@ impl PluginManifest {
                 "description must not be empty".into(),
             ));
         }
-        validate_relative_file(&self.script, "script")?;
+        match (&self.script, &self.process) {
+            (Some(script), None) => validate_relative_file(script, "script")?,
+            (None, Some(process)) => {
+                validate_relative_file(&process.command, "process.command")?;
+                if process.idle_secs == 0 {
+                    return Err(ManifestError::Invalid(
+                        "process.idle_secs must be positive".into(),
+                    ));
+                }
+            }
+            (Some(_), Some(_)) => {
+                return Err(ManifestError::Invalid(
+                    "declare either script (an isolate) or [process] (a brokered process), not both"
+                        .into(),
+                ));
+            }
+            (None, None) => {
+                return Err(ManifestError::Invalid(
+                    "declare how the plugin runs: script (an isolate) or [process] (a brokered process)"
+                        .into(),
+                ));
+            }
+        }
         if self.provides.is_empty() {
             return Err(ManifestError::Invalid(
                 "the plugin provides nothing: declare at least one tool under [[provides.tools]]"
@@ -371,6 +451,45 @@ mod tests {
         assert!(
             matches!(&error, ManifestError::Parse(message) if message.contains("channels")),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_declares_exactly_one_way_to_run() {
+        let neither = PluginManifest::parse(&ECHO.replace(r#"script = "plugin.js""#, ""))
+            .expect_err("refused");
+        assert!(
+            matches!(&neither, ManifestError::Invalid(message) if message.contains("script") && message.contains("[process]")),
+            "{neither}"
+        );
+        let both = PluginManifest::parse(&format!("{ECHO}\n[process]\ncommand = \"server\"\n"))
+            .expect_err("refused");
+        assert!(
+            matches!(&both, ManifestError::Invalid(message) if message.contains("not both")),
+            "{both}"
+        );
+    }
+
+    #[test]
+    fn a_process_plugin_names_its_command_and_defaults_its_idle_period() {
+        let manifest = PluginManifest::parse(&format!(
+            "{}\n[process]\ncommand = \"server.py\"\nargs = [\"--serve\"]\n",
+            ECHO.replace(r#"script = "plugin.js""#, "")
+        ))
+        .expect("parses");
+        assert_eq!(manifest.profile(), Profile::Process);
+        let process = manifest.process.as_ref().expect("declared");
+        assert_eq!(process.command, "server.py");
+        assert_eq!(process.args, vec!["--serve"]);
+        assert_eq!(process.idle(), Duration::from_secs(300));
+        let absolute = PluginManifest::parse(&format!(
+            "{}\n[process]\ncommand = \"/usr/bin/server\"\n",
+            ECHO.replace(r#"script = "plugin.js""#, "")
+        ))
+        .expect_err("refused");
+        assert!(
+            matches!(&absolute, ManifestError::Invalid(message) if message.contains("process.command")),
+            "{absolute}"
         );
     }
 

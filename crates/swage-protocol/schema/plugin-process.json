@@ -1,0 +1,275 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PluginProcessSurface",
+  "type": "object",
+  "properties": {
+    "message": {
+      "$ref": "#/$defs/PluginProcessMessage"
+    },
+    "request": {
+      "$ref": "#/$defs/PluginProcessRequest"
+    }
+  },
+  "required": [
+    "request",
+    "message"
+  ],
+  "$defs": {
+    "PluginCallContext": {
+      "description": "Where a tool call comes from, as the plugin's handler sees it.",
+      "type": "object",
+      "properties": {
+        "agentId": {
+          "type": "string"
+        },
+        "callId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "workingDirectory": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessionId",
+        "agentId",
+        "workingDirectory"
+      ]
+    },
+    "PluginHostCallError": {
+      "description": "A host call's refusal or failure, by name and message.",
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "message"
+      ]
+    },
+    "PluginHostReply": {
+      "description": "The gateway's answer to a host call: a value, or an error by name.",
+      "type": "object",
+      "properties": {
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PluginHostCallError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "value": true
+      },
+      "required": [
+        "ok"
+      ]
+    },
+    "PluginProcessMessage": {
+      "description": "What the process sends the gateway.",
+      "oneOf": [
+        {
+          "description": "The process's first message: the tools it serves. A tool the\nmanifest declares that is missing here fails the start.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "ready"
+            },
+            "tools": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "tools"
+          ]
+        },
+        {
+          "description": "The invocation `id` succeeded with `value`.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "result"
+            },
+            "value": true
+          },
+          "required": [
+            "kind",
+            "id",
+            "value"
+          ]
+        },
+        {
+          "description": "The invocation `id` failed.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "failure"
+            },
+            "message": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "name",
+            "message"
+          ]
+        },
+        {
+          "description": "A host call made while serving `invocation`: `name` and `payload`\nas the plugin isolate's door takes them (`callTool` with\n`{ \"name\", \"arguments\" }`, `log` with a string). The gateway\nanswers with a `reply` carrying the same `id`.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "invocation": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "call"
+            },
+            "name": {
+              "type": "string"
+            },
+            "payload": true
+          },
+          "required": [
+            "kind",
+            "id",
+            "invocation",
+            "name",
+            "payload"
+          ]
+        }
+      ]
+    },
+    "PluginProcessRequest": {
+      "description": "What the gateway sends the process.",
+      "oneOf": [
+        {
+          "description": "Run a tool the plugin provides; the process answers with a `result`\nor a `failure` carrying the same `id`.",
+          "type": "object",
+          "properties": {
+            "context": {
+              "$ref": "#/$defs/PluginCallContext"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "invoke"
+            },
+            "params": true,
+            "tool": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "tool",
+            "params",
+            "context"
+          ]
+        },
+        {
+          "description": "The answer to a host call the process made, by the call's `id`.",
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "reply"
+            },
+            "reply": {
+              "$ref": "#/$defs/PluginHostReply"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "reply"
+          ]
+        },
+        {
+          "description": "The process is being stopped and has the gateway's grace period to\nexit; after it the process is killed.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "stop"
+            },
+            "reason": {
+              "$ref": "#/$defs/PluginProcessStopReason"
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
+          ]
+        }
+      ]
+    },
+    "PluginProcessStopReason": {
+      "description": "Why the gateway is stopping the process.",
+      "oneOf": [
+        {
+          "description": "The session the process served has closed.",
+          "type": "string",
+          "const": "session_closed"
+        },
+        {
+          "description": "Nothing called the process for the manifest's idle period.",
+          "type": "string",
+          "const": "idle"
+        },
+        {
+          "description": "The gateway is stopping.",
+          "type": "string",
+          "const": "gateway_stopping"
+        },
+        {
+          "description": "A newer revision of the plugin was installed.",
+          "type": "string",
+          "const": "superseded"
+        }
+      ]
+    }
+  }
+}

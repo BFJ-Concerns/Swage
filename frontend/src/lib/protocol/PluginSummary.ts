@@ -35,4 +35,13 @@ enabled_topics: Array<string>,
 /**
  * Topics that disable it on their own, over the install's answer.
  */
-disabled_topics: Array<string>, service: PluginServiceState, };
+disabled_topics: Array<string>, service: PluginServiceState,
+/**
+ * How the plugin runs: `isolate` (a script in a V8 isolate the kernel
+ * builds) or `process` (a process the gateway brokers per session).
+ */
+profile: string,
+/**
+ * For a process plugin, the sessions with a process serving now.
+ */
+sessions: Array<string>, };

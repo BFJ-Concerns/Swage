@@ -12,6 +12,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use chromiumoxide::cdp::browser_protocol::accessibility::{
     AxNode, EnableParams, GetFullAxTreeParams, QueryAxTreeParams,
 };
@@ -29,6 +30,8 @@ use serde::Deserialize;
 use serde_json::json;
 use swage_config::{BrowserScreenshotPolicy, BrowserToolConfig};
 use swage_core::ToolError;
+use swage_plugin::{Held, ProcessKeeper};
+use swage_protocol::plugin::PluginProcessStopReason;
 use swage_sandbox::{ChildProcessManager, cleanup_failed_startup_process};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -39,6 +42,8 @@ use render::{element_reference, parse_reference_snapshot, tail_truncate};
 
 const DEFAULT_PROFILE: &str = "default";
 const LOAD_SETTLE: Duration = Duration::from_secs(1);
+/// The one Chromium is the install's, shared by every session's pages.
+const INSTALL_SCOPE: &str = "install";
 
 #[derive(Debug, Clone)]
 pub struct BrowserConfig {
@@ -93,18 +98,48 @@ pub struct BrowserActionAudit {
 pub struct BrowserHost {
     config: BrowserConfig,
     inner: Mutex<BrowserState>,
+    /// The Chromium process on the gateway's shared process lifecycle:
+    /// started on the first navigation, stopped after `process_idle`
+    /// without a page in use and at gateway stop.
+    processes: ProcessKeeper<BrowserProcess>,
 }
 
 struct BrowserState {
-    process: Option<BrowserProcess>,
     sessions: HashMap<String, PageSession>,
 }
 
 struct BrowserProcess {
-    child: ChildProcessManager,
-    browser: Browser,
-    handler: JoinHandle<()>,
-    last_used: Instant,
+    pid: u32,
+    child: Mutex<ChildProcessManager>,
+    browser: Mutex<Browser>,
+    handler: std::sync::Mutex<Option<JoinHandle<()>>>,
+}
+
+#[async_trait]
+impl Held for BrowserProcess {
+    async fn stop(&self, reason: PluginProcessStopReason) {
+        if let Err(error) = self.browser.lock().await.close().await {
+            debug!(%error, ?reason, "browser CDP close failed");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if let Some(handler) = self
+            .handler
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            handler.abort();
+        }
+        if let Err(error) = self
+            .child
+            .lock()
+            .await
+            .graceful_shutdown(Duration::from_secs(2))
+            .await
+        {
+            warn!(%error, ?reason, "browser process did not shut down cleanly");
+        }
+    }
 }
 
 struct PageSession {
@@ -118,68 +153,82 @@ struct PageSession {
 
 impl BrowserHost {
     pub fn new(config: BrowserConfig) -> Arc<Self> {
+        let process_idle = config.process_idle;
         Arc::new(Self {
             config,
             inner: Mutex::new(BrowserState {
-                process: None,
                 sessions: HashMap::new(),
             }),
+            processes: ProcessKeeper::new(process_idle),
         })
     }
 
     pub async fn shutdown(&self) {
-        let mut state = self.inner.lock().await;
-        state.sessions.clear();
-        if let Some(mut process) = state.process.take() {
-            if let Err(error) = process.browser.close().await {
-                debug!(%error, "browser CDP close failed during shutdown");
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            process.handler.abort();
-            if let Err(error) = process
-                .child
-                .graceful_shutdown(Duration::from_secs(2))
-                .await
-            {
-                warn!(%error, "browser process did not shut down cleanly");
-            }
-        }
+        self.inner.lock().await.sessions.clear();
+        self.processes
+            .stop_all(PluginProcessStopReason::GatewayStopping)
+            .await;
     }
 
     #[doc(hidden)]
     pub async fn browser_pid_for_tests(&self) -> Option<u32> {
-        self.inner
-            .lock()
+        self.processes
+            .current(INSTALL_SCOPE)
             .await
-            .process
-            .as_ref()
-            .map(|process| process.child.pid())
+            .map(|process| process.pid)
     }
 
+    /// Drop pages nobody has used for `page_idle`; with no page left, a
+    /// Chromium unused for `process_idle` stops.
     pub async fn sweep_idle(&self) {
-        let mut state = self.inner.lock().await;
         let now = Instant::now();
-        state
-            .sessions
-            .retain(|_, session| now.duration_since(session.last_used) < self.config.page_idle);
-        let should_stop_process = state.sessions.is_empty()
-            && state.process.as_ref().is_some_and(|process| {
-                now.duration_since(process.last_used) >= self.config.process_idle
-            });
-        if should_stop_process && let Some(mut process) = state.process.take() {
-            if let Err(error) = process.browser.close().await {
-                debug!(%error, "browser CDP close failed during idle sweep");
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            process.handler.abort();
-            if let Err(error) = process
-                .child
-                .graceful_shutdown(Duration::from_secs(2))
-                .await
-            {
-                warn!(%error, "idle browser process did not shut down cleanly");
-            }
+        let no_pages = {
+            let mut state = self.inner.lock().await;
+            state
+                .sessions
+                .retain(|_, session| now.duration_since(session.last_used) < self.config.page_idle);
+            state.sessions.is_empty()
+        };
+        if no_pages {
+            self.processes.sweep_idle(now).await;
         }
+    }
+
+    /// The install's Chromium, started on first use. A Chromium that died
+    /// since takes every page with it: the pages are dropped, the next
+    /// navigation starts afresh, and this call says so.
+    async fn ensure_process(&self) -> Result<Arc<BrowserProcess>, ToolError> {
+        let config = &self.config;
+        let process = self
+            .processes
+            .get_or_start(INSTALL_SCOPE, || async {
+                match spawn_browser(config, false).await {
+                    Ok(process) => Ok(process),
+                    Err(sandboxed_error) => {
+                        warn!(error = %sandboxed_error, "sandboxed Chromium launch failed; retrying with --no-sandbox");
+                        spawn_browser(config, true).await
+                    }
+                }
+            })
+            .await?;
+        if !process.child.lock().await.is_running() {
+            if let Some(handler) = process
+                .handler
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                handler.abort();
+            }
+            self.processes.forget(INSTALL_SCOPE, &process).await;
+            self.inner.lock().await.sessions.clear();
+            return Err(ToolError::ExecutionFailed {
+                name: "browser".to_string(),
+                message: "the browser restarted and page state was lost — navigate again"
+                    .to_string(),
+            });
+        }
+        Ok(process)
     }
 
     pub async fn navigate(
@@ -190,9 +239,9 @@ impl BrowserHost {
         let parsed = parse_browser_url(url)?;
         self.ensure_navigation_is_allowed(&parsed).await?;
 
+        let process = self.ensure_process().await?;
         let mut state = self.inner.lock().await;
-        state.ensure_process(&self.config).await?;
-        let page = state.ensure_page(session_id).await?;
+        let page = state.ensure_page(session_id, &process).await?;
         page.page
             .goto(NavigateParams::new(parsed.as_str()))
             .await
@@ -651,42 +700,16 @@ impl BrowserHost {
 }
 
 impl BrowserState {
-    async fn ensure_process(&mut self, config: &BrowserConfig) -> Result<(), ToolError> {
-        if let Some(process) = &mut self.process {
-            process.last_used = Instant::now();
-            if process.child.is_running() {
-                return Ok(());
-            }
-            process.handler.abort();
-            self.sessions.clear();
-            self.process = None;
-            return Err(ToolError::ExecutionFailed {
-                name: "browser".to_string(),
-                message: "the browser restarted and page state was lost — navigate again"
-                    .to_string(),
-            });
-        }
-
-        self.process = Some(match spawn_browser(config, false).await {
-            Ok(process) => process,
-            Err(sandboxed_error) => {
-                warn!(error = %sandboxed_error, "sandboxed Chromium launch failed; retrying with --no-sandbox");
-                spawn_browser(config, true).await?
-            }
-        });
-        Ok(())
-    }
-
-    async fn ensure_page(&mut self, session_id: &str) -> Result<&mut PageSession, ToolError> {
+    async fn ensure_page(
+        &mut self,
+        session_id: &str,
+        process: &BrowserProcess,
+    ) -> Result<&mut PageSession, ToolError> {
         if !self.sessions.contains_key(session_id) {
-            let Some(process) = &self.process else {
-                return Err(ToolError::ExecutionFailed {
-                    name: "browser".to_string(),
-                    message: "browser process is not available".to_string(),
-                });
-            };
             let page = process
                 .browser
+                .lock()
+                .await
                 .new_page("about:blank")
                 .await
                 .map_err(browser_error("browser", "failed to create browser page"))?;
@@ -738,7 +761,7 @@ impl PageSession {
 async fn spawn_browser(
     config: &BrowserConfig,
     no_sandbox: bool,
-) -> Result<BrowserProcess, ToolError> {
+) -> Result<Arc<BrowserProcess>, ToolError> {
     let binary = resolve_browser_binary(config.binary_path.as_deref())?;
     let profile = config.profile_root.join(DEFAULT_PROFILE);
     tokio::fs::create_dir_all(&profile)
@@ -794,12 +817,12 @@ async fn spawn_browser(
             }
         }
     });
-    Ok(BrowserProcess {
-        child,
-        browser,
-        handler,
-        last_used: Instant::now(),
-    })
+    Ok(Arc::new(BrowserProcess {
+        pid: child.pid(),
+        child: Mutex::new(child),
+        browser: Mutex::new(browser),
+        handler: std::sync::Mutex::new(Some(handler)),
+    }))
 }
 
 pub fn chromium_command(

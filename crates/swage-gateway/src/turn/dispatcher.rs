@@ -508,6 +508,20 @@ pub(crate) async fn build_gateway_dispatcher(
     let sandbox_build =
         build_turn_sandbox(state, config, agent_config, workspace_policy.as_ref()).await?;
     tracing::debug!(backend = ?sandbox_build.backend, "selected turn sandbox backend");
+    // A process started on the session's behalf — a plugin's brokered
+    // process — runs where the turn's commands run: inside the same sandbox
+    // policy under bubblewrap, plainly where the turn itself has no
+    // boundary (declared, disabled, or the permitted fallback).
+    let process_placement = Arc::new(match sandbox_build.backend {
+        SandboxBackend::Bubblewrap => crate::plugin::process::ProcessPlacement::sandboxed(
+            build_sandbox_config(agent_config, workspace_policy.as_ref()).map_err(|error| {
+                swage_core::SandboxError::SpawnFailed {
+                    message: format!("failed to build the process placement: {error}"),
+                }
+            })?,
+        ),
+        _ => crate::plugin::process::ProcessPlacement::plain(),
+    });
     let sandbox = sandbox_build.sandbox;
     let sandbox_guard = sandbox
         .as_ref()
@@ -539,14 +553,17 @@ pub(crate) async fn build_gateway_dispatcher(
             Arc::new(LeakDetector::default()),
             false,
         )
-        .with_execution_strategy(Arc::new(GatewayExecutionStrategy::new(
-            inner_strategy.clone(),
-            ws_tx.clone(),
-            device.clone(),
-            state.secret_manager.clone(),
-            state.storage.clone(),
-            Some(state.clone()),
-        ))),
+        .with_execution_strategy(Arc::new(
+            GatewayExecutionStrategy::new(
+                inner_strategy.clone(),
+                ws_tx.clone(),
+                device.clone(),
+                state.secret_manager.clone(),
+                state.storage.clone(),
+                Some(state.clone()),
+            )
+            .with_process_placement(Arc::clone(&process_placement)),
+        )),
     );
     Ok(GatewayDispatcherBuild {
         dispatcher: dispatcher.with_execution_strategy(Arc::new(
@@ -558,7 +575,8 @@ pub(crate) async fn build_gateway_dispatcher(
                 state.storage.clone(),
                 Some(state.clone()),
             )
-            .with_session_dispatcher(session_dispatcher),
+            .with_session_dispatcher(session_dispatcher)
+            .with_process_placement(process_placement),
         )),
         sandbox_guard,
         isolation: sandbox_build.isolation,

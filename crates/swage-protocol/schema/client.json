@@ -3389,7 +3389,7 @@
       "description": "Whether the plugin's isolate is up.",
       "oneOf": [
         {
-          "description": "The isolate serves calls.",
+          "description": "The isolate serves calls — or, for a process plugin, the gateway\nstarts a session's process on its first call.",
           "type": "object",
           "properties": {
             "state": {
@@ -3474,6 +3474,10 @@
         "name": {
           "type": "string"
         },
+        "profile": {
+          "description": "How the plugin runs: `isolate` (a script in a V8 isolate the kernel\nbuilds) or `process` (a process the gateway brokers per session).",
+          "type": "string"
+        },
         "provides": {
           "$ref": "#/$defs/PluginProvides"
         },
@@ -3497,6 +3501,13 @@
         },
         "service": {
           "$ref": "#/$defs/PluginServiceState"
+        },
+        "sessions": {
+          "description": "For a process plugin, the sessions with a process serving now.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "variant_of": {
           "description": "The function this plugin is a variant of, when it declares one.",
@@ -3522,7 +3533,9 @@
         "enabled_for_install",
         "enabled_topics",
         "disabled_topics",
-        "service"
+        "service",
+        "profile",
+        "sessions"
       ]
     },
     "PostWorkflowRunEventRequest": {

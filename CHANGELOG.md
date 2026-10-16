@@ -5,6 +5,12 @@ All notable changes to Swage are documented in this file.
 ## Unreleased
 
 ### Added
+- A plugin can run as a brokered process instead of a script: a `[process]` in
+  `plugin.toml` names a command the gateway starts per session on first use,
+  stops when the session closes, after an idle period or at gateway stop, and
+  runs inside the session's sandbox; the process speaks the plugin-process
+  contract (`swage-protocol`'s `plugin-process` schema) over a Unix socket, with
+  host calls answered under the plugin's grants as the isolate's are.
 
 - Plugins: a package directory with a `plugin.toml` manifest and a script installs from Settings → Plugins (or `POST /api/plugins`) into the data root as a new revision, loads in a V8 isolate of its own with heap and execution-time limits, and provides tools the model calls like built-ins. The manifest declares the tools, the host grants (`tools`), the secrets and the function the plugin is a variant of; the settings surface lists all of it with every revision, and enables a plugin for the install or for one topic (`PUT /api/plugins/{name}/enablement`) — a session elsewhere does not see its tools. A script reaches the session only through the host API: `swage.callTool` runs the named tool through the session's own dispatcher, under its grants, approvals and record, as a nested call. Installs, enablement changes and isolate terminations are audit events (`plugin_installed`, `plugin_enabled`, `plugin_disabled`, `plugin_terminated`).
 - Settings has a Memory tab listing every memory page, general and per topic, to read; a chat box there changes memory by instructing the curator, showing its reply and each page it changed. The curator's notice links open the page they name.

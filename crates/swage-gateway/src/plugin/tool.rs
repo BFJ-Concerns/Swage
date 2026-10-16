@@ -3,8 +3,10 @@
 //!
 //! `PluginTool` is an ordinary `Tool`: the dispatcher looks it up, checks the
 //! session's permissions, validates its parameters and records its call like
-//! any built-in's. Its `execute` hands the call to the plugin's isolate and
-//! supplies the host for that one call: a `callTool` from the script runs
+//! any built-in's. Its `execute` hands the call to the plugin's isolate — or
+//! to the session's brokered process, started on this first call where the
+//! turn places it — and supplies the host for that one call: a `callTool`
+//! from the plugin runs
 //! through the turn's own dispatcher — the same registry, permissions and
 //! execution strategy the model's calls meet — as a nested call recorded
 //! beneath the plugin's, so an effect a plugin raises is gated exactly as
@@ -15,9 +17,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 use swage_core::ToolError;
-use swage_plugin::{
-    HostCallFailure, InvocationContext, PluginError, PluginHost, PluginRuntime, ToolDeclaration,
-};
+use swage_plugin::{HostCallFailure, InvocationContext, PluginError, PluginHost, ToolDeclaration};
 use swage_python::NestedToolHost;
 use swage_storage::model::NewAuditEvent;
 use swage_tool::context::{ToolContext, serialise_tool_context};
@@ -32,7 +32,7 @@ pub struct PluginTool {
     /// Whether the plugin holds the `tools` grant, so a call needs the
     /// turn's dispatcher to answer it.
     calls_tools: bool,
-    runtime: Arc<PluginRuntime>,
+    execution: super::Execution,
 }
 
 impl PluginTool {
@@ -40,13 +40,13 @@ impl PluginTool {
         plugin: String,
         declaration: ToolDeclaration,
         calls_tools: bool,
-        runtime: Arc<PluginRuntime>,
+        execution: super::Execution,
     ) -> Self {
         Self {
             plugin,
             declaration,
             calls_tools,
-            runtime,
+            execution,
         }
     }
 
@@ -133,11 +133,28 @@ impl Tool for PluginTool {
             call_id: Some(call_id.clone()),
             working_directory: ctx.working_directory().display().to_string(),
         };
-        match self
-            .runtime
-            .invoke_tool(&self.declaration.name, &params, &context, host)
-            .await
-        {
+        let outcome = match &self.execution {
+            super::Execution::Isolate(runtime) => {
+                runtime
+                    .invoke_tool(&self.declaration.name, &params, &context, host)
+                    .await
+            }
+            super::Execution::Process(plugin) => {
+                // The process runs where the turn places it; without a
+                // placement there is no boundary to run it under.
+                let placement = gateway_ctx.process_placement().ok_or_else(|| {
+                    failed(
+                        "the turn's process placement is not reachable from this call, so the plugin's process cannot be started"
+                            .to_owned(),
+                    )
+                })?;
+                let launcher = super::process::GatewayProcessLauncher::new(Arc::clone(placement));
+                plugin
+                    .invoke_tool(&self.declaration.name, &params, &context, host, &launcher)
+                    .await
+            }
+        };
+        match outcome {
             Ok(value) => Ok(value),
             Err(PluginError::Terminated(termination)) => {
                 let session_id = ctx.session_id().parse::<Uuid>().ok();
@@ -340,7 +357,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let runtime = PluginRuntime::start(
+        let runtime = swage_plugin::PluginRuntime::start(
             manifest.clone(),
             r#"swage.provide.tool("probe", async () => {
                 const ran = await swage.callTool("probe_shell", {});
@@ -358,7 +375,7 @@ mod tests {
             "probe".into(),
             manifest.provides.tools[0].clone(),
             true,
-            runtime,
+            super::super::Execution::Isolate(runtime),
         );
 
         let mut registry = ToolRegistry::new();
@@ -452,7 +469,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let runtime = PluginRuntime::start(
+        let runtime = swage_plugin::PluginRuntime::start(
             manifest.clone(),
             r#"swage.provide.tool("probe", async () => swage.callTool("probe_shell", {}));"#
                 .to_owned(),
@@ -463,7 +480,7 @@ mod tests {
             "probe".into(),
             manifest.provides.tools[0].clone(),
             true,
-            runtime,
+            super::super::Execution::Isolate(runtime),
         );
         let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
         let strategy = GatewayExecutionStrategy::new(

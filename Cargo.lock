@@ -3595,11 +3595,15 @@ dependencies = [
  "serde",
  "serde_json",
  "swage-isolate",
+ "swage-protocol",
+ "swage-sandbox",
  "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",
  "toml",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
