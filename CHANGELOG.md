@@ -45,6 +45,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Topic tags, library tags and the library catalogue's tag filter follow one rule: tags are trimmed, lower-cased and kept once, so a tag saved in any spelling matches a filter in any other. Annotation tags keep their case.
+
 - Browser navigation keeps working after settings or grant changes, retaining the logged-in profile; startup timeouts explain how to recover.
 
 - Oversized browser snapshots retain the opening paragraph of main article content instead of eliding it.
