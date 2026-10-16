@@ -548,8 +548,8 @@ fn run_script(
     variables: &BTreeMap<String, String>,
     timeout: Duration,
 ) -> Result<ScriptOutcome, String> {
-    // The isolate cages the engine (no `Date`, `eval` or `Math.random`, so
-    // wall-clock time and randomness are constructively absent) and bounds
+    // The isolate cages the engine (no `Date` or `Math.random`, so wall-clock
+    // time and randomness are constructively absent) and bounds
     // the script: `timeout` is the fail-open boundary a runaway script hits,
     // terminated so the default assembly can serve.
     let mut program = Program::new(

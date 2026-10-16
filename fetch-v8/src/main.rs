@@ -140,7 +140,7 @@ fn read_pin(path: &Path, target: &str) -> Result<Pin> {
     let version = table
         .get("version")
         .and_then(toml::Value::as_str)
-        .ok_or("{PIN_FILE} has no `version`")?
+        .ok_or_else(|| format!("{PIN_FILE} has no `version`"))?
         .to_owned();
     let archive = table
         .get("archive")
