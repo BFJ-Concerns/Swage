@@ -122,6 +122,12 @@ pub trait Tool: Send + Sync {
         swage_protocol::client::conversation::ToolExecution::succeeded()
     }
 
+    /// Check arguments before any work. An error here records a refusal
+    /// without execution. Implementations must perform no I/O in this hook.
+    fn validate_call(&self, _params: &Value) -> Result<(), ToolError> {
+        Ok(())
+    }
+
     /// Execute the tool with already-validated parameters.
     ///
     /// Returns the raw output `Value`; the framework wraps it into a

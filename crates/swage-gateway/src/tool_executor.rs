@@ -251,7 +251,7 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
             ctx.mark_execution_started();
             tool.execute(resolved_params, &gateway_ctx)
                 .await
-                .map_err(ToolError::after_execution)
+                .map_err(ToolError::execution_uncertain)
         } else {
             // Secret-aware tools run on the host so raw values never enter sandbox IPC.
             if !tool.device_secret_keys().is_empty() {
@@ -259,7 +259,7 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
                 return tool
                     .execute(resolved_params, &gateway_ctx)
                     .await
-                    .map_err(ToolError::after_execution);
+                    .map_err(ToolError::execution_uncertain);
             }
             match &self.inner {
                 Some(strategy) => {
@@ -272,7 +272,7 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
                     ctx.mark_execution_started();
                     tool.execute(resolved_params, &gateway_ctx)
                         .await
-                        .map_err(ToolError::after_execution)
+                        .map_err(ToolError::execution_uncertain)
                 }
             }
         }

@@ -368,6 +368,14 @@ impl Tool for ScheduleTool {
         true
     }
 
+    fn validate_call(&self, params: &Value) -> Result<(), ToolError> {
+        if params["action"] == "update" {
+            crate::schedule::validate_schedule_agent_update(params.get("agent_id").is_some())
+                .map_err(|error| map_service_error(SCHEDULE_TOOL, error))?;
+        }
+        Ok(())
+    }
+
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let state = gateway_state(SCHEDULE_TOOL, ctx)?;
         let action = required_str(SCHEDULE_TOOL, &params, "action")?;

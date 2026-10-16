@@ -19253,6 +19253,9 @@ async fn operation_outcome_turn(
                 max_output_bytes: 4096,
             }) as Arc<dyn crate::tool::Tool>,
             Arc::new(crate::tool::workflow_run::WorkflowRunTool),
+            Arc::new(crate::tool::file_read::FileReadTool {
+                max_output_bytes: 4096,
+            }),
         ]),
         None,
         root.path().to_path_buf(),
@@ -20901,4 +20904,87 @@ async fn interrupt_policy_expiry_records_unexecuted_call_and_timeout_terminal_ev
         failures.is_empty(),
         "{failures:?}\nstored={call}\nevents={events:?}\nreplay={replay:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settlement_preflight_refusal_agrees_in_record_event_and_model_result() {
+    let (storage, turn, events, requests) = operation_outcome_turn(vec![(
+        "ambiguous-workflow",
+        "workflow_run",
+        serde_json::json!({"name":"saved","source":"return null"}),
+    )])
+    .await;
+    let calls = storage.list_tool_calls_by_turn(turn).await.unwrap();
+    let call = calls
+        .iter()
+        .find(|call| call.call_id == "ambiguous-workflow")
+        .unwrap();
+    let expected = swage_protocol::client::conversation::ToolExecution::refused();
+    assert_eq!(
+        call.execution,
+        Some(expected),
+        "stored refusal must not claim work ran"
+    );
+    assert!(
+        events.iter().any(|event| matches!(event,
+            ServerEvent::ToolEnd { call_id, execution: Some(execution), .. }
+            if call_id == "ambiguous-workflow" && *execution == expected
+        )),
+        "ToolEnd must carry the same refusal: {events:?}"
+    );
+    assert!(requests.last().unwrap().messages.iter()
+        .flat_map(|message| message.tool_replay().unwrap_or_default())
+        .any(|part| matches!(part, ToolReplayPart::ToolResult { call_id, content, is_error: true }
+            if call_id == "ambiguous-workflow" && content.contains("provide exactly one of name or source"))),
+        "the next provider request must carry the tool's actionable message");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settlement_post_read_rejection_agrees_in_record_event_and_model_result() {
+    let (storage, turn, events, requests) = operation_outcome_turn(vec![
+        (
+            "write-text",
+            "shell",
+            serde_json::json!({"command":"printf 'settlement text' > settlement.txt"}),
+        ),
+        (
+            "reject-offset",
+            "file_read",
+            serde_json::json!({"path":"settlement.txt","offset_bytes":100}),
+        ),
+    ])
+    .await;
+    let calls = storage.list_tool_calls_by_turn(turn).await.unwrap();
+    let call = calls
+        .iter()
+        .find(|call| call.call_id == "reject-offset")
+        .unwrap();
+    assert!(
+        call.result
+            .as_deref()
+            .unwrap()
+            .contains("valid UTF-8 byte boundary"),
+        "expected a rejection based on the file length: {call:?}"
+    );
+    let expected = swage_protocol::client::conversation::ToolExecution {
+        outcome: swage_protocol::client::conversation::ToolOutcome::Rejected,
+        ..swage_protocol::client::conversation::ToolExecution::succeeded()
+    };
+    assert_eq!(
+        call.execution,
+        Some(expected),
+        "a rejection based on file contents follows a real read"
+    );
+    assert!(
+        events.iter().any(|event| matches!(event,
+            ServerEvent::ToolEnd { call_id, execution: Some(execution), .. }
+            if call_id == "reject-offset" && *execution == expected
+        )),
+        "ToolEnd must carry the same post-read rejection: {events:?}"
+    );
+    assert!(requests.last().unwrap().messages.iter()
+        .flat_map(|message| message.tool_replay().unwrap_or_default())
+        .any(|part| matches!(part, ToolReplayPart::ToolResult { call_id, content, is_error: true }
+            if call_id == "reject-offset" && content.contains("valid UTF-8 byte boundary"))),
+        "the next provider request must carry the file reader's rejection");
 }

@@ -383,7 +383,17 @@ async fn agent_can_create_schedules_with_each_delivery_route() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_change_is_refused_without_mutating_the_schedule_tool() {
-    let state = test_state();
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let state = AppState::new_with_config_root(
+        storage.clone(),
+        storage,
+        Arc::new(TextProvider),
+        swage_config::ResolvedConfig::default(),
+        ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
     let topic = state.topic_store.general_scope().await.unwrap();
     let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
     let ctx = host_context(&state, "researcher", tool_session(&state, topic.id).await);
@@ -432,6 +442,29 @@ async fn agent_change_is_refused_without_mutating_the_schedule_tool() {
             "researcher",
         )
         .await;
+    let error = result.as_ref().unwrap_err();
+    assert_eq!(
+        error.execution(),
+        swage_protocol::client::conversation::ToolExecution::refused()
+    );
+    assert!(
+        swage_agent::agent::format_tool_error_for_model(error)
+            .contains("A schedule's agent is fixed")
+    );
+    let approved_error = dispatcher
+        .dispatch_approved(
+            "schedule",
+            json!({
+                "action": "update", "schedule_id": schedule_id, "agent_id": "researcher",
+                "message": "must not be applied", "timing": "every", "every": "every 3 hours",
+            }),
+            &ctx,
+            "researcher",
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(approved_error.execution(), error.execution());
+    assert_eq!(approved_error.to_string(), error.to_string());
     let wording = "A schedule's agent is fixed when the schedule is created. To change it, create a new schedule with that agent.";
     assert!(
         matches!(&result, Err(swage_core::ToolError::InvalidParameters { message, .. }) if message == wording),

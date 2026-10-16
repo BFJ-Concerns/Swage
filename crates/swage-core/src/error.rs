@@ -292,6 +292,9 @@ pub enum DelegateCompletionMode {
 /// Errors from tool execution.
 #[derive(Debug, Error)]
 pub enum ToolError {
+    /// Execution returned an error without declaring whether work completed.
+    #[error("{source}")]
+    ExecutionUncertain { source: Box<ToolError> },
     #[error("{source}")]
     AfterExecution { source: Box<ToolError> },
     /// Tool not found in registry (permanent).
@@ -404,6 +407,20 @@ impl std::fmt::Display for PermissionDeniedReason {
 }
 
 impl ToolError {
+    /// Preserve declared execution facts; otherwise keep completion unknown.
+    pub fn execution_uncertain(self) -> Self {
+        match self {
+            Self::RequiresApproval { .. }
+            | Self::RequiresLocationApproval { .. }
+            | Self::RequiresDelegation { .. }
+            | Self::AfterExecution { .. }
+            | Self::ExecutionUncertain { .. } => self,
+            _ => Self::ExecutionUncertain {
+                source: Box::new(self),
+            },
+        }
+    }
+
     pub fn after_execution(self) -> Self {
         match self {
             Self::RequiresApproval { .. }
@@ -421,6 +438,15 @@ impl ToolError {
             ToolExecution, ToolExecutionStage, ToolOutcome,
         };
         match self {
+            Self::ExecutionUncertain { source } => ToolExecution {
+                outcome: if matches!(source.as_ref(), Self::InvalidParameters { .. }) {
+                    ToolOutcome::Rejected
+                } else {
+                    ToolOutcome::Failed
+                },
+                stage: ToolExecutionStage::Unknown,
+                completion: swage_protocol::client::conversation::ToolCompletion::Unknown,
+            },
             Self::AfterExecution { source } => ToolExecution {
                 outcome: if matches!(source.as_ref(), Self::InvalidParameters { .. }) {
                     ToolOutcome::Rejected
@@ -435,10 +461,6 @@ impl ToolError {
                 stage: ToolExecutionStage::Unknown,
                 completion: swage_protocol::client::conversation::ToolCompletion::Unknown,
             },
-            Self::InvalidParameters { .. } => ToolExecution {
-                outcome: ToolOutcome::Rejected,
-                ..ToolExecution::refused()
-            },
             _ => ToolExecution::refused(),
         }
     }
@@ -446,7 +468,7 @@ impl ToolError {
     /// Returns true if the error represents a transient failure that may
     /// succeed on retry.
     pub fn is_retriable(&self) -> bool {
-        if let Self::AfterExecution { source } = self {
+        if let Self::AfterExecution { source } | Self::ExecutionUncertain { source } = self {
             return source.is_retriable();
         }
         // Approval and delegation variants are control flow, not transient failures.

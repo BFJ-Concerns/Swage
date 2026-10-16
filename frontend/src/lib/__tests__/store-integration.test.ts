@@ -178,7 +178,7 @@ describe("streaming store → conversation store: turn lifecycle", () => {
     );
   });
 
-  it("settles a stopped reply-less turn on its request with the running call interrupted", async () => {
+  it("settles a stopped reply-less turn on its request with the running call cancelled", async () => {
     const conversationStore = createConversationStore();
     await seedActiveConversation(conversationStore);
     const streamingStore = createStreamingStore({ conversationStore });
@@ -210,11 +210,11 @@ describe("streaming store → conversation store: turn lifecycle", () => {
 
     const request = conversationStore.activeConversation!.messages.at(-1);
     expect(request).toEqual(
-      expect.objectContaining({ role: "user", content: "Run sleep 30", turn_state: "interrupted" }),
+      expect.objectContaining({ role: "user", content: "Run sleep 30", turn_state: "cancelled" }),
     );
     expect(request?.tool_calls?.map((call) => [call.call_id, call.status])).toEqual([
       ["call-done", "success"],
-      ["call-sleep", "interrupted"],
+      ["call-sleep", "cancelled"],
     ]);
     expect(streamingStore.activeToolCalls).toEqual([]);
   });
@@ -271,7 +271,7 @@ describe("streaming store → conversation store: turn lifecycle", () => {
     const assistantMessages = messages.filter((m) => m.role === "assistant");
     expect(assistantMessages).toHaveLength(1);
     expect(assistantMessages[0].content).toBe("Here is the beginning");
-    expect(assistantMessages[0].turn_state).toBe("interrupted");
+    expect(assistantMessages[0].turn_state).toBe("cancelled");
   });
 });
 

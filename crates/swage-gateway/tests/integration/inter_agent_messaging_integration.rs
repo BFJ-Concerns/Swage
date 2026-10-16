@@ -29,7 +29,13 @@ use swage_storage::store::{
 
 /// Create a minimal storage with a session, thread, and turn for an agent.
 async fn setup_agent_turn(agent_id: &str) -> (Arc<SqliteStorage>, Uuid, Uuid, Uuid) {
-    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    setup_agent_turn_in(agent_id, Arc::new(SqliteStorage::in_memory().unwrap())).await
+}
+
+async fn setup_agent_turn_in(
+    agent_id: &str,
+    storage: Arc<SqliteStorage>,
+) -> (Arc<SqliteStorage>, Uuid, Uuid, Uuid) {
     let topic = TopicStore::general_scope(storage.as_ref()).await.unwrap();
     let session = storage
         .create_session(NewSession {
@@ -430,10 +436,13 @@ async fn delegation_to_nonexistent_agent_fails() {
 // ---------------------------------------------------------------------------
 
 /// A Cancel message correlated to a Delegate causes the target's active
-/// turn to be interrupted.
+/// turn to be cancelled.
 #[tokio::test(flavor = "multi_thread")]
 async fn cancel_interrupts_active_delegation() {
-    let (storage, _session_id, _thread_id, target_turn_id) = setup_agent_turn("agent-b").await;
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(SqliteStorage::open(&root.path().join("messages.sqlite")).unwrap());
+    let (storage, _session_id, _thread_id, target_turn_id) =
+        setup_agent_turn_in("agent-b", storage).await;
 
     // Create a Delegate in the correlation chain.
     let delegate = storage
@@ -466,9 +475,9 @@ async fn cancel_interrupts_active_delegation() {
         .await
         .unwrap();
 
-    // The target's turn should now be interrupted.
+    // The target's turn should now be cancelled.
     let turn = storage.get_turn(target_turn_id).await.unwrap().unwrap();
-    assert_eq!(turn.state, TurnState::Interrupted);
+    assert_eq!(turn.state, TurnState::Cancelled);
 }
 
 // ---------------------------------------------------------------------------

@@ -60,7 +60,7 @@ impl ToolExecutionStrategy for DefaultExecutionStrategy {
         ctx.mark_execution_started();
         tool.execute(params.clone(), ctx)
             .await
-            .map_err(ToolError::after_execution)
+            .map_err(ToolError::execution_uncertain)
     }
 }
 
@@ -77,8 +77,8 @@ impl ToolExecutionStrategy for DefaultExecutionStrategy {
 ///    ensuring they never consume capacity.
 /// 3. **Rate limit** — calls that exceed the configured windows are rejected
 ///    with a descriptive `ExecutionFailed` error.
-/// 4. **Schema validation** — invalid parameters short-circuit before the
-///    tool's `execute()` method is invoked.
+/// 4. **Argument validation** — schema checks and the tool's I/O-free
+///    preflight short-circuit before `execute()` is invoked.
 /// 5. **Parameter redaction** — a sanitised copy is produced for logging;
 ///    the original unredacted params are passed to `execute()`.
 /// 6. **Execute** — the tool runs; wall-clock time is measured by the
@@ -295,6 +295,7 @@ impl ToolDispatcher {
         // Step 4: Schema validation — invalid params never reach execute().
         let schema = tool.parameters();
         validate_tool_schema(tool_name, &schema, &params)?;
+        tool.validate_call(&params)?;
 
         // Step 5: Parameter redaction for logging.
         // The redacted copy is available here for future hook/audit integration;
@@ -313,11 +314,10 @@ impl ToolDispatcher {
             }
             None => {
                 ctx.mark_execution_started();
-                tool.execute(params, ctx)
-                    .await
-                    .map_err(ToolError::after_execution)
+                tool.execute(params, ctx).await
             }
-        }?;
+        }
+        .map_err(ToolError::execution_uncertain)?;
         let execution = tool.execution_outcome(&raw_output);
         let duration = start.elapsed();
 
@@ -388,6 +388,7 @@ impl ToolDispatcher {
         // Step 4: Schema validation.
         let schema = tool.parameters();
         validate_tool_schema(tool_name, &schema, &params)?;
+        tool.validate_call(&params)?;
 
         // Step 5: Parameter redaction.
         let _redacted_params = redact_params(&params, tool.sensitive_keys());
@@ -402,11 +403,10 @@ impl ToolDispatcher {
             }
             None => {
                 ctx.mark_execution_started();
-                tool.execute(params, ctx)
-                    .await
-                    .map_err(ToolError::after_execution)
+                tool.execute(params, ctx).await
             }
-        }?;
+        }
+        .map_err(ToolError::execution_uncertain)?;
         let execution = tool.execution_outcome(&raw_output);
         let duration = start.elapsed();
 
@@ -966,6 +966,9 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_strategy_error_propagates() {
+        let root = tempfile::tempdir().unwrap();
+        let mut context = ctx();
+        context.working_directory = root.path().to_path_buf();
         use super::ToolExecutionStrategy;
 
         // Strategy that always fails — verifies errors propagate through the pipeline.
@@ -991,13 +994,22 @@ mod tests {
             make_dispatcher("echo", true, false).with_execution_strategy(Arc::new(FailingStrategy));
 
         let err = dispatcher
-            .dispatch("echo", json!({"text": "x"}), &ctx(), "agent-test")
+            .dispatch("echo", json!({"text": "x"}), &context, "agent-test")
             .await
             .expect_err("strategy error should propagate");
 
+        assert_eq!(
+            err.execution(),
+            swage_protocol::client::conversation::ToolExecution {
+                outcome: swage_protocol::client::conversation::ToolOutcome::Failed,
+                stage: swage_protocol::client::conversation::ToolExecutionStage::Unknown,
+                completion: swage_protocol::client::conversation::ToolCompletion::Unknown,
+            },
+            "a strategy error alone does not confirm work completed: {err:?}"
+        );
         assert!(
-            matches!(err, ToolError::ExecutionFailed { .. }),
-            "expected ExecutionFailed from strategy, got: {err:?}"
+            err.is_retriable(),
+            "the wrapped failure must remain retriable"
         );
         assert!(err.to_string().contains("strategy rejected"));
     }
@@ -1129,5 +1141,76 @@ mod tests {
             matches!(err, ToolError::InvalidParameters { .. }),
             "expected InvalidParameters, got: {err:?}"
         );
+    }
+    #[tokio::test]
+    async fn undeclared_error_completion_remains_unknown() {
+        let root = tempfile::tempdir().unwrap();
+        let mut context = ctx();
+        context.working_directory = root.path().to_path_buf();
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use swage_protocol::client::conversation::{
+            ToolCompletion, ToolExecutionStage, ToolOutcome,
+        };
+        struct UnclassifiedTool(Arc<AtomicUsize>);
+        #[async_trait]
+        impl Tool for UnclassifiedTool {
+            fn name(&self) -> &str {
+                "unclassified"
+            }
+            fn description(&self) -> &str {
+                "Checks an input."
+            }
+            fn parameters(&self) -> Value {
+                json!({"type":"object"})
+            }
+            async fn execute(
+                &self,
+                params: Value,
+                _: &dyn ToolContext,
+            ) -> Result<Value, ToolError> {
+                if params["work"] == true {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(ToolError::InvalidParameters {
+                    name: self.name().into(),
+                    message: "cannot accept input".into(),
+                })
+            }
+        }
+        for strategy in [false, true] {
+            let work = Arc::new(AtomicUsize::new(0));
+            let mut dispatcher =
+                ToolDispatcher::allow_all(vec![
+                    Arc::new(UnclassifiedTool(work.clone())) as Arc<dyn Tool>
+                ]);
+            if strategy {
+                dispatcher =
+                    dispatcher.with_execution_strategy(Arc::new(super::DefaultExecutionStrategy));
+            }
+            for approved in [false, true] {
+                for did_work in [false, true] {
+                    let params = json!({"work":did_work});
+                    let error = if approved {
+                        dispatcher
+                            .dispatch_approved("unclassified", params, &context, "agent")
+                            .await
+                    } else {
+                        dispatcher
+                            .dispatch("unclassified", params, &context, "agent")
+                            .await
+                    }
+                    .unwrap_err();
+                    let execution = error.execution();
+                    assert_eq!(execution.stage, ToolExecutionStage::Unknown);
+                    assert_eq!(execution.completion, ToolCompletion::Unknown);
+                    assert_eq!(execution.outcome, ToolOutcome::Rejected);
+                }
+            }
+            assert_eq!(
+                work.load(Ordering::SeqCst),
+                2,
+                "both dispatch routes actually performed work"
+            );
+        }
     }
 }

@@ -148,7 +148,8 @@ mod approval_tests {
                 Err(swage_core::ToolError::InvalidParameters {
                     name: self.name().into(),
                     message: "offset beyond the content read".into(),
-                })
+                }
+                .after_execution())
             }
         }
         let dir = tempfile::tempdir().unwrap();
@@ -2276,7 +2277,9 @@ pub fn format_tool_error_for_model(error: &swage_core::ToolError) -> String {
     use swage_core::ToolError;
 
     match error {
-        ToolError::AfterExecution { source } => format_tool_error_for_model(source),
+        ToolError::AfterExecution { source } | ToolError::ExecutionUncertain { source } => {
+            format_tool_error_for_model(source)
+        }
         ToolError::NotFound { name } => format!(
             "Tool error: `{name}` is not available. Use one of the advertised tools or continue without it."
         ),

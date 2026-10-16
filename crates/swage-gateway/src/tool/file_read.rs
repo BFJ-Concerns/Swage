@@ -60,6 +60,11 @@ impl Tool for FileReadTool {
         true
     }
 
+    fn validate_call(&self, params: &Value) -> Result<(), ToolError> {
+        optional_offset_bytes(params, self.name())?;
+        Ok(())
+    }
+
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let path_str = params["path"]
             .as_str()
@@ -109,6 +114,7 @@ impl Tool for FileReadTool {
             self.max_output_bytes,
             self.name(),
         )
+        .map_err(ToolError::after_execution)
     }
 }
 
@@ -304,5 +310,41 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let err = tool(&dir).execute(json!({}), &ctx(&dir)).await.unwrap_err();
         assert!(matches!(err, ToolError::InvalidParameters { .. }));
+    }
+    #[tokio::test]
+    async fn dispatch_records_rejection_after_reading_the_file() {
+        use swage_protocol::client::conversation::{
+            ToolCompletion, ToolExecutionStage, ToolOutcome,
+        };
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("text.txt"), "settlement text").unwrap();
+        let dispatcher = crate::tool::ToolDispatcher::allow_all(vec![
+            std::sync::Arc::new(tool(&dir)) as std::sync::Arc<dyn Tool>,
+        ]);
+        for approved in [false, true] {
+            let params = json!({"path":"text.txt", "offset_bytes":100});
+            let error = if approved {
+                dispatcher
+                    .dispatch_approved("file_read", params, &ctx(&dir), "agent")
+                    .await
+            } else {
+                dispatcher
+                    .dispatch("file_read", params, &ctx(&dir), "agent")
+                    .await
+            }
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("valid UTF-8 byte boundary"),
+                "expected a post-read offset rejection: {error}"
+            );
+            let execution = error.execution();
+            assert_eq!(execution.outcome, ToolOutcome::Rejected);
+            assert_eq!(execution.stage, ToolExecutionStage::Finished);
+            assert_eq!(execution.completion, ToolCompletion::Confirmed);
+            assert!(
+                swage_agent::agent::format_tool_error_for_model(&error)
+                    .contains("valid UTF-8 byte boundary")
+            );
+        }
     }
 }

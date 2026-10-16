@@ -79,6 +79,14 @@ impl Tool for UrlFetchTool {
         true
     }
 
+    fn validate_call(&self, params: &Value) -> Result<(), ToolError> {
+        optional_offset_bytes(params, self.name())?;
+        if let Some(url) = params["url"].as_str() {
+            parse_fetch_url(url, self.name())?;
+        }
+        Ok(())
+    }
+
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let url = params["url"]
             .as_str()
@@ -106,6 +114,21 @@ impl Tool for UrlFetchTool {
                 message: format!("Failed to build HTTP client: {e}"),
             })?;
 
+        self.fetch_and_retain(client, parsed_url, url, offset_bytes, ctx)
+            .await
+            .map_err(ToolError::after_execution)
+    }
+}
+
+impl UrlFetchTool {
+    async fn fetch_and_retain(
+        &self,
+        client: reqwest::Client,
+        parsed_url: reqwest::Url,
+        url: String,
+        offset_bytes: usize,
+        ctx: &dyn ToolContext,
+    ) -> Result<Value, ToolError> {
         let mut response = client.get(parsed_url.clone()).send().await.map_err(|e| {
             let message = if e.is_timeout() {
                 format!(
@@ -592,6 +615,9 @@ mod tests {
 
     #[tokio::test]
     async fn times_out_on_unreachable_host() {
+        let root = tempfile::tempdir().unwrap();
+        let mut context = ctx();
+        context.working_directory = root.path().to_path_buf();
         let t = UrlFetchTool {
             // Use a very short timeout so the test doesn't hang.
             timeout: Duration::from_millis(50),
@@ -599,10 +625,14 @@ mod tests {
         };
         // RFC 5737 TEST-NET — guaranteed not routable, connection will time out.
         let err = t
-            .execute(json!({ "url": "http://192.0.2.1/test" }), &ctx())
+            .execute(json!({ "url": "http://192.0.2.1/test" }), &context)
             .await
             .unwrap_err();
-        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
+        assert_eq!(
+            err.execution(),
+            swage_protocol::client::conversation::ToolExecution::failed(),
+            "the HTTP attempt finished with a failure: {err}"
+        );
         // Should mention a timeout or connection failure, not panic.
         assert!(!err.to_string().is_empty());
     }

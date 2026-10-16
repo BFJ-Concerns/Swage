@@ -73,7 +73,7 @@ impl Tool for WorkflowRunTool {
     fn requires_device_execution(&self) -> bool {
         true
     }
-    async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+    fn validate_call(&self, params: &Value) -> Result<(), ToolError> {
         for key in ["name", "source"] {
             if params.get(key).is_some_and(|value| {
                 !value.is_null() && value.as_str().is_none_or(|text| text.trim().is_empty())
@@ -92,6 +92,13 @@ impl Tool for WorkflowRunTool {
                 message: "provide exactly one of name or source".into(),
             });
         }
+        Ok(())
+    }
+
+    async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+        self.validate_call(&params)?;
+        let name = params.get("name").and_then(Value::as_str);
+        let source = params.get("source").and_then(Value::as_str);
         let args = params.get("args").cloned().unwrap_or(Value::Null);
         let budget = params
             .get("budget")
@@ -181,21 +188,40 @@ mod tests {
             crate::tool::ToolDispatcher::allow_all(
                 vec![Arc::new(WorkflowRunTool) as Arc<dyn Tool>],
             );
-        let context = MockToolContext::new("agent", Uuid::new_v4().to_string());
+        let root = tempfile::tempdir().unwrap();
+        let mut context = MockToolContext::new("agent", Uuid::new_v4().to_string());
+        context.working_directory = root.path().to_path_buf();
 
-        for params in [json!({}), json!({"name": "saved", "source": "return null"})] {
-            let error = dispatcher
-                .dispatch("workflow_run", params, &context, "agent")
-                .await
-                .expect_err("ambiguous input should be rejected through the dispatcher");
-            assert!(
-                matches!(
-                    error,
-                    ToolError::InvalidParameters { ref message, .. }
-                        if message == "provide exactly one of name or source"
-                ),
-                "unexpected dispatcher error: {error}"
-            );
+        for approved in [false, true] {
+            for params in [json!({}), json!({"name": "saved", "source": "return null"})] {
+                let result = if approved {
+                    dispatcher
+                        .dispatch_approved("workflow_run", params, &context, "agent")
+                        .await
+                } else {
+                    dispatcher
+                        .dispatch("workflow_run", params, &context, "agent")
+                        .await
+                };
+                let error =
+                    result.expect_err("ambiguous input should be refused through the dispatcher");
+                assert_eq!(
+                    error.execution(),
+                    swage_protocol::client::conversation::ToolExecution::refused()
+                );
+                assert!(
+                    swage_agent::agent::format_tool_error_for_model(&error)
+                        .contains("provide exactly one of name or source")
+                );
+                assert!(
+                    matches!(
+                        error,
+                        ToolError::InvalidParameters { ref message, .. }
+                            if message == "provide exactly one of name or source"
+                    ),
+                    "unexpected dispatcher error: {error}"
+                );
+            }
         }
 
         for params in [json!({"name": "saved"}), json!({"source": "return null"})] {
@@ -204,11 +230,9 @@ mod tests {
                 .await
                 .expect_err("one workflow input should pass schema validation and reach execution");
             assert!(
-                matches!(
-                    error,
-                    ToolError::ExecutionFailed { ref message, .. }
-                        if message == "workflow_run requires gateway execution"
-                ),
+                error
+                    .to_string()
+                    .contains("workflow_run requires gateway execution"),
                 "one workflow input did not reach execution: {error}"
             );
         }

@@ -536,7 +536,19 @@ async fn stream_cancellation_preserves_partial_response() {
     let (tx1, rx1) = tokio::sync::mpsc::channel(10);
     let (tx2, rx2) = tokio::sync::mpsc::channel(10);
     let provider = ChannelProvider::new(vec![rx1, rx2]);
-    let (router, addr, storage) = start_test_server(provider).await;
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let state = AppState::new_with_config_root(
+        storage.clone(),
+        storage.clone(),
+        Arc::new(provider),
+        swage_config::ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    let router = build_router(state);
+    let (addr, _server) = start_live_server(router.clone()).await;
 
     // Create conversation + open WebSocket.
     let (_, body) = http(&router, "POST", "/api/conversations").await;
@@ -582,9 +594,9 @@ async fn stream_cancellation_preserves_partial_response() {
         "at least the user message should be stored"
     );
 
-    // The turn should be interrupted.
-    let has_interrupted = messages.iter().any(|m| m["turn_state"] == "interrupted");
-    assert!(has_interrupted, "turn should be marked interrupted");
+    // The turn should be cancelled.
+    let has_cancelled = messages.iter().any(|m| m["turn_state"] == "cancelled");
+    assert!(has_cancelled, "turn should be marked cancelled");
 
     let session_id = conv_id.parse().expect("conversation id");
     let thread = storage
@@ -594,15 +606,15 @@ async fn stream_cancellation_preserves_partial_response() {
         .into_iter()
         .next()
         .expect("conversation thread");
-    let interrupted_turn = storage
+    let cancelled_turn = storage
         .list_turns_by_thread(thread.id)
         .await
         .expect("conversation turns")
         .into_iter()
-        .find(|turn| turn.state == TurnState::Interrupted)
-        .expect("interrupted turn");
+        .find(|turn| turn.state == TurnState::Cancelled)
+        .expect("cancelled turn");
     let rounds = storage
-        .list_provider_rounds_by_turn(interrupted_turn.id)
+        .list_provider_rounds_by_turn(cancelled_turn.id)
         .await
         .expect("provider rounds");
     assert_eq!(rounds.len(), 1, "the cancelled request opened one round");
@@ -610,6 +622,8 @@ async fn stream_cancellation_preserves_partial_response() {
         rounds[0].completed_at.is_some(),
         "a cancelled provider request must no longer be outstanding"
     );
+    // The provider stream ended without a response; its round outcome is
+    // independent of the cancelled turn's terminal state.
     assert_eq!(rounds[0].outcome, json!({"outcome": "interrupted"}));
 
     // Partial content should be saved.

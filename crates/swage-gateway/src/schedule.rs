@@ -320,6 +320,15 @@ pub async fn update_schedule(
     update_schedule_change(state, schedule_id, request, "operator_http", None).await
 }
 
+pub(crate) fn validate_schedule_agent_update(has_agent_id: bool) -> Result<(), GatewayError> {
+    if has_agent_id {
+        return Err(GatewayError::ValidationError(
+            "A schedule's agent is fixed when the schedule is created. To change it, create a new schedule with that agent.".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn update_schedule_change(
     state: &AppState,
     schedule_id: Uuid,
@@ -327,11 +336,7 @@ pub(crate) async fn update_schedule_change(
     source: &str,
     session_id: Option<Uuid>,
 ) -> Result<wire::Schedule, GatewayError> {
-    if request.agent_id.is_some() {
-        return Err(GatewayError::ValidationError(
-            "A schedule's agent is fixed when the schedule is created. To change it, create a new schedule with that agent.".into(),
-        ));
-    }
+    validate_schedule_agent_update(request.agent_id.is_some())?;
     let rearm = request.spec.is_some();
     let intended = resolve_update_schedule(state, schedule_id, request).await?;
     validate_schedule_shape(&intended)?;
