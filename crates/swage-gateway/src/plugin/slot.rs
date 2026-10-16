@@ -32,7 +32,7 @@ use crate::state::AppState;
 
 /// Ask the gateway's active provider for a completion on a plugin's
 /// behalf and record it as the plugin's: `request` is
-/// `{ messages: [{ role, content }], model? }`.
+/// `{ messages: [{ role, content }], model?, max_tokens?, temperature? }`.
 pub async fn complete_via_provider(
     state: &AppState,
     plugin: &str,
@@ -44,7 +44,7 @@ pub async fn complete_via_provider(
         .and_then(Value::as_array)
         .ok_or_else(|| HostCallFailure {
             name: "TypeError".into(),
-            message: "complete takes { messages: [{ role, content }], model? }".into(),
+            message: "complete takes { messages: [{ role, content }], model?, max_tokens?, temperature? }".into(),
         })?
         .iter()
         .map(|message| {
@@ -73,12 +73,17 @@ pub async fn complete_via_provider(
         .get("model")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    let max_tokens = request
+        .get("max_tokens")
+        .and_then(Value::as_u64)
+        .and_then(|limit| u32::try_from(limit).ok());
+    let temperature = request.get("temperature").and_then(Value::as_f64);
     let completion = CompletionRequest {
         messages,
         model: model.clone(),
         effort: None,
-        max_tokens: None,
-        temperature: None,
+        max_tokens,
+        temperature,
         stop_sequences: None,
         metadata: None,
         tool_definitions: Vec::new(),
@@ -188,8 +193,8 @@ impl PluginSlot {
     }
 
     /// The succession slot: the summariser's request — the completion the
-    /// provider would get — goes to the plugin, which answers
-    /// `{ summary }`.
+    /// provider would get, as `{ messages, model, max_tokens, temperature }`
+    /// — goes to the plugin, which answers `{ summary }`.
     pub async fn summarise(
         &self,
         completion: CompletionRequest,
@@ -201,6 +206,8 @@ impl PluginSlot {
                 .map(|message| json!({ "role": role_name(message.role()), "content": message.text_content() }))
                 .collect::<Vec<_>>(),
             "model": completion.model,
+            "max_tokens": completion.max_tokens,
+            "temperature": completion.temperature,
         });
         let output = self
             .runtime
@@ -567,14 +574,22 @@ pub fn hooks_for_turn(
     let mut hooks = TurnHooks::default();
     for attachment in graph.hooks_at(point) {
         match slot_for_plugin(state, &attachment.plugin, context, topic_id) {
-            Some(slot) => {
+            Ok(slot) => {
                 hooks.attached.push((attachment.mode, slot));
                 hooks.serving.push(attachment);
             }
-            None => hooks.skipped.push(attachment),
+            Err(_) => hooks.skipped.push(attachment),
         }
     }
     hooks
+}
+
+/// What a slot's draw settled on: the plugin to resolve, and why it is the
+/// named filler rather than the draw's own answer where the draw could not
+/// stand.
+pub struct SlotDraw {
+    pub name: String,
+    pub refusal: Option<String>,
 }
 
 /// The plugin that fills `slot` this turn: the revision's named filler, or
@@ -583,7 +598,12 @@ pub fn hooks_for_turn(
 /// enabled; the draw runs through the experimentation seam at location
 /// `slot.<slot>` with the named filler as the default, so a topic's
 /// configuration pins a variant over the shipped part, experimentation off
-/// keeps the named filler, and every draw is recorded.
+/// keeps the named filler, and every draw — a default-only one included —
+/// is recorded. A session's recorded choice serves while it is the named
+/// filler or still a candidate for the scope; a choice that is neither (the
+/// variant disabled or gone since, the revision's filler changed) gives way
+/// to the named filler, as does a draw the seam refuses, each with its
+/// reason for the turn's record.
 pub async fn slot_variant(
     state: &AppState,
     config: &swage_config::model::ExperimentationConfig,
@@ -592,12 +612,9 @@ pub async fn slot_variant(
     session_id: Uuid,
     turn_id: Option<Uuid>,
     topic_id: Option<Uuid>,
-) -> String {
+) -> SlotDraw {
     let location = format!("slot.{}", slot.as_str());
     let candidates = state.plugins.variants_of(&location, topic_id);
-    if candidates.is_empty() {
-        return named.to_owned();
-    }
     let registered: Vec<&str> = candidates.iter().map(String::as_str).collect();
     match crate::experimentation::select_session_variant(
         state,
@@ -610,24 +627,45 @@ pub async fn slot_variant(
     )
     .await
     {
-        Ok(decision) => decision.variant,
+        Ok(decision) if decision.variant == named || candidates.contains(&decision.variant) => {
+            SlotDraw {
+                name: decision.variant,
+                refusal: None,
+            }
+        }
+        Ok(decision) => {
+            let refusal = format!(
+                "the session's recorded choice '{}' at {location} is neither the named filler nor a candidate for this scope now",
+                decision.variant
+            );
+            tracing::warn!(slot = slot.as_str(), %refusal, "the named filler serves");
+            SlotDraw {
+                name: named.to_owned(),
+                refusal: Some(refusal),
+            }
+        }
         Err(error) => {
-            tracing::warn!(%error, slot = slot.as_str(), "the slot's variant could not be drawn; the named filler serves");
-            named.to_owned()
+            let refusal = format!("the slot's variant could not be drawn: {error}");
+            tracing::warn!(slot = slot.as_str(), %refusal, "the named filler serves");
+            SlotDraw {
+                name: named.to_owned(),
+                refusal: Some(refusal),
+            }
         }
     }
 }
 
 /// A plugin's isolate as a slot for one turn, when it is installed,
-/// enabled for the session's scope, and serving as an isolate.
+/// enabled for the session's scope, and serving as an isolate; otherwise
+/// why it cannot serve, for the turn's record.
 pub fn slot_for_plugin(
     state: &AppState,
     plugin: &str,
     context: &InvocationContext,
     topic_id: Option<Uuid>,
-) -> Option<PluginSlot> {
+) -> Result<PluginSlot, String> {
     match state.plugins.execution_of(plugin, topic_id) {
-        Some(crate::plugin::Execution::Isolate(runtime)) => Some(PluginSlot::new(
+        Some(crate::plugin::Execution::Isolate(runtime)) => Ok(PluginSlot::new(
             plugin.to_owned(),
             runtime,
             Arc::new(SlotHost::new(
@@ -638,18 +676,15 @@ pub fn slot_for_plugin(
             context.clone(),
         )),
         Some(crate::plugin::Execution::Process(_)) => {
-            tracing::warn!(
-                plugin,
-                "a process plugin cannot fill a slot or hook; skipped"
-            );
-            None
+            let reason =
+                format!("plugin '{plugin}' runs as a process, which cannot fill a slot or hook");
+            tracing::warn!(plugin, %reason, "skipped");
+            Err(reason)
         }
         None => {
-            tracing::warn!(
-                plugin,
-                "the revision names a plugin that is not serving or not enabled for this scope; skipped"
-            );
-            None
+            let reason = format!("plugin '{plugin}' is not serving or not enabled for this scope");
+            tracing::warn!(plugin, %reason, "skipped");
+            Err(reason)
         }
     }
 }
@@ -858,8 +893,8 @@ mod tests {
             ],
             model: Some("m".into()),
             effort: None,
-            max_tokens: None,
-            temperature: None,
+            max_tokens: Some(1024),
+            temperature: Some(0.3),
             stop_sequences: None,
             metadata: None,
             tool_definitions: Vec::new(),
@@ -870,6 +905,11 @@ mod tests {
         assert_eq!(asked.len(), 1);
         assert_eq!(asked[0]["model"], "m");
         assert_eq!(asked[0]["messages"][0]["content"], "Summarise.");
+        assert_eq!(
+            asked[0]["max_tokens"], 1024,
+            "the kernel's limits travel with the request"
+        );
+        assert_eq!(asked[0]["temperature"], 0.3);
     }
 
     #[tokio::test(flavor = "multi_thread")]

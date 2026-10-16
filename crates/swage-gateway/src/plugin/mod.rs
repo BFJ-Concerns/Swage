@@ -393,10 +393,12 @@ impl PluginService {
     /// per shipped version: a plugin with a revision already shipped at
     /// that version is left as it is — a revision the person installed over
     /// it stays the one serving; a newer shipped version installs a new
-    /// revision, the person's enablement standing; the first install
-    /// enables the plugin for the install, since a shipped part serves by
-    /// default. A shipped package that fails to install is
-    /// reported and skipped — the gateway runs without that part, as it
+    /// revision. A shipped part serves by default, so a plugin whose
+    /// install-scope enablement nobody has decided — its first install, or
+    /// an earlier boot's install that stopped before deciding it — is
+    /// enabled for the install; a decision on the record, the person's or
+    /// an earlier boot's, stands. A shipped package that fails to install
+    /// is reported and skipped — the gateway runs without that part, as it
     /// runs without an operator's plugin that failed to load.
     pub async fn install_shipped(
         &self,
@@ -404,6 +406,20 @@ impl PluginService {
         names: &[&str],
         reserved_tool_names: &[String],
     ) -> Vec<PluginSummary> {
+        // The install-scope decisions on the record; unreadable, every
+        // plugin is treated as decided and the next boot decides.
+        let decided: Option<HashSet<String>> = match self.storage.list_plugin_enablement().await {
+            Ok(rows) => Some(
+                rows.into_iter()
+                    .filter(|row| row.topic_id.is_none())
+                    .map(|row| row.plugin_name)
+                    .collect(),
+            ),
+            Err(error) => {
+                tracing::error!(%error, "the plugins' enablement could not be read; shipped plugins keep the enablement they have");
+                None
+            }
+        };
         let mut installed_now = Vec::new();
         for name in names {
             let source = packages_root.join(name);
@@ -414,17 +430,20 @@ impl PluginService {
                     continue;
                 }
             };
-            let shipped_at_version =
-                self.read()
-                    .get(package.manifest.name.as_str())
-                    .map(|plugin| {
-                        plugin.revisions.iter().any(|revision| {
-                            revision.provenance == PluginProvenance::Shipped.as_str()
-                                && revision.version == package.manifest.version
-                        })
-                    });
-            let first_install = shipped_at_version.is_none();
-            if shipped_at_version == Some(true) {
+            let name = package.manifest.name.as_str();
+            let undecided = decided
+                .as_ref()
+                .is_some_and(|decided| !decided.contains(name));
+            let shipped_at_version = self.read().get(name).is_some_and(|plugin| {
+                plugin.revisions.iter().any(|revision| {
+                    revision.provenance == PluginProvenance::Shipped.as_str()
+                        && revision.version == package.manifest.version
+                })
+            });
+            if shipped_at_version {
+                if undecided {
+                    self.enable_shipped(name).await;
+                }
                 continue;
             }
             match self
@@ -437,14 +456,8 @@ impl PluginService {
                 .await
             {
                 Ok(summary) => {
-                    let summary = if first_install {
-                        match self.set_enablement(&summary.name, None, true, None).await {
-                            Ok(enabled) => enabled,
-                            Err(error) => {
-                                tracing::error!(plugin = name, %error, "shipped plugin installed but could not be enabled for the install");
-                                summary
-                            }
-                        }
+                    let summary = if undecided {
+                        self.enable_shipped(name).await.unwrap_or(summary)
                     } else {
                         summary
                     };
@@ -456,6 +469,18 @@ impl PluginService {
             }
         }
         installed_now
+    }
+
+    /// Enable a shipped plugin for the install, the default a shipped part
+    /// serves under; a failure is reported and the next boot tries again.
+    async fn enable_shipped(&self, name: &str) -> Option<PluginSummary> {
+        match self.set_enablement(name, None, true, None).await {
+            Ok(summary) => Some(summary),
+            Err(error) => {
+                tracing::error!(plugin = name, %error, "shipped plugin installed but could not be enabled for the install");
+                None
+            }
+        }
     }
 
     async fn install_from(
@@ -527,9 +552,22 @@ impl PluginService {
                 })
                 .map_or(1, |last| last + 1)
         };
+        // The records number the revisions; a directory at the next number
+        // with no record is residue — a copy whose record never landed, or
+        // a database rebuilt beneath an install root — and this install
+        // takes its place.
+        let target = install_dir(&self.plugins_root, &name, next_revision);
+        if target.exists() {
+            tracing::warn!(plugin = %name, revision = next_revision, path = %target.display(), "an install directory with no record is replaced");
+            std::fs::remove_dir_all(&target).map_err(|error| {
+                PluginServiceError::Refused(format!(
+                    "the unrecorded install directory {} could not be removed: {error}",
+                    target.display()
+                ))
+            })?;
+        }
         let installed_package = install_package(&package, &self.plugins_root, next_revision)
             .map_err(|error| PluginServiceError::Refused(error.to_string()))?;
-        let target = install_dir(&self.plugins_root, &name, next_revision);
         let execution = match self.start_execution(&installed_package).await {
             Ok(execution) => execution,
             Err(error) => {
@@ -982,6 +1020,71 @@ mod tests {
                     && event.entity_id == "succession-summariser"
                     && event.metadata["provenance"] == "shipped")
         );
+    }
+
+    /// An earlier boot's shipped install that stopped before deciding the
+    /// install's enablement is decided on the next boot; nothing is
+    /// reinstalled.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_shipped_install_whose_enablement_never_landed_is_decided_on_the_next_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        let (service, _storage) = service(dir.path());
+        crate::shipped_plugins::regenerate(dir.path())
+            .await
+            .unwrap();
+        let packages = crate::shipped_plugins::root(dir.path());
+        let names = ["succession-summariser"];
+        service
+            .install_from(
+                &packages.join("succession-summariser"),
+                &[],
+                None,
+                PluginProvenance::Shipped,
+            )
+            .await
+            .expect("installs");
+        assert!(
+            !service
+                .summary("succession-summariser")
+                .unwrap()
+                .enabled_for_install
+        );
+
+        assert!(
+            service
+                .install_shipped(&packages, &names, &[])
+                .await
+                .is_empty()
+        );
+        let summary = service.summary("succession-summariser").unwrap();
+        assert_eq!(summary.revision, 1);
+        assert!(summary.enabled_for_install);
+    }
+
+    /// A database rebuilt beneath an install root leaves revision
+    /// directories no record knows; the next install takes their numbers.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_install_directory_the_records_do_not_know_is_replaced_by_the_next_install() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::shipped_plugins::regenerate(dir.path())
+            .await
+            .unwrap();
+        let packages = crate::shipped_plugins::root(dir.path());
+        let names = ["succession-summariser"];
+        {
+            let (service, _storage) = service(dir.path());
+            assert_eq!(
+                service.install_shipped(&packages, &names, &[]).await.len(),
+                1
+            );
+        }
+        assert!(dir.path().join("plugins/succession-summariser/1").is_dir());
+
+        let (service, _storage) = service(dir.path());
+        let installed = service.install_shipped(&packages, &names, &[]).await;
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].revision, 1);
+        assert!(installed[0].enabled_for_install);
     }
 
     #[tokio::test(flavor = "multi_thread")]

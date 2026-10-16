@@ -20478,77 +20478,211 @@ async fn an_installed_variant_of_a_slot_shadows_the_named_filler_through_the_dra
     let named = StepFiller::Plugin {
         name: "base".into(),
     };
-    let context = crate::plugin::slot::slot_context(
-        Some(session.id),
-        "agent-a",
-        std::path::Path::new("/work"),
-    );
+    let context_for = |session: Uuid| {
+        crate::plugin::slot::slot_context(Some(session), "agent-a", std::path::Path::new("/work"))
+    };
+    let fresh_session = || {
+        let storage = Arc::clone(&storage);
+        async move {
+            storage
+                .create_session(swage_storage::fixtures::new_session(topic.id))
+                .await
+                .expect("session")
+                .id
+        }
+    };
+    let draws_for = |session: Uuid| {
+        let storage = Arc::clone(&storage);
+        async move {
+            storage
+                .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                    session_id: Some(session),
+                    entity_kind: Some("experiment_location".to_owned()),
+                    entity_id: Some("slot.succession".to_owned()),
+                    event_kind: Some("variant_selected".to_owned()),
+                    ..Default::default()
+                })
+                .await
+                .expect("draws")
+        }
+    };
+    let forcing = |variant: &str| {
+        let mut config = swage_config::ResolvedConfig::default();
+        config.experimentation.locations.insert(
+            "slot.succession".into(),
+            swage_config::model::ExperimentLocationConfig {
+                enabled: true,
+                forced_variant: Some(variant.into()),
+            },
+        );
+        config
+    };
 
+    // Off: the named filler serves, and the decision is on the record.
     let mut off = swage_config::ResolvedConfig::default();
     off.experimentation.enabled = false;
-    let summariser = super::summariser_for(
+    let (summariser, fallback) = super::summariser_for(
         &state,
         &off.experimentation,
         &named,
-        &context,
+        &context_for(session.id),
         Some(topic.id),
         session.id,
         Some(Uuid::new_v4()),
     )
     .await;
-    assert_eq!(
-        summariser.describe(),
-        "plugin base",
-        "off: the named filler serves"
-    );
+    assert_eq!(summariser.describe(), "plugin base");
+    assert_eq!(fallback, None);
+    let draws = draws_for(session.id).await;
+    assert_eq!(draws.len(), 1, "off is a recorded decision");
+    assert_eq!(draws[0].metadata["variant"], "base");
+    assert_eq!(draws[0].metadata["reason"], "disabled");
 
-    let mut forced = swage_config::ResolvedConfig::default();
-    forced.experimentation.locations.insert(
-        "slot.succession".into(),
-        swage_config::model::ExperimentLocationConfig {
-            enabled: true,
-            forced_variant: Some("alt".into()),
-        },
-    );
-    let second = storage
-        .create_session(swage_storage::fixtures::new_session(topic.id))
-        .await
-        .expect("second session");
-    let summariser = super::summariser_for(
+    // Forced: the installed variant shadows the named filler.
+    let forced = forcing("alt");
+    let second = fresh_session().await;
+    let (summariser, fallback) = super::summariser_for(
         &state,
         &forced.experimentation,
         &named,
-        &context,
+        &context_for(second),
         Some(topic.id),
-        second.id,
+        second,
         Some(Uuid::new_v4()),
     )
     .await;
-    assert_eq!(
-        summariser.describe(),
-        "plugin alt",
-        "forced: the installed variant shadows the named filler"
-    );
+    assert_eq!(summariser.describe(), "plugin alt");
+    assert_eq!(fallback, None);
+    assert_eq!(draws_for(second).await[0].metadata["variant"], "alt");
 
-    // Disabled for the scope, the variant is no candidate.
+    // The session's recorded choice outlives the variant's enablement: once
+    // the variant is disabled, the named filler serves and the turn says
+    // why.
     state
         .plugins
         .set_enablement("alt", None, false, None)
         .await
         .expect("disables");
-    let third = storage
-        .create_session(swage_storage::fixtures::new_session(topic.id))
-        .await
-        .expect("third session");
-    let summariser = super::summariser_for(
+    let (summariser, fallback) = super::summariser_for(
         &state,
         &forced.experimentation,
         &named,
-        &context,
+        &context_for(second),
         Some(topic.id),
-        third.id,
+        second,
         Some(Uuid::new_v4()),
     )
     .await;
     assert_eq!(summariser.describe(), "plugin base");
+    assert!(
+        fallback
+            .as_deref()
+            .is_some_and(|reason| reason.contains("recorded choice 'alt'")),
+        "{fallback:?}"
+    );
+
+    // A disabled variant is no candidate for the seam: with a second
+    // variant beside it, pinning that one serves it, and pinning the
+    // disabled one is a draw the seam refuses, the named filler serving.
+    state
+        .plugins
+        .install(
+            &write("alt2", "variant_of = \"slot.succession\""),
+            &[],
+            None,
+        )
+        .await
+        .expect("installs");
+    state
+        .plugins
+        .set_enablement("alt2", None, true, None)
+        .await
+        .expect("enables");
+    let third = fresh_session().await;
+    let (summariser, fallback) = super::summariser_for(
+        &state,
+        &forcing("alt2").experimentation,
+        &named,
+        &context_for(third),
+        Some(topic.id),
+        third,
+        Some(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(summariser.describe(), "plugin alt2");
+    assert_eq!(fallback, None);
+    let fourth = fresh_session().await;
+    let (summariser, fallback) = super::summariser_for(
+        &state,
+        &forced.experimentation,
+        &named,
+        &context_for(fourth),
+        Some(topic.id),
+        fourth,
+        Some(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(summariser.describe(), "plugin base");
+    assert!(
+        fallback
+            .as_deref()
+            .is_some_and(|reason| reason.contains("could not be drawn") && reason.contains("alt")),
+        "{fallback:?}"
+    );
+    assert!(
+        draws_for(fourth).await.is_empty(),
+        "a refused draw records no choice; the turn's record carries the refusal"
+    );
+
+    // No candidates at all is a default-only decision, recorded like any
+    // other.
+    state
+        .plugins
+        .set_enablement("alt2", None, false, None)
+        .await
+        .expect("disables");
+    let fifth = fresh_session().await;
+    let (summariser, fallback) = super::summariser_for(
+        &state,
+        &swage_config::ResolvedConfig::default().experimentation,
+        &named,
+        &context_for(fifth),
+        Some(topic.id),
+        fifth,
+        Some(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(summariser.describe(), "plugin base");
+    assert_eq!(fallback, None);
+    let draws = draws_for(fifth).await;
+    assert_eq!(draws.len(), 1);
+    assert_eq!(draws[0].metadata["reason"], "default_only");
+}
+
+/// The summariser is named as having served only on a turn whose
+/// compaction the succession step requested: a degradation diagnosis
+/// produces the same successor shape without it.
+#[test]
+fn the_summariser_served_only_where_the_succession_step_requested_the_compaction() {
+    use swage_protocol::client::context::CompactionRecord;
+    let record = |requested: &str| CompactionRecord {
+        element: "history".into(),
+        requested_strategy: requested.into(),
+        actual_strategy: swage_context::succession::THRESHOLD_STRATEGY.into(),
+        messages_removed: 2,
+        tokens_before: 10,
+        tokens_after: 5,
+        source_message_range: Some((0, 2)),
+        budget: None,
+        failure_reason: None,
+        focus: None,
+        diagnosis: None,
+    };
+    assert!(!super::succession_ran(&[]));
+    assert!(!super::succession_ran(&[record(
+        swage_context::succession::DEGRADATION_STRATEGY
+    )]));
+    assert!(super::succession_ran(&[record(
+        swage_context::succession::THRESHOLD_STRATEGY
+    )]));
 }

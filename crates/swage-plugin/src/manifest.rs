@@ -357,6 +357,22 @@ impl PluginManifest {
                 "variant_of must name a function, or be omitted".into(),
             ));
         }
+        // A variant of a slot's function stands where the slot's filler
+        // stands, so it provides that slot.
+        if let Some(slot) = self
+            .variant_of
+            .as_deref()
+            .and_then(|function| function.strip_prefix("slot."))
+            && !self
+                .provides
+                .slots
+                .iter()
+                .any(|declared| declared.name == slot)
+        {
+            return Err(ManifestError::Invalid(format!(
+                "variant_of = \"slot.{slot}\" requires the plugin to provide the slot '{slot}'"
+            )));
+        }
         if self.limits.heap_mib == 0 || self.limits.continuous_execution_secs == 0 {
             return Err(ManifestError::Invalid(
                 "limits.heap_mib and limits.continuous_execution_secs must be positive".into(),
@@ -462,6 +478,24 @@ mod tests {
         description = "Echo the text back."
         parameters = { type = "object", properties = { text = { type = "string" } }, required = ["text"] }
     "#;
+
+    #[test]
+    fn a_slot_variant_provides_the_slot_it_stands_in_for() {
+        let as_variant = ECHO.replace(
+            "variant_of = \"tools.echo\"",
+            "variant_of = \"slot.succession\"",
+        );
+        let without = PluginManifest::parse(&as_variant);
+        assert!(
+            matches!(&without, Err(ManifestError::Invalid(message)) if message.contains("provide the slot 'succession'")),
+            "{without:?}"
+        );
+        let with = PluginManifest::parse(&format!(
+            "{as_variant}\n[[provides.slots]]\nname = \"succession\"\n"
+        ))
+        .expect("a variant providing its slot parses");
+        assert_eq!(with.variant_of.as_deref(), Some("slot.succession"));
+    }
 
     #[test]
     fn a_conforming_manifest_reads_every_declaration() {

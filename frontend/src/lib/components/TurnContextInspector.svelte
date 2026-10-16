@@ -17,7 +17,12 @@
   interface TurnGraphAccount {
     revision: number;
     context_program: { filler: StepFiller; served: string; fallback: string | null };
-    succession: { filler: StepFiller; summariser: string; served: string | null };
+    succession: {
+      filler: StepFiller;
+      summariser: string;
+      served: string | null;
+      fallback: string | null;
+    };
     hooks: { attached: HookAttachment[]; skipped: HookAttachment[] };
     branches: string[];
   }
@@ -144,7 +149,9 @@
           <li>
             succession: {fillerLabel(turnGraph.succession.filler)}; {turnGraph.succession.served
               ? `served by ${turnGraph.succession.served}`
-              : "not run this turn"}
+              : "not run this turn"}{turnGraph.succession.fallback
+              ? ` — fell back: ${turnGraph.succession.fallback}`
+              : ""}
           </li>
           {#if turnGraph.hooks.attached.length > 0}
             <li>

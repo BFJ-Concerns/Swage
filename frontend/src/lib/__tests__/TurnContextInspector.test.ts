@@ -82,6 +82,7 @@ describe("TurnContextInspector", () => {
           filler: { kind: "plugin", name: "marker-summariser" },
           summariser: "plugin marker-summariser",
           served: "plugin marker-summariser",
+          fallback: null,
         },
         hooks: {
           attached: [{ point: "tool_call", plugin: "guard", mode: "veto" }],
@@ -124,7 +125,12 @@ describe("TurnContextInspector", () => {
       turn_graph: {
         revision: 0,
         context_program: { filler: { kind: "plugin", name: "composer" }, served: "builtin", fallback: "composer: the slot answered without messages" },
-        succession: { filler: { kind: "builtin" }, summariser: "builtin", served: null },
+        succession: {
+          filler: { kind: "plugin", name: "gone" },
+          summariser: "builtin",
+          served: null,
+          fallback: "plugin 'gone' is not serving or not enabled for this scope",
+        },
         hooks: { attached: [], skipped: [] },
         branches: [],
       },
@@ -141,6 +147,9 @@ describe("TurnContextInspector", () => {
     const text = document.querySelector(".turn-graph")!.textContent!.replace(/\s+/g, " ");
     expect(text).toContain("not run this turn");
     expect(text).toContain("fell back: composer: the slot answered without messages");
+    expect(text).toContain(
+      "succession: plugin gone; not run this turn — fell back: plugin 'gone' is not serving",
+    );
   });
 
   it("names each declared omission and the reason given for it", async () => {

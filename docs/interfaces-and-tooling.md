@@ -1002,7 +1002,10 @@ forced_variant = "my-summariser"
 ```
 
 — experimentation off keeps the named filler, and every draw is recorded
-like any other variant decision.
+like any other variant decision. A session's recorded choice serves while
+it is still the named filler or a candidate for the scope; a choice that is
+neither — the variant disabled since, the revision's filler changed — gives
+way to the named filler, and the turn's record says why.
 
 ```toml
 name = "echo"
@@ -1064,8 +1067,9 @@ its own, naming the candidate and why. Settings → Turn graph shows the
 same.
 
 A plugin filling a slot runs in its isolate with the `model` grant's
-`swage.complete({ messages, model? })` answered by the gateway's active
-provider and recorded as the plugin's completion. The context-program
+`swage.complete({ messages, model?, max_tokens?, temperature? })` answered
+by the gateway's active provider and recorded as the plugin's completion;
+the succession slot receives the summariser's request as those same fields. The context-program
 slot receives the turn's elements with their messages in the
 conversation's own shape and answers with messages handed back as given
 or composed afresh as `{ role, content }` text; a message in neither
@@ -1092,7 +1096,12 @@ mode = "veto"
 
 ```js
 swage.provide.slot("succession", async (input) => {
-  const reply = await swage.complete({ messages: input.messages, model: input.model });
+  const reply = await swage.complete({
+    messages: input.messages,
+    model: input.model,
+    max_tokens: input.max_tokens,
+    temperature: input.temperature,
+  });
   return { summary: reply.content };
 });
 swage.provide.hook("tool_call", (event) =>

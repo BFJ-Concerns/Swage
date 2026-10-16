@@ -666,7 +666,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
     let context_program_served = std::sync::Mutex::new(SlotService::builtin());
     let context_program_plugin = match &context_program_filler {
         swage_protocol::client::turn_graph::StepFiller::Plugin { name } => {
-            let name = crate::plugin::slot::slot_variant(
+            let draw = crate::plugin::slot::slot_variant(
                 state,
                 &config.experimentation,
                 swage_protocol::client::turn_graph::TurnSlot::ContextProgram,
@@ -676,16 +676,27 @@ pub(super) async fn process_turn_with_composition_and_focus(
                 Some(topic_id),
             )
             .await;
-            let slot =
-                crate::plugin::slot::slot_for_plugin(state, &name, &slot_context, Some(topic_id));
-            if slot.is_none() {
-                *context_program_served
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) = SlotService::fallback(format!(
-                    "plugin '{name}' is not serving or not enabled for this scope"
-                ));
+            match crate::plugin::slot::slot_for_plugin(
+                state,
+                &draw.name,
+                &slot_context,
+                Some(topic_id),
+            ) {
+                Ok(slot) => {
+                    context_program_served
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .fallback = draw.refusal;
+                    Some(slot)
+                }
+                Err(reason) => {
+                    *context_program_served
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) =
+                        SlotService::fallback(after_reason(draw.refusal, reason));
+                    None
+                }
             }
-            slot
         }
         _ => None,
     };
@@ -706,17 +717,19 @@ pub(super) async fn process_turn_with_composition_and_focus(
             Some(slot) => {
                 match slot.context_program(elements, &session_variables, &tokeniser, kernel) {
                     Ok(output) => {
-                        *context_program_served
+                        context_program_served
                             .lock()
-                            .unwrap_or_else(|e| e.into_inner()) =
-                            SlotService::served(format!("plugin {}", slot.plugin));
+                            .unwrap_or_else(|e| e.into_inner())
+                            .served = format!("plugin {}", slot.plugin);
                         output
                     }
                     Err(error) => {
                         tracing::warn!(%error, "the context-program plugin failed; the kernel's assembly serves");
-                        *context_program_served
+                        let mut served = context_program_served
                             .lock()
-                            .unwrap_or_else(|e| e.into_inner()) = SlotService::fallback(error);
+                            .unwrap_or_else(|e| e.into_inner());
+                        let earlier = served.fallback.take();
+                        *served = SlotService::fallback(after_reason(earlier, error));
                         kernel()
                     }
                 }
@@ -728,7 +741,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
     let succession_filler = active_graph
         .graph
         .filler_for(swage_protocol::client::turn_graph::TurnSlot::Succession);
-    let summariser = Box::pin(summariser_for(
+    let (summariser, succession_fallback) = Box::pin(summariser_for(
         state,
         &config.experimentation,
         &succession_filler,
@@ -790,13 +803,9 @@ pub(super) async fn process_turn_with_composition_and_focus(
         "succession": {
             "filler": succession_filler,
             "summariser": succession_summariser,
-            // What served is named only on a turn the succession step ran:
-            // a turn under the threshold ran no summariser at all.
-            "served": assembly_report
-                .compaction_applied
-                .iter()
-                .any(|record| record.actual_strategy.starts_with("succession"))
+            "served": succession_ran(&assembly_report.compaction_applied)
                 .then_some(&succession_summariser),
+            "fallback": succession_fallback,
         },
         "hooks": {
             "attached": turn_hooks.attached,
@@ -1100,13 +1109,6 @@ impl SlotService {
         }
     }
 
-    fn served(filler: String) -> Self {
-        Self {
-            served: filler,
-            fallback: None,
-        }
-    }
-
     fn fallback(reason: String) -> Self {
         Self {
             served: "builtin".to_owned(),
@@ -1142,9 +1144,37 @@ pub(crate) mod tests;
 // Tests
 // ---------------------------------------------------------------------------
 
-/// What fills the succession slot under the turn's revision: a named plugin
-/// — or an installed variant of the slot drawn in its place — and the
-/// kernel's own when that plugin is not serving this scope.
+/// Whether the succession step's summariser ran this turn: a compaction
+/// record the step requested as its own. A degradation diagnosis answers
+/// the same successor shape without the summariser, and a turn under the
+/// threshold ran no summariser at all; neither is the summariser serving.
+fn succession_ran(records: &[swage_protocol::client::context::CompactionRecord]) -> bool {
+    records
+        .iter()
+        .any(|record| record.requested_strategy == swage_context::succession::THRESHOLD_STRATEGY)
+}
+
+/// A reason a slot is not served as chosen, after an earlier one where
+/// there was one.
+fn after_reason(earlier: Option<String>, reason: String) -> String {
+    match earlier {
+        Some(earlier) => format!("{earlier}; {reason}"),
+        None => reason,
+    }
+}
+
+/// Two reasons a slot is not served as chosen, as one; none when neither.
+fn join_reasons(first: Option<String>, second: Option<String>) -> Option<String> {
+    match second {
+        Some(second) => Some(after_reason(first, second)),
+        None => first,
+    }
+}
+
+/// What fills the succession slot under the turn's revision, drawn through
+/// the slot's variants: a named plugin — or an installed variant of the slot
+/// drawn in its place — and the kernel's own when that plugin is not serving
+/// this scope, with why the step is not served as chosen.
 async fn summariser_for(
     state: &AppState,
     experimentation: &swage_config::model::ExperimentationConfig,
@@ -1153,12 +1183,11 @@ async fn summariser_for(
     topic_id: Option<Uuid>,
     session_id: Uuid,
     turn_id: Option<Uuid>,
-) -> succession::Summariser {
+) -> (succession::Summariser, Option<String>) {
     use swage_protocol::client::turn_graph::{StepFiller, TurnSlot};
     match filler {
-        StepFiller::Builtin => succession::Summariser::Builtin,
         StepFiller::Plugin { name } => {
-            let name = crate::plugin::slot::slot_variant(
+            let draw = crate::plugin::slot::slot_variant(
                 state,
                 experimentation,
                 TurnSlot::Succession,
@@ -1168,15 +1197,46 @@ async fn summariser_for(
                 topic_id,
             )
             .await;
-            crate::plugin::slot::slot_for_plugin(state, &name, context, topic_id)
-                .map(succession::Summariser::Plugin)
-                .unwrap_or(succession::Summariser::Builtin)
+            let (summariser, reason) = summariser_named(
+                state,
+                &StepFiller::Plugin { name: draw.name },
+                context,
+                topic_id,
+                session_id,
+            );
+            (summariser, join_reasons(draw.refusal, reason))
         }
-        StepFiller::Workflow { name } => succession::Summariser::Workflow {
-            name: name.clone(),
-            state: Box::new(state.clone()),
-            session_id: Some(session_id),
-        },
+        other => summariser_named(state, other, context, topic_id, session_id),
+    }
+}
+
+/// The summariser `filler` names, as declared — no draw: a shadow branch
+/// runs the filler its declaration names — and why the kernel's own serves
+/// instead where a named plugin cannot.
+fn summariser_named(
+    state: &AppState,
+    filler: &swage_protocol::client::turn_graph::StepFiller,
+    context: &swage_plugin::InvocationContext,
+    topic_id: Option<Uuid>,
+    session_id: Uuid,
+) -> (succession::Summariser, Option<String>) {
+    use swage_protocol::client::turn_graph::StepFiller;
+    match filler {
+        StepFiller::Builtin => (succession::Summariser::Builtin, None),
+        StepFiller::Plugin { name } => {
+            match crate::plugin::slot::slot_for_plugin(state, name, context, topic_id) {
+                Ok(slot) => (succession::Summariser::Plugin(slot), None),
+                Err(reason) => (succession::Summariser::Builtin, Some(reason)),
+            }
+        }
+        StepFiller::Workflow { name } => (
+            succession::Summariser::Workflow {
+                name: name.clone(),
+                state: Box::new(state.clone()),
+                session_id: Some(session_id),
+            },
+            None,
+        ),
     }
 }
 
@@ -1258,16 +1318,7 @@ async fn succession_shadows(
             });
         shadows.push(succession::Shadow {
             branch: branch.id.clone(),
-            summariser: Box::pin(summariser_for(
-                state,
-                &config.experimentation,
-                &step.filler,
-                context,
-                topic_id,
-                session_id,
-                Some(turn_id),
-            ))
-            .await,
+            summariser: summariser_named(state, &step.filler, context, topic_id, session_id).0,
             record,
         });
     }
