@@ -12,6 +12,12 @@
 //! newer part kept as it was. The agent shapes the summary through the
 //! turn's compaction focus.
 //!
+//! The summariser's instruction is the caller's choice between the texts
+//! this module carries (`STANDING_RULES_INSTRUCTIONS`, the default, and
+//! `PLAIN_NOTES_INSTRUCTIONS`); the gateway selects one per session as a
+//! recorded variant, so which text wrote a summary is reconstructable from
+//! the audit trail.
+//!
 //! The pass runs at the turn's assembly step, at the same threshold the
 //! agent runtime compacts at; once it has run, the runtime finds the
 //! threshold met and its own compactor stays idle. When the pass cannot run
@@ -53,6 +59,9 @@ pub struct SuccessionRequest<'a> {
     pub history: &'a [ChatMessage],
     /// The agent's shaping instructions for the summary, when it gave any.
     pub focus: Option<&'a str>,
+    /// The summariser's instruction: one of the texts this module carries,
+    /// selected by the caller.
+    pub instructions: &'a str,
     /// The most history messages the successor may keep verbatim, when the
     /// caller's threshold counts messages: the successor is built to fit,
     /// so the runtime's own compactor never runs over it. `None` keeps the
@@ -159,6 +168,7 @@ pub async fn succeed(
     let summarised = split_point(&request)?;
     let response = provider
         .complete(summary_request(
+            request.instructions,
             request.carried,
             &request.history[..summarised],
             request.focus,
@@ -303,13 +313,21 @@ pub fn failure_record(
     }
 }
 
-const SUMMARY_INSTRUCTIONS: &str = "You write the hand-over notes an assistant continues a conversation from. \
-The assistant's standing context is shown first and will be in place again, word for word, when it continues — \
-never restate, paraphrase or summarise it. Summarise the conversation alone: what was asked, what was decided, \
-what was done and how it turned out, what is still open, and any fact the assistant learned that the standing \
-context does not hold. Write in the past tense, as notes to the assistant, in plain prose without headings.";
+/// The instruction the hand-over notes are written under by default: the
+/// conversation summarised against the carried context, with every standing
+/// rule the conversation established carried forward as a rule in force
+/// rather than as an event. The gateway selects between this text and
+/// `PLAIN_NOTES_INSTRUCTIONS` as a recorded variant.
+pub const STANDING_RULES_INSTRUCTIONS: &str = "You write the hand-over notes an assistant continues a conversation from. The assistant's standing context is shown first and will be in place again, word for word, when it continues — never restate, paraphrase or summarise it. Summarise the conversation alone: what was asked, what was decided, what was done and how it turned out, what is still open, and any fact the assistant learned that the standing context does not hold. Write in the past tense, as notes to the assistant, in plain prose without headings.\n\n\
+Rules are not events. A standing instruction the conversation established — a preference the person stated, a constraint they set, a way of working they asked for or the assistant committed to, a rule read from a file — still binds the assistant after the hand-over, so record it as a rule in force rather than as something that happened: in the present tense and the imperative, each in its own sentence saying what it applies to, together in a final paragraph that opens \"Standing rules:\". Leave that paragraph out when the conversation established none, and never put a rule there that the standing context already states. \"The person asked that commits be signed\" reads as an event that is over; \"Sign every commit\" keeps the rule in force.";
+
+/// The earlier instruction, kept as the registered alternative: the same
+/// notes with no rule given a different standing from an event — a
+/// comparison measures whether it lets established rules lapse.
+pub const PLAIN_NOTES_INSTRUCTIONS: &str = "You write the hand-over notes an assistant continues a conversation from. The assistant's standing context is shown first and will be in place again, word for word, when it continues — never restate, paraphrase or summarise it. Summarise the conversation alone: what was asked, what was decided, what was done and how it turned out, what is still open, and any fact the assistant learned that the standing context does not hold. Write in the past tense, as notes to the assistant, in plain prose without headings.";
 
 fn summary_request(
+    instructions: &str,
     carried: &[ChatMessage],
     older: &[ChatMessage],
     focus: Option<&str>,
@@ -324,7 +342,7 @@ fn summary_request(
     CompletionRequest {
         effort: None,
         messages: vec![
-            ChatMessage::new(Role::System, SUMMARY_INSTRUCTIONS),
+            ChatMessage::new(Role::System, instructions),
             ChatMessage::new(
                 Role::User,
                 format!(
@@ -479,6 +497,7 @@ mod tests {
 
         let succession = succeed(
             SuccessionRequest {
+                instructions: STANDING_RULES_INSTRUCTIONS,
                 carried: &carried,
                 history: &history,
                 focus: Some("keep the open questions"),
@@ -492,6 +511,10 @@ mod tests {
 
         let request = provider.only_request();
         assert_eq!(request.messages[0].role(), Role::System);
+        assert_eq!(
+            request.messages[0].text_content(),
+            STANDING_RULES_INSTRUCTIONS
+        );
         let shown = request.messages[1].text_content();
         assert!(shown.contains("already in place; do not repeat"), "{shown}");
         assert!(shown.contains("You are Swage. Topic: alpha."), "{shown}");
@@ -522,11 +545,36 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn the_summariser_runs_under_the_request_s_instruction_whichever_text_it_is() {
+        let provider = RecordingProvider::answering("Notes.");
+        let history = history(4);
+        succeed(
+            SuccessionRequest {
+                instructions: PLAIN_NOTES_INSTRUCTIONS,
+                carried: &[],
+                history: &history,
+                focus: None,
+                retain_at_most: None,
+            },
+            &provider,
+            &CharTokeniser,
+        )
+        .await
+        .expect("succession runs");
+
+        let request = provider.only_request();
+        assert_eq!(request.messages[0].role(), Role::System);
+        assert_eq!(request.messages[0].text_content(), PLAIN_NOTES_INSTRUCTIONS);
+        assert_ne!(PLAIN_NOTES_INSTRUCTIONS, STANDING_RULES_INSTRUCTIONS);
+    }
+
     #[test]
     fn a_diagnosis_becomes_the_successor_s_summary_under_its_trigger_s_strategy() {
         let history = history(6);
         let succession = successor(
             &SuccessionRequest {
+                instructions: STANDING_RULES_INSTRUCTIONS,
                 carried: &[],
                 history: &history,
                 focus: None,
@@ -564,6 +612,7 @@ mod tests {
         let history = history(4);
         let error = succeed(
             SuccessionRequest {
+                instructions: STANDING_RULES_INSTRUCTIONS,
                 carried: &[],
                 history: &history,
                 focus: None,
@@ -594,6 +643,7 @@ mod tests {
         let history = history(4);
         let error = succeed(
             SuccessionRequest {
+                instructions: STANDING_RULES_INSTRUCTIONS,
                 carried: &[],
                 history: &history,
                 focus: None,
@@ -613,6 +663,7 @@ mod tests {
         let history = history(1);
         let error = succeed(
             SuccessionRequest {
+                instructions: STANDING_RULES_INSTRUCTIONS,
                 carried: &[],
                 history: &history,
                 focus: None,
@@ -646,6 +697,7 @@ mod tests {
 
     fn split_of(history: &[ChatMessage], retain_at_most: Option<usize>) -> usize {
         split_point(&SuccessionRequest {
+            instructions: STANDING_RULES_INSTRUCTIONS,
             carried: &[],
             history,
             focus: None,
@@ -739,6 +791,7 @@ mod tests {
         history.extend(tool_round("x"));
         history.push(ChatMessage::new(Role::User, "u6"));
         let request = SuccessionRequest {
+            instructions: STANDING_RULES_INSTRUCTIONS,
             carried: &[],
             history: &history,
             focus: None,
