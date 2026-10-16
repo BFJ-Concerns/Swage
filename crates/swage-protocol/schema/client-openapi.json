@@ -6609,7 +6609,7 @@
             ]
           },
           "attempts": {
-            "description": "Every attempt the call ran, oldest first, each stamped once its turn\nresolved the options it actually ran with. A call interrupted and\nre-dispatched by replay has more than one, and each names its own\nturn — so the record keeps the interrupted attempt rather than only\nthe one that settled. Empty until the first turn resolves.",
+            "description": "Every attempt the call was dispatched for, oldest first: opened by\nthe run with its cause before the turn starts, and resolved by the\nturn with the options it actually ran with. A call interrupted and\nre-dispatched by replay, or served by its declared fallback, has more\nthan one, each naming its own turn — so the record keeps the attempt\nthat was cut off beside the one that followed. An attempt with no\nturn was opened and never resolved.",
             "items": {
               "$ref": "#/components/schemas/WorkflowAgentCallResolution"
             },
