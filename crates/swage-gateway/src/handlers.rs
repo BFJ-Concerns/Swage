@@ -3821,6 +3821,15 @@ mod tests {
                 })
                 .await
                 .unwrap();
+            swage_storage::ThreadStore::create(
+                storage.as_ref(),
+                swage_storage::model::NewThread {
+                    session_id: session.id,
+                    agent_id: session.agent_id.clone(),
+                },
+            )
+            .await
+            .unwrap();
             let (provider, requests) = CapturingMultiRoundProvider::new(vec![vec![
                 swage_core::StreamChunk::Delta {
                     content: "seen".into(),
