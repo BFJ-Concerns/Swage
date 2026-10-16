@@ -145,6 +145,9 @@
     "relink_workspace_attachment_request": {
       "$ref": "#/$defs/RelinkWorkspaceAttachmentRequest"
     },
+    "rename_surface_request": {
+      "$ref": "#/$defs/RenameSurfaceRequest"
+    },
     "restart_status": {
       "$ref": "#/$defs/RestartStatusResponse"
     },
@@ -299,6 +302,7 @@
     "create_channel_link_code_request",
     "create_topic_request",
     "create_surface_request",
+    "rename_surface_request",
     "memory_page_list",
     "memory_page",
     "memory_instruction_request",
@@ -3854,6 +3858,18 @@
         "path"
       ]
     },
+    "RenameSurfaceRequest": {
+      "description": "Rename only this session's surface, leaving its saved origin untouched.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ]
+    },
     "RequireApprovalEntry": {
       "anyOf": [
         {
@@ -6066,6 +6082,15 @@
           "type": "string",
           "format": "uuid"
         },
+        "resolved_at": {
+          "description": "Resolution time; the note remains in the record after leaving the working view.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "default": null
+        },
         "tags": {
           "type": "array",
           "items": {
@@ -6192,6 +6217,10 @@
           "type": "string",
           "format": "uuid"
         },
+        "shape_only": {
+          "description": "True when the copy starts with shape alone, without its origin's content.",
+          "type": "boolean"
+        },
         "title": {
           "type": "string"
         },
@@ -6201,6 +6230,7 @@
         }
       },
       "required": [
+        "shape_only",
         "id",
         "session_id",
         "title",
