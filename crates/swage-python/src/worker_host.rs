@@ -9,8 +9,9 @@ use serde_json::Value;
 use tempfile::TempDir;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::process::Command;
+use tokio::task::{JoinHandle, JoinSet};
 use uuid::Uuid;
 
 use swage_config::model::PythonExecuteToolConfig;
@@ -94,10 +95,16 @@ impl PythonWorkerRuntime {
 
     pub async fn spawn_worker_for_turn(
         &self,
-        policy: SandboxConfig,
+        policy: impl Into<Option<SandboxConfig>>,
         egress: EgressSetup,
     ) -> Result<ReadyWorker, PythonWorkerError> {
-        self.spawn_worker(true, Some(policy), Some(egress)).await
+        let policy = policy.into();
+        self.spawn_worker(
+            policy.is_some() || self.config.require_sandbox,
+            policy,
+            Some(egress),
+        )
+        .await
     }
 
     async fn spawn_worker(
@@ -125,6 +132,16 @@ impl PythonWorkerRuntime {
             .map(swage_sandbox::egress::EgressProxy::start)
             .transpose()
             .map_err(|error| PythonWorkerError::SandboxUnavailable(error.to_string()))?;
+        // Unsandboxed workers do not enter the sandbox command launcher, so
+        // their TCP-to-Unix proxy bridge lives beside the worker on the host.
+        let bridge = if !sandboxed {
+            match proxy.as_ref() {
+                Some(proxy) => Some(WorkerEgressBridge::start(proxy.socket_path()).await?),
+                None => None,
+            }
+        } else {
+            None
+        };
         let mut command = if sandboxed {
             let policy = policy.unwrap_or_else(|| {
                 SandboxConfig::builder()
@@ -138,6 +155,9 @@ impl PythonWorkerRuntime {
             build_unsandboxed_command(&self.runtime, &worker_dir)
         };
 
+        if let Some(bridge) = &bridge {
+            command.envs(bridge.endpoint.environment());
+        }
         command.stdin(Stdio::piped());
         let mut child = ChildProcessManager::spawn(command).map_err(|error| {
             PythonWorkerError::SpawnFailed(format!("child spawn failed: {error}"))
@@ -189,6 +209,7 @@ impl PythonWorkerRuntime {
                 transport,
                 uses_worker_directory: sandboxed && !scoped,
                 _egress_proxy: proxy,
+                _egress_bridge: bridge,
                 _worker_dir: worker_dir,
             }),
             Err(error) => {
@@ -339,12 +360,68 @@ impl PythonWorkerRuntime {
     }
 }
 
+struct WorkerEgressBridge {
+    endpoint: swage_sandbox::egress::EgressBridge,
+    task: JoinHandle<()>,
+}
+
+impl WorkerEgressBridge {
+    async fn start(socket: &Path) -> Result<Self, PythonWorkerError> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.map_err(|error| {
+            PythonWorkerError::SpawnFailed(format!("failed to bind Python egress bridge: {error}"))
+        })?;
+        let address = listener
+            .local_addr()
+            .map_err(|error| PythonWorkerError::SpawnFailed(error.to_string()))?;
+        let socket = socket.to_owned();
+        let task = tokio::spawn(async move {
+            // Dropping this task aborts every connection as well as accepting.
+            let mut connections = JoinSet::new();
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let (mut client, _) = match accepted {
+                            Ok(connection) => connection,
+                            Err(error) => {
+                                tracing::warn!(%error, "Python egress bridge stopped accepting");
+                                break;
+                            }
+                        };
+                        let socket = socket.clone();
+                        connections.spawn(async move {
+                            let mut proxy = UnixStream::connect(socket).await?;
+                            tokio::io::copy_bidirectional(&mut client, &mut proxy)
+                                .await.map(|_| ())
+                        });
+                    }
+                    Some(result) = connections.join_next(), if !connections.is_empty() => {
+                        if !matches!(result, Ok(Ok(()))) {
+                            tracing::debug!(?result, "Python egress bridge connection ended");
+                        }
+                    }
+                }
+            }
+        });
+        Ok(Self {
+            endpoint: swage_sandbox::egress::EgressBridge { address },
+            task,
+        })
+    }
+}
+
+impl Drop for WorkerEgressBridge {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 pub struct ReadyWorker {
     child: ChildProcessManager,
     transport: WorkerTransport,
     uses_worker_directory: bool,
     _worker_dir: WorkerDirectory,
     _egress_proxy: Option<swage_sandbox::egress::EgressProxy>,
+    _egress_bridge: Option<WorkerEgressBridge>,
 }
 
 impl ReadyWorker {

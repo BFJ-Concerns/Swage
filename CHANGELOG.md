@@ -47,6 +47,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Unsandboxed Python workers use the calling turn’s recording proxy for HTTP requests.
+
 - Python calls inside a declared execution boundary no longer require bubblewrap unless Python sandboxing is explicitly required.
 
 - Turns with both sandbox settings disabled can run without `HOME`, including when Python is disabled.

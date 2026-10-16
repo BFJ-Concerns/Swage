@@ -95,14 +95,11 @@ impl WorkerPool {
         policy: Option<swage_sandbox::SandboxConfig>,
         egress: swage_sandbox::EgressSetup,
     ) -> Result<WorkerLease, PythonWorkerError> {
-        let Some(policy) = policy else {
-            if self.spawn_sandboxed {
-                return Err(PythonWorkerError::SandboxUnavailable(
-                    "the calling turn supplied no sandbox policy".into(),
-                ));
-            }
-            return self.acquire().await;
-        };
+        if policy.is_none() && self.spawn_sandboxed {
+            return Err(PythonWorkerError::SandboxUnavailable(
+                "the calling turn supplied no sandbox policy".into(),
+            ));
+        }
         if self.warm_target > 0 {
             // Acquire through the pool so an in-flight warm-up cannot hold
             // the last permit while a scoped caller waits for it forever.
@@ -400,6 +397,111 @@ raise SystemExit(1)
         let runtime =
             Arc::new(PythonWorkerRuntime::new(config).expect("wrapper runtime should resolve"));
         (temp_dir, runtime)
+    }
+
+    #[tokio::test]
+    async fn unsandboxed_turn_records_http_through_its_proxy() {
+        use swage_sandbox::{
+            EgressConnection, EgressPolicy, EgressRecorder, EgressRequest, EgressSetup,
+            EgressVerdict,
+        };
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        struct LocalOnly;
+        #[async_trait::async_trait]
+        impl EgressPolicy for LocalOnly {
+            async fn decide(&self, request: &EgressRequest) -> EgressVerdict {
+                if request.host == "127.0.0.1" {
+                    EgressVerdict::Allowed {
+                        basis: "local fixture".into(),
+                    }
+                } else {
+                    EgressVerdict::Refused {
+                        reason: "fixture only".into(),
+                    }
+                }
+            }
+        }
+        #[derive(Default)]
+        struct Records(std::sync::Mutex<Vec<EgressConnection>>);
+        #[async_trait::async_trait]
+        impl EgressRecorder for Records {
+            async fn record(&self, connection: EgressConnection) -> Result<(), String> {
+                self.0.lock().unwrap().push(connection);
+                Ok(())
+            }
+        }
+        struct NoTools;
+        #[async_trait::async_trait]
+        impl crate::worker_host::NestedToolHost for NoTools {
+            async fn dispatch_tool(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+            ) -> Result<serde_json::Value, crate::worker_protocol::WorkerToolError> {
+                panic!("unexpected tool call");
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let server = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = server.local_addr().unwrap();
+        let fixture = tokio::spawn(async move {
+            let (stream, _) = server.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert_eq!(line, "GET /recorded HTTP/1.1\r\n");
+            reader
+                .get_mut()
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nfixture",
+                )
+                .await
+                .unwrap();
+        });
+        let recorded = Arc::new(Records::default());
+        let runtime = unsandboxed_test_runtime();
+        let pool = WorkerPool::new(runtime.clone()).unwrap();
+        let mut lease = pool
+            .acquire_for_turn(
+                None,
+                EgressSetup {
+                    policy: Arc::new(LocalOnly),
+                    recorder: recorded.clone(),
+                },
+            )
+            .await
+            .expect("unsandboxed scoped worker must start");
+        let code = format!(
+            r#"
+import os
+import urllib.request
+# Loopback is normally exempt. This fixture explicitly sends it through
+# the worker's configured proxy while keeping every connection local.
+os.environ['no_proxy'] = ''
+os.environ['NO_PROXY'] = ''
+print(urllib.request.urlopen('http://{address}/recorded', timeout=3).read().decode())
+"#
+        );
+        let result = runtime
+            .execute_python(lease.worker_mut(), &code, root.path(), &NoTools)
+            .await
+            .unwrap();
+        lease.mark_spent().await;
+        assert_eq!(result.exception_type, None, "{:?}", result.traceback);
+        assert_eq!(result.stdout, "fixture\n");
+        fixture.await.unwrap();
+        let records = recorded.0.lock().unwrap();
+        assert_eq!(
+            records.len(),
+            1,
+            "the turn's proxy must record the HTTP request"
+        );
+        assert_eq!(records[0].host, "127.0.0.1");
+        assert_eq!(records[0].port, address.port());
+        assert_eq!(records[0].method, "GET");
+        assert!(records[0].verdict.is_allowed());
     }
 
     #[cfg(target_os = "linux")]
