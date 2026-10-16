@@ -99,7 +99,7 @@
       case "first":
         return `${ordinal} — the first dispatch`;
       case "after_interruption":
-        return `${ordinal} — dispatched again after a gateway interruption: attempt ${index}'s outcome is unknown and the tool calls it issued may have been applied`;
+        return `${ordinal} — dispatched again after a gateway interruption: attempt ${index}'s outcome is unknown and the tool calls it issued may have been applied twice`;
       case "provider_fallback":
         return `${ordinal} — the primary failed (${attempt.cause.primary_failure}); the declared fallback served`;
     }

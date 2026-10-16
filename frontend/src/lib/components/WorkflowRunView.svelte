@@ -74,7 +74,7 @@
   // stands: its interrupted attempt's tool calls have unknown outcomes.
   function describeRedispatch(worker: WorkflowWorkerAccount): string | null {
     return worker.redispatched_after_interruption
-      ? "redispatched after an interruption — the interrupted attempt's tool calls have unknown outcomes and may have been applied"
+      ? "redispatched after an interruption — the interrupted attempt's tool calls have unknown outcomes and may have been applied twice"
       : null;
   }
 

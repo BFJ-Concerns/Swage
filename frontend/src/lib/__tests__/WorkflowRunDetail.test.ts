@@ -254,7 +254,7 @@ describe("WorkflowRunDetail", () => {
     let attempts = document.querySelector(".attempts")!.textContent!;
     expect(attempts).toContain("attempt 2 — dispatched again after a gateway interruption");
     expect(attempts).toContain("attempt 1's outcome is unknown");
-    expect(attempts).toContain("may have been applied");
+    expect(attempts).toContain("may have been applied twice");
     expect(attempts).not.toContain("fallback");
 
     unmount(component!);
