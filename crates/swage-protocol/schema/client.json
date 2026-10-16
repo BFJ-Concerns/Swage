@@ -10,8 +10,20 @@
     "attachment_list": {
       "$ref": "#/$defs/AttachmentListResponse"
     },
+    "channel_link": {
+      "$ref": "#/$defs/ChannelLinkResponse"
+    },
+    "channel_link_code_list": {
+      "$ref": "#/$defs/ChannelLinkCodeListResponse"
+    },
     "channel_link_code_response": {
       "$ref": "#/$defs/ChannelLinkCodeResponse"
+    },
+    "channel_link_list": {
+      "$ref": "#/$defs/ChannelLinkListResponse"
+    },
+    "channel_status_list": {
+      "$ref": "#/$defs/ChannelStatusListResponse"
     },
     "client_event": {
       "$ref": "#/$defs/ClientEvent"
@@ -322,6 +334,10 @@
     "update_workspace_trust_request",
     "relink_workspace_attachment_request",
     "workspace_attachment_list",
+    "channel_link",
+    "channel_link_list",
+    "channel_link_code_list",
+    "channel_status_list",
     "channel_link_code_response",
     "create_conversation_request",
     "create_conversation_branch_request",
@@ -676,6 +692,13 @@
         "updated_at"
       ]
     },
+    "ChannelLinkCodeListResponse": {
+      "description": "The readable, unredeemed codes, represented on the wire as an array.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ChannelLinkCodeResponse"
+      }
+    },
     "ChannelLinkCodeResponse": {
       "description": "A short-lived, single-use channel link code.",
       "type": "object",
@@ -691,6 +714,116 @@
       "required": [
         "link_code",
         "expires_at"
+      ]
+    },
+    "ChannelLinkListResponse": {
+      "description": "All linked channel conversations.",
+      "type": "object",
+      "properties": {
+        "links": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChannelLinkResponse"
+          }
+        }
+      },
+      "required": [
+        "links"
+      ]
+    },
+    "ChannelLinkResponse": {
+      "description": "A channel conversation linked to a topic and agent.",
+      "type": "object",
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "conversation": {
+          "type": "string"
+        },
+        "home_target": true,
+        "integration": {
+          "type": "string"
+        },
+        "linked_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "topic_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "integration",
+        "account",
+        "conversation",
+        "topic_id",
+        "agent_id",
+        "linked_at",
+        "updated_at"
+      ]
+    },
+    "ChannelStatusListResponse": {
+      "type": "object",
+      "properties": {
+        "channels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChannelStatusResponse"
+          }
+        }
+      },
+      "required": [
+        "channels"
+      ]
+    },
+    "ChannelStatusResponse": {
+      "type": "object",
+      "properties": {
+        "delivery_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "integration": {
+          "type": "string"
+        },
+        "last_delivery_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "route_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "integration",
+        "status",
+        "route_count",
+        "delivery_count"
       ]
     },
     "ClientEvent": {

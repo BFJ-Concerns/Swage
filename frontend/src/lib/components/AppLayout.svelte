@@ -275,6 +275,7 @@
         <button class:active={settingsTab === "skills"} onclick={() => onNavigate?.("/settings/skills")}>Skills</button>
         <button class:active={settingsTab === "automation"} onclick={() => onNavigate?.("/settings/automation")}>Automation</button>
         <button class:active={settingsTab === "voice"} onclick={() => onNavigate?.("/settings/voice")}>Voice</button>
+        <button class:active={settingsTab === "channels"} onclick={() => onNavigate?.("/settings/channels")}>Channels</button>
         <button class:active={settingsTab === "memory"} onclick={() => onNavigate?.("/settings/memory")}>Memory</button>
         {#each topicStore?.topics ?? [] as topic (topic.id)}
           <button

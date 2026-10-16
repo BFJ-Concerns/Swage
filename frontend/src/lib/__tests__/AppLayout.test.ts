@@ -888,6 +888,15 @@ describe("AppLayout shell navigation", () => {
     },
   );
 
+  it("opens Channels from the Settings navigation", () => {
+    const onNavigate = vi.fn();
+    component = mountLayout({ onNavigate, routePath: "/settings/providers" });
+    const channels = Array.from(document.querySelectorAll('nav[aria-label="Settings sections"] button'))
+      .find((button) => button.textContent?.trim() === "Channels") as HTMLButtonElement | undefined;
+    flushSync(() => channels?.click());
+    expect(onNavigate).toHaveBeenCalledWith("/settings/channels");
+  });
+
   it("navigates to the agent definitions settings tab", () => {
     const onNavigate = vi.fn();
     component = mountLayout({ onNavigate, routePath: "/settings/providers" });
