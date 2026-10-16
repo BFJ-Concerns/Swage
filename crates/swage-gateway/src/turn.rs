@@ -496,7 +496,17 @@ pub(super) async fn process_turn_with_composition_and_focus(
         worker_placement,
     );
 
-    let environment = build_session_environment(&topic, &tool_root, &session);
+    // The tools this turn's provider-visible list will carry, as the
+    // dispatcher build below will resolve them: the registry for the agent,
+    // through the session's permissions. The orientation names only these.
+    let available_tools = visible_tool_names(
+        state,
+        &config,
+        &session.agent_id,
+        Some(topic_id),
+        session.id,
+    );
+    let environment = build_session_environment(&topic, &tool_root, &session, available_tools);
     let available_skills = available_skills_for_agent(&scope, &session.agent_id, Some(swage_root));
 
     let operator_guidance = operator_guidance_rules(Some(swage_root), &workspace_policy);
@@ -852,3 +862,40 @@ pub(crate) mod tests;
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// The tool names a turn's provider-visible list carries: the agent's
+/// registry, less what the session's permissions deny. Computed before the
+/// context is assembled so the orientation can name only these; the
+/// dispatcher built afterwards resolves the same registry and permissions.
+pub(crate) fn visible_tool_names(
+    state: &AppState,
+    config: &swage_config::ResolvedConfig,
+    agent_id: &str,
+    topic_id: Option<Uuid>,
+    session_id: Uuid,
+) -> Vec<String> {
+    let session_approval_grants = state
+        .session_approval_grants
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let permissions = build_permission_config(
+        config,
+        &state.config,
+        topic_id,
+        Some(session_id),
+        &session_approval_grants,
+    );
+    let registry = state
+        .active_tool_dispatcher()
+        .registry()
+        .for_agent(agent_id);
+    let mut names: Vec<String> = registry
+        .list()
+        .into_iter()
+        .filter(|name| swage_tool::permission::check_permission(&permissions, name).is_ok())
+        .map(str::to_owned)
+        .collect();
+    names.sort();
+    names
+}

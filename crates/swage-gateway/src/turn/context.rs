@@ -144,6 +144,7 @@ pub(crate) fn build_session_environment(
     topic: &swage_storage::Topic,
     tool_root: &ResolvedToolRoot,
     session: &swage_storage::Session,
+    available_tools: Vec<String>,
 ) -> SessionEnvironment {
     let session_metadata = session.metadata.as_ref();
     // A channel session's origin was stamped at session creation; surface the
@@ -193,6 +194,7 @@ pub(crate) fn build_session_environment(
         // assembled prefix stable.
         started_at: session.created_at,
         channel,
+        available_tools,
     }
 }
 

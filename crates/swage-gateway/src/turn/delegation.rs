@@ -14,7 +14,7 @@ use super::{
     execute_context_assembly, load_active_skills_for_agent, load_session_config,
     load_trusted_workspace_policy, mpsc, operator_guidance_rules,
     resolve_authorised_worker_directory, resolve_requested_skills_for_agent, resolve_swage_root,
-    select_context_assembly, shutdown_sandbox_guard, worker_placement_path,
+    select_context_assembly, shutdown_sandbox_guard, visible_tool_names, worker_placement_path,
 };
 use crate::turn::workspace::ResolvedWorkerDirectory;
 use sha2::{Digest, Sha256};
@@ -293,7 +293,15 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             session.active_workspace_attachment_id,
         )
         .await;
-        let environment = build_session_environment(&self.topic, &self.tool_root, session);
+        let available_tools = visible_tool_names(
+            &self.state,
+            &self.config,
+            &self.agent_id,
+            Some(self.topic.id),
+            session.id,
+        );
+        let environment =
+            build_session_environment(&self.topic, &self.tool_root, session, available_tools);
         let available_skills = available_skills_for_agent(
             &self.topic.location(),
             &self.agent_id,

@@ -15884,7 +15884,7 @@ async fn unattached_session_environment_identifies_resolved_scratch_root() {
     let (tool_root, _) =
         resolve_agent_tool_root_from_policy(root.path(), &policy, &topic.location(), session.id);
 
-    let environment = build_session_environment(&topic, &tool_root, &session);
+    let environment = build_session_environment(&topic, &tool_root, &session, Vec::new());
     assert_eq!(
         environment.tool_root,
         swage_context::orientation::ToolRoot::ManagedScratch(tool_root.path.display().to_string())
@@ -15920,7 +15920,7 @@ async fn placed_worker_orientation_keeps_its_working_directory() {
         session.id,
         worker_placement_path(session.metadata.as_ref()),
     );
-    let environment = build_session_environment(&topic, &tool_root, &session);
+    let environment = build_session_environment(&topic, &tool_root, &session, Vec::new());
     let text = swage_context::orientation::OrientationElement::new(environment, vec![]).content()
         [0]
     .text_content();
@@ -16129,6 +16129,7 @@ fn test_environment() -> swage_context::orientation::SessionEnvironment {
         tool_root: swage_context::orientation::ToolRoot::ManagedScratch("/scratch/session".into()),
         started_at: chrono::Utc::now(),
         channel: None,
+        available_tools: Vec::new(),
     }
 }
 

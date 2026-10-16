@@ -35,6 +35,10 @@ pub struct SessionEnvironment {
     /// the model should know whose voice it is using and what that surface
     /// can render.
     pub channel: Option<ChannelOrientation>,
+    /// The tools this turn's provider-visible list carries, by name. The
+    /// orientation's tool guidance names a tool only when it is here, so a
+    /// session asked what it can use describes only what it has.
+    pub available_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,17 +90,41 @@ retrying, and continue with the approved result or work around a \
 rejection. File paths in tool calls resolve against your working \
 directory unless a tool says otherwise.
 
-Where tools overlap, prefer the specific one. Your operator's memory — what \
-they have stated about themselves and about this topic — arrives as a \
-profile and an index in this context; read an entry with `memory_read` \
-when its summary bears on the conversation, and remember nothing yourself: \
-the platform's curator records what the operator states. \
-Use `web_search` to find web sources and `url_fetch` to read a \
-URL you already have; reusable work surfaces are found with \
-`surface_library`, never on the web. Use `workflow_run` for a saved, journalled multi-step \
-job and `delegate` for a one-off child task. Prefer your native \
-file and shell tools over `python_execute` unless the task is genuinely \
-computation.";
+Where tools overlap, prefer the specific one.";
+
+/// The guidance for the tools a session has, one sentence per tool or pair,
+/// rendered only when the named tool is in the turn's list: the model is
+/// never told to use a tool it cannot see.
+const TOOL_GUIDANCE: &[(&[&str], &str)] = &[
+    (
+        &["memory_read"],
+        "Your operator's memory — what they have stated about themselves and \
+about this topic — arrives as a profile and an index in this context; read \
+an entry with `memory_read` when its summary bears on the conversation, and \
+remember nothing yourself: the platform's curator records what the operator \
+states.",
+    ),
+    (
+        &["web_search", "url_fetch"],
+        "Use `web_search` to find web sources and `url_fetch` to read a URL you \
+already have.",
+    ),
+    (
+        &["surface_library"],
+        "Reusable work surfaces are found with `surface_library`, never on the \
+web.",
+    ),
+    (
+        &["workflow_run"],
+        "Use `workflow_run` for a saved, journalled multi-step job.",
+    ),
+    (&["delegate"], "Use `delegate` for a one-off child task."),
+    (
+        &["python_execute"],
+        "Prefer your native file and shell tools over `python_execute` unless \
+the task is genuinely computation.",
+    ),
+];
 
 /// The context element carrying baseline orientation.
 ///
@@ -117,8 +145,26 @@ impl OrientationElement {
         }
     }
 
+    /// The identity with the guidance for the tools this session has: a
+    /// sentence joins only when every tool it names is in the list.
+    fn identity(&self) -> String {
+        let mut identity = IDENTITY.to_string();
+        for (tools, sentence) in TOOL_GUIDANCE {
+            if tools.iter().all(|tool| {
+                self.environment
+                    .available_tools
+                    .iter()
+                    .any(|have| have == tool)
+            }) {
+                identity.push(' ');
+                identity.push_str(sentence);
+            }
+        }
+        identity
+    }
+
     fn render(&self) -> String {
-        let mut blocks = vec![IDENTITY.to_string()];
+        let mut blocks = vec![self.identity()];
 
         let mut place = String::from("## Where you are\n");
         if self.environment.topic_name.is_empty() {
@@ -226,6 +272,7 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc),
             channel: None,
+            available_tools: Vec::new(),
         }
     }
 
@@ -247,6 +294,63 @@ mod tests {
         assert!(text.contains("Tool paths resolve at /scratch/general/sessions/example"));
         assert!(text.contains("a scratch directory for this work"));
         assert!(text.contains("2026-08-09 18:30 UTC"));
+    }
+
+    /// The guidance names a tool only when the session has it: a reader
+    /// granted file tools alone is told nothing of delegation, workflows or
+    /// memory, and a session with them all is told of each.
+    #[test]
+    fn tool_guidance_names_only_the_tools_the_session_has() {
+        let mut file_tools_only = bare_environment();
+        file_tools_only.available_tools = vec!["file_read".into(), "file_write".into()];
+        let text = OrientationElement::new(file_tools_only, vec![]).content()[0].text_content();
+        for absent in [
+            "delegate",
+            "workflow_run",
+            "memory_read",
+            "web_search",
+            "url_fetch",
+            "surface_library",
+            "python_execute",
+        ] {
+            assert!(
+                !text.contains(absent),
+                "{absent} named without being granted:\n{text}"
+            );
+        }
+        assert!(text.contains("Where tools overlap, prefer the specific one."));
+
+        let mut everything = bare_environment();
+        everything.available_tools = [
+            "memory_read",
+            "web_search",
+            "url_fetch",
+            "surface_library",
+            "workflow_run",
+            "delegate",
+            "python_execute",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let text = OrientationElement::new(everything, vec![]).content()[0].text_content();
+        for present in [
+            "`memory_read`",
+            "`web_search`",
+            "`url_fetch`",
+            "`surface_library`",
+            "`workflow_run`",
+            "`delegate`",
+            "`python_execute`",
+        ] {
+            assert!(text.contains(present), "{present} missing:\n{text}");
+        }
+
+        // A pair renders only whole: web search without the fetch says nothing of either.
+        let mut half = bare_environment();
+        half.available_tools = vec!["web_search".into()];
+        let text = OrientationElement::new(half, vec![]).content()[0].text_content();
+        assert!(!text.contains("web_search") && !text.contains("url_fetch"));
     }
 
     /// The session is told what the record covers and that registered
