@@ -392,7 +392,11 @@ impl Default for EngineLimits {
 
 #[derive(Debug, Error)]
 pub enum WorkflowEngineError {
-    #[error("failed to initialise the JavaScript runtime: {0}")]
+    /// The engine refused or could not complete the program for a reason
+    /// that is neither the script's exception nor a limit: a result that is
+    /// not a string, a program that drained with its promise still pending,
+    /// or a runtime that could not be built.
+    #[error("JavaScript engine error: {0}")]
     Runtime(String),
 
     #[error("workflow execution was cancelled")]
@@ -559,10 +563,23 @@ impl WorkflowEngine {
 /// public globals (`agent`, `agentStart`, `wait`, `pipeline`, `parallel`,
 /// `budget`, `log`, …) on them.
 const HOST_SHIM: &str = r#"
+(() => {
+                        // Everything here is closure-scoped: the workflow
+                        // source sees only what is assigned to globalThis
+                        // below, never the door or the raw call functions.
                         const __host = globalThis.__swageHost;
                         delete globalThis.__swageHost;
                         const __call = (name, ...args) => __host.call(name, JSON.stringify(args));
-                        const __callSync = (name, ...args) => __host.callSync(name, JSON.stringify(args));
+                        const __unwrapSync = (json) => {
+                            const response = JSON.parse(json);
+                            if (!response.ok) {
+                                const error = new Error(response.error.message);
+                                error.name = response.error.name;
+                                throw error;
+                            }
+                            return response.value;
+                        };
+                        const __callSync = (name, ...args) => __unwrapSync(__host.callSync(name, JSON.stringify(args)));
                         const __agent = (prompt, optionsJson) => __call("agent", prompt, optionsJson);
                         const __workerPlacements = () => __call("workerPlacements");
                         const __workerOpen = (optionsJson) => __call("workerOpen", optionsJson);
@@ -579,9 +596,9 @@ const HOST_SHIM: &str = r#"
                         const __log = (message) => { __callSync("log", message); };
                         const __phase = (title) => { __callSync("phase", title); };
                         const __abandonTimer = (timerId) => { __callSync("abandonTimer", timerId); };
-                        const __budgetSpent = () => JSON.parse(__callSync("budgetSpent"));
+                        const __budgetSpent = () => __callSync("budgetSpent");
                         const __budgetRemaining = () => {
-                            const remaining = JSON.parse(__callSync("budgetRemaining"));
+                            const remaining = __callSync("budgetRemaining");
                             return remaining === null ? undefined : remaining;
                         };
                         let __workflow, __deliver, __capturedSources;
@@ -1191,6 +1208,7 @@ const HOST_SHIM: &str = r#"
                         globalThis.log = (message) => __log(String(message));
                         globalThis.phase = (title) => __phase(String(title));
                         globalThis.console = { log, warn: log, error: log };
+})();
 "#;
 
 #[cfg(test)]
@@ -3690,7 +3708,10 @@ mod tests {
 
         let value: serde_json::Value = serde_json::from_str(&result).expect("JSON result");
         assert_eq!(value["date"], "undefined");
-        assert_eq!(value["eval"], "undefined");
+        assert_eq!(
+            value["eval"], "function",
+            "eval is language, not capability: it stays"
+        );
         assert_eq!(value["performance"], "undefined");
         assert_eq!(value["fetch"], "undefined");
         assert_eq!(value["timeout"], "undefined");

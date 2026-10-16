@@ -291,18 +291,19 @@ impl HostCalls for WorkflowHostCalls {
         match name {
             "log" | "phase" => {
                 self.host.record(name, string_argument(&arguments, 0));
-                Value::Null.to_string()
+                ok(Value::Null)
             }
             "abandonTimer" => {
                 self.host
                     .abandon_timer(number_argument(&arguments, 0) as u64);
-                Value::Null.to_string()
+                ok(Value::Null)
             }
-            "budgetSpent" => self.host.budget_spent().to_string(),
+            "budgetSpent" => ok(serde_json::json!(self.host.budget_spent())),
             // `null` reads as `undefined` in the shim: an unbounded budget has
             // no remaining figure.
-            "budgetRemaining" => serde_json::to_string(&self.host.budget_remaining())
-                .unwrap_or_else(|_| Value::Null.to_string()),
+            "budgetRemaining" => {
+                ok(serde_json::to_value(self.host.budget_remaining()).unwrap_or(Value::Null))
+            }
             other => ungranted(other),
         }
     }

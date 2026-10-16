@@ -3,11 +3,14 @@
 //! Every JavaScript program Swage runs — a workflow, a context assembly, a
 //! plugin — gets an isolate of its own, built here. The isolate has no ambient
 //! capability: the cage removes what the engine ships that could reach outside
-//! the program or make its runs differ (`eval`, the clocks `Date` and
-//! `Temporal`, `Math.random`, `Intl`, WebAssembly, shared memory, the engine's
-//! own host object and its `console`), and the only door out is the host-call
-//! pair that a [`HostCalls`] implementation answers. A program with no host
-//! has no door at all.
+//! the program or make its runs differ (the clocks `Date` and `Temporal`,
+//! `Math.random`, the `Intl` constructors, WebAssembly, shared memory, the
+//! engine's own host object and its `console`), and the only door out is the
+//! host-call pair that a [`HostCalls`] implementation answers. A program with
+//! no host has no door at all. Language stays: `eval` and `Function` compile
+//! source in the same caged realm and reach nothing the realm does not.
+//! The prototype's locale methods (`toLocaleString`, `localeCompare`)
+//! remain and follow the host's default locale.
 //!
 //! Two limits bound every program: a heap ceiling, and a ceiling on how long it
 //! may execute without yielding to the host. Crossing either terminates the
@@ -20,7 +23,11 @@
 //! each workflow run a thread of its own; a context assembly runs on the
 //! thread that composes the turn. The engine schedules its own housekeeping
 //! through a tokio runtime, so a program built outside one carries a
-//! runtime of its own.
+//! runtime of its own — entered for each call into the engine, never driven,
+//! which is enough for synchronous use ([`Program::execute`]) and no more: a
+//! program that will await host calls ([`Program::settle_to_string`]) is
+//! built inside the runtime that will drive it, and one built outside
+//! refuses to be awaited rather than hang on a runtime nobody polls.
 
 use std::cell::RefCell;
 use std::fmt;
@@ -202,9 +209,9 @@ extension!(
 /// into a frozen `__swageHost` door (only when a host registered them), then
 /// removes every global that reaches outside the program or makes runs differ
 /// — the engine's host object and the `console` it built on a print op, the
-/// clocks, the locale tables, WebAssembly, shared memory and the GC observers
-/// — and replaces `Math.random` with a loud failure. A program that needs
-/// output or a clock gets a host call; the cage never polyfills.
+/// clocks, the `Intl` constructors, WebAssembly, shared memory and the GC
+/// observers — and replaces `Math.random` with a loud failure. A program that
+/// needs output or a clock gets a host call; the cage never polyfills.
 const CAGE: &str = r#"
 (() => {
     const core = globalThis.Deno && globalThis.Deno.core;
@@ -223,7 +230,7 @@ const CAGE: &str = r#"
         });
     }
     for (const name of [
-        "Deno", "__bootstrap", "console", "eval", "Date", "Temporal", "Intl",
+        "Deno", "__bootstrap", "console", "Date", "Temporal", "Intl",
         "WebAssembly", "SharedArrayBuffer", "Atomics", "WeakRef",
         "FinalizationRegistry",
     ]) {
@@ -411,11 +418,15 @@ impl Program {
 
     /// Drive the event loop — host calls included — until `value` settles,
     /// and return the settled value, which must be a string. Cancellation
-    /// ends the wait even while a host call is still pending.
+    /// ends the wait even while a host call is still pending. The program
+    /// must have been built inside the tokio runtime that awaits this: a
+    /// program carrying a runtime of its own is refused here, since its
+    /// host futures would bind to a runtime nothing drives.
     pub async fn settle_to_string(
         &mut self,
         value: v8::Global<v8::Value>,
     ) -> Result<String, IsolateError> {
+        self.require_driven_runtime()?;
         let _entered = self.entered();
         let mut settled = self.runtime().resolve(value);
         let mut cancelled = self
@@ -483,6 +494,18 @@ impl Program {
         self.runtime.as_mut().expect("the isolate lives until drop")
     }
 
+    /// Awaiting the event loop needs the runtime that built the program to
+    /// be the one driving it; a program with a runtime of its own has none.
+    fn require_driven_runtime(&self) -> Result<(), IsolateError> {
+        if self.runtime_context.is_some() {
+            return Err(IsolateError::Engine(
+                "the program was built outside a tokio runtime, so it can only run synchronously; build it inside the runtime that will await it"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     fn entered(&self) -> Option<tokio::runtime::EnterGuard<'_>> {
         self.runtime_context
             .as_ref()
@@ -525,6 +548,24 @@ mod tests {
         }
     }
 
+    /// The own string keys of the caged global object with a host present,
+    /// sorted: the ECMAScript intrinsics the cage leaves, the engine's
+    /// `queueMicrotask`, and the door.
+    const EXPECTED_GLOBAL_NAMES: &str = concat!(
+        "AggregateError,Array,ArrayBuffer,AsyncDisposableStack,",
+        "BigInt,BigInt64Array,BigUint64Array,Boolean,DataView,",
+        "DisposableStack,Error,EvalError,Float16Array,Float32Array,",
+        "Float64Array,Function,Infinity,Int16Array,Int32Array,",
+        "Int8Array,Iterator,JSON,Map,Math,NaN,Number,Object,Promise,",
+        "Proxy,RangeError,ReferenceError,Reflect,RegExp,Set,String,",
+        "SuppressedError,Symbol,SyntaxError,TypeError,URIError,",
+        "Uint16Array,Uint32Array,Uint8Array,Uint8ClampedArray,",
+        "WeakMap,WeakSet,__swageHost,decodeURI,decodeURIComponent,",
+        "encodeURI,encodeURIComponent,escape,eval,globalThis,",
+        "isFinite,isNaN,parseFloat,parseInt,queueMicrotask,undefined,",
+        "unescape",
+    );
+
     fn program() -> Program {
         Program::new(limits(), None, None).expect("isolate")
     }
@@ -554,7 +595,7 @@ mod tests {
         let absent = program
             .execute_for_string(
                 "test",
-                r#"["Deno", "__bootstrap", "console", "eval", "Date", "Temporal", "Intl",
+                r#"["Deno", "__bootstrap", "console", "Date", "Temporal", "Intl",
                     "WebAssembly", "SharedArrayBuffer", "Atomics", "WeakRef",
                     "FinalizationRegistry", "__swageHost"]
                     .filter((name) => typeof globalThis[name] !== "undefined").join(",")"#
@@ -572,6 +613,56 @@ mod tests {
         assert!(
             random.starts_with("NondeterministicCallError: Math.random is not available"),
             "{random}"
+        );
+    }
+
+    /// The allow-list: every own name of the caged global object. A new
+    /// name here — an engine bump that installs a global, a cage entry that
+    /// stopped removing — fails this test until it is judged and listed.
+    #[test]
+    fn the_caged_global_object_has_exactly_these_names() {
+        let mut program = Program::new(limits(), Some(Arc::new(Echo)), None).expect("isolate");
+        let names = program
+            .execute_for_string(
+                "test",
+                r#"Reflect.ownKeys(globalThis).filter((key) => typeof key === "string").sort().join(",")"#
+                    .to_owned(),
+            )
+            .expect("runs");
+        assert_eq!(
+            names, EXPECTED_GLOBAL_NAMES,
+            "the caged global object changed"
+        );
+    }
+
+    #[test]
+    fn a_program_built_outside_a_runtime_is_synchronous_only() {
+        let (settled_tx, settled_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut program = Program::new(limits(), Some(Arc::new(Echo)), None).expect("isolate");
+            let synchronous = program
+                .execute_for_string("test", "'runs'".to_owned())
+                .expect("synchronous use works");
+            let pending = program
+                .execute(
+                    "test",
+                    "(async () => __swageHost.call('x', '1'))()".to_owned(),
+                )
+                .expect("starts");
+            let driver = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let refused = driver.block_on(program.settle_to_string(pending));
+            settled_tx.send((synchronous, refused)).unwrap();
+        });
+        let (synchronous, refused) = settled_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the program answered instead of hanging");
+        assert_eq!(synchronous, "runs");
+        assert!(
+            matches!(&refused, Err(IsolateError::Engine(message)) if message.contains("built outside a tokio runtime")),
+            "{refused:?}"
         );
     }
 
