@@ -697,18 +697,23 @@ fn isolated_browser_binary(binary: &str, root: &std::path::Path) -> String {
         "XDG_RUNTIME_DIR",
     ] {
         let directory = root.join("browser-environment").join(key);
-        std::fs::create_dir_all(&directory).unwrap();
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::create_dir_all(&directory).expect("create isolated browser environment");
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("restrict isolated browser environment permissions");
         script.push_str(&format!(
             "export {key}={}\n",
-            quote(directory.to_str().unwrap())
+            quote(directory.to_str().expect("UTF-8 browser environment path"))
         ));
     }
     script.push_str(&format!("exec {} \"$@\"\n", quote(binary)));
     let launcher = root.join("chromium-isolated");
-    std::fs::write(&launcher, script).unwrap();
-    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700)).unwrap();
-    launcher.to_str().unwrap().to_owned()
+    std::fs::write(&launcher, script).expect("write isolated browser launcher");
+    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700))
+        .expect("make isolated browser launcher executable");
+    launcher
+        .to_str()
+        .expect("UTF-8 browser launcher path")
+        .to_owned()
 }
 
 fn browser_binary_or_skip() -> Option<String> {
