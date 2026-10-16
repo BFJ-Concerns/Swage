@@ -199,7 +199,22 @@ impl SearchWindow {
         }
     }
 
+    /// A line retains only its own slice; earlier results never need copying.
+    fn commit_line(&mut self, line: &Self) {
+        self.output.push_str(&line.output);
+        self.total_bytes = line.total_bytes;
+        self.boundary = line.boundary;
+        self.matches += 1;
+    }
+
     fn push(&mut self, text: &str) {
+        if self.total_bytes >= self.offset.saturating_add(self.limit) {
+            if self.total_bytes == self.offset {
+                self.boundary = true;
+            }
+            self.total_bytes += text.len();
+            return;
+        }
         for ch in text.chars() {
             if self.total_bytes == self.offset {
                 self.boundary = true;
@@ -340,7 +355,7 @@ fn search_into(
     };
     let mut source = Cursor::new(sample).chain(source);
     let mut file_window = window.clone();
-    let mut line_window = file_window.clone();
+    let mut line_window = SearchWindow::new(window.offset, window.limit);
     let mut line_number = 1;
     let mut line_started = false;
     let mut matcher = LineMatcher::new(pattern);
@@ -362,7 +377,9 @@ fn search_into(
         let text = std::str::from_utf8(&pending[..valid]).expect("validated prefix");
         for ch in text.chars() {
             if !line_started {
-                line_window = file_window.clone();
+                line_window.output.clear();
+                line_window.total_bytes = file_window.total_bytes;
+                line_window.boundary = file_window.boundary;
                 if file_window.matches > 0 {
                     line_window.push("\n");
                 }
@@ -371,8 +388,7 @@ fn search_into(
             }
             if ch == '\n' {
                 if matcher.matched() {
-                    file_window = line_window.clone();
-                    file_window.matches += 1;
+                    file_window.commit_line(&line_window);
                 }
                 line_number += 1;
                 line_started = false;
@@ -400,8 +416,7 @@ fn search_into(
         push_search_character('\r', &mut line_window, &mut matcher);
     }
     if line_started && matcher.matched() {
-        file_window = line_window;
-        file_window.matches += 1;
+        file_window.commit_line(&line_window);
     }
     *window = file_window;
     Ok(())
@@ -856,6 +871,46 @@ mod regression_tests {
         assert!(result.is_ok(), "search did not stop at symlink cycle");
         assert_eq!(result.unwrap().unwrap()["output"], "inside:1: needle");
     }
+    #[tokio::test]
+    async fn regression_search_large_file_after_window_fills() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = std::fs::File::create(dir.path().join("large.txt")).unwrap();
+        let first_line = "needle ".repeat(14_286);
+        writeln!(file, "{first_line}").unwrap();
+        // Short non-matching lines stress retention overhead after the default
+        // result window fills, without constructing the input in memory.
+        const LINES: usize = 24_000_000;
+        let block = "x\n".repeat(10_000);
+        for _ in 0..LINES / 10_000 {
+            file.write_all(block.as_bytes()).unwrap();
+        }
+        file.write_all(b"needle tail\n").unwrap();
+        drop(file);
+
+        let mut ctx = swage_tool::context::MockToolContext::new("agent", "session");
+        ctx.working_directory = dir.path().into();
+        let result = FileSearchTool {
+            max_output_bytes: 100_000,
+        }
+        .execute(json!({"pattern": "needle"}), &ctx)
+        .await;
+        assert!(
+            result.is_ok(),
+            "search must finish after its retained window fills: {result:?}"
+        );
+        let result = result.unwrap();
+        let expected = format!(
+            "large.txt:1: {first_line}\nlarge.txt:{}: needle tail",
+            LINES + 2
+        );
+        assert_eq!(result["output"], &expected[..100_000]);
+        assert_eq!(result["total_bytes"], expected.len());
+        assert_eq!(result["truncated"], true);
+        assert_eq!(result["next_offset_bytes"], 100_000);
+    }
+
     #[test]
     fn regression_search_retains_window_counts_and_rejects_invalid_files() {
         let text = "needle\n".repeat(10_000);

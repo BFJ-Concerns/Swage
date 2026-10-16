@@ -44,6 +44,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- File search keeps scanning efficiently after the result window fills, preserving result bytes and total counts.
+
 - Tool-output creation refuses planted directory and file links, preventing sandboxed commands from redirecting gateway writes outside output storage.
 
 - File search runs off the async runtime, stops on cancellation or a deadline, confines symlinks to the approved root, and retains only the requested result window while counting matches. Case-insensitive matching preserves contextual Unicode lowercase, including Greek final sigma.
