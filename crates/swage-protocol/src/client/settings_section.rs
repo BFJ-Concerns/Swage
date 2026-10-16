@@ -21,6 +21,7 @@ pub enum SettingsFieldKind {
     Boolean,
     String,
     Float,
+    Array,
 }
 
 impl SettingsFieldKind {
@@ -31,11 +32,12 @@ impl SettingsFieldKind {
             Self::Boolean => "boolean",
             Self::String => "string",
             Self::Float => "float",
+            Self::Array => "array",
         }
     }
 }
 
-/// A Rust field type's TOML kind. Implemented for the scalar types a
+/// A Rust field type's TOML kind. Implemented for the scalar and list types a
 /// declared section may carry; a field of another type is a compile error
 /// at the declaration, which is where it should be caught.
 pub trait SettingsField {
@@ -59,6 +61,10 @@ scalar_settings_fields! {
     bool => Boolean,
     String => String,
     f64 => Float,
+}
+
+impl SettingsField for Vec<String> {
+    const KIND: SettingsFieldKind = SettingsFieldKind::Array;
 }
 
 /// One declared field, as the config file walker reads it.
@@ -132,7 +138,7 @@ pub trait SettingsSection: Sized + Default {
 ///
 /// Field attributes are applied to the section struct only (the partial
 /// derives no projection, so a `#[ts(...)]` attribute has nothing to say
-/// there). Field types are the scalars `SettingsField` is implemented for.
+/// there). Field types are those `SettingsField` is implemented for.
 #[macro_export]
 macro_rules! settings_section {
     (
@@ -334,5 +340,39 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "count": 4 })).unwrap();
         assert_eq!(sparse.count, Some(4));
         assert_eq!(sparse.label, None);
+    }
+    settings_section! {
+        /// List field probe.
+        section "list_probe" as ListProbeConfig / PartialListProbeConfig {
+            values: Vec<String> = vec!["default".into()],
+        }
+        problems(_section) { Vec::new() }
+    }
+
+    #[test]
+    fn a_list_field_keeps_its_shape_defaults_and_child_wins_overlay() {
+        assert_eq!(ListProbeConfig::SCHEMA.fields[0].kind.name(), "array");
+        assert_eq!(
+            PartialListProbeConfig::default().resolve().values,
+            ["default"]
+        );
+        let base: PartialListProbeConfig =
+            serde_json::from_value(serde_json::json!({"values": ["base", "other"]})).unwrap();
+        let child: PartialListProbeConfig =
+            serde_json::from_value(serde_json::json!({"values": ["child"]})).unwrap();
+        let resolved = base.overlay(child).resolve();
+        assert_eq!(resolved.values, ["child"]);
+        let partial: PartialListProbeConfig = resolved.clone().into();
+        assert_eq!(partial.resolve(), resolved);
+        assert!(
+            serde_json::from_value::<PartialListProbeConfig>(serde_json::json!({"values": [42]}))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ListProbeConfig>(
+                serde_json::json!({"values": [], "extra": 1})
+            )
+            .is_err()
+        );
     }
 }
