@@ -89,7 +89,19 @@ pub fn install_package(
             path: target,
         });
     }
-    copy_tree(&package.root, &package.root, &target)?;
+    if let Err(error) = copy_tree(&package.root, &package.root, &target) {
+        // The revision directory is the next install's claim on that number,
+        // so a refused copy must not leave it behind.
+        if let Err(cleanup) = std::fs::remove_dir_all(&target)
+            && cleanup.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(PackageError::Io {
+                path: target,
+                message: format!("{error}; the partial copy could not be removed: {cleanup}"),
+            });
+        }
+        return Err(error);
+    }
     read_package(&target)
 }
 
@@ -196,6 +208,10 @@ mod tests {
         assert!(
             matches!(error, PackageError::SymbolicLink { .. }),
             "{error}"
+        );
+        assert!(
+            !install_dir(root.path(), &package.manifest.name, 1).exists(),
+            "a refused copy must not keep the revision directory"
         );
     }
 }

@@ -150,6 +150,10 @@ pub struct PluginService {
     plugins_root: PathBuf,
     storage: Arc<dyn Storage>,
     installed: RwLock<BTreeMap<String, InstalledPlugin>>,
+    /// Installs run one at a time: the revision number, the name checks,
+    /// the copy, the load and the record are one decision, and two installs
+    /// deciding together would each claim the other's revision.
+    install_lock: tokio::sync::Mutex<()>,
 }
 
 impl PluginService {
@@ -160,6 +164,7 @@ impl PluginService {
             plugins_root,
             storage,
             installed: RwLock::new(BTreeMap::new()),
+            install_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -249,6 +254,7 @@ impl PluginService {
         reserved_tool_names: &[String],
         session_id: Option<Uuid>,
     ) -> Result<PluginSummary, PluginServiceError> {
+        let _installing = self.install_lock.lock().await;
         let package =
             read_package(source).map_err(|error| PluginServiceError::Refused(error.to_string()))?;
         let name = package.manifest.name.clone();

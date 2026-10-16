@@ -115,13 +115,16 @@ pub async fn install_plugin(
         .filter(|name| !state.plugins.provides_tool(name))
         .map(str::to_owned)
         .collect();
-    let summary = state
-        .plugins
-        .install(&source, &reserved, None)
-        .await
-        .map_err(plugin_service_error)?;
-    crate::plugin::refresh_tool_dispatcher(&state);
-    Ok(Json(summary))
+    let outcome = state.plugins.install(&source, &reserved, None).await;
+    // An install that was applied but could not be recorded has changed the
+    // live set as much as a recorded one; the dispatcher follows it either way.
+    if matches!(
+        outcome,
+        Ok(_) | Err(crate::plugin::PluginServiceError::Unrecorded(_))
+    ) {
+        crate::plugin::refresh_tool_dispatcher(&state);
+    }
+    Ok(Json(outcome.map_err(plugin_service_error)?))
 }
 
 /// `PUT /api/plugins/{name}/enablement` — enable or disable a plugin for the

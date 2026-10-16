@@ -824,12 +824,6 @@ pub(crate) fn build_tool_dispatcher_with_browser(
     let mut non_python_tools = base_tools;
     non_python_tools.extend(plugin_tools);
 
-    // Sub-dispatcher: all non-python tools, excluding python_execute to prevent
-    // recursive invocation through the python_execute tool.
-    let sub_dispatcher = Arc::new(crate::tool::ToolDispatcher::allow_all(
-        non_python_tools.iter().cloned(),
-    ));
-
     let mut all_tools = non_python_tools;
 
     if !config.tools.python_execute.enabled {
@@ -842,12 +836,7 @@ pub(crate) fn build_tool_dispatcher_with_browser(
                 let runtime = Arc::new(runtime);
                 match swage_python::WorkerPool::new(Arc::clone(&runtime)) {
                     Ok(pool) => {
-                        all_tools.push(Arc::new(PythonExecuteTool::new(
-                            runtime,
-                            pool,
-                            sub_dispatcher,
-                            storage,
-                        )));
+                        all_tools.push(Arc::new(PythonExecuteTool::new(runtime, pool, storage)));
                         info!("Python worker runtime available — python_execute tool registered");
                     }
                     Err(error) => {

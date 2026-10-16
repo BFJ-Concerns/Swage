@@ -10,13 +10,12 @@ use swage_python::{PythonWorkerRuntime, WorkerPool};
 use swage_storage::store::Storage;
 use swage_tool::context::{ToolContext, serialise_tool_context};
 
-use super::{Tool, ToolDispatcher};
+use super::Tool;
 use crate::tool::nested_tool_runtime::NestedToolRuntime;
 
 pub struct PythonExecuteTool {
     runtime: Arc<PythonWorkerRuntime>,
     pool: Arc<WorkerPool>,
-    sub_dispatcher: Arc<ToolDispatcher>,
     storage: Arc<dyn Storage>,
 }
 
@@ -24,13 +23,11 @@ impl PythonExecuteTool {
     pub fn new(
         runtime: Arc<PythonWorkerRuntime>,
         pool: Arc<WorkerPool>,
-        sub_dispatcher: Arc<ToolDispatcher>,
         storage: Arc<dyn Storage>,
     ) -> Self {
         Self {
             runtime,
             pool,
-            sub_dispatcher,
             storage,
         }
     }
@@ -87,8 +84,20 @@ impl Tool for PythonExecuteTool {
             "python_execute requires gateway execution context",
         )?;
 
+        // The tools the worker calls run through the session's own
+        // dispatcher — the turn's registry, permissions and execution
+        // strategy — so a nested call meets every gate the model's own call
+        // meets. Without one there is nothing to gate them, and the call
+        // fails closed rather than run them ungated.
+        let session_dispatcher = gateway_ctx.session_dispatcher().ok_or_else(|| {
+            ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: "python_execute needs the session's tool dispatcher to run the tools the worker calls"
+                    .to_string(),
+            }
+        })?;
         let nested_runtime = NestedToolRuntime::new(
-            Arc::clone(&self.sub_dispatcher),
+            Arc::clone(session_dispatcher),
             gateway_ctx.ws_tx().clone(),
             Arc::clone(&self.storage),
             turn_id,

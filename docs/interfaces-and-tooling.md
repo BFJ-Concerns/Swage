@@ -929,8 +929,11 @@ arguments)` under the `tools` grant, which runs the named tool through the
 session's own dispatcher with the session's grants, approvals and record, and
 `swage.log(message)`. A handler's parameters are the model's arguments; its
 second argument carries the session, agent, call id and working directory.
-An isolate that crosses a limit is terminated, the termination recorded, and
-the plugin starts afresh on its next call.
+A call ends when the isolate is idle, not when the handler's promise
+settles: work a handler starts and does not await still completes inside
+that call, and a failure in it is that call's failure. An isolate that
+crosses a limit is terminated, the termination recorded, and the plugin
+starts afresh on its next call.
 
 A plugin is enabled for the whole install or for one topic (`PUT
 /api/plugins/{name}/enablement`); a session in a scope that does not enable

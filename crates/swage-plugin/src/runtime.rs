@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use swage_isolate::{HostCalls, IsolateError, Program, Termination};
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 use crate::manifest::{HostGrant, PluginManifest};
 
@@ -103,6 +104,16 @@ pub struct PluginRuntime {
     name: String,
     invocations: mpsc::UnboundedSender<Invocation>,
     state: Arc<Mutex<PluginRuntimeState>>,
+    /// Cancelled when the last owner drops: an invocation waiting on a host
+    /// that has not answered ends, the isolate goes with it, and the host
+    /// work it was waiting on is abandoned.
+    cancellation: CancellationToken,
+}
+
+impl Drop for PluginRuntime {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -123,6 +134,8 @@ impl PluginRuntime {
         let (loaded_tx, loaded_rx) = oneshot::channel::<Result<(), PluginError>>();
         let state = Arc::new(Mutex::new(PluginRuntimeState::Serving));
         let thread_state = Arc::clone(&state);
+        let cancellation = CancellationToken::new();
+        let thread_cancellation = cancellation.clone();
         let name = manifest.name.clone();
         std::thread::Builder::new()
             .name(format!("plugin-{name}"))
@@ -139,19 +152,25 @@ impl PluginRuntime {
                 };
                 runtime.block_on(async move {
                     let host_calls = Arc::new(PluginHostCalls::new(&manifest));
-                    let mut program = match load_program(&manifest, &script, &host_calls) {
-                        Ok(program) => {
-                            let _ = loaded_tx.send(Ok(()));
-                            Some(program)
-                        }
-                        Err(error) => {
-                            let _ = loaded_tx.send(Err(error));
-                            return;
-                        }
-                    };
+                    let mut program =
+                        match load_program(&manifest, &script, &host_calls, &thread_cancellation) {
+                            Ok(program) => {
+                                let _ = loaded_tx.send(Ok(()));
+                                Some(program)
+                            }
+                            Err(error) => {
+                                let _ = loaded_tx.send(Err(error));
+                                return;
+                            }
+                        };
                     while let Some(invocation) = queue.recv().await {
                         if program.is_none() {
-                            match load_program(&manifest, &script, &host_calls) {
+                            match load_program(
+                                &manifest,
+                                &script,
+                                &host_calls,
+                                &thread_cancellation,
+                            ) {
                                 Ok(fresh) => {
                                     program = Some(fresh);
                                     set_state(&thread_state, PluginRuntimeState::Serving);
@@ -186,6 +205,7 @@ impl PluginRuntime {
             name,
             invocations,
             state,
+            cancellation,
         }))
     }
 
@@ -240,11 +260,12 @@ fn load_program(
     manifest: &PluginManifest,
     script: &str,
     host_calls: &Arc<PluginHostCalls>,
+    cancellation: &CancellationToken,
 ) -> Result<Program, PluginError> {
     let mut program = Program::new(
         manifest.limits.limits(),
         Some(Arc::clone(host_calls) as Arc<dyn HostCalls>),
-        None,
+        Some(cancellation.child_token()),
     )?;
     program.execute("swage:plugin-host", host_shim(manifest))?;
     program.execute("swage:plugin", script.to_owned())?;
@@ -282,7 +303,12 @@ async fn invoke(
             literal(context_json)
         ),
     )?;
-    Ok(program.settle_to_string(pending).await?)
+    let result = program.settle_to_string(pending).await?;
+    // The handler's promise settling is not the end of its work: a promise
+    // chain it started and did not await still runs, and it must run now,
+    // under this invocation's host, never under the next call's.
+    program.drain().await?;
+    Ok(result)
 }
 
 /// The host shim: evaluated after the cage and before the script. It takes
@@ -409,6 +435,17 @@ impl PluginHostCalls {
     }
 }
 
+/// The host's work for one call, abandoned if the isolate stops waiting for
+/// it: a cancelled program drops its pending host calls, and the task must
+/// not outlive the call it served.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 fn ok(value: Value) -> String {
     json!({ "ok": true, "value": value }).to_string()
 }
@@ -437,10 +474,11 @@ impl HostCalls for PluginHostCalls {
                     Err(error) => return failure("TypeError", error.to_string()),
                 };
                 let host = serving.host;
-                let outcome = serving
-                    .caller
-                    .spawn(async move { host.call_tool(&request.name, request.arguments).await })
-                    .await;
+                let mut task =
+                    AbortOnDrop(serving.caller.spawn(async move {
+                        host.call_tool(&request.name, request.arguments).await
+                    }));
+                let outcome = (&mut task.0).await;
                 match outcome {
                     Ok(Ok(value)) => ok(value),
                     Ok(Err(refusal)) => failure(&refusal.name, refusal.message),
@@ -469,6 +507,8 @@ impl HostCalls for PluginHostCalls {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     fn manifest(grants: &str, limits: &str) -> PluginManifest {
         PluginManifest::parse(&format!(
@@ -727,5 +767,114 @@ mod tests {
             "{error}"
         );
         assert_eq!(steady.state(), PluginRuntimeState::Serving);
+    }
+
+    #[tokio::test]
+    async fn work_a_handler_leaves_behind_finishes_inside_its_own_invocation() {
+        let (runtime, first_host) = probe(
+            r#""tools""#,
+            r#"swage.provide.tool("probe", async (params) => {
+                if (params.leave) {
+                    swage.callTool("first", {}).then(() => swage.callTool("second", { from: params.leave }));
+                    return "left";
+                }
+                return "plain";
+            });"#,
+        )
+        .await;
+        let second_host = Arc::new(RecordingHost::default());
+        let left = runtime
+            .invoke_tool(
+                "probe",
+                &json!({ "leave": "A" }),
+                &context(),
+                first_host.clone(),
+            )
+            .await
+            .expect("serves");
+        assert_eq!(left, "left");
+        let plain = runtime
+            .invoke_tool("probe", &json!({}), &context(), second_host.clone())
+            .await
+            .expect("serves");
+        assert_eq!(plain, "plain");
+        let first_calls: Vec<String> = first_host
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        assert_eq!(first_calls, vec!["first", "second"]);
+        assert_eq!(
+            first_host.calls.lock().unwrap()[1].1,
+            json!({ "from": "A" })
+        );
+        assert!(
+            second_host.calls.lock().unwrap().is_empty(),
+            "the chain the first call left behind reached the second call's host"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_the_runtime_ends_a_wait_on_a_host_that_never_answers() {
+        /// A host whose tool call never answers, recording when the wait
+        /// begins and when the host's work is abandoned.
+        struct Silent {
+            waiting: Arc<AtomicBool>,
+            abandoned: Arc<AtomicBool>,
+        }
+        struct Abandons(Arc<AtomicBool>);
+        impl Drop for Abandons {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        #[async_trait]
+        impl PluginHost for Silent {
+            async fn call_tool(&self, _: &str, _: Value) -> Result<Value, HostCallFailure> {
+                let _abandons = Abandons(Arc::clone(&self.abandoned));
+                self.waiting.store(true, Ordering::SeqCst);
+                std::future::pending().await
+            }
+            fn log(&self, _: &str) {}
+        }
+        let waiting = Arc::new(AtomicBool::new(false));
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let host = Arc::new(Silent {
+            waiting: Arc::clone(&waiting),
+            abandoned: Arc::clone(&abandoned),
+        });
+        let runtime = PluginRuntime::start(
+            manifest(r#""tools""#, ""),
+            r#"swage.provide.tool("probe", () => swage.callTool("slow", {}));"#.to_owned(),
+        )
+        .await
+        .expect("starts");
+        let caller = Arc::clone(&runtime);
+        let call = tokio::spawn(async move {
+            caller
+                .invoke_tool("probe", &json!({}), &context(), host)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !waiting.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the host call begins");
+
+        call.abort();
+        let _ = call.await;
+        drop(runtime);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !abandoned.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the host's work is abandoned once nothing waits for it");
     }
 }

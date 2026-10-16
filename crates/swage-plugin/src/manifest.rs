@@ -103,9 +103,17 @@ impl Default for IsolateLimitsDeclaration {
 }
 
 impl IsolateLimitsDeclaration {
+    /// The heap limit in bytes, or `None` when the declared size does not
+    /// fit this host's address space; validation refuses such a manifest.
+    fn heap_bytes(&self) -> Option<usize> {
+        self.heap_mib
+            .checked_mul(1024 * 1024)
+            .and_then(|bytes| usize::try_from(bytes).ok())
+    }
+
     pub fn limits(self) -> IsolateLimits {
         IsolateLimits {
-            heap_bytes: usize::try_from(self.heap_mib * 1024 * 1024).unwrap_or(usize::MAX),
+            heap_bytes: self.heap_bytes().unwrap_or(usize::MAX),
             continuous_execution: Duration::from_secs(self.continuous_execution_secs),
         }
     }
@@ -202,6 +210,11 @@ impl PluginManifest {
         if self.limits.heap_mib == 0 || self.limits.continuous_execution_secs == 0 {
             return Err(ManifestError::Invalid(
                 "limits.heap_mib and limits.continuous_execution_secs must be positive".into(),
+            ));
+        }
+        if self.limits.heap_bytes().is_none() {
+            return Err(ManifestError::Invalid(
+                "limits.heap_mib is larger than this host can address".into(),
             ));
         }
         let mut seen = std::collections::HashSet::new();
@@ -357,6 +370,17 @@ mod tests {
                 .expect_err("refused");
         assert!(
             matches!(&error, ManifestError::Parse(message) if message.contains("channels")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_heap_limit_beyond_the_address_space_is_refused() {
+        let error =
+            PluginManifest::parse(&ECHO.replace("heap_mib = 8", "heap_mib = 17592186044416"))
+                .expect_err("refused");
+        assert!(
+            matches!(&error, ManifestError::Invalid(message) if message.contains("heap_mib")),
             "{error}"
         );
     }

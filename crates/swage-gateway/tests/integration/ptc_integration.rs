@@ -95,16 +95,11 @@ async fn start_ptc_test_server(
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let workspace = tempfile::tempdir().expect("PTC workspace should be created");
 
-    // Build the sub-dispatcher: echo and shell, but NOT python_execute.
-    // This prevents recursion when Python code dispatches sub-tool calls.
+    // The tools Python code calls run through the session's dispatcher the
+    // turn builds over this registry, so echo and shell need only be here.
     let echo_tool: Arc<dyn swage_gateway::tool::Tool> = Arc::new(EchoTool);
     let shell_tool: Arc<dyn swage_gateway::tool::Tool> = Arc::new(MockShellTool);
-    let sub_dispatcher = Arc::new(swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::clone(&echo_tool),
-        Arc::clone(&shell_tool),
-    ]));
 
-    // Create the PythonExecuteTool with access to sub-tools and storage.
     let runtime =
         swage_python::PythonWorkerRuntime::new(swage_config::model::PythonExecuteToolConfig {
             require_sandbox: false,
@@ -116,7 +111,6 @@ async fn start_ptc_test_server(
     let ptc_tool = swage_gateway::tool::python_execute::PythonExecuteTool::new(
         Arc::clone(pool.runtime()),
         Arc::clone(&pool),
-        sub_dispatcher,
         Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
     );
 

@@ -69,9 +69,11 @@ impl Tool for PluginTool {
         self.declaration.parameters.clone()
     }
 
-    /// The isolate lives in the gateway process, so the call runs on the
-    /// host; what the handler asks of the session runs where that tool
-    /// would.
+    /// The isolate lives in the gateway process, so the call never goes to
+    /// the sandbox child; what the handler asks of the session runs where
+    /// that tool would. A session bound to a remote device sends every tool
+    /// to the device before this flag is read — the device model's rule,
+    /// which this wrapper does not change.
     fn requires_device_execution(&self) -> bool {
         true
     }
