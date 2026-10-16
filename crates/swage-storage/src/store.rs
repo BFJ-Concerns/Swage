@@ -562,6 +562,16 @@ pub trait MaterialStore: Send + Sync {
 pub trait TurnStore: Send + Sync {
     async fn create_turn(&self, turn: NewTurn) -> Result<Turn, StorageError>;
     async fn get_turn(&self, id: Uuid) -> Result<Option<Turn>, StorageError>;
+    /// Read state and its observation time together, while the storage snapshot is held.
+    async fn get_turn_observation(
+        &self,
+        _id: Uuid,
+    ) -> Result<Option<(Turn, chrono::DateTime<chrono::Utc>)>, StorageError> {
+        Err(StorageError::QueryFailed(
+            "turn observations are unsupported by this store".into(),
+        ))
+    }
+
     /// List all turns for a thread ordered by created_at ascending.
     async fn list_turns_by_thread(&self, thread_id: Uuid) -> Result<Vec<Turn>, StorageError>;
     /// Update a turn's state.
@@ -1193,6 +1203,16 @@ pub trait WorkflowStore: Send + Sync {
         run: NewWorkflowRun,
     ) -> Result<WorkflowRunRecord, StorageError>;
     async fn get_workflow_run(&self, id: Uuid) -> Result<Option<WorkflowRunRecord>, StorageError>;
+    /// Read state and its observation time together, while the storage snapshot is held.
+    async fn get_workflow_run_observation(
+        &self,
+        _id: Uuid,
+    ) -> Result<Option<(WorkflowRunRecord, chrono::DateTime<chrono::Utc>)>, StorageError> {
+        Err(StorageError::QueryFailed(
+            "workflow run observations are unsupported by this store".into(),
+        ))
+    }
+
     /// The child run a parent's journalled `workflow()` call already started,
     /// if any — how a resumed parent finds its child instead of duplicating it.
     async fn find_child_workflow_run(

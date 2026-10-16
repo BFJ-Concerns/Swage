@@ -43,7 +43,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
-- Workflow and detached-child start observations take their timestamp before reading run state, so a concurrent completion cannot predate a running observation.
+- Workflow and detached-child start observations capture their state and timestamp in the same storage read.
 - Interrupted workflow cancellation is refused plainly, and unclaimed cancellation requests leave no misleading audit record.
 - Workflow run status explains how to acknowledge handled run endings.
 - Workflow and delegated-child starts report their observed state and time, including work that finishes immediately.

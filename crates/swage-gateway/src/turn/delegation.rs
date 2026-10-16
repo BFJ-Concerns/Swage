@@ -1080,11 +1080,16 @@ impl DelegationHandler for GatewayDelegationHandler {
                     tracing::warn!(%error, child = name, "could not record the named child");
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                let status_as_of = chrono::Utc::now();
-                let observed = self
+                #[cfg(test)]
+                crate::workflow::workflow_pause_test_hook::pause(
+                    "detached-snapshot-pending",
+                    sender_session_id,
+                )
+                .await;
+                let (observed, status_as_of) = self
                     .state
                     .storage
-                    .get_turn(detached.child_turn_id)
+                    .get_turn_observation(detached.child_turn_id)
                     .await?
                     .ok_or_else(|| {
                         AgentError::InvalidConfig("delegated child turn disappeared".into())

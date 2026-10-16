@@ -1709,13 +1709,13 @@ impl GatewayWorkflowLauncher {
         } else {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
-        // Timestamp before the read so a concurrent ending cannot predate this observation.
-        let status_as_of = chrono::Utc::now();
-        // The returned state and its worker count share one recorded account.
-        let record = self
+        #[cfg(test)]
+        workflow_pause_test_hook::pause("start-snapshot-pending", session.id).await;
+        // State, worker count and observation time share one storage snapshot.
+        let (record, status_as_of) = self
             .state
             .storage
-            .get_workflow_run(run.id)
+            .get_workflow_run_observation(run.id)
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "workflow run disappeared".to_string())?;
@@ -8813,7 +8813,7 @@ mod workflow_cleanup_test_hook {
 }
 
 #[cfg(test)]
-mod workflow_pause_test_hook {
+pub(crate) mod workflow_pause_test_hook {
     use std::{
         collections::HashMap,
         sync::{Arc, Mutex, OnceLock},
@@ -8822,9 +8822,9 @@ mod workflow_pause_test_hook {
     use tokio::sync::Semaphore;
     use uuid::Uuid;
 
-    pub(super) struct Pause {
-        pub(super) entered: Semaphore,
-        pub(super) release: Semaphore,
+    pub(crate) struct Pause {
+        pub(crate) entered: Semaphore,
+        pub(crate) release: Semaphore,
     }
 
     /// A staged pause is keyed by the point it holds and the run or hold it
@@ -8840,7 +8840,7 @@ mod workflow_pause_test_hook {
     /// Hold the next pass through `point` for `subject` until the test lets
     /// it go, so an interleaving a race depends on can be staged rather than
     /// hoped for.
-    pub(super) fn install(point: &'static str, subject: Uuid) -> Arc<Pause> {
+    pub(crate) fn install(point: &'static str, subject: Uuid) -> Arc<Pause> {
         let pause = Arc::new(Pause {
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
@@ -8852,7 +8852,7 @@ mod workflow_pause_test_hook {
         pause
     }
 
-    pub(super) async fn pause(point: &'static str, subject: Uuid) {
+    pub(crate) async fn pause(point: &'static str, subject: Uuid) {
         let pause = pauses()
             .lock()
             .expect("workflow pause test-hook registry")
