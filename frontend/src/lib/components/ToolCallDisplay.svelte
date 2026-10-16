@@ -39,6 +39,57 @@
     toolCall.status === "error" || toolCall.status === "rejected" || toolCall.status === "expired",
   );
 
+  // Accept only complete objects/arrays, even when quoted through several layers.
+  function embeddedStructure(text: string): object | undefined {
+    const escapeControls = (value: string) => value.replace(
+      /[\u0000-\u001f]/g,
+      (character) => JSON.stringify(character).slice(1, -1),
+    );
+    for (let depth = 0; depth < 20; depth++) {
+      const candidate = text.trim();
+      let decoded: unknown;
+      try {
+        // Quoted text can carry literal line breaks from a text snapshot.
+        decoded = JSON.parse(candidate.startsWith('"') ? escapeControls(candidate) : candidate);
+      } catch {
+        try {
+          // Some text producers escape the JSON's quotes without its whitespace.
+          if (!candidate.startsWith("{") && !candidate.startsWith("[")) return undefined;
+          decoded = JSON.parse(`"${escapeControls(candidate)}"`);
+        } catch {
+          return undefined;
+        }
+      }
+      if (decoded !== null && typeof decoded === "object") return decoded;
+      if (typeof decoded !== "string" || decoded === text) return undefined;
+      text = decoded;
+    }
+    return undefined;
+  }
+
+  function readableStructure(value: unknown, depth = 0): unknown {
+    if (depth >= 20) return value;
+    if (typeof value === "string") {
+      const decoded = embeddedStructure(value);
+      return decoded === undefined ? value : readableStructure(decoded, depth + 1);
+    }
+    if (Array.isArray(value)) return value.map((item) => readableStructure(item, depth + 1));
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).map(
+        ([key, item]) => [key, readableStructure(item, depth + 1)],
+      ));
+    }
+    return value;
+  }
+
+  function readableText(text: string): string {
+    // Leave ordinary quoted text intact; replace only spans that decode as JSON.
+    return text.replace(/"(?:\\[\s\S]|[^"\\])*"/g, (quoted) => {
+      const decoded = embeddedStructure(quoted);
+      return decoded === undefined ? quoted : JSON.stringify(readableStructure(decoded), null, 2);
+    });
+  }
+
   // Unwrap serialised output envelopes without changing the recorded result.
   function readableResult(value: unknown): string {
     // Bound decoding for malformed or unusually deep nested output.
@@ -54,7 +105,7 @@
         } catch {
           // Ordinary tool output is text, not necessarily JSON.
         }
-        return text;
+        return readableText(text);
       }
       if (
         value !== null && typeof value === "object" &&

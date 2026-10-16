@@ -43,7 +43,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
-- Tool results display readable output with raw envelopes behind a disclosure.
+- Tool results display readable output, including JSON embedded in quoted text, with raw envelopes behind a disclosure.
 - Tool-call headers show file-edit paths and workflow names, with readable object and array fallbacks.
 - Session previews in the recent list, sidebar, conversation selector, delete controls and Operator deck show plain text without Markdown formatting or link destinations. Operator session summaries are limited to three lines.
 - The workflow-authoring skill states event-kind names as the gateway accepts them: segments are joined by `.`, `:` or `/` only, with `_` and `-` allowed inside a segment but never separating one.

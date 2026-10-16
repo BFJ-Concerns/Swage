@@ -15,6 +15,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mount, unmount, flushSync } from "svelte";
 import ToolCallDisplay from "../components/ToolCallDisplay.svelte";
 import type { ToolCallView } from "../types";
+import capturedSnapshot from "./fixtures/browser-nested-json.json";
 
 type MountedComponent = ReturnType<typeof mount>;
 
@@ -530,5 +531,50 @@ describe("non-scalar argument headlines", () => {
       props: { toolCall: makeCompletedCall({ tool: "unknown", arguments: args }), isLive: false },
     });
     expect(document.querySelector(".args-summary")!.textContent).toBe(expected);
+  });
+});
+
+describe("JSON embedded in result text", () => {
+  it("renders the captured nested browser JSON without snapshot quote escaping", () => {
+    // Captured from the running browser tool; origin and trace id anonymised.
+    component = mount(ToolCallDisplay, {
+      target: document.body,
+      props: { toolCall: makeCompletedCall({ result: capturedSnapshot }), isLive: false },
+    });
+    flushSync(() => {});
+    const toggle = document.querySelector(".toggle-btn") as HTMLButtonElement;
+    flushSync(() => toggle.click());
+    const text = document.querySelector(".tool-result .result-content")!.textContent!;
+    expect(text).toContain('- StaticText {\n  "args": {');
+    expect(text).toContain('"payload": {\n      "heading": "Booking"');
+    expect(text).not.toContain('\\"args\\"');
+    expect(text).not.toContain('"payload": "{');
+    expect(text).toContain('checkbox "Pretty print" [checked=false, invalid=false] ref=s2e1');
+    const disclosure = document.querySelector("details")!;
+    flushSync(() => disclosure.querySelector("summary")!.click());
+    expect(disclosure.open).toBe(true);
+    expect(disclosure.querySelector("pre")!.textContent).toBe(JSON.stringify(capturedSnapshot, null, 2));
+  });
+
+  it("formats quoted JSON arrays in arbitrary text without changing surrounding text", () => {
+    const output = `Before ${JSON.stringify('[{"path":"a"}]')} after.`;
+    component = mount(ToolCallDisplay, {
+      target: document.body,
+      props: { toolCall: makeCompletedCall({ tool: "unknown", result: { output } }), isLive: false },
+    });
+    expect(document.querySelector(".tool-result .result-content")!.textContent).toBe(
+      'Before [\n  {\n    "path": "a"\n  }\n] after.',
+    );
+  });
+
+  it.each([
+    'Read "{not JSON}" and keep C:\\notes\\next.txt unchanged.',
+    'The guest said "hello".\nSecond line.',
+  ])("preserves ordinary and malformed quoted text: %s", (output) => {
+    component = mount(ToolCallDisplay, {
+      target: document.body,
+      props: { toolCall: makeCompletedCall({ result: { output } }), isLive: false },
+    });
+    expect(document.querySelector(".tool-result .result-content")!.textContent).toBe(output);
   });
 });
