@@ -43,7 +43,7 @@ fn text_round(text: &str) -> Vec<StreamChunk> {
 
 fn live_state(storage: &Arc<SqliteStorage>, rounds: Vec<Vec<StreamChunk>>) -> AppState {
     let (provider, _requests) = CapturingProvider::new("origin-model", rounds);
-    AppState::new(
+    AppState::for_test(
         storage.clone() as Arc<dyn Storage>,
         storage.clone(),
         Arc::new(provider),

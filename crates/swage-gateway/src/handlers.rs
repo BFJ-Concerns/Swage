@@ -2159,7 +2159,7 @@ mod tests {
         storage: Arc<MockStorage>,
         config: swage_config::ResolvedConfig,
     ) -> (Router, Arc<MockStorage>) {
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider,
@@ -2703,7 +2703,7 @@ mod tests {
 
         let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("storage"));
         let topic = storage.general_scope().await.expect("topic");
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn swage_storage::TopicStore>,
             Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
@@ -2826,7 +2826,7 @@ mod tests {
         let mut config = swage_config::ResolvedConfig::default();
         config.tools.permissions.require_approval =
             vec![swage_config::RequireApprovalEntry::Simple("echo".into())];
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -2932,13 +2932,14 @@ mod tests {
             instructions: "Use the external delegated specialist instructions.".to_string(),
             ..swage_config::ResolvedConfig::default()
         };
-        let state = AppState::new(
+        let state = AppState::new_with_config_root(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(provider) as Arc<dyn LlmProvider>,
             config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
+            swage_home.path().to_path_buf(),
         );
         let router = MessageRouter::new(state.storage.clone(), None);
         let delegate_msg = router
@@ -3093,7 +3094,7 @@ mod tests {
             .expect("write agent permissions");
         }
 
-        let state = AppState::new(
+        let state = AppState::new_with_config_root(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -3103,6 +3104,7 @@ mod tests {
                 Arc::new(NamedTool::new("target_only")) as Arc<dyn crate::tool::Tool>,
             ]),
             None,
+            swage_home.path().to_path_buf(),
         );
         let router = MessageRouter::new(state.storage.clone(), None);
         let delegate_msg = router
@@ -5236,7 +5238,7 @@ mod tests {
         let provider = Arc::new(MockProvider::new(vec![]));
         let (broadcast_tx, broadcast_rx) = broadcast::channel(16);
         let shutdown_signal = CancellationToken::new();
-        let mut state = AppState::new(
+        let mut state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider as Arc<dyn swage_provider::LlmProvider>,

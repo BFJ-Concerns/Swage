@@ -32,7 +32,7 @@ use swage_storage::SqliteStorage;
 fn make_router() -> Router {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let provider = Arc::new(NoOpProvider) as Arc<dyn swage_provider::LlmProvider>;
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         provider,

@@ -107,7 +107,7 @@ async fn start_test_server(
     voice_provider: Option<Arc<dyn VoiceProvider>>,
 ) -> SocketAddr {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),

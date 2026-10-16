@@ -176,7 +176,7 @@ async fn start_test_server_with_tools(
     tools: Vec<Arc<dyn swage_tool::tool::Tool>>,
 ) -> (Router, SocketAddr, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(provider),
@@ -1459,7 +1459,7 @@ async fn native_approval_scope_with_workspace(scope: &str, read: bool, symlink: 
     // A fresh gateway has no session grant cache: permanent access must load from storage.
     let (router, addr) = if scope == "permanent" {
         let provider = MockProvider::new(vec![next(), native_done()]);
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(provider),
