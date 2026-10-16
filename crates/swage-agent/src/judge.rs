@@ -2,11 +2,12 @@
 //!
 //! A tool call that reaches beyond the session's grants — a filesystem
 //! location outside its granted locations — needs someone to answer for it.
-//! In an attended session that is the person at the approval card. In an
-//! unattended session nobody is watching, so the request goes to a judging
-//! model: it sees the call and the agent's stated justification and says yes
-//! or no with a reason. Without a yes — a refusal, an unreadable verdict, no
-//! judge configured — the request fails closed and the model is told why.
+//! The judging model sees the call and the agent's stated justification and
+//! says yes or no with a reason. In an attended session it decides confident
+//! cases and passes uncertain or unavailable judgements to the person. In an
+//! unattended session nobody is watching, so without a yes — a refusal, an
+//! unreadable verdict, no judge configured — the request fails closed and
+//! the model is told why.
 //!
 //! The agent runtime owns the seam and the fail-closed rule; what judges, and
 //! how, is the caller's: the gateway supplies a [`RequestJudge`] backed by its
@@ -113,11 +114,13 @@ impl JudgeVerdict {
     }
 }
 
-/// One judgement: the verdict, the judge's reason in its own words, and the
+/// One judgement: the verdict, confidence, the judge's reason, and the
 /// model that gave it (absent when none did).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Judgement {
     pub verdict: JudgeVerdict,
+    /// Whether the judge can decide without asking the person.
+    pub confident: bool,
     pub reason: String,
     pub judge: Option<String>,
 }
@@ -127,6 +130,7 @@ impl Judgement {
     pub fn unavailable(reason: impl Into<String>) -> Self {
         Self {
             verdict: JudgeVerdict::Unavailable,
+            confident: false,
             reason: reason.into(),
             judge: None,
         }
@@ -229,6 +233,7 @@ mod tests {
             &reach,
             &Judgement {
                 verdict: JudgeVerdict::Refused,
+                confident: true,
                 reason: "the task never named this path".into(),
                 judge: Some("judge".into()),
             },

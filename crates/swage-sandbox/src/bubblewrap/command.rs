@@ -105,11 +105,13 @@ pub(crate) fn build_bwrap_command_with_path(
     cmd.args(["--dev", "/dev"]);
     cmd.args(["--proc", "/proc"]);
     cmd.args(["--tmpfs", "/tmp"]);
+    bind_host_tmp_entries(&mut cmd).map_err(|error| SandboxError::SpawnFailed {
+        message: format!("failed to expose host temporary files read-only: {error}"),
+    })?;
 
     // The host IPC socket may live under /tmp (a relocated or over-long
-    // runtime directory), where the tmpfs above hides it. Bind the socket
-    // file itself — never its directory — after the overlay so the agent can
-    // connect and sees nothing else of the host's socket root.
+    // runtime directory). Bind only the socket writable, after the read-only
+    // mounts, so connecting never needs a writable host runtime directory.
     let socket = socket_path.as_os_str();
     cmd.arg("--bind").arg(socket).arg(socket);
 
@@ -154,6 +156,28 @@ pub(crate) fn build_bwrap_command_with_path(
     cmd.arg("--").arg(agent_binary).arg("--sandbox-mode");
 
     Ok(cmd)
+}
+
+/// Existing host temporary files remain readable, while new top-level entries
+/// live in the sandbox's tmpfs. Grants and masks overlay these read-only mounts.
+/// Recreate symlinks rather than binding their targets at another path, which
+/// would let an alias expose a masked target. Temporary entries can disappear
+/// between enumeration and mount setup.
+fn bind_host_tmp_entries(cmd: &mut Command) -> std::io::Result<()> {
+    for entry in std::fs::read_dir("/tmp")? {
+        let path = entry?.path();
+        match std::fs::read_link(&path) {
+            Ok(target) => {
+                cmd.arg("--symlink").arg(target).arg(&path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
+                cmd.arg("--ro-bind-try").arg(&path).arg(&path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 /// One mount the policy asks for.
@@ -322,15 +346,15 @@ mod tests {
         )
         .unwrap();
         let args = args_of(&cmd);
-        let position = |needle: &Path| {
-            args.iter()
-                .position(|a| *a == needle.as_os_str())
+        let position = |flag: &str, needle: &Path| {
+            args.windows(2)
+                .position(|w| w == [OsStr::new(flag), needle.as_os_str()])
                 .unwrap_or_else(|| panic!("{} must be mounted; args: {args:?}", needle.display()))
         };
-        let home_bind = position(home.path());
-        let root_mask = position(&data_root);
-        let ssh_mask = position(&ssh);
-        let scratch_bind = position(&scratch);
+        let home_bind = position("--bind", home.path());
+        let root_mask = position("--tmpfs", &data_root);
+        let ssh_mask = position("--tmpfs", &ssh);
+        let scratch_bind = position("--bind", &scratch);
         assert!(
             home_bind < root_mask && home_bind < ssh_mask,
             "masks under the home grant follow it"
@@ -454,9 +478,15 @@ mod tests {
             .expect("--ro-bind must appear");
 
         let wd_bind_pos = args
-            .iter()
-            .position(|a| *a == OsStr::new("/tmp/agent-workspace"))
-            .expect("working_directory must appear in args");
+            .windows(3)
+            .position(|w| {
+                w == [
+                    OsStr::new("--bind"),
+                    OsStr::new("/tmp/agent-workspace"),
+                    OsStr::new("/tmp/agent-workspace"),
+                ]
+            })
+            .expect("working_directory must have a writable bind");
 
         // Working directory must appear after the root ro-bind.
         assert!(
@@ -490,7 +520,7 @@ mod tests {
             );
         }
 
-        // A read-only workspace is left to the read-only root: no bind at all.
+        // A workspace without a write grant must never get a writable bind.
         let read_only = basic_config();
         let cmd = build_bwrap_command_with_path(
             Path::new("/usr/bin/bwrap"),
@@ -502,8 +532,13 @@ mod tests {
         .unwrap();
         let args = args_of(&cmd);
         assert!(
-            !args.contains(&OsStr::new("/tmp/agent-workspace")),
-            "an unlisted working directory must not be bound; args: {args:?}"
+            !args.windows(3).any(|w| w
+                == [
+                    OsStr::new("--bind"),
+                    OsStr::new("/tmp/agent-workspace"),
+                    OsStr::new("/tmp/agent-workspace")
+                ]),
+            "an unlisted working directory must not be writable; args: {args:?}"
         );
     }
 
@@ -573,8 +608,14 @@ mod tests {
         .unwrap();
         let args = args_of(&cmd);
         let write = args
-            .iter()
-            .position(|a| *a == home.path().as_os_str())
+            .windows(3)
+            .position(|w| {
+                w == [
+                    OsStr::new("--bind"),
+                    home.path().as_os_str(),
+                    home.path().as_os_str(),
+                ]
+            })
             .expect("the home is bound writable");
         let dir_mask = args
             .windows(2)
@@ -817,11 +858,9 @@ mod tests {
                 .map(|(i, w)| (i, Path::new(w[1]), Path::new(w[2])))
                 .collect();
 
-            // The one permitted exposure of `/` is the read-only root bind
-            // that precedes the tmpfs, which then hides /tmp beneath it.
-            // Every other bind — at any position — must not carry `/`, any
-            // other ancestor of the socket, /tmp or the runtime directory as
-            // its source or destination.
+            // The root bind precedes the tmpfs. Existing host temporary
+            // entries may be exposed read-only; no other bind may expose
+            // an ancestor of the socket or its runtime directory writable.
             let root_bind = binds
                 .iter()
                 .position(|&(position, source, destination)| {
@@ -834,12 +873,15 @@ mod tests {
             let mut forbidden: Vec<&Path> = socket.ancestors().skip(1).collect();
             forbidden.push(Path::new("/tmp"));
             forbidden.extend(runtime_dir);
-            for (_, source, destination) in binds
+            for (position, source, destination) in binds
                 .iter()
                 .enumerate()
                 .filter(|(index, _)| *index != root_bind)
                 .map(|(_, bind)| bind)
             {
+                if args[*position] == OsStr::new("--ro-bind-try") {
+                    continue;
+                }
                 for path in &forbidden {
                     assert!(
                         source != path && destination != path,

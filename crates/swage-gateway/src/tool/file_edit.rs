@@ -38,6 +38,10 @@ impl Tool for FileEditTool {
         json!({
             "type": "object",
             "properties": {
+                "justification": {
+                    "type": "string",
+                    "description": "Why this file is needed when it lies outside the session's granted locations, in one or two sentences. Read by whoever answers for the request — the person, or the judge when nobody is watching; omitted, the request is weighed without a reason."
+                },
                 "changes": {
                     "type": "array",
                     "description": "Files to edit. Each file is read once, its edits are applied in order, and all files are validated before any writes occur.",
@@ -96,7 +100,7 @@ impl Tool for FileEditTool {
     }
 
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
-        validate_object_keys(&params, &["changes"], self.name())?;
+        validate_object_keys(&params, &["changes", "justification"], self.name())?;
         let changes = parse_changes(&params, ctx, self.name())?;
         let mut prepared = Vec::with_capacity(changes.len());
 
