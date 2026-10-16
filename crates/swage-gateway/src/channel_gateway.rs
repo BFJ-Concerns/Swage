@@ -196,7 +196,47 @@ async fn handle_inbound(
     let session_id =
         ensure_session_for_origin(state, &origin, SessionResolutionPolicy::AllowDefaultTopic)
             .await?;
-    let response = run_channel_turn(state, session_id, text).await?;
+    let thread = resolve_thread_for_session(state.storage.as_ref(), session_id, None).await?;
+    let targets = resolve_delivery_targets(
+        Some(&origin),
+        DeliveryRoutingRequest {
+            home_target: routing
+                .home_target
+                .clone()
+                .or(configured_home_target(state, &origin).await?),
+            ..routing.clone()
+        },
+    )?;
+    let result = if state.active_turns.lock().await.contains_key(&session_id)
+        || crate::turn_queue::has_queued_input(state, session_id).await?
+    {
+        Err(GatewayError::TurnInProgress { session_id })
+    } else {
+        run_channel_turn(state, session_id, text.clone()).await
+    };
+    let response = match result {
+        Ok(response) => response,
+        Err(GatewayError::TurnInProgress { .. }) => {
+            let queued = crate::turn_queue::queue_input_with_attribution(
+                state,
+                session_id,
+                thread.id,
+                crate::turn::TurnInput::text(&text),
+                None,
+                Vec::new(),
+                crate::turn::TurnAttendance::Unattended,
+                targets,
+            )
+            .await?;
+            return Ok(ChannelInboundResponse {
+                session_id,
+                queued: Some(queued),
+                delivered_to: Vec::new(),
+                response: String::new(),
+            });
+        }
+        Err(error) => return Err(error),
+    };
     let targets = deliver_channel_response(
         state,
         session_id,
@@ -208,6 +248,7 @@ async fn handle_inbound(
     .await?;
 
     Ok(ChannelInboundResponse {
+        queued: None,
         session_id,
         delivered_to: targets,
         response,
@@ -400,16 +441,31 @@ pub async fn drain_channel_queue(state: AppState) {
 }
 
 pub async fn drain_channel_queue_checked(state: &AppState) -> Result<(), GatewayError> {
-    let origins = match state.storage.list_pending_channel_origins().await {
-        Ok(origins) => origins,
-        Err(error) => {
-            return Err(GatewayError::Storage(error));
-        }
-    };
-
+    let rows = state.storage.list_pending_channel_messages().await?;
+    // Allocate each session's queue sequence in inbox arrival order, including
+    // messages from different chats linked to that same session.
+    let mut batches: Vec<(Uuid, Uuid, Vec<ChannelInboundMessage>)> = Vec::new();
     let mut first_error = None;
-    for pending in origins {
-        if let Err(error) = drain_channel_origin(state, pending).await
+    for row in rows {
+        match resolve_channel_destination(state, &row).await {
+            Ok(Some((session_id, thread_id))) => {
+                if let Some((_, _, batch)) = batches.iter_mut().find(|(id, _, _)| *id == session_id)
+                {
+                    batch.push(row);
+                } else {
+                    batches.push((session_id, thread_id, vec![row]));
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+    for (session_id, thread_id, rows) in batches {
+        if let Err(error) = queue_channel_rows(state, session_id, thread_id, rows).await
             && first_error.is_none()
         {
             first_error = Some(error);
@@ -434,17 +490,15 @@ fn channel_origin(pending: &PendingChannelOrigin) -> Result<ChannelOrigin, Gatew
     })
 }
 
-async fn drain_channel_origin(
+async fn resolve_channel_destination(
     state: &AppState,
-    pending: PendingChannelOrigin,
-) -> Result<(), GatewayError> {
-    let origin = channel_origin(&pending)?;
-    let rows = state.storage.list_pending_by_origin(pending).await?;
-    if rows.is_empty() {
-        return Ok(());
-    }
-    let row_ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
-
+    row: &ChannelInboundMessage,
+) -> Result<Option<(Uuid, Uuid)>, GatewayError> {
+    let origin = channel_origin(&PendingChannelOrigin {
+        integration: row.integration.clone(),
+        account: row.account.clone(),
+        conversation: row.conversation.clone(),
+    })?;
     let session_id = match ensure_session_for_origin(
         state,
         &origin,
@@ -458,55 +512,14 @@ async fn drain_channel_origin(
         {
             state
                 .storage
-                .discard_channel_messages(row_ids, "unlinked")
+                .discard_channel_messages(vec![row.id], "unlinked")
                 .await?;
-            return Ok(());
+            return Ok(None);
         }
         Err(error) => return Err(error),
     };
-
-    let busy = state.active_turns.lock().await.contains_key(&session_id);
-    let session = state
-        .storage
-        .get_session(session_id)
-        .await?
-        .ok_or_else(|| {
-            GatewayError::ValidationError(format!("linked session {session_id} no longer exists"))
-        })?;
     let thread = resolve_thread_for_session(state.storage.as_ref(), session_id, None).await?;
-    let input = compose_channel_messages(&rows);
-    if busy || crate::turn_queue::has_queued_input(state, session_id).await? {
-        return queue_channel_rows(state, session_id, thread.id, rows).await;
-    }
-
-    let turn = match state
-        .storage
-        .begin_channel_turn(thread.id, &session.agent_id, &input, row_ids)
-        .await
-    {
-        Ok(turn) => turn,
-        Err(swage_core::StorageError::ConstraintViolation(_)) => {
-            return queue_channel_rows(state, session_id, thread.id, rows).await;
-        }
-        Err(error) => return Err(GatewayError::Storage(error)),
-    };
-
-    let response =
-        crate::automated_turn::run_placeholder_turn(state, session_id, input.as_str(), turn.id)
-            .await?;
-    deliver_channel_response(
-        state,
-        session_id,
-        DeliveryAttribution {
-            run_id: None,
-            turn_id: Some(turn.id),
-        },
-        &origin,
-        DeliveryRoutingRequest::default(),
-        &response,
-    )
-    .await?;
-    Ok(())
+    Ok(Some((session_id, thread.id)))
 }
 
 async fn queue_channel_rows(
@@ -515,65 +528,53 @@ async fn queue_channel_rows(
     thread_id: Uuid,
     rows: Vec<ChannelInboundMessage>,
 ) -> Result<(), GatewayError> {
-    for row in rows {
-        match crate::turn_queue::queue_input_with_attribution(
-            state,
+    let inputs = rows
+        .iter()
+        .map(|row| swage_storage::NewQueuedTurnInput {
+            delivery_targets: Vec::new(),
+            attended: false,
+            client_id: None,
             session_id,
             thread_id,
-            crate::turn::TurnInput::text(&row.content),
-            None,
-            vec![row.id],
-            crate::turn::TurnAttendance::Unattended,
-        )
-        .await
-        {
-            Ok(_) => {}
-            // Another inbox reader already handed this input to the queue.
-            Err(
-                error @ GatewayError::Storage(swage_core::StorageError::ConstraintViolation(_)),
-            ) => {
-                let queued = state.storage.list_queued_turn_inputs(session_id).await?;
-                if !queued
+            origin: swage_storage::MessageOrigin::User,
+            content: row.content.clone(),
+            attachments: Vec::new(),
+            schedule_run_id: None,
+            channel_message_ids: vec![row.id],
+        })
+        .collect();
+    match state.storage.enqueue_turn_inputs(inputs).await {
+        Ok(queued) => {
+            crate::turn_queue::announce_queued_inputs(state, session_id, &queued).await?;
+        }
+        Err(error @ swage_core::StorageError::ConstraintViolation(_)) => {
+            let queued = state.storage.list_queued_turn_inputs(session_id).await?;
+            if !rows.iter().all(|row| {
+                queued
                     .iter()
                     .any(|input| input.channel_message_ids.contains(&row.id))
-                {
-                    return Err(error);
-                }
+            }) {
+                return Err(error.into());
             }
-            Err(error) => return Err(error),
         }
+        Err(error) => return Err(error.into()),
     }
     Ok(())
 }
 
-/// Deliver the shared turn's reply to each originating chat represented in it.
-pub(crate) async fn deliver_queued_response(
+/// Resolve the shared turn's destinations for an originating chat.
+pub(crate) async fn queued_response_targets(
     state: &AppState,
-    session_id: Uuid,
-    turn: &swage_storage::Turn,
     pending: PendingChannelOrigin,
-) -> Result<(), GatewayError> {
+) -> Result<Vec<DeliveryTarget>, GatewayError> {
     let origin = channel_origin(&pending)?;
-    deliver_channel_response(
-        state,
-        session_id,
-        DeliveryAttribution {
-            run_id: None,
-            turn_id: Some(turn.id),
+    resolve_delivery_targets(
+        Some(&origin),
+        DeliveryRoutingRequest {
+            home_target: configured_home_target(state, &origin).await?,
+            ..Default::default()
         },
-        &origin,
-        DeliveryRoutingRequest::default(),
-        turn.assistant_response.as_deref().unwrap_or_default(),
     )
-    .await?;
-    Ok(())
-}
-
-fn compose_channel_messages(rows: &[ChannelInboundMessage]) -> String {
-    rows.iter()
-        .map(|row| row.content.as_str())
-        .collect::<Vec<_>>()
-        .join("\n\n")
 }
 
 async fn run_channel_turn(
@@ -652,7 +653,7 @@ pub fn resolve_delivery_targets(
     Ok(targets)
 }
 
-fn push_unique_target(targets: &mut Vec<DeliveryTarget>, target: DeliveryTarget) {
+pub(crate) fn push_unique_target(targets: &mut Vec<DeliveryTarget>, target: DeliveryTarget) {
     if !targets.contains(&target) {
         targets.push(target);
     }
@@ -872,6 +873,395 @@ mod tests {
         AuditStore, ChannelLinkStore, SessionStore, SurfaceStore, ThreadStore, TopicStore,
     };
     use tokio::net::TcpListener;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn developer_routes_accept_busy_session_inputs_in_the_shared_queue() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("channels.db");
+        let storage = Arc::new(swage_storage::SqliteStorage::open(&database).unwrap());
+        let state = AppState::new(
+            storage.clone(),
+            storage.clone(),
+            Arc::new(crate::turn::tests::MockProvider::new(vec![
+                swage_core::StreamChunk::Delta {
+                    content: "shared reply".into(),
+                },
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ])),
+            Default::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let linked = crate::onboarding::create_channel_link(
+            &state,
+            crate::onboarding::CreateChannelLinkRequest {
+                integration: "dev_dm".into(),
+                account: "account".into(),
+                conversation: "person".into(),
+                topic_id: None,
+                agent_id: None,
+                home_target: None,
+            },
+        )
+        .await
+        .unwrap();
+        let session_id = linked.session_id.unwrap();
+        let active =
+            crate::automated_turn::create_placeholder_turn(&state, session_id, "gateway", "active")
+                .await
+                .unwrap();
+        for (integration, conversation) in [
+            (ExternalChannelIntegration::DevDm, "person"),
+            (ExternalChannelIntegration::DevThread, "room/thread"),
+        ] {
+            state.channel_routes.lock().await.insert(
+                ChannelOrigin {
+                    integration,
+                    account: "account".into(),
+                    conversation: conversation.into(),
+                },
+                session_id,
+            );
+        }
+        state
+            .active_turns
+            .lock()
+            .await
+            .insert(session_id, tokio_util::sync::CancellationToken::new());
+        let dm = handle_dev_dm_inbound(
+            &state,
+            DevDmInboundRequest {
+                account: "account".into(),
+                user_id: "person".into(),
+                text: "first".into(),
+                routing: DeliveryRoutingRequest {
+                    store_local_output: true,
+                    ..Default::default()
+                },
+            },
+        )
+        .await;
+        let thread = handle_dev_thread_inbound(
+            &state,
+            DevThreadInboundRequest {
+                account: "account".into(),
+                channel_id: "room".into(),
+                thread_id: "thread".into(),
+                text: "second".into(),
+                routing: DeliveryRoutingRequest {
+                    store_local_output: true,
+                    ..Default::default()
+                },
+            },
+        )
+        .await;
+        assert!(
+            dm.is_ok() && thread.is_ok(),
+            "busy developer routes must accept input: dm={dm:?}, thread={thread:?}"
+        );
+        let queued = state
+            .storage
+            .list_queued_turn_inputs(session_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            queued
+                .iter()
+                .map(|row| (row.content.as_str(), row.origin))
+                .collect::<Vec<_>>(),
+            vec![
+                ("first", swage_storage::MessageOrigin::User),
+                ("second", swage_storage::MessageOrigin::User)
+            ]
+        );
+        state
+            .storage
+            .update_turn_state(active, swage_storage::TurnState::Completed)
+            .await
+            .unwrap();
+        drop(state);
+        drop(storage);
+        let reopened = Arc::new(swage_storage::SqliteStorage::open(&database).unwrap());
+        let rebuilt = AppState::new(
+            reopened.clone(),
+            reopened,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![
+                swage_core::StreamChunk::Delta {
+                    content: "shared reply".into(),
+                },
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ])),
+            Default::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        crate::turn_queue::drain_queue(&rebuilt, session_id)
+            .await
+            .unwrap();
+        let deliveries = rebuilt.storage.list_delivery_records().await.unwrap();
+        assert_eq!(
+            deliveries
+                .iter()
+                .map(
+                    |record| serde_json::from_value::<DeliveryTarget>(record.target.clone())
+                        .unwrap()
+                )
+                .collect::<std::collections::HashSet<_>>(),
+            [
+                DeliveryTarget::Channel {
+                    integration: ExternalChannelIntegration::DevDm,
+                    account: "account".into(),
+                    conversation: "person".into()
+                },
+                DeliveryTarget::Channel {
+                    integration: ExternalChannelIntegration::DevThread,
+                    account: "account".into(),
+                    conversation: "room/thread".into()
+                },
+                DeliveryTarget::LocalStorage,
+            ]
+            .into_iter()
+            .collect(),
+            "each originating channel and the shared local target must receive the reply"
+        );
+        assert_eq!(
+            deliveries.len(),
+            3,
+            "two origins share one local output, with one delivery per target"
+        );
+        assert!(
+            deliveries
+                .iter()
+                .all(|delivery| delivery.content == "shared reply")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shared_channel_targets_receive_one_delivery_per_drained_turn() {
+        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let state = AppState::new(
+            storage.clone(),
+            storage.clone(),
+            Arc::new(crate::turn::tests::MockProvider::new(vec![
+                StreamChunk::Delta {
+                    content: "shared reply".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ])),
+            Default::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let linked = crate::onboarding::create_channel_link(
+            &state,
+            crate::onboarding::CreateChannelLinkRequest {
+                integration: "dev_dm".into(),
+                account: "account".into(),
+                conversation: "one".into(),
+                topic_id: None,
+                agent_id: None,
+                home_target: None,
+            },
+        )
+        .await
+        .unwrap();
+        let session = linked.session_id.unwrap();
+        let thread = resolve_thread_for_session(state.storage.as_ref(), session, None)
+            .await
+            .unwrap();
+        state
+            .active_turns
+            .lock()
+            .await
+            .insert(session, tokio_util::sync::CancellationToken::new());
+        for conversation in ["one", "two"] {
+            state
+                .storage
+                .upsert_channel_link(swage_storage::NewChannelLink {
+                    integration: "dev_dm".into(),
+                    account: "account".into(),
+                    conversation: conversation.into(),
+                    topic_id: linked.topic_id,
+                    agent_id: "gateway".into(),
+                    session_id: Some(session),
+                    home_target: Some(serde_json::to_value(DeliveryTarget::LocalStorage).unwrap()),
+                })
+                .await
+                .unwrap();
+            state
+                .storage
+                .ingest_channel_inbound(
+                    vec![swage_storage::NewChannelInboundMessage {
+                        integration: "dev_dm".into(),
+                        account: "account".into(),
+                        conversation: conversation.into(),
+                        external_id: conversation.into(),
+                        sender: "person".into(),
+                        content: conversation.into(),
+                    }],
+                    "dev_dm",
+                    "account",
+                    "1",
+                )
+                .await
+                .unwrap();
+            let rows = state
+                .storage
+                .list_pending_by_origin(PendingChannelOrigin {
+                    integration: "dev_dm".into(),
+                    account: "account".into(),
+                    conversation: conversation.into(),
+                })
+                .await
+                .unwrap();
+            queue_channel_rows(&state, session, thread.id, rows)
+                .await
+                .unwrap();
+        }
+        state.active_turns.lock().await.remove(&session);
+        crate::turn_queue::drain_queue(&state, session)
+            .await
+            .unwrap();
+        let deliveries = state.storage.list_delivery_records().await.unwrap();
+        assert_eq!(
+            deliveries
+                .iter()
+                .map(
+                    |record| serde_json::from_value::<DeliveryTarget>(record.target.clone())
+                        .unwrap()
+                )
+                .collect::<std::collections::HashSet<_>>(),
+            [
+                DeliveryTarget::Channel {
+                    integration: ExternalChannelIntegration::DevDm,
+                    account: "account".into(),
+                    conversation: "one".into()
+                },
+                DeliveryTarget::Channel {
+                    integration: ExternalChannelIntegration::DevDm,
+                    account: "account".into(),
+                    conversation: "two".into()
+                },
+                DeliveryTarget::LocalStorage,
+            ]
+            .into_iter()
+            .collect(),
+            "each originating channel and the shared local target must receive the reply"
+        );
+        assert_eq!(
+            deliveries.len(),
+            3,
+            "two origins with one shared target must deliver to three distinct targets"
+        );
+        assert!(
+            deliveries
+                .iter()
+                .all(|record| record.content == "shared reply")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn interleaved_channel_origins_keep_session_arrival_order() {
+        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let state = AppState::new(
+            storage.clone(),
+            storage.clone(),
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            Default::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let linked = crate::onboarding::create_channel_link(
+            &state,
+            crate::onboarding::CreateChannelLinkRequest {
+                integration: "dev_dm".into(),
+                account: "account".into(),
+                conversation: "a".into(),
+                topic_id: None,
+                agent_id: None,
+                home_target: None,
+            },
+        )
+        .await
+        .unwrap();
+        let session = linked.session_id.unwrap();
+        state
+            .storage
+            .upsert_channel_link(swage_storage::NewChannelLink {
+                integration: "dev_dm".into(),
+                account: "account".into(),
+                conversation: "b".into(),
+                topic_id: linked.topic_id,
+                agent_id: "gateway".into(),
+                session_id: Some(session),
+                home_target: None,
+            })
+            .await
+            .unwrap();
+        state
+            .active_turns
+            .lock()
+            .await
+            .insert(session, tokio_util::sync::CancellationToken::new());
+        state
+            .storage
+            .ingest_channel_inbound(
+                [("a", "A1"), ("b", "B1"), ("a", "A2")]
+                    .into_iter()
+                    .map(
+                        |(conversation, content)| swage_storage::NewChannelInboundMessage {
+                            integration: "dev_dm".into(),
+                            account: "account".into(),
+                            conversation: conversation.into(),
+                            external_id: content.into(),
+                            sender: "person".into(),
+                            content: content.into(),
+                        },
+                    )
+                    .collect(),
+                "dev_dm",
+                "account",
+                "1",
+            )
+            .await
+            .unwrap();
+        drain_channel_queue_checked(&state).await.unwrap();
+        let queued = state
+            .storage
+            .list_queued_turn_inputs(session)
+            .await
+            .unwrap();
+        assert_eq!(
+            queued
+                .iter()
+                .map(|input| input.content.as_str())
+                .collect::<Vec<_>>(),
+            ["A1", "B1", "A2"],
+            "shared session inputs must keep cross-origin arrival order"
+        );
+        assert!(
+            queued
+                .iter()
+                .all(|input| input.channel_message_ids.len() == 1)
+        );
+        drain_channel_queue_checked(&state).await.unwrap();
+        assert_eq!(
+            state
+                .storage
+                .list_queued_turn_inputs(session)
+                .await
+                .unwrap()
+                .len(),
+            3,
+            "transferred inbox messages must not be queued twice"
+        );
+    }
 
     #[test]
     fn home_target_defaults_to_origin() {
@@ -1096,44 +1486,6 @@ mod tests {
         .expect_err("missing origin should fail");
 
         assert!(error.to_string().contains("without an origin"));
-    }
-
-    #[test]
-    fn compose_channel_messages_separates_queued_updates() {
-        let received_at = chrono::Utc::now();
-        let rows = vec![
-            ChannelInboundMessage {
-                id: Uuid::new_v4(),
-                integration: "telegram".into(),
-                account: "bot-1".into(),
-                conversation: "chat-1".into(),
-                external_id: "1".into(),
-                sender: "chat-1".into(),
-                content: "first".into(),
-                state: swage_storage::model::ChannelInboundMessageState::Pending,
-                discard_reason: None,
-                turn_id: None,
-                received_at,
-                presented_at: None,
-            },
-            ChannelInboundMessage {
-                id: Uuid::new_v4(),
-                integration: "telegram".into(),
-                account: "bot-1".into(),
-                conversation: "chat-1".into(),
-                external_id: "2".into(),
-                sender: "chat-1".into(),
-                content: "second".into(),
-                state: swage_storage::model::ChannelInboundMessageState::Pending,
-                discard_reason: None,
-                turn_id: None,
-                received_at,
-                presented_at: None,
-            },
-        ];
-
-        assert_eq!(compose_channel_messages(&rows[..1]), "first");
-        assert_eq!(compose_channel_messages(&rows), "first\n\nsecond");
     }
 
     #[tokio::test(flavor = "multi_thread")]

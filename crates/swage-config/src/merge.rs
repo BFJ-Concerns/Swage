@@ -12,7 +12,9 @@ use crate::model::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use swage_core::ApprovalTimeoutPolicy;
-pub use swage_protocol::client::settings::{PartialMemoryConfig, PartialSessionsConfig};
+pub use swage_protocol::client::settings::{
+    PartialAttachmentsConfig, PartialMemoryConfig, PartialSessionsConfig,
+};
 
 // ---------------------------------------------------------------------------
 // Partial section types — mirror of model types, all fields Option<T>
@@ -260,6 +262,7 @@ pub struct PartialConfig {
     pub scheduling: Option<PartialSchedulingConfig>,
     pub sessions: Option<PartialSessionsConfig>,
     pub memory: Option<PartialMemoryConfig>,
+    pub attachments: Option<PartialAttachmentsConfig>,
     pub voice: Option<PartialVoiceConfig>,
     pub generation: Option<PartialGenerationConfig>,
     pub channels: Option<PartialChannelsConfig>,
@@ -422,6 +425,7 @@ impl From<ResolvedConfig> for PartialConfig {
             }),
             sessions: Some(r.sessions.clone().into()),
             memory: Some(r.memory.clone().into()),
+            attachments: Some(r.attachments.clone().into()),
             voice: Some(PartialVoiceConfig {
                 transcription_model: r.voice.transcription_model.clone(),
                 speech_model: r.voice.speech_model.clone(),
@@ -700,6 +704,11 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
             PartialSessionsConfig::overlay,
         ),
         memory: merge_section(base.memory, overlay.memory, PartialMemoryConfig::overlay),
+        attachments: merge_section(
+            base.attachments,
+            overlay.attachments,
+            PartialAttachmentsConfig::overlay,
+        ),
         voice: merge_overlay_section(base.voice, overlay.voice),
         generation: merge_section(base.generation, overlay.generation, |b, o| {
             let mut presets = b.presets.unwrap_or_default();
@@ -985,6 +994,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
         },
         sessions: partial.sessions.unwrap_or_default().resolve(),
         memory: partial.memory.unwrap_or_default().resolve(),
+        attachments: partial.attachments.unwrap_or_default().resolve(),
         voice: {
             let v = partial.voice.unwrap_or_default();
             VoiceConfig {
@@ -2315,5 +2325,23 @@ mod tests {
         let telegram = merged.channels.unwrap().telegram.unwrap();
         assert_eq!(telegram.bot_token_secret_ref, Some(None));
         assert_eq!(telegram.bot_token_env, Some(None));
+    }
+    #[test]
+    fn image_scheme_settings_default_replace_and_round_trip() {
+        assert_eq!(
+            resolve(PartialConfig::default())
+                .attachments
+                .accepted_schemes,
+            ["https", "data"]
+        );
+        let base: PartialConfig =
+            toml::from_str("[attachments]\naccepted_schemes = ['https', 'data']").unwrap();
+        let overlay: PartialConfig =
+            toml::from_str("[attachments]\naccepted_schemes = ['http']").unwrap();
+        let resolved = resolve(merge_partial(base, overlay));
+        assert_eq!(resolved.attachments.accepted_schemes, ["http"]);
+        let encoded = toml::to_string(&PartialConfig::from(resolved.clone())).unwrap();
+        let again = resolve(toml::from_str(&encoded).unwrap());
+        assert_eq!(again.attachments, resolved.attachments);
     }
 }

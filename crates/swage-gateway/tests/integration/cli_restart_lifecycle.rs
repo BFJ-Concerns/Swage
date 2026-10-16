@@ -262,6 +262,30 @@ impl Drop for GatewayProbe {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_reports_the_daemons_configuration_error_on_stderr() {
+    let probe = GatewayProbe::new();
+    fs::write(
+        probe.root.path().join("config.toml"),
+        "[server]\nport = \"broken-port\"\n",
+    )
+    .unwrap();
+    let output = journey(probe.run(&["gateway", "start", "--port", "0"])).await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "invalid configuration was accepted"
+    );
+    assert!(
+        stderr.contains("server.port: expected integer, found string"),
+        "startup diagnostic missing from CLI stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("did not become ready"),
+        "startup error became a readiness timeout: {stderr}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn clean_stop_status_reports_not_running_without_an_error() {
     GatewayProbe::new()
         .journey(async |probe| {

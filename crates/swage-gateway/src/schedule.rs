@@ -1244,6 +1244,7 @@ async fn run_body(
                 Some(run.id),
                 Vec::new(),
                 crate::turn::TurnAttendance::Unattended,
+                Vec::new(),
             )
             .await?;
             return Ok(RunOutcome::Queued);
