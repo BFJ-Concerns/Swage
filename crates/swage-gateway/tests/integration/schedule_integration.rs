@@ -169,6 +169,32 @@ fn test_state_with_config(
     )
 }
 
+#[tokio::test]
+async fn default_schedule_fixture_retains_its_memory_root_until_last_clone() {
+    let database = tempfile::TempDir::new().unwrap();
+    let state = test_state(
+        &database.path().join("schedule.db"),
+        MockProvider::new(vec![]),
+    );
+    let root = state.config_root.clone();
+    let retained = state.clone();
+    drop(state);
+    let reference = swage_gateway::memory::MemoryReference::parse("general/isolation").unwrap();
+    swage_gateway::memory::write_entry(
+        &retained.config_root,
+        &swage_core::ScopeLocation::General,
+        &reference,
+        "Schedule fixture memory",
+        "retained by the schedule state",
+    )
+    .await
+    .unwrap();
+    assert!(root.join("general/memory/isolation.md").is_file());
+    assert_ne!(root, swage_config::discovery::effective_root_path());
+    drop(retained);
+    assert!(!root.exists(), "last schedule state must release its root");
+}
+
 async fn json_response(response: axum::response::Response) -> Value {
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     if bytes.is_empty() {
