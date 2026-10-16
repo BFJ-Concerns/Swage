@@ -424,7 +424,7 @@ impl ThreadStore for SqliteStorage {
             )?;
 
             let mut stmt = conn.prepare(
-                "SELECT turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin
+                "SELECT turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin, delivered
                  FROM messages
                  WHERE thread_id = ?1 AND position <= ?2
                  ORDER BY position ASC",
@@ -443,6 +443,7 @@ impl ThreadStore for SqliteStorage {
                         row.get::<_, String>(7)?,
                         row.get::<_, String>(8)?,
                         row.get::<_, String>(9)?,
+                        row.get::<_, bool>(10)?,
                     ))
                 },
             )?;
@@ -549,14 +550,15 @@ impl ThreadStore for SqliteStorage {
                     created_at,
                     attachments,
                     origin,
+                    delivered,
                 ) = row;
                 let child_turn_id = turn_id
                     .as_ref()
                     .and_then(|turn_id| turn_id_map.get(turn_id))
                     .cloned();
                 conn.execute(
-                    "INSERT INTO messages (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    "INSERT INTO messages (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin, delivered)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                     params![
                         Uuid::new_v4().to_string(),
                         child_thread_id.to_string(),
@@ -570,6 +572,7 @@ impl ThreadStore for SqliteStorage {
                         created_at,
                         attachments,
                         origin,
+                        delivered,
                     ],
                 )?;
             }
@@ -1022,6 +1025,7 @@ mod tests {
                 turn_id: None,
                 role: Role::User,
                 origin: crate::model::MessageOrigin::User,
+                delivered: false,
                 content: "hello".into(),
                 position: 0,
                 agent_id: "agent-1".into(),
@@ -1035,6 +1039,7 @@ mod tests {
                 turn_id: None,
                 role: Role::Assistant,
                 origin: crate::model::MessageOrigin::Assistant,
+                delivered: false,
                 content: "world".into(),
                 position: 1,
                 agent_id: "agent-1".into(),
@@ -1082,6 +1087,7 @@ mod tests {
                 turn_id: Some(parent_turn.id),
                 role: Role::User,
                 origin: crate::model::MessageOrigin::User,
+                delivered: false,
                 content: "use a tool".into(),
                 position: 0,
                 agent_id: "agent-1".into(),
@@ -1095,6 +1101,7 @@ mod tests {
                 turn_id: Some(parent_turn.id),
                 role: Role::Assistant,
                 origin: crate::model::MessageOrigin::Assistant,
+                delivered: false,
                 content: "done".into(),
                 position: 1,
                 agent_id: "agent-1".into(),
@@ -1190,6 +1197,7 @@ mod tests {
                 turn_id: Some(parent_turn.id),
                 role: Role::User,
                 origin: crate::model::MessageOrigin::User,
+                delivered: false,
                 content: "use a tool".into(),
                 position: 0,
                 agent_id: "agent-1".into(),
@@ -1203,6 +1211,7 @@ mod tests {
                 turn_id: Some(parent_turn.id),
                 role: Role::Assistant,
                 origin: crate::model::MessageOrigin::Assistant,
+                delivered: false,
                 content: "done".into(),
                 position: 1,
                 agent_id: "agent-1".into(),
@@ -1277,6 +1286,7 @@ mod tests {
                 turn_id: None,
                 role: Role::User,
                 origin: crate::model::MessageOrigin::User,
+                delivered: false,
                 content: "a".into(),
                 position: 0,
                 agent_id: "agent-1".into(),
@@ -1290,6 +1300,7 @@ mod tests {
                 turn_id: None,
                 role: Role::User,
                 origin: crate::model::MessageOrigin::User,
+                delivered: false,
                 content: "b".into(),
                 position: 0,
                 agent_id: "agent-1".into(),

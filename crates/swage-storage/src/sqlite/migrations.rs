@@ -1209,6 +1209,13 @@ const COMPLETE_SCHEMA: &str = "
         -- path that composed it. Keyed by the UI's author label; a row with
         -- no recorded origin is refused rather than guessed from its role.
         origin       TEXT    NOT NULL CHECK (origin IN ('user', 'assistant', 'tool', 'delegation', 'schedule', 'workflow', 'platform')),
+        -- Whether the row was handed to the agent as material produced
+        -- elsewhere (a delegated agent's result, a completed run's report, a
+        -- platform notice) rather than typed or addressed to it as a brief.
+        -- The history rebuild frames delivered rows for the model; views show
+        -- the content as stored either way. Every Rust writer sets it; the
+        -- default serves only raw fixture inserts.
+        delivered    INTEGER NOT NULL DEFAULT 0 CHECK (delivered IN (0, 1)),
         content      TEXT    NOT NULL,
         -- Content parts submitted beside the text, as a JSON array of the
         -- client wire's tagged attachment values; '[]' for text-only rows.

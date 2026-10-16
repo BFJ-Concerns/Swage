@@ -15,10 +15,10 @@ use crate::store::MessageStore;
 // ---------------------------------------------------------------------------
 
 /// Column order: id, thread_id, turn_id, role, content, position, agent_id,
-/// tool_call_id, tool_name, created_at, attachments, origin (12 columns,
-/// matching every SELECT).
+/// tool_call_id, tool_name, created_at, attachments, origin, delivered (13
+/// columns, matching every SELECT).
 const MESSAGE_COLUMNS: &str = "id, thread_id, turn_id, role, content, position, agent_id,
-                        tool_call_id, tool_name, created_at, attachments, origin";
+                        tool_call_id, tool_name, created_at, attachments, origin, delivered";
 
 fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
     let id: String = row.get(0)?;
@@ -27,6 +27,7 @@ fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
     let created: String = row.get(9)?;
     let attachments: String = row.get(10)?;
     let origin: String = row.get(11)?;
+    let delivered: bool = row.get(12)?;
 
     let role: String = row.get(3)?;
 
@@ -40,6 +41,7 @@ fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         origin: origin.parse::<MessageOrigin>().map_err(|err| {
             rusqlite::Error::FromSqlConversionFailure(11, rusqlite::types::Type::Text, err.into())
         })?,
+        delivered,
         content: row.get(4)?,
         attachments: parse_attachments(&attachments)?,
         position: row.get(5)?,
@@ -92,8 +94,8 @@ impl MessageStore for SqliteStorage {
 
             conn.execute(
                 "INSERT INTO messages
-                     (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                     (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin, delivered)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     id.to_string(),
                     message.thread_id.to_string(),
@@ -107,6 +109,7 @@ impl MessageStore for SqliteStorage {
                     &now_str,
                     encode_attachments(&message.attachments)?,
                     message.origin.as_str(),
+                    message.delivered,
                 ],
             )?;
 
@@ -117,6 +120,7 @@ impl MessageStore for SqliteStorage {
                 turn_id: message.turn_id,
                 role: message.role,
                 origin: message.origin,
+                delivered: message.delivered,
                 content: message.content,
                 position: message.position,
                 agent_id: message.agent_id,
@@ -143,8 +147,8 @@ impl MessageStore for SqliteStorage {
 
             conn.execute(
                 "INSERT INTO messages
-                     (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                     (id, thread_id, turn_id, role, content, position, agent_id, tool_call_id, tool_name, created_at, attachments, origin, delivered)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     id.to_string(),
                     message.thread_id.to_string(),
@@ -158,6 +162,7 @@ impl MessageStore for SqliteStorage {
                     &now_str,
                     encode_attachments(&message.attachments)?,
                     message.origin.as_str(),
+                    message.delivered,
                 ],
             )?;
 
@@ -168,6 +173,7 @@ impl MessageStore for SqliteStorage {
                 turn_id: message.turn_id,
                 role: message.role,
                 origin: message.origin,
+                delivered: message.delivered,
                 content: message.content,
                 position,
                 agent_id: message.agent_id,
@@ -202,7 +208,7 @@ impl MessageStore for SqliteStorage {
         self.with_conn(|conn| {
             conn.query_row(
                 "SELECT m.id, m.thread_id, m.turn_id, m.role, m.content, m.position, m.agent_id,
-                        m.tool_call_id, m.tool_name, m.created_at, m.attachments, m.origin
+                        m.tool_call_id, m.tool_name, m.created_at, m.attachments, m.origin, m.delivered
                  FROM messages m
                  JOIN threads t ON m.thread_id = t.id
                  WHERE t.session_id = ?1
@@ -305,6 +311,7 @@ mod tests {
             turn_id: None,
             role,
             origin: origin_for(role),
+            delivered: false,
             content: content.into(),
             position,
             agent_id: "test-agent".to_string(),
@@ -318,6 +325,7 @@ mod tests {
             turn_id: None,
             role,
             origin: origin_for(role),
+            delivered: false,
             content: content.into(),
             agent_id: "test-agent".to_string(),
         }

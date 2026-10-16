@@ -141,6 +141,7 @@ mod tests {
                 turn_id: None,
                 role: Role::Assistant,
                 origin: swage_storage::MessageOrigin::Assistant,
+                delivered: false,
                 content: "…".to_string(),
                 attachments: Vec::new(),
                 position: 0,

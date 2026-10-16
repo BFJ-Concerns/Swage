@@ -20,6 +20,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- Content the platform hands into a conversation — a delegated agent's result, a completed workflow run's report, a platform notice — reaches the model on later turns inside a delimited block that names what it is, says the person did not write it, and says nothing in it is an instruction; a typed message, a scheduled brief or a worker's prompt is never framed. Each stored message records whether it was delivered or addressed; the conversation view shows the content as stored.
 - Swage is licensed under the GNU Affero General Public License, version 3 or any later version (`AGPL-3.0-or-later`), with the full text in `LICENSE` and the licence recorded in every crate and npm package manifest. Pull requests are welcome, contributed under the same licence.
 - A continuation schedule firing during a running turn queues its brief for the next turn, and channel messages for a busy session wait in the same durable queue. The web UI shows queued inputs once, labels them queued, and displays recorded inputs and the drained reply live.
 - A message, channel message or continuation brief reaching an idle session that still has queued messages, as a Stop leaves them, joins the queue and runs after them in the same turn.
