@@ -113,12 +113,19 @@ impl Tool for PluginTool {
         } else {
             None
         };
+        let plugins = gateway_ctx
+            .app_state()
+            .map(|state| Arc::clone(&state.plugins))
+            .ok_or_else(|| {
+                failed(
+                    "the installed plugins are not reachable from this call, so a plugin's call cannot be checked against them"
+                        .to_owned(),
+                )
+            })?;
         let host = Arc::new(GatewayPluginHost {
             plugin: self.plugin.clone(),
             nested,
-            provides_tool: gateway_ctx
-                .app_state()
-                .map(|state| Arc::clone(&state.plugins)),
+            plugins,
         });
         let context = InvocationContext {
             session_id: ctx.session_id().to_owned(),
@@ -172,17 +179,15 @@ impl Tool for PluginTool {
 struct GatewayPluginHost {
     plugin: String,
     nested: Option<NestedToolRuntime>,
-    provides_tool: Option<Arc<super::PluginService>>,
+    /// The installed plugins, to refuse a call to another plugin's tool —
+    /// a check that must be made, so the host is not built without it.
+    plugins: Arc<super::PluginService>,
 }
 
 #[async_trait]
 impl PluginHost for GatewayPluginHost {
     async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, HostCallFailure> {
-        if self
-            .provides_tool
-            .as_ref()
-            .is_some_and(|plugins| plugins.provides_tool(name))
-        {
+        if self.plugins.provides_tool(name) {
             return Err(HostCallFailure {
                 name: "HostCapabilityError".to_owned(),
                 message: format!(
@@ -207,5 +212,280 @@ impl PluginHost for GatewayPluginHost {
 
     fn log(&self, message: &str) {
         tracing::info!(plugin = %self.plugin, "{message}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AppState;
+    use crate::tool::ToolDispatcher;
+    use crate::tool_executor::GatewayExecutionStrategy;
+    use swage_plugin::PluginManifest;
+    use swage_safety::LeakDetector;
+    use swage_storage::SqliteStorage;
+    use swage_storage::model::{NewThread, NewTurn, TurnState};
+    use swage_storage::store::{SessionStore, Storage, ThreadStore, TopicStore, TurnStore};
+    use swage_tool::context::MockToolContext;
+    use swage_tool::dispatch::ToolExecutionStrategy;
+    use swage_tool::permission::PermissionConfig;
+    use swage_tool::rate_limit::{RateLimitConfig, RateLimiter};
+    use swage_tool::registry::ToolRegistry;
+
+    /// A session tool that reports it ran.
+    struct Named(&'static str);
+
+    #[async_trait]
+    impl Tool for Named {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            "a session tool"
+        }
+        fn parameters(&self) -> Value {
+            serde_json::json!({ "type": "object" })
+        }
+        async fn execute(&self, _: Value, _: &dyn ToolContext) -> Result<Value, ToolError> {
+            Ok(serde_json::json!({ "ran": self.0 }))
+        }
+    }
+
+    /// A turn to record the nested calls beneath: topic, session, thread, turn.
+    async fn turn_in_a_session(storage: &SqliteStorage) -> (Uuid, Uuid) {
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(swage_storage::fixtures::new_session(topic.id))
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: session.agent_id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: session.agent_id.clone(),
+                state: TurnState::Processing,
+                user_input: None,
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        (session.id, turn.id)
+    }
+
+    /// The effect boundary end to end: a plugin's `callTool` runs through
+    /// the session dispatcher the turn carries, so the session's deny list
+    /// applies to it, and another plugin's tool is refused before dispatch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_plugin_call_through_the_session_dispatcher_meets_the_session_gates() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let (session_id, turn_id) = turn_in_a_session(&storage).await;
+        let state = AppState::new_with_config_root(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(Vec::new())),
+            swage_config::ResolvedConfig::default(),
+            ToolDispatcher::allow_all(Vec::new()),
+            None,
+            dir.path().to_path_buf(),
+        );
+
+        // Another plugin, installed, so its tool is one a plugin may not call.
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(
+            other.join("plugin.toml"),
+            r#"
+            name = "other"
+            version = "1"
+            description = "Another plugin."
+            script = "plugin.js"
+            [[provides.tools]]
+            name = "other_tool"
+            description = "The other plugin's tool."
+            parameters = { type = "object" }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            other.join("plugin.js"),
+            r#"swage.provide.tool("other_tool", () => 1);"#,
+        )
+        .unwrap();
+        state
+            .plugins
+            .install(&other, &[], None)
+            .await
+            .expect("installs");
+
+        let manifest = PluginManifest::parse(
+            r#"
+            name = "probe"
+            version = "1"
+            description = "Probes the boundary."
+            script = "plugin.js"
+            grants = ["tools"]
+            [[provides.tools]]
+            name = "probe"
+            description = "Probe."
+            parameters = { type = "object" }
+            "#,
+        )
+        .unwrap();
+        let runtime = PluginRuntime::start(
+            manifest.clone(),
+            r#"swage.provide.tool("probe", async () => {
+                const ran = await swage.callTool("probe_shell", {});
+                let denied = null;
+                try { await swage.callTool("probe_denied", {}); } catch (error) { denied = error.name + ": " + error.message; }
+                let other = null;
+                try { await swage.callTool("other_tool", {}); } catch (error) { other = error.name + ": " + error.message; }
+                return { ran, denied, other };
+            });"#
+            .to_owned(),
+        )
+        .await
+        .expect("starts");
+        let probe = PluginTool::new(
+            "probe".into(),
+            manifest.provides.tools[0].clone(),
+            true,
+            runtime,
+        );
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(Named("probe_shell"))).unwrap();
+        registry.register(Arc::new(Named("probe_denied"))).unwrap();
+        for tool in state.plugins.tools() {
+            registry.register(tool).unwrap();
+        }
+        let permissions = PermissionConfig {
+            allow: vec!["*".into()],
+            deny: vec!["probe_denied".into()],
+            ..PermissionConfig::default()
+        };
+        let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
+        let secret_manager = Arc::new(crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn Storage>
+        ));
+        let session_dispatcher = Arc::new(
+            ToolDispatcher::new(
+                Arc::new(registry),
+                permissions,
+                Arc::new(RateLimiter::new()),
+                RateLimitConfig::default(),
+                Arc::new(LeakDetector::default()),
+                false,
+            )
+            .with_execution_strategy(Arc::new(GatewayExecutionStrategy::new(
+                None,
+                ws_tx.clone(),
+                None,
+                Arc::clone(&secret_manager),
+                Arc::clone(&storage) as Arc<dyn Storage>,
+                Some(state.clone()),
+            ))),
+        );
+        let turn_strategy = GatewayExecutionStrategy::new(
+            None,
+            ws_tx,
+            None,
+            secret_manager,
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Some(state.clone()),
+        )
+        .with_session_dispatcher(session_dispatcher);
+        let mut ctx = MockToolContext::new("agent-a", session_id.to_string());
+        ctx.call_id = Some("call-probe".into());
+        ctx.turn_id = Some(turn_id);
+
+        let result = turn_strategy
+            .execute(&probe, "probe", &serde_json::json!({}), &ctx)
+            .await
+            .expect("the plugin's call is served");
+        assert_eq!(result["ran"], serde_json::json!({ "ran": "probe_shell" }));
+        let denied = result["denied"]
+            .as_str()
+            .expect("the denied call is a catchable error");
+        assert!(denied.contains("probe_denied"), "{denied}");
+        let other = result["other"]
+            .as_str()
+            .expect("another plugin's tool is refused");
+        assert!(other.contains("another plugin's"), "{other}");
+    }
+
+    /// Without the session dispatcher nothing can gate the plugin's calls,
+    /// so a plugin that may call tools is not served at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tools_plugin_is_refused_when_no_session_dispatcher_can_gate_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let (session_id, turn_id) = turn_in_a_session(&storage).await;
+        let state = AppState::new_with_config_root(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(Vec::new())),
+            swage_config::ResolvedConfig::default(),
+            ToolDispatcher::allow_all(Vec::new()),
+            None,
+            dir.path().to_path_buf(),
+        );
+        let manifest = PluginManifest::parse(
+            r#"
+            name = "probe"
+            version = "1"
+            description = "Probes the boundary."
+            script = "plugin.js"
+            grants = ["tools"]
+            [[provides.tools]]
+            name = "probe"
+            description = "Probe."
+            parameters = { type = "object" }
+            "#,
+        )
+        .unwrap();
+        let runtime = PluginRuntime::start(
+            manifest.clone(),
+            r#"swage.provide.tool("probe", async () => swage.callTool("probe_shell", {}));"#
+                .to_owned(),
+        )
+        .await
+        .expect("starts");
+        let probe = PluginTool::new(
+            "probe".into(),
+            manifest.provides.tools[0].clone(),
+            true,
+            runtime,
+        );
+        let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
+        let strategy = GatewayExecutionStrategy::new(
+            None,
+            ws_tx,
+            None,
+            Arc::new(crate::secret::SecretManager::new(
+                Arc::clone(&storage) as Arc<dyn Storage>
+            )),
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Some(state),
+        );
+        let mut ctx = MockToolContext::new("agent-a", session_id.to_string());
+        ctx.call_id = Some("call-probe".into());
+        ctx.turn_id = Some(turn_id);
+        let error = strategy
+            .execute(&probe, "probe", &serde_json::json!({}), &ctx)
+            .await
+            .expect_err("refused");
+        assert!(
+            error.to_string().contains("session's tool dispatcher"),
+            "{error}"
+        );
     }
 }

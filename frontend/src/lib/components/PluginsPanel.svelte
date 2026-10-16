@@ -66,13 +66,19 @@
     }
   }
 
-  async function setEnabled(plugin: PluginSummary, scope: string | null, enabled: boolean) {
+  /**
+   * Ask the gateway to change the enablement; the box shows the gateway's
+   * answer, so a refused change puts the box back where it was.
+   */
+  async function setEnabled(plugin: PluginSummary, scope: string | null, input: HTMLInputElement) {
+    const enabled = input.checked;
     changing = plugin.name;
     error = null;
     try {
       replace(await setPluginEnablement(plugin.name, scope, enabled));
     } catch (err: unknown) {
       error = err instanceof Error ? err.message : "Failed to change the plugin's enablement.";
+      input.checked = !enabled;
     } finally {
       changing = null;
     }
@@ -168,7 +174,7 @@
                 type="checkbox"
                 checked={selected.enabled_for_install}
                 disabled={changing === selected.name}
-                onchange={(event) => void setEnabled(selected, null, (event.currentTarget as HTMLInputElement).checked)}
+                onchange={(event) => void setEnabled(selected, null, event.currentTarget as HTMLInputElement)}
               />
               <span>Enabled for the install</span>
             </label>
@@ -178,7 +184,7 @@
                   type="checkbox"
                   checked={enabledInTopic(selected, topicId)}
                   disabled={changing === selected.name}
-                  onchange={(event) => void setEnabled(selected, topicId, (event.currentTarget as HTMLInputElement).checked)}
+                  onchange={(event) => void setEnabled(selected, topicId, event.currentTarget as HTMLInputElement)}
                 />
                 <span>Enabled in this topic <em class="meta">({topicAnswer(selected, topicId)})</em></span>
               </label>

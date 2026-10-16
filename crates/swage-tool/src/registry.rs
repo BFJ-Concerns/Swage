@@ -291,6 +291,27 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
+    fn withholding_removes_the_named_tools_and_nothing_else() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(NamedTool::new("probe_a")))
+            .unwrap();
+        registry
+            .register(Arc::new(NamedTool::new("probe_b")))
+            .unwrap();
+        let narrowed = registry.withholding(&["probe_a".to_owned(), "absent".to_owned()]);
+        assert!(
+            narrowed.get("probe_a").is_none(),
+            "a withheld tool is absent"
+        );
+        assert!(narrowed.get("probe_b").is_some(), "an unnamed tool stays");
+        assert!(
+            registry.get("probe_a").is_some(),
+            "the original registry is untouched"
+        );
+    }
+
+    #[test]
     fn register_and_get_tool_by_name() {
         let mut registry = ToolRegistry::new();
         registry.register(arc("calculator")).unwrap();

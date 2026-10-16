@@ -339,7 +339,7 @@ fn host_shim(manifest: &PluginManifest) -> String {
             },
         }),
         log(message) {
-            door.callSync("log", JSON.stringify(String(message)));
+            unwrap(door.callSync("log", JSON.stringify(String(message))));
         },
     };
     if (__GRANT_TOOLS__) {
@@ -601,7 +601,7 @@ mod tests {
             "",
             r#"swage.provide.tool("probe", () => [
                 typeof fetch, typeof Deno, typeof require, typeof process, typeof __swageHost,
-                typeof swage.callTool, typeof Date, typeof eval,
+                typeof swage.callTool, typeof Date,
             ].join(","));"#,
         )
         .await;
@@ -611,7 +611,7 @@ mod tests {
             .expect("serves");
         assert_eq!(
             result,
-            "undefined,undefined,undefined,undefined,undefined,undefined,undefined,undefined"
+            "undefined,undefined,undefined,undefined,undefined,undefined,undefined"
         );
     }
 

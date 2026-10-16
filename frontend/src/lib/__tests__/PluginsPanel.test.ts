@@ -104,6 +104,25 @@ describe("PluginsPanel", () => {
     expect(JSON.parse(String(put?.[1]?.body))).toEqual({ topic_id: "topic-1", enabled: true });
   });
 
+  it("puts the box back when the gateway refuses the change", async () => {
+    const echo = plugin("echo");
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      if (init?.method === "PUT") {
+        return new Response(JSON.stringify({ error: "enablement is read-only here" }), { status: 409, headers: { "Content-Type": "application/json" } });
+      }
+      return jsonResponse({ plugins: [echo] });
+    });
+    component = mount(PluginsPanel, { target: document.body, props: { topicId: null } });
+    await vi.waitFor(() => expect(document.querySelector('[aria-label="echo details"]')).not.toBeNull());
+
+    const toggle = document.querySelector<HTMLInputElement>('[aria-label="echo details"] input[type="checkbox"]')!;
+    expect(toggle.checked).toBe(false);
+    toggle.checked = true;
+    toggle.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(document.querySelector('[role="alert"]')).not.toBeNull());
+    expect(toggle.checked).toBe(false);
+  });
+
   it("installs a package from a path and selects the new plugin", async () => {
     const installed = plugin("fresh", { revision: 2 });
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
