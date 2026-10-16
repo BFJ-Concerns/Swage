@@ -615,9 +615,6 @@ mod tests {
 
     #[tokio::test]
     async fn times_out_on_unreachable_host() {
-        let root = tempfile::tempdir().unwrap();
-        let mut context = ctx();
-        context.working_directory = root.path().to_path_buf();
         let t = UrlFetchTool {
             // Use a very short timeout so the test doesn't hang.
             timeout: Duration::from_millis(50),
@@ -625,14 +622,10 @@ mod tests {
         };
         // RFC 5737 TEST-NET — guaranteed not routable, connection will time out.
         let err = t
-            .execute(json!({ "url": "http://192.0.2.1/test" }), &context)
+            .execute(json!({ "url": "http://192.0.2.1/test" }), &ctx())
             .await
             .unwrap_err();
-        assert_eq!(
-            err.execution(),
-            swage_protocol::client::conversation::ToolExecution::failed(),
-            "the HTTP attempt finished with a failure: {err}"
-        );
+        assert!(matches!(err, ToolError::ExecutionFailed { .. }));
         // Should mention a timeout or connection failure, not panic.
         assert!(!err.to_string().is_empty());
     }
