@@ -530,25 +530,25 @@ pub async fn rename_surface(
             "a surface needs a non-empty title".into(),
         ));
     }
-    let prior = state
+    state
         .storage
-        .rename_surface(id, title)
+        .rename_surface(
+            id,
+            title,
+            NewAuditEvent {
+                id: Uuid::new_v4().to_string(),
+                session_id: Some(surface.session_id),
+                entity_kind: "surface".into(),
+                entity_id: id.to_string(),
+                event_kind: "surface_renamed".into(),
+                summary: format!("surface renamed: {title}"),
+                metadata: json!({"title": title, "author": author}),
+            },
+        )
         .await?
         .ok_or_else(|| {
             GatewayError::ValidationError("the surface disappeared during rename".into())
         })?;
-    state
-        .storage
-        .create_audit_event(NewAuditEvent {
-            id: Uuid::new_v4().to_string(),
-            session_id: Some(surface.session_id),
-            entity_kind: "surface".into(),
-            entity_id: id.to_string(),
-            event_kind: "surface_renamed".into(),
-            summary: format!("surface renamed: {title}"),
-            metadata: json!({"prior_title": prior, "title": title, "author": author}),
-        })
-        .await?;
     let _ = state.broadcast.send(ServerEvent::SurfaceUpdated {
         surface_id: id,
         module_id: None,
@@ -573,7 +573,15 @@ pub async fn resolve_surface_annotation(
     module_on_surface(state, &surface, prior.module_id).await?;
     if state
         .storage
-        .resolve_surface_annotation(annotation_id)
+        .resolve_surface_annotation(annotation_id, NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: Some(surface.session_id),
+            entity_kind: "surface".into(),
+            entity_id: surface_id.to_string(),
+            event_kind: "surface_annotation_resolved".into(),
+            summary: format!("note resolved on {}", surface.title),
+            metadata: json!({"annotation_id": annotation_id, "module_id": prior.module_id, "author": author}),
+        })
         .await?
     {
         let current = state
@@ -583,9 +591,6 @@ pub async fn resolve_surface_annotation(
             .ok_or_else(|| {
                 GatewayError::ValidationError("the note disappeared during resolution".into())
             })?;
-        state.storage.create_audit_event(NewAuditEvent {
-            id: Uuid::new_v4().to_string(), session_id: Some(surface.session_id), entity_kind: "surface".into(), entity_id: surface_id.to_string(), event_kind: "surface_annotation_resolved".into(), summary: format!("note resolved on {}", surface.title), metadata: json!({"annotation_id": annotation_id, "module_id": prior.module_id, "author": author, "resolved_at": current.resolved_at, "body": current.body}),
-        }).await?;
         let _ = state.broadcast.send(ServerEvent::SurfaceUpdated {
             surface_id,
             module_id: Some(prior.module_id),
@@ -1403,6 +1408,182 @@ mod tests {
             .unwrap(),
         );
         (state, storage, surface.id, module.id, other_module.id)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_rename_audit_leaves_the_title_unchanged() {
+        let (state, storage, surface_id, _, _) = seeded().await;
+        let prior = storage.get_page(surface_id).await.unwrap().unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER reject_rename_audit BEFORE INSERT ON audit_events
+             WHEN NEW.event_kind = 'surface_renamed'
+             BEGIN SELECT RAISE(ABORT, 'injected rename audit failure'); END;",
+                )
+            })
+            .await
+            .unwrap();
+        let mut updates = state.broadcast.subscribe();
+        rename_surface(
+            &state,
+            surface_id,
+            RenameSurfaceRequest {
+                title: "New title".into(),
+            },
+            "user",
+        )
+        .await
+        .expect_err("the audit insert must fail");
+        let unchanged = storage.get_page(surface_id).await.unwrap().unwrap();
+        assert_eq!(
+            unchanged.title, "Planning",
+            "a failed audit must roll back the title"
+        );
+        assert_eq!(unchanged.updated_at, prior.updated_at);
+        assert!(
+            updates.try_recv().is_err(),
+            "a failed change emits no update"
+        );
+        assert!(
+            storage
+                .list_audit_events()
+                .await
+                .unwrap()
+                .iter()
+                .all(|event| event.event_kind != "surface_renamed")
+        );
+
+        storage
+            .with_conn(|conn| conn.execute_batch("DROP TRIGGER reject_rename_audit"))
+            .await
+            .unwrap();
+        let renamed = rename_surface(
+            &state,
+            surface_id,
+            RenameSurfaceRequest {
+                title: "New title".into(),
+            },
+            "user",
+        )
+        .await
+        .unwrap();
+        assert_eq!(renamed.title, "New title");
+        let events = storage.list_audit_events().await.unwrap();
+        let events: Vec<_> = events
+            .iter()
+            .filter(|event| event.event_kind == "surface_renamed")
+            .collect();
+        assert_eq!(
+            events.len(),
+            1,
+            "one successful rename leaves exactly one audit"
+        );
+        assert_eq!(events[0].entity_id, surface_id.to_string());
+        assert_eq!(events[0].metadata["prior_title"], "Planning");
+        assert_eq!(events[0].metadata["title"], "New title");
+        assert_eq!(events[0].metadata["author"], "user");
+        assert!(
+            matches!(updates.try_recv().unwrap(), ServerEvent::SurfaceUpdated { surface_id: id, module_id: None } if id == surface_id)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_resolution_audit_leaves_the_note_open() {
+        let (state, storage, surface_id, module_id, _) = seeded().await;
+        let note =
+            create_surface_annotation(&state, surface_id, annotation(module_id, "Do this"), "user")
+                .await
+                .unwrap();
+        let prior = storage
+            .get_surface_annotation(note.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let surface = storage.get_page(surface_id).await.unwrap().unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER reject_resolution_audit BEFORE INSERT ON audit_events
+             WHEN NEW.event_kind = 'surface_annotation_resolved'
+             BEGIN SELECT RAISE(ABORT, 'injected resolution audit failure'); END;",
+                )
+            })
+            .await
+            .unwrap();
+        let mut updates = state.broadcast.subscribe();
+        resolve_surface_annotation(&state, surface_id, note.id, "agent")
+            .await
+            .expect_err("the audit insert must fail");
+        let unchanged = storage
+            .get_surface_annotation(note.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            unchanged.resolved_at.is_none(),
+            "a failed audit must leave the note unresolved"
+        );
+        assert_eq!(unchanged.updated_at, prior.updated_at);
+        assert_eq!(
+            storage
+                .get_page(surface_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .updated_at,
+            surface.updated_at
+        );
+        assert!(
+            updates.try_recv().is_err(),
+            "a failed change emits no update"
+        );
+        assert!(
+            storage
+                .list_audit_events()
+                .await
+                .unwrap()
+                .iter()
+                .all(|event| event.event_kind != "surface_annotation_resolved")
+        );
+
+        storage
+            .with_conn(|conn| conn.execute_batch("DROP TRIGGER reject_resolution_audit"))
+            .await
+            .unwrap();
+        let resolved = resolve_surface_annotation(&state, surface_id, note.id, "agent")
+            .await
+            .unwrap();
+        assert!(resolved.resolved_at.is_some());
+        resolve_surface_annotation(&state, surface_id, note.id, "user")
+            .await
+            .unwrap();
+        let events = storage.list_audit_events().await.unwrap();
+        let events: Vec<_> = events
+            .iter()
+            .filter(|event| event.event_kind == "surface_annotation_resolved")
+            .collect();
+        assert_eq!(
+            events.len(),
+            1,
+            "one successful resolution leaves exactly one audit, including after retry"
+        );
+        assert_eq!(events[0].entity_id, surface_id.to_string());
+        assert_eq!(events[0].metadata["annotation_id"], note.id.to_string());
+        assert_eq!(events[0].metadata["module_id"], module_id.to_string());
+        assert_eq!(events[0].metadata["body"], "Do this");
+        assert_eq!(events[0].metadata["author"], "agent");
+        assert_eq!(
+            events[0].metadata["resolved_at"],
+            json!(resolved.resolved_at)
+        );
+        assert!(
+            matches!(updates.try_recv().unwrap(), ServerEvent::SurfaceUpdated { surface_id: id, module_id: Some(mid) } if id == surface_id && mid == module_id)
+        );
+        assert!(
+            updates.try_recv().is_err(),
+            "a resolution retry emits no duplicate update"
+        );
     }
 
     /// The module a write landed; an append never comes back stale.

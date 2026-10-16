@@ -4390,7 +4390,12 @@ impl ThreadStore for MockStorage {
 
 #[async_trait]
 impl swage_storage::SurfaceStore for MockStorage {
-    async fn rename_surface(&self, _: Uuid, _: &str) -> Result<Option<String>, StorageError> {
+    async fn rename_surface(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: swage_storage::NewAuditEvent,
+    ) -> Result<Option<String>, StorageError> {
         unimplemented!()
     }
     async fn create_page(
@@ -4506,7 +4511,11 @@ impl swage_storage::SurfaceStore for MockStorage {
 
 #[async_trait]
 impl swage_storage::SurfaceAnnotationStore for MockStorage {
-    async fn resolve_surface_annotation(&self, _: Uuid) -> Result<bool, StorageError> {
+    async fn resolve_surface_annotation(
+        &self,
+        _: Uuid,
+        _: swage_storage::NewAuditEvent,
+    ) -> Result<bool, StorageError> {
         unimplemented!()
     }
     async fn create_surface_annotation(

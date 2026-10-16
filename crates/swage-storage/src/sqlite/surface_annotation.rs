@@ -155,17 +155,39 @@ impl SurfaceAnnotationStore for SqliteStorage {
         .await
     }
 
-    async fn resolve_surface_annotation(&self, id: Uuid) -> Result<bool, StorageError> {
+    async fn resolve_surface_annotation(
+        &self,
+        id: Uuid,
+        mut audit_event: NewAuditEvent,
+    ) -> Result<bool, StorageError> {
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
-            let now = Utc::now().to_rfc3339();
-            let changed = tx.execute("UPDATE surface_annotations SET resolved_at = ?1, updated_at = ?1 WHERE id = ?2 AND resolved_at IS NULL", params![now, id.to_string()])?;
+            let now = Utc::now();
+            let now_str = now.to_rfc3339();
+            let changed = tx.execute(
+                "UPDATE surface_annotations SET resolved_at = ?1, updated_at = ?1
+                 WHERE id = ?2 AND resolved_at IS NULL",
+                params![now_str, id.to_string()],
+            )?;
             if changed > 0 {
-                tx.execute("UPDATE surfaces SET updated_at = ?1 WHERE id = (SELECT surface_id FROM surface_annotations WHERE id = ?2)", params![now, id.to_string()])?;
+                tx.execute(
+                    "UPDATE surfaces SET updated_at = ?1
+                     WHERE id = (SELECT surface_id FROM surface_annotations WHERE id = ?2)",
+                    params![now_str, id.to_string()],
+                )?;
+                let body: String = tx.query_row(
+                    "SELECT body FROM surface_annotations WHERE id = ?1",
+                    [id.to_string()],
+                    |row| row.get(0),
+                )?;
+                audit_event.metadata["resolved_at"] = serde_json::json!(now);
+                audit_event.metadata["body"] = serde_json::json!(body);
+                super::audit::insert_audit_event(&tx, audit_event)?;
             }
             tx.commit()?;
             Ok(changed > 0)
-        }).await
+        })
+        .await
     }
 
     async fn delete_surface_annotation_with_audit(

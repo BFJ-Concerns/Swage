@@ -51,6 +51,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Surface renames and note resolutions commit with their audit event; a failed audit write leaves the surface unchanged.
+
 - Surface reads by the agent omit resolved notes while the HTTP response and stored record retain them.
 
 - Retrying a surface rename or note resolution clears the previous failure notice.

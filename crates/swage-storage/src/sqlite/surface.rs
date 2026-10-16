@@ -196,7 +196,12 @@ impl SurfaceStore for SqliteStorage {
         .await
     }
 
-    async fn rename_surface(&self, id: Uuid, title: &str) -> Result<Option<String>, StorageError> {
+    async fn rename_surface(
+        &self,
+        id: Uuid,
+        title: &str,
+        mut audit_event: NewAuditEvent,
+    ) -> Result<Option<String>, StorageError> {
         let title = title.to_owned();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
@@ -207,11 +212,13 @@ impl SurfaceStore for SqliteStorage {
                     |row| row.get(0),
                 )
                 .optional()?;
-            if prior.is_some() {
+            if let Some(prior_title) = &prior {
                 tx.execute(
                     "UPDATE surfaces SET title = ?1, updated_at = ?2 WHERE id = ?3",
                     params![title, Utc::now().to_rfc3339(), id.to_string()],
                 )?;
+                audit_event.metadata["prior_title"] = serde_json::json!(prior_title);
+                super::audit::insert_audit_event(&tx, audit_event)?;
             }
             tx.commit()?;
             Ok(prior)
