@@ -278,7 +278,13 @@ describe("TopicSettingsPage", () => {
     vi.mocked(surfacesApi.listTopicDefaultSurfaces).mockResolvedValue({ entries: [entries[0]] });
     component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "surfaces" } });
     await flushUi();
-    expect(Array.from(document.querySelectorAll("time")).map(t => t.dateTime)).toEqual(times);
+    for (const [label, savedAt] of [["Default surfaces", times[0]], ["Surface library", times[1]]]) {
+      const rows = document.querySelectorAll(`[aria-label="${label}"] .record-row`);
+      expect(rows).toHaveLength(1);
+      const timestamp = rows[0].querySelector("time");
+      expect(timestamp?.dateTime, `${label} row save time`).toBe(savedAt);
+      expect(timestamp?.textContent).toContain(savedAt);
+    }
     expect(document.body.textContent?.match(/General/g)).toHaveLength(2);
   });
 
