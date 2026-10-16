@@ -369,6 +369,25 @@ describe("surface workspace corrections", () => {
     expect(store.annotate).not.toHaveBeenCalled();
   });
 
+  it("preserves an open note draft after a failed checklist toggle", async () => {
+    const initial = surface([module("m", "- [ ] Draft approved by Maya", 0)]);
+    const store = fakeStore(initial);
+    store.writeModule.mockRejectedValueOnce(new Error("Checklist save unavailable"));
+    store.openSurface.mockImplementationOnce(async () => { store.setActive({ ...initial }); });
+    show(store);
+    button("Add note").click(); await settled();
+    const note = document.querySelector<HTMLInputElement>('input[placeholder="Note on this module"]')!;
+    note.value = "Unsaved checklist note";
+    note.dispatchEvent(new Event("input", { bubbles: true }));
+    await settled();
+    document.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();
+    await settled();
+    expect(store.writeModule).toHaveBeenCalledWith(SURFACE_ID, "m", "- [x] Draft approved by Maya", 0);
+    expect(store.openSurface).toHaveBeenCalledWith(SURFACE_ID);
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("Checklist save unavailable");
+    expect(document.querySelector<HTMLInputElement>('input[placeholder="Note on this module"]')?.value, "open note draft").toBe("Unsaved checklist note");
+  });
+
   it("requests resolution of an open note and filters recorded resolved notes", async () => {
     const m = module("m", "# Plan", 0);
     m.annotations = [

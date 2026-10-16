@@ -51,6 +51,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Failed checklist saves keep an open surface note and its unsaved text.
+
 - Shared-session channel arrivals keep their order across chats, and queued branch replies stay on their own thread in the live conversation.
 
 - Developer channel messages join the durable session queue during a turn. Telegram polling continues while the assistant answers; queued inputs retain their thread destinations, replies are delivered once per target, and deleting a session settles its waiting scheduled work. Delayed queue acknowledgements cannot restore drained messages.

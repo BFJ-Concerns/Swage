@@ -263,7 +263,8 @@
     try {
       newer = await store.writeModule(surface.id, editingModuleId, editingSource, editingRevision);
     } catch (error) {
-      await refetchAfterFailure(error, surface.id);
+      stopEditing();
+      await reportAndRefreshFailure(error, surface.id);
       return;
     }
     if (newer) {
