@@ -125,13 +125,19 @@ impl Tool for ShellTool {
             Ok::<_, ToolError>((stdout, stderr))
         };
 
-        // Safe to abandon on timeout: read_fut owns only local pipe handles and
-        // output buffers — no shared or persisted state. The timeout arm below
-        // kills the child and discards the partial buffers, so dropping the
-        // future leaves nothing half-written.
-        let read_result = tokio::time::timeout(self.timeout, read_fut).await;
+        // Pipe EOF does not mean the command has exited. Both output collection
+        // and process exit share one deadline; timeout stops the process group.
+        let execution = async {
+            let (stdout, stderr) = read_fut.await?;
+            let exit_status = child.wait().await.map_err(|e| ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: format!("Failed to wait for command: {e}"),
+            })?;
+            Ok::<_, ToolError>((stdout, stderr, exit_status))
+        };
+        let result = Box::pin(tokio::time::timeout(self.timeout, execution)).await;
 
-        match read_result {
+        match result {
             Err(_elapsed) => {
                 // Timeout expired — stop the process group to free resources.
                 kill_child(&mut child, &mut process_group).await;
@@ -145,17 +151,12 @@ impl Tool for ShellTool {
             }
 
             Ok(Err(e)) => {
-                // I/O error reading output — stop the process group and propagate.
+                // Output or process-wait error — stop the group and propagate.
                 kill_child(&mut child, &mut process_group).await;
                 Err(e)
             }
 
-            Ok(Ok((stdout, stderr))) => {
-                // Reap the child to get the exit status.
-                let exit_status = child.wait().await.map_err(|e| ToolError::ExecutionFailed {
-                    name: self.name().to_owned(),
-                    message: format!("Failed to wait for command: {e}"),
-                })?;
+            Ok(Ok((stdout, stderr, exit_status))) => {
                 process_group.disarm();
 
                 let stdout_str = String::from_utf8_lossy(&stdout.bytes);
@@ -448,6 +449,53 @@ mod tests {
         assert!(
             msg.contains("timed out after 0.2s") && msg.contains("shell_timeout_secs"),
             "error message should mention timeout: {msg:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn timeout_stops_command_after_both_output_streams_close() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let context = ctx_in_dir_with_ids(&workspace);
+        let t = ShellTool {
+            timeout: Duration::from_millis(200),
+            max_output_bytes: 1024 * 1024,
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            t.execute(
+                json!({"command": "echo $$ > shell.pid; exec 1>&- 2>&-; sleep 2; touch finished"}),
+                &context,
+            ),
+        )
+        .await
+        .expect("closing output streams must not bypass the shell deadline");
+        let error = result.expect_err("the command must time out before it finishes");
+        let message = error.to_string();
+        assert!(
+            message.contains("timed out after 0.2s") && message.contains("shell_timeout_secs"),
+            "{message}"
+        );
+        let pid: libc::pid_t = std::fs::read_to_string(workspace.path().join("shell.pid"))
+            .expect("the actual shell must record its PID")
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "the shell must stop");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        tokio::time::sleep(Duration::from_millis(2100)).await;
+        assert!(
+            !workspace.path().join("finished").exists(),
+            "the command's descendants must stop at the deadline"
+        );
+        let next = t
+            .execute(json!({"command": "printf fresh"}), &context)
+            .await;
+        assert_eq!(
+            next.expect("the next shell call must work")["output"],
+            "fresh"
         );
     }
 
