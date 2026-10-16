@@ -306,23 +306,13 @@ impl Default for ToolPermissionConfig {
     }
 }
 
-/// Tools that act outside the conversation — running commands or code,
-/// writing files, operating a page — and so prompt before each call in an
-/// attended session. Unattended sessions run on their grants alone.
+/// Tools that run commands or code or write files, and so prompt before each
+/// call in an attended session. Unattended sessions run on their grants alone.
 fn default_high_risk_tool_approvals() -> Vec<RequireApprovalEntry> {
-    [
-        "shell",
-        "file_edit",
-        "file_write",
-        "python_execute",
-        "browser_click",
-        "browser_type",
-        "browser_select",
-        "browser_scroll",
-    ]
-    .into_iter()
-    .map(|tool| RequireApprovalEntry::Simple(tool.to_string()))
-    .collect()
+    ["shell", "file_edit", "file_write", "python_execute"]
+        .into_iter()
+        .map(|tool| RequireApprovalEntry::Simple(tool.to_string()))
+        .collect()
 }
 
 /// Settings for the gateway-hosted browser tools.
@@ -753,7 +743,7 @@ impl Default for SchedulingConfig {
 
 // Declared once in swage-protocol: the wire type and the resolved config
 // type are one definition, with the partial, schema and semantics beside it.
-pub use swage_protocol::client::settings::{MemoryConfig, SessionsConfig};
+pub use swage_protocol::client::settings::{AttachmentsConfig, MemoryConfig, SessionsConfig};
 
 /// Model routes for voice. Voice speaks only to the default provider's
 /// endpoint; each id is the model that endpoint serves for that audio API.
@@ -868,6 +858,8 @@ pub struct ResolvedConfig {
     pub sessions: SessionsConfig,
     /// `[memory]` — when the curator passes over an attended conversation.
     pub memory: MemoryConfig,
+    /// Image reference schemes admitted before provider capability checks.
+    pub attachments: AttachmentsConfig,
     /// Model routes for transcription and speech synthesis.
     pub voice: VoiceConfig,
     /// Named generation parameter presets available to model entries.
@@ -1421,16 +1413,7 @@ timeout_policy = "reject"
                 .iter()
                 .map(RequireApprovalEntry::tool_name)
                 .collect::<Vec<_>>(),
-            vec![
-                "shell",
-                "file_edit",
-                "file_write",
-                "python_execute",
-                "browser_click",
-                "browser_type",
-                "browser_select",
-                "browser_scroll"
-            ]
+            vec!["shell", "file_edit", "file_write", "python_execute"]
         );
     }
 
