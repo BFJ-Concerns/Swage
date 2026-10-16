@@ -192,10 +192,11 @@ describe("OperatorHistoryPane", () => {
     },
     {
       name: "provider credential labels",
-      prior: { providers: { google: { api_key_env: "OLD_KEY", api_key_secret_ref: "secret-old", has_credential: false, base_url: "http://a" } } },
-      next: { providers: { google: { api_key_env: "NEW_KEY", api_key_secret_ref: "secret-new", has_credential: true, base_url: "http://b" } } },
+      prior: { providers: { google: { api_key: "[REDACTED]", api_key_env: "OLD_KEY", api_key_secret_ref: "secret-old", has_credential: false, base_url: "http://a" } } },
+      next: { providers: { google: { api_key: "", api_key_env: "NEW_KEY", api_key_secret_ref: "secret-new", has_credential: true, base_url: "http://b" } } },
       rows: [
-        ["Providers › google › API key", "OLD_KEY", "NEW_KEY"],
+        ["Providers › google › API key", "[REDACTED]", ""],
+        ["Providers › google › API key environment variable", "OLD_KEY", "NEW_KEY"],
         ["Providers › google › Stored credential", "secret-old", "secret-new"],
         ["Providers › google › Base URL", "http://a", "http://b"],
         ["Providers › google › Credential", "false", "true"],

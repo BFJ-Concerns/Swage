@@ -20,7 +20,7 @@ export const SETTINGS_LABELS: Readonly<Record<string, string>> = {
   "voice.speech_model": "Speech model",
   "providers.*.base_url": "Base URL",
   "providers.*.api_key": API_KEY_LABEL,
-  "providers.*.api_key_env": API_KEY_LABEL,
+  "providers.*.api_key_env": "API key environment variable",
   "providers.*.api_key_secret_ref": "Stored credential",
   "providers.*.has_credential": "Credential",
   "models.*.default_effort": "Default effort",
