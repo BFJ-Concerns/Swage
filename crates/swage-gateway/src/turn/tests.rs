@@ -15709,6 +15709,30 @@ async fn delegation_rejects_missing_sender_turn_lineage() {
 }
 
 #[test]
+fn sandbox_config_carries_the_session_shell_timeout_and_waits_for_its_reply() {
+    let agent = AgentConfig::new("agent").with_workspace(std::env::current_dir().unwrap(), vec![]);
+    for seconds in [1, 75] {
+        let tools = swage_config::ToolConfig {
+            shell_timeout_secs: seconds,
+            ..Default::default()
+        };
+        let config = build_sandbox_config(&agent, None, &tools).unwrap();
+        assert_eq!(
+            config
+                .tool_runtime
+                .as_ref()
+                .map(|settings| settings.shell_timeout_secs),
+            Some(seconds),
+            "the sandbox child must receive the session's configured timeout"
+        );
+        assert!(
+            config.tool_call_timeout > std::time::Duration::from_secs(seconds),
+            "the IPC wait must let the shell report its own timeout"
+        );
+    }
+}
+
+#[test]
 fn sandbox_config_skips_missing_trusted_workspace_paths() {
     let temp_dir = tempfile::tempdir().unwrap();
     let working_directory = temp_dir.path().join("work");
@@ -15746,7 +15770,12 @@ fn sandbox_config_skips_missing_trusted_workspace_paths() {
         ],
     };
 
-    let sandbox_config = build_sandbox_config(&agent_config, Some(&policy)).unwrap();
+    let sandbox_config = build_sandbox_config(
+        &agent_config,
+        Some(&policy),
+        &swage_config::ToolConfig::default(),
+    )
+    .unwrap();
     let existing_workspace = sandbox_path(&existing_workspace);
 
     assert!(
@@ -15804,7 +15833,12 @@ fn worker_placement_replaces_other_filesystem_authority() {
     apply_worker_placement_permission(&mut policy, &agent_config, Some(&metadata));
 
     assert!(policy.attachments.is_empty());
-    let sandbox_config = build_sandbox_config(&agent_config, Some(&policy)).unwrap();
+    let sandbox_config = build_sandbox_config(
+        &agent_config,
+        Some(&policy),
+        &swage_config::ToolConfig::default(),
+    )
+    .unwrap();
     let placement = sandbox_path(&placement);
     let sibling_workspace = sandbox_path(&sibling_workspace);
     assert!(sandbox_config.read_only_mounts.contains(&placement));

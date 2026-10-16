@@ -155,9 +155,17 @@ pub(super) fn sandbox_path(path: &Path) -> PathBuf {
 pub(crate) fn build_sandbox_config(
     agent_config: &AgentConfig,
     workspace_policy: Option<&TrustedWorkspacePolicy>,
-) -> Result<swage_sandbox::SandboxConfig, swage_sandbox::SandboxConfigError> {
+    tools: &swage_config::ToolConfig,
+) -> Result<swage_sandbox::SandboxConfig, swage_core::SandboxError> {
     let working_directory = sandbox_path(&agent_config.working_directory);
-    let mut builder = swage_sandbox::SandboxConfig::builder().working_directory(&working_directory);
+    let runtime = crate::settings::tool_runtime_from_config(tools).map_err(|error| {
+        swage_core::SandboxError::SpawnFailed {
+            message: format!("failed to configure sandbox tools: {error}"),
+        }
+    })?;
+    let mut builder = swage_sandbox::SandboxConfig::builder()
+        .working_directory(&working_directory)
+        .tool_runtime(runtime);
 
     let active_grant = workspace_policy
         .and_then(|policy| policy.active_workspace.as_ref())
@@ -202,7 +210,11 @@ pub(crate) fn build_sandbox_config(
         }
     }
 
-    builder.build()
+    builder
+        .build()
+        .map_err(|error| swage_core::SandboxError::SpawnFailed {
+            message: format!("failed to build sandbox config: {error}"),
+        })
 }
 
 pub(crate) fn apply_worker_placement_permission(
@@ -256,11 +268,7 @@ pub(super) async fn build_turn_sandbox(
     }
     #[cfg(test)]
     if state.test_sandbox_enabled() {
-        let config = build_sandbox_config(agent_config, workspace_policy).map_err(|error| {
-            swage_core::SandboxError::SpawnFailed {
-                message: format!("failed to build test sandbox config: {error}"),
-            }
-        })?;
+        let config = build_sandbox_config(agent_config, workspace_policy, &config.tools)?;
         return Ok(TurnSandboxBuild {
             sandbox: Some(Arc::new(PolicyEnforcingTestSandbox { config })),
             isolation: ExecutionIsolation::Isolated,
@@ -370,11 +378,7 @@ async fn build_turn_sandbox_for_backend_selection(
     bubblewrap_available: bool,
     spawn_fallback: bool,
 ) -> Result<TurnSandboxBuild, swage_core::SandboxError> {
-    let sandbox_config = build_sandbox_config(agent_config, workspace_policy).map_err(|error| {
-        swage_core::SandboxError::SpawnFailed {
-            message: format!("failed to build sandbox config: {error}"),
-        }
-    })?;
+    let sandbox_config = build_sandbox_config(agent_config, workspace_policy, &config.tools)?;
 
     let provider = state.active_provider();
     let make_llm_handler = || {

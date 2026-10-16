@@ -42,6 +42,8 @@ pub struct SandboxConfig {
     pub shutdown_grace_period: Duration,
     /// Per-tool-call IPC timeout.
     pub tool_call_timeout: Duration,
+    /// Session tool settings carried to the child through the sandbox configuration.
+    pub tool_runtime: Option<swage_protocol::client::settings::ToolRuntimeSettings>,
     /// Per-LLM-request IPC timeout.
     pub llm_request_timeout: Duration,
 }
@@ -72,6 +74,7 @@ pub struct SandboxConfigBuilder {
     shutdown_grace_period: Duration,
     // 30 second default — tools that run external commands need headroom.
     tool_call_timeout: Duration,
+    tool_runtime: Option<swage_protocol::client::settings::ToolRuntimeSettings>,
     // 60 second default — LLM requests can take a while for large completions.
     llm_request_timeout: Duration,
 }
@@ -87,6 +90,7 @@ impl SandboxConfigBuilder {
             landlock_write_paths: Vec::new(),
             shutdown_grace_period: Duration::from_secs(5),
             tool_call_timeout: Duration::from_secs(30),
+            tool_runtime: None,
             llm_request_timeout: Duration::from_secs(60),
         }
     }
@@ -133,6 +137,15 @@ impl SandboxConfigBuilder {
         self
     }
 
+    /// Pass the session's existing tool settings to the child process.
+    pub fn tool_runtime(
+        mut self,
+        settings: swage_protocol::client::settings::ToolRuntimeSettings,
+    ) -> Self {
+        self.tool_runtime = Some(settings);
+        self
+    }
+
     /// Overrides the per-LLM-request IPC timeout (default: 60s).
     pub fn llm_request_timeout(mut self, duration: Duration) -> Self {
         self.llm_request_timeout = duration;
@@ -156,7 +169,18 @@ impl SandboxConfigBuilder {
             landlock_read_paths: self.landlock_read_paths,
             landlock_write_paths: self.landlock_write_paths,
             shutdown_grace_period: self.shutdown_grace_period,
-            tool_call_timeout: self.tool_call_timeout,
+            // The shell owns its deadline. Allow its process cleanup and reply
+            // to finish before treating silence as a broken IPC connection.
+            tool_call_timeout: self.tool_runtime.as_ref().map_or(
+                self.tool_call_timeout,
+                |settings| {
+                    self.tool_call_timeout.max(
+                        Duration::from_secs(settings.shell_timeout_secs)
+                            .saturating_add(self.shutdown_grace_period),
+                    )
+                },
+            ),
+            tool_runtime: self.tool_runtime,
             llm_request_timeout: self.llm_request_timeout,
         })
     }
