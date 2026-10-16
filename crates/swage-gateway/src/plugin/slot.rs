@@ -577,6 +577,47 @@ pub fn hooks_for_turn(
     hooks
 }
 
+/// The plugin that fills `slot` this turn: the revision's named filler, or
+/// an installed variant of the slot's function drawn in its place. A plugin
+/// declaring `variant_of = "slot.<slot>"` is a candidate wherever it is
+/// enabled; the draw runs through the experimentation seam at location
+/// `slot.<slot>` with the named filler as the default, so a topic's
+/// configuration pins a variant over the shipped part, experimentation off
+/// keeps the named filler, and every draw is recorded.
+pub async fn slot_variant(
+    state: &AppState,
+    config: &swage_config::model::ExperimentationConfig,
+    slot: swage_protocol::client::turn_graph::TurnSlot,
+    named: &str,
+    session_id: Uuid,
+    turn_id: Option<Uuid>,
+    topic_id: Option<Uuid>,
+) -> String {
+    let location = format!("slot.{}", slot.as_str());
+    let candidates = state.plugins.variants_of(&location, topic_id);
+    if candidates.is_empty() {
+        return named.to_owned();
+    }
+    let registered: Vec<&str> = candidates.iter().map(String::as_str).collect();
+    match crate::experimentation::select_session_variant(
+        state,
+        config,
+        &location,
+        &registered,
+        named,
+        session_id,
+        turn_id,
+    )
+    .await
+    {
+        Ok(decision) => decision.variant,
+        Err(error) => {
+            tracing::warn!(%error, slot = slot.as_str(), "the slot's variant could not be drawn; the named filler serves");
+            named.to_owned()
+        }
+    }
+}
+
 /// A plugin's isolate as a slot for one turn, when it is installed,
 /// enabled for the session's scope, and serving as an isolate.
 pub fn slot_for_plugin(
@@ -786,6 +827,49 @@ mod tests {
         let asked = host.completions.lock().unwrap().clone();
         assert_eq!(asked[0]["model"], "m");
         assert_eq!(asked[0]["messages"][1]["content"], "one");
+    }
+
+    /// The shipped summariser forwards the step's request to the model
+    /// under its grant and answers the model's content — the kernel's own
+    /// behaviour, on the plugin contract.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_shipped_summariser_answers_the_request_through_its_model_grant() {
+        let host = Arc::new(SummarisingHost::default());
+        let manifest = PluginManifest::parse(include_str!(
+            "../../../../shipped/plugins/succession-summariser/plugin.toml"
+        ))
+        .unwrap();
+        let runtime = PluginRuntime::start(
+            manifest,
+            include_str!("../../../../shipped/plugins/succession-summariser/plugin.js").to_owned(),
+        )
+        .await
+        .expect("starts");
+        let slot = PluginSlot::new(
+            "succession-summariser".into(),
+            runtime,
+            host.clone(),
+            context(),
+        );
+        let completion = CompletionRequest {
+            messages: vec![
+                ChatMessage::new(Role::System, "Summarise."),
+                ChatMessage::new(Role::User, "one"),
+            ],
+            model: Some("m".into()),
+            effort: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: None,
+            tool_definitions: Vec::new(),
+        };
+        let summary = slot.summarise(completion).await.expect("summarises");
+        assert_eq!(summary, "the gist");
+        let asked = host.completions.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0]["model"], "m");
+        assert_eq!(asked[0]["messages"][0]["content"], "Summarise.");
     }
 
     #[tokio::test(flavor = "multi_thread")]

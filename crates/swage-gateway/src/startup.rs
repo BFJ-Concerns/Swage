@@ -87,6 +87,9 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     if let Err(error) = crate::shipped_skill_projection::regenerate(&root).await {
         warn!(%error, "failed to regenerate shipped skill resources");
     }
+    if let Err(error) = crate::shipped_plugins::regenerate(&root).await {
+        warn!(%error, "failed to regenerate shipped plugin packages");
+    }
     let db_path = root.join("swage.db");
 
     // Step 4: Open persistent storage.
@@ -201,6 +204,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     let storage: Arc<dyn swage_storage::store::Storage> =
         Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>;
     let topic_store: Arc<dyn swage_storage::store::TopicStore> = raw_storage;
+    let data_root = root.clone();
     let mut state = crate::state::AppState::new_with_config_root(
         storage,
         topic_store,
@@ -217,6 +221,33 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     if let Err(error) = state.plugins.load().await {
         eprintln!("Failed to load installed plugins: {error}");
         std::process::exit(1);
+    }
+    // The parts the gateway ships on the plugin contracts install
+    // themselves once per shipped version, through the same path an
+    // operator's package takes, with provenance `shipped`.
+    {
+        let reserved: Vec<String> = state
+            .active_tool_dispatcher()
+            .registry()
+            .list()
+            .into_iter()
+            .filter(|name| !state.plugins.provides_tool(name))
+            .map(str::to_owned)
+            .collect();
+        let names: Vec<&str> = crate::shipped_plugins::SHIPPED_PLUGINS
+            .iter()
+            .map(|plugin| plugin.name)
+            .collect();
+        for installed in state
+            .plugins
+            .install_shipped(&crate::shipped_plugins::root(&data_root), &names, &reserved)
+            .await
+        {
+            info!(
+                "Installed shipped plugin {} revision {}",
+                installed.name, installed.revision
+            );
+        }
     }
     crate::plugin::refresh_tool_dispatcher(&state);
     // The turn graph's revisions come up from their records; an install

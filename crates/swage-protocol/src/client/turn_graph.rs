@@ -142,9 +142,14 @@ pub struct TurnGraph {
     pub branches: Vec<TurnBranch>,
 }
 
+/// The plugin the gateway ships for the succession step; installed by the
+/// gateway's startup with provenance `shipped`.
+pub const SHIPPED_SUCCESSION_SUMMARISER: &str = "succession-summariser";
+
 impl TurnGraph {
-    /// The graph the kernel ships with: every slot its own implementation,
-    /// no hooks, no branches. Revision 0 on every install.
+    /// The graph the kernel ships with: the succession step filled by the
+    /// shipped summariser plugin, every other slot the kernel's own, no
+    /// hooks, no branches. Revision 0 on every install.
     pub fn shipped() -> Self {
         Self {
             steps: TurnSlot::ALL
@@ -152,7 +157,12 @@ impl TurnGraph {
                 .map(|slot| TurnStep {
                     id: slot.as_str().to_owned(),
                     slot: *slot,
-                    filler: StepFiller::Builtin,
+                    filler: match slot {
+                        TurnSlot::Succession => StepFiller::Plugin {
+                            name: SHIPPED_SUCCESSION_SUMMARISER.to_owned(),
+                        },
+                        _ => StepFiller::Builtin,
+                    },
                 })
                 .collect(),
             hooks: Vec::new(),

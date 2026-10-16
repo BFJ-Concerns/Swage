@@ -76,6 +76,7 @@ pub mod service;
 pub mod session_archive;
 pub mod settings;
 pub mod shipped_docs;
+mod shipped_plugins;
 mod shipped_skill_projection;
 mod shipped_skills;
 pub mod shutdown;

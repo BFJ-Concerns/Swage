@@ -20323,6 +20323,14 @@ async fn a_shadow_branch_is_absent_where_experimentation_is_off_for_its_location
     );
     state.turn_graph.load().await.expect("revision 0");
     let mut graph = TurnGraph::shipped();
+    // No plugin is installed here: the kernel's own summariser is the live
+    // step, and the branch shadows it.
+    graph
+        .steps
+        .iter_mut()
+        .find(|step| step.slot == TurnSlot::Succession)
+        .expect("succession step")
+        .filler = StepFiller::Builtin;
     graph.branches.push(TurnBranch {
         id: "trial".into(),
         from: TurnSlot::Succession.as_str().into(),
@@ -20412,4 +20420,135 @@ async fn a_shadow_branch_is_absent_where_experimentation_is_off_for_its_location
     .await;
     assert_eq!(shadows.len(), 1, "the forced variant draws the shadow");
     assert_eq!(shadows[0].branch, "trial");
+}
+
+/// A plugin declaring itself a variant of a slot's function is drawn in
+/// the named filler's place through the experimentation seam: off, the
+/// named filler serves; forced, the variant does; and the draw is recorded.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_installed_variant_of_a_slot_shadows_the_named_filler_through_the_draw() {
+    use swage_protocol::client::turn_graph::StepFiller;
+    let dir = tempfile::tempdir().expect("plugins root");
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let topic = storage.general_scope().await.expect("general scope");
+    let session = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .expect("session");
+    // The state's plugin service installs under `<root>/plugins`; the
+    // packages are written beside it.
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
+        Arc::new(PendingProvider),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        dir.path().to_path_buf(),
+    );
+    let write = |name: &str, variant_of: &str| {
+        let root = dir.path().join("packages").join(name);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("plugin.toml"),
+            format!(
+                "name = \"{name}\"\nversion = \"1\"\ndescription = \"A {name}.\"\nscript = \"plugin.js\"\ngrants = [\"model\"]\n{variant_of}\n[[provides.slots]]\nname = \"succession\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("plugin.js"),
+            format!(r#"swage.provide.slot("succession", (input) => ({{ summary: "{name}" }}));"#),
+        )
+        .unwrap();
+        root
+    };
+    for (name, variant_of) in [("base", ""), ("alt", "variant_of = \"slot.succession\"")] {
+        state
+            .plugins
+            .install(&write(name, variant_of), &[], None)
+            .await
+            .expect("installs");
+        state
+            .plugins
+            .set_enablement(name, None, true, None)
+            .await
+            .expect("enables");
+    }
+    let named = StepFiller::Plugin {
+        name: "base".into(),
+    };
+    let context = crate::plugin::slot::slot_context(
+        Some(session.id),
+        "agent-a",
+        std::path::Path::new("/work"),
+    );
+
+    let mut off = swage_config::ResolvedConfig::default();
+    off.experimentation.enabled = false;
+    let summariser = super::summariser_for(
+        &state,
+        &off.experimentation,
+        &named,
+        &context,
+        Some(topic.id),
+        session.id,
+        Some(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(
+        summariser.describe(),
+        "plugin base",
+        "off: the named filler serves"
+    );
+
+    let mut forced = swage_config::ResolvedConfig::default();
+    forced.experimentation.locations.insert(
+        "slot.succession".into(),
+        swage_config::model::ExperimentLocationConfig {
+            enabled: true,
+            forced_variant: Some("alt".into()),
+        },
+    );
+    let second = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .expect("second session");
+    let summariser = super::summariser_for(
+        &state,
+        &forced.experimentation,
+        &named,
+        &context,
+        Some(topic.id),
+        second.id,
+        Some(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(
+        summariser.describe(),
+        "plugin alt",
+        "forced: the installed variant shadows the named filler"
+    );
+
+    // Disabled for the scope, the variant is no candidate.
+    state
+        .plugins
+        .set_enablement("alt", None, false, None)
+        .await
+        .expect("disables");
+    let third = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .expect("third session");
+    let summariser = super::summariser_for(
+        &state,
+        &forced.experimentation,
+        &named,
+        &context,
+        Some(topic.id),
+        third.id,
+        Some(Uuid::new_v4()),
+    )
+    .await;
+    assert_eq!(summariser.describe(), "plugin base");
 }

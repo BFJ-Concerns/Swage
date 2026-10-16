@@ -42,6 +42,25 @@ pub struct PluginSecret {
     pub description: String,
 }
 
+/// Where a plugin revision came from: compiled into the gateway and
+/// installed by its startup, or installed by an operator. The one thing
+/// that tells a shipped part from an installed plugin of the same kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginProvenance {
+    Shipped,
+    Installed,
+}
+
+impl PluginProvenance {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PluginProvenance::Shipped => "shipped",
+            PluginProvenance::Installed => "installed",
+        }
+    }
+}
+
 /// One installed revision of a plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 pub struct PluginRevision {
@@ -49,6 +68,7 @@ pub struct PluginRevision {
     pub version: String,
     /// Where the package was installed from.
     pub installed_from: String,
+    pub provenance: PluginProvenance,
     pub installed_at: String,
     /// Whether this is the revision serving now.
     pub active: bool,
@@ -81,8 +101,11 @@ pub struct PluginSummary {
     /// The host grants the plugin asks for.
     pub grants: Vec<String>,
     pub secrets: Vec<PluginSecret>,
-    /// The function this plugin is a variant of, when it declares one.
+    /// The function this plugin is a variant of, when it declares one — a
+    /// slot's, as `slot.<slot>`, makes it a candidate at that step's draw.
     pub variant_of: Option<String>,
+    /// The active revision's provenance.
+    pub provenance: PluginProvenance,
     /// Every recorded revision, oldest first.
     pub revisions: Vec<PluginRevision>,
     /// Whether the install enables it everywhere.

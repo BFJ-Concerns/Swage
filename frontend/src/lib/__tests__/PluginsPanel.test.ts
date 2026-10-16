@@ -16,7 +16,8 @@ function plugin(name: string, overrides: Partial<PluginSummary> = {}): PluginSum
     grants: ["tools"],
     secrets: [],
     variant_of: null,
-    revisions: [{ revision: 1, version: "1.0.0", installed_from: "/src/plugin", installed_at: "2026-10-16T17:00:00Z", active: true }],
+    provenance: "installed",
+    revisions: [{ revision: 1, version: "1.0.0", installed_from: "/src/plugin", provenance: "installed", installed_at: "2026-10-16T17:00:00Z", active: true }],
     enabled_for_install: false,
     enabled_topics: [],
     disabled_topics: [],
@@ -61,7 +62,14 @@ describe("PluginsPanel", () => {
       service: { state: "terminated", reason: "heap_limit" },
     });
     const quiet = plugin("quiet", { grants: [], service: { state: "failed", reason: "SyntaxError: bad" }, profile: "process", sessions: ["s1", "s2"] });
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({ plugins: [echo, quiet] }));
+    const shipped = plugin("succession-summariser", {
+      provides: { tools: [], slots: ["succession"], hooks: [] },
+      grants: ["model"],
+      provenance: "shipped",
+      enabled_for_install: true,
+      revisions: [{ revision: 1, version: "1.0.0", installed_from: "/data/generated/shipped-plugins/succession-summariser", provenance: "shipped", installed_at: "2026-10-16T17:00:00Z", active: true }],
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({ plugins: [echo, quiet, shipped] }));
     component = mount(PluginsPanel, { target: document.body, props: { topicId: null } });
     await vi.waitFor(() => expect(document.body.textContent).toContain("echo"));
 
@@ -83,6 +91,16 @@ describe("PluginsPanel", () => {
     flushSync(() => quietButton?.click());
     expect(document.querySelector('[aria-label="quiet details"]')?.textContent).toContain("Grants");
     expect(document.querySelector('[aria-label="quiet details"]')?.textContent).toContain("serving 2 sessions");
+
+    // A shipped part sits in the same list with the same controls; only its
+    // provenance tells it apart.
+    const shippedButton = Array.from(document.querySelectorAll("button")).find((button) => button.textContent?.includes("succession-summariser"))!;
+    expect(shippedButton.textContent).toContain("Shipped with the gateway");
+    flushSync(() => shippedButton.click());
+    const shippedDetail = document.querySelector('[aria-label="succession-summariser details"]')!;
+    expect(shippedDetail.textContent).toContain("Shipped with the gateway");
+    expect(shippedDetail.textContent).toContain("shipped with the gateway");
+    expect(shippedDetail.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked).toBe(true);
   });
 
   it("enables a plugin for the selected topic through the enablement route", async () => {

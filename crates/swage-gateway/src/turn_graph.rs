@@ -613,12 +613,22 @@ mod tests {
         std::fs::write(root.join("plugin.js"), script).unwrap();
     }
 
+    /// A service as the gateway starts it: the shipped plugins installed
+    /// from their projection, so revision 0's shipped summariser validates.
     async fn service(dir: &Path) -> (TurnGraphService, Arc<SqliteStorage>, Arc<PluginService>) {
         let storage = Arc::new(SqliteStorage::in_memory().unwrap());
         let plugins = Arc::new(PluginService::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             dir.join("plugins"),
         ));
+        crate::shipped_plugins::regenerate(dir).await.unwrap();
+        let names: Vec<&str> = crate::shipped_plugins::SHIPPED_PLUGINS
+            .iter()
+            .map(|plugin| plugin.name)
+            .collect();
+        plugins
+            .install_shipped(&crate::shipped_plugins::root(dir), &names, &[])
+            .await;
         let graph = TurnGraphService::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -657,7 +667,10 @@ mod tests {
         assert_eq!(listed.revisions[0].graph, TurnGraph::shipped());
         assert_eq!(
             graph.active().graph.filler_for(TurnSlot::Succession),
-            StepFiller::Builtin
+            StepFiller::Plugin {
+                name: swage_protocol::client::turn_graph::SHIPPED_SUCCESSION_SUMMARISER.into()
+            },
+            "the shipped graph names the shipped summariser"
         );
         assert!(
             graph
@@ -701,7 +714,9 @@ mod tests {
         assert_eq!(graph.active().revision, 0, "the shipped graph still serves");
         assert_eq!(
             graph.active().graph.filler_for(TurnSlot::Succession),
-            StepFiller::Builtin
+            StepFiller::Plugin {
+                name: swage_protocol::client::turn_graph::SHIPPED_SUCCESSION_SUMMARISER.into()
+            }
         );
         let listed = graph.list().unwrap();
         assert_eq!(listed.revisions[0].activation, RevisionActivation::Active);
@@ -766,7 +781,13 @@ mod tests {
         let diff = graph.diff(0, 1).unwrap();
         assert_eq!(diff.steps_refilled.len(), 1);
         assert_eq!(diff.steps_refilled[0].id, "succession");
-        assert_eq!(diff.steps_refilled[0].before, StepFiller::Builtin);
+        assert_eq!(
+            diff.steps_refilled[0].before,
+            StepFiller::Plugin {
+                name: swage_protocol::client::turn_graph::SHIPPED_SUCCESSION_SUMMARISER.to_owned()
+            },
+            "the shipped graph fills succession with the shipped summariser"
+        );
         assert!(diff.steps_added.is_empty() && diff.steps_removed.is_empty());
 
         // A plugin filling a slot it does not provide is refused by name.

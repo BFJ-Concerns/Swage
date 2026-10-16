@@ -1734,6 +1734,9 @@ pub struct PluginRevisionRecord {
     pub manifest: serde_json::Value,
     /// Where the package was installed from.
     pub installed_from: String,
+    /// `shipped` for a package compiled into the gateway and installed by
+    /// its startup; `installed` for one an operator installed.
+    pub provenance: String,
     /// The revision's directory under the install root.
     pub install_dir: String,
     pub installed_at: DateTime<Utc>,
@@ -1750,6 +1753,8 @@ pub struct NewPluginRevision {
     pub description: String,
     pub manifest: serde_json::Value,
     pub installed_from: String,
+    /// See `PluginRevisionRecord::provenance`.
+    pub provenance: String,
     pub install_dir: String,
 }
 

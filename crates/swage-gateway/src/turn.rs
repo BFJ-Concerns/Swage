@@ -666,8 +666,18 @@ pub(super) async fn process_turn_with_composition_and_focus(
     let context_program_served = std::sync::Mutex::new(SlotService::builtin());
     let context_program_plugin = match &context_program_filler {
         swage_protocol::client::turn_graph::StepFiller::Plugin { name } => {
+            let name = crate::plugin::slot::slot_variant(
+                state,
+                &config.experimentation,
+                swage_protocol::client::turn_graph::TurnSlot::ContextProgram,
+                name,
+                session_id,
+                Some(prepared_turn_id),
+                Some(topic_id),
+            )
+            .await;
             let slot =
-                crate::plugin::slot::slot_for_plugin(state, name, &slot_context, Some(topic_id));
+                crate::plugin::slot::slot_for_plugin(state, &name, &slot_context, Some(topic_id));
             if slot.is_none() {
                 *context_program_served
                     .lock()
@@ -718,13 +728,16 @@ pub(super) async fn process_turn_with_composition_and_focus(
     let succession_filler = active_graph
         .graph
         .filler_for(swage_protocol::client::turn_graph::TurnSlot::Succession);
-    let summariser = summariser_for(
+    let summariser = Box::pin(summariser_for(
         state,
+        &config.experimentation,
         &succession_filler,
         &slot_context,
         Some(topic_id),
-        Some(session_id),
-    );
+        session_id,
+        Some(prepared_turn_id),
+    ))
+    .await;
     let succession_summariser = summariser.describe();
     // Over the compaction threshold, or after the thread's recent turns kept
     // hitting walls, the turn runs on a successor: the same elements rendered
@@ -1129,27 +1142,40 @@ pub(crate) mod tests;
 // Tests
 // ---------------------------------------------------------------------------
 
-/// What fills the succession slot under the turn's revision: the kernel's
-/// own when the named plugin is not serving this scope.
-fn summariser_for(
+/// What fills the succession slot under the turn's revision: a named plugin
+/// — or an installed variant of the slot drawn in its place — and the
+/// kernel's own when that plugin is not serving this scope.
+async fn summariser_for(
     state: &AppState,
+    experimentation: &swage_config::model::ExperimentationConfig,
     filler: &swage_protocol::client::turn_graph::StepFiller,
     context: &swage_plugin::InvocationContext,
     topic_id: Option<Uuid>,
-    session_id: Option<Uuid>,
+    session_id: Uuid,
+    turn_id: Option<Uuid>,
 ) -> succession::Summariser {
-    use swage_protocol::client::turn_graph::StepFiller;
+    use swage_protocol::client::turn_graph::{StepFiller, TurnSlot};
     match filler {
         StepFiller::Builtin => succession::Summariser::Builtin,
         StepFiller::Plugin { name } => {
-            crate::plugin::slot::slot_for_plugin(state, name, context, topic_id)
+            let name = crate::plugin::slot::slot_variant(
+                state,
+                experimentation,
+                TurnSlot::Succession,
+                name,
+                session_id,
+                turn_id,
+                topic_id,
+            )
+            .await;
+            crate::plugin::slot::slot_for_plugin(state, &name, context, topic_id)
                 .map(succession::Summariser::Plugin)
                 .unwrap_or(succession::Summariser::Builtin)
         }
         StepFiller::Workflow { name } => succession::Summariser::Workflow {
             name: name.clone(),
             state: Box::new(state.clone()),
-            session_id,
+            session_id: Some(session_id),
         },
     }
 }
@@ -1232,7 +1258,16 @@ async fn succession_shadows(
             });
         shadows.push(succession::Shadow {
             branch: branch.id.clone(),
-            summariser: summariser_for(state, &step.filler, context, topic_id, Some(session_id)),
+            summariser: Box::pin(summariser_for(
+                state,
+                &config.experimentation,
+                &step.filler,
+                context,
+                topic_id,
+                session_id,
+                Some(turn_id),
+            ))
+            .await,
             record,
         });
     }

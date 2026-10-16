@@ -134,6 +134,7 @@ const CREATE_PLUGIN_TABLES: &str = "
         description    TEXT    NOT NULL,
         manifest       TEXT    NOT NULL,
         installed_from TEXT    NOT NULL,
+        provenance     TEXT    NOT NULL CHECK (provenance IN ('shipped', 'installed')),
         install_dir    TEXT    NOT NULL,
         installed_at   TEXT    NOT NULL,
         active         INTEGER NOT NULL CHECK (active IN (0, 1)),

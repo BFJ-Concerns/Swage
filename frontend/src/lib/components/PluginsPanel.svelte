@@ -98,6 +98,11 @@
   }
 
   /** How the plugin runs, and for a process plugin which sessions have one. */
+  // The one thing that tells a shipped part from an installed plugin.
+  function provenanceLabel(plugin: PluginSummary): string {
+    return plugin.provenance === "shipped" ? "Shipped with the gateway" : "Installed";
+  }
+
   function runsAs(plugin: PluginSummary): string {
     if (plugin.profile === "process") {
       const count = plugin.sessions.length;
@@ -163,7 +168,7 @@
             onclick={() => (selectedName = plugin.name)}
           >
             <span class="item-name">{plugin.name}</span>
-            <span class="meta">v{plugin.version} · revision {plugin.revision}</span>
+            <span class="meta">v{plugin.version} · revision {plugin.revision} · {provenanceLabel(plugin)}</span>
             <span class="meta" class:warn={plugin.service.state !== "serving"}>{serviceLabel(plugin)}</span>
             {#if plugin.description}<span class="description">{plugin.description}</span>{/if}
           </button>
@@ -204,6 +209,7 @@
 
           <dl>
             <div><dt>Description</dt><dd>{selected.description || "Not provided"}</dd></div>
+            <div><dt>Provenance</dt><dd>{provenanceLabel(selected)}</dd></div>
             <div><dt>Runs as</dt><dd>{runsAs(selected)}</dd></div>
             <div><dt>Service</dt><dd>{serviceLabel(selected)}</dd></div>
             <div>
@@ -244,7 +250,7 @@
                     <li>
                       revision {revision.revision} · v{revision.version} · {revision.installed_at}
                       {#if revision.active}<span class="active">Active</span>{/if}
-                      <span class="meta">from {revision.installed_from}</span>
+                      <span class="meta">{revision.provenance === "shipped" ? "shipped with the gateway" : `from ${revision.installed_from}`}</span>
                     </li>
                   {/each}
                 </ul>

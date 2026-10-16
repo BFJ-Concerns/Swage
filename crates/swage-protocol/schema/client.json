@@ -3399,6 +3399,14 @@
         "plugins"
       ]
     },
+    "PluginProvenance": {
+      "description": "Where a plugin revision came from: compiled into the gateway and\ninstalled by its startup, or installed by an operator. The one thing\nthat tells a shipped part from an installed plugin of the same kind.",
+      "type": "string",
+      "enum": [
+        "shipped",
+        "installed"
+      ]
+    },
     "PluginProvides": {
       "description": "What a plugin provides, by kind.",
       "type": "object",
@@ -3445,6 +3453,9 @@
           "description": "Where the package was installed from.",
           "type": "string"
         },
+        "provenance": {
+          "$ref": "#/$defs/PluginProvenance"
+        },
         "revision": {
           "type": "integer",
           "format": "uint32",
@@ -3458,6 +3469,7 @@
         "revision",
         "version",
         "installed_from",
+        "provenance",
         "installed_at",
         "active"
       ]
@@ -3571,6 +3583,10 @@
           "description": "How the plugin runs: `isolate` (a script in a V8 isolate the kernel\nbuilds) or `process` (a process the gateway brokers per session).",
           "type": "string"
         },
+        "provenance": {
+          "description": "The active revision's provenance.",
+          "$ref": "#/$defs/PluginProvenance"
+        },
         "provides": {
           "$ref": "#/$defs/PluginProvides"
         },
@@ -3603,7 +3619,7 @@
           }
         },
         "variant_of": {
-          "description": "The function this plugin is a variant of, when it declares one.",
+          "description": "The function this plugin is a variant of, when it declares one — a\nslot's, as `slot.<slot>`, makes it a candidate at that step's draw.",
           "type": [
             "string",
             "null"
@@ -3622,6 +3638,7 @@
         "provides",
         "grants",
         "secrets",
+        "provenance",
         "revisions",
         "enabled_for_install",
         "enabled_topics",

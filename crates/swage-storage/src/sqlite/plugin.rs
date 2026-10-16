@@ -41,7 +41,7 @@ fn parse_json(s: &str) -> rusqlite::Result<serde_json::Value> {
 }
 
 const REVISION_COLUMNS: &str = "id, plugin_name, revision, version, description, manifest, \
-     installed_from, install_dir, installed_at, active";
+     installed_from, install_dir, installed_at, active, provenance";
 
 fn row_to_revision(row: &rusqlite::Row<'_>) -> rusqlite::Result<PluginRevisionRecord> {
     let id: String = row.get(0)?;
@@ -63,6 +63,7 @@ fn row_to_revision(row: &rusqlite::Row<'_>) -> rusqlite::Result<PluginRevisionRe
         description: row.get(4)?,
         manifest: parse_json(&manifest)?,
         installed_from: row.get(6)?,
+        provenance: row.get(10)?,
         install_dir: row.get(7)?,
         installed_at: parse_dt(&installed_at)?,
         active: active == 1,
@@ -105,8 +106,8 @@ impl PluginStore for SqliteStorage {
             )?;
             transaction.execute(
                 "INSERT INTO plugin_revisions (id, plugin_name, revision, version, description, \
-                 manifest, installed_from, install_dir, installed_at, active)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1)",
+                 manifest, installed_from, install_dir, installed_at, active, provenance)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10)",
                 params![
                     id.to_string(),
                     revision.plugin_name,
@@ -117,6 +118,7 @@ impl PluginStore for SqliteStorage {
                     revision.installed_from,
                     revision.install_dir,
                     now,
+                    revision.provenance,
                 ],
             )?;
             let record = transaction.query_row(
@@ -197,6 +199,7 @@ mod tests {
             description: "A plugin.".into(),
             manifest: serde_json::json!({ "name": name, "provides": { "tools": [] } }),
             installed_from: "/src/plugin".into(),
+            provenance: "installed".into(),
             install_dir: format!("/root/plugins/{name}/{revision}"),
         }
     }

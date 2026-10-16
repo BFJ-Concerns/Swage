@@ -977,6 +977,33 @@ A plugin is enabled for the whole install or for one topic (`PUT
 plugin serves nothing — a session there does not see its tools, and a turn
 there runs none of its slots or hooks.
 
+Some of the gateway's own parts are plugins it ships: a package compiled
+into the binary (`shipped/plugins/<name>/`) that the gateway installs at
+startup through the same path an operator's package takes, once per
+shipped version — a newer shipped version installs a new revision, an
+enablement choice already made stands, and a revision you install over a
+shipped one stays the one serving. A shipped plugin is governed,
+presented and invoked exactly as an installed one; its `provenance`
+(`shipped` rather than `installed`, on the plugin and on each revision) is
+the one thing that tells them apart in Settings → Plugins. The first is
+`succession-summariser`, which fills the succession step on the shipped
+turn graph: it sends the step's request to the model under its `model`
+grant and answers the model's summary.
+
+A plugin that declares `variant_of = "slot.<slot>"` is a candidate for that
+step wherever it is enabled: at the step, the gateway draws between the
+revision's named filler and the candidates through the experimentation
+seam at location `slot.<slot>`, so a topic's `config.toml` can pin an
+installed variant over the shipped part —
+
+```toml
+[experimentation.locations."slot.succession"]
+forced_variant = "my-summariser"
+```
+
+— experimentation off keeps the named filler, and every draw is recorded
+like any other variant decision.
+
 ```toml
 name = "echo"
 version = "1.0.0"
@@ -1014,7 +1041,9 @@ drawn per session through the experimentation location
 `turn_graph.<branch>`, so experimentation off for that location keeps the
 path single.
 
-Revision 0 is the shipped graph. `POST /api/turn-graph/revisions` proposes
+Revision 0 is the shipped graph: the succession step filled by the shipped
+`succession-summariser` plugin, every other slot the kernel's own. `POST
+/api/turn-graph/revisions` proposes
 a new one: it is validated against what is installed now — known slots,
 each once on the live path, a filler of a kind the slot's kernel point
 runs (`context_program` takes a plugin; `succession` a plugin or a

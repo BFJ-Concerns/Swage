@@ -27,8 +27,8 @@ use swage_plugin::{
     ProcessSpec, Profile, install_dir, install_package, read_package,
 };
 use swage_protocol::client::plugin::{
-    PluginListResponse, PluginProvides, PluginRevision, PluginSecret, PluginServiceState,
-    PluginSummary, ProvidedHook, ProvidedTool,
+    PluginListResponse, PluginProvenance, PluginProvides, PluginRevision, PluginSecret,
+    PluginServiceState, PluginSummary, ProvidedHook, ProvidedTool,
 };
 use swage_protocol::plugin::PluginProcessStopReason;
 use swage_storage::model::{NewAuditEvent, NewPluginRevision, PluginRevisionRecord};
@@ -144,6 +144,7 @@ impl InstalledPlugin {
                 })
                 .collect(),
             variant_of: self.manifest.variant_of.clone(),
+            provenance: provenance_of(&self.active.provenance),
             revisions: self
                 .revisions
                 .iter()
@@ -151,6 +152,7 @@ impl InstalledPlugin {
                     revision: revision.revision,
                     version: revision.version.clone(),
                     installed_from: revision.installed_from.clone(),
+                    provenance: provenance_of(&revision.provenance),
                     installed_at: revision.installed_at.to_rfc3339(),
                     active: revision.active,
                 })
@@ -176,6 +178,33 @@ impl InstalledPlugin {
                 _ => Vec::new(),
             },
         }
+    }
+}
+
+/// The provenance a record carries, read back; a value outside the column's
+/// check is impossible, so an unknown one reads as installed.
+fn provenance_of(recorded: &str) -> PluginProvenance {
+    if recorded == PluginProvenance::Shipped.as_str() {
+        PluginProvenance::Shipped
+    } else {
+        PluginProvenance::Installed
+    }
+}
+
+impl PluginService {
+    /// The plugins serving and enabled for a scope that declare themselves
+    /// variants of `function` (`variant_of`), by name — the candidates a
+    /// draw at that function chooses among.
+    pub fn variants_of(&self, function: &str, topic_id: Option<Uuid>) -> Vec<String> {
+        self.read()
+            .values()
+            .filter(|plugin| {
+                plugin.execution.is_ok()
+                    && plugin.enabled_for(topic_id)
+                    && plugin.manifest.variant_of.as_deref() == Some(function)
+            })
+            .map(|plugin| plugin.manifest.name.clone())
+            .collect()
     }
 }
 
@@ -350,6 +379,92 @@ impl PluginService {
         reserved_tool_names: &[String],
         session_id: Option<Uuid>,
     ) -> Result<PluginSummary, PluginServiceError> {
+        self.install_from(
+            source,
+            reserved_tool_names,
+            session_id,
+            PluginProvenance::Installed,
+        )
+        .await
+    }
+
+    /// Install every plugin compiled into the gateway from its projection
+    /// under `packages_root` (`shipped_plugins::regenerate` writes it), once
+    /// per shipped version: a plugin with a revision already shipped at
+    /// that version is left as it is — a revision the person installed over
+    /// it stays the one serving; a newer shipped version installs a new
+    /// revision, the person's enablement standing; the first install
+    /// enables the plugin for the install, since a shipped part serves by
+    /// default. A shipped package that fails to install is
+    /// reported and skipped — the gateway runs without that part, as it
+    /// runs without an operator's plugin that failed to load.
+    pub async fn install_shipped(
+        &self,
+        packages_root: &Path,
+        names: &[&str],
+        reserved_tool_names: &[String],
+    ) -> Vec<PluginSummary> {
+        let mut installed_now = Vec::new();
+        for name in names {
+            let source = packages_root.join(name);
+            let package = match read_package(&source) {
+                Ok(package) => package,
+                Err(error) => {
+                    tracing::error!(plugin = name, %error, "shipped plugin package does not read; it is skipped");
+                    continue;
+                }
+            };
+            let shipped_at_version =
+                self.read()
+                    .get(package.manifest.name.as_str())
+                    .map(|plugin| {
+                        plugin.revisions.iter().any(|revision| {
+                            revision.provenance == PluginProvenance::Shipped.as_str()
+                                && revision.version == package.manifest.version
+                        })
+                    });
+            let first_install = shipped_at_version.is_none();
+            if shipped_at_version == Some(true) {
+                continue;
+            }
+            match self
+                .install_from(
+                    &source,
+                    reserved_tool_names,
+                    None,
+                    PluginProvenance::Shipped,
+                )
+                .await
+            {
+                Ok(summary) => {
+                    let summary = if first_install {
+                        match self.set_enablement(&summary.name, None, true, None).await {
+                            Ok(enabled) => enabled,
+                            Err(error) => {
+                                tracing::error!(plugin = name, %error, "shipped plugin installed but could not be enabled for the install");
+                                summary
+                            }
+                        }
+                    } else {
+                        summary
+                    };
+                    installed_now.push(summary);
+                }
+                Err(error) => {
+                    tracing::error!(plugin = name, %error, "shipped plugin failed to install; the gateway runs without it");
+                }
+            }
+        }
+        installed_now
+    }
+
+    async fn install_from(
+        &self,
+        source: &Path,
+        reserved_tool_names: &[String],
+        session_id: Option<Uuid>,
+        provenance: PluginProvenance,
+    ) -> Result<PluginSummary, PluginServiceError> {
         let _installing = self.install_lock.lock().await;
         let package =
             read_package(source).map_err(|error| PluginServiceError::Refused(error.to_string()))?;
@@ -435,6 +550,7 @@ impl PluginService {
                 description: installed_package.manifest.description.clone(),
                 manifest: manifest_json.clone(),
                 installed_from: source.display().to_string(),
+                provenance: provenance.as_str().to_owned(),
                 install_dir: target.display().to_string(),
             })
             .await
@@ -482,6 +598,7 @@ impl PluginService {
                 "revision": next_revision,
                 "version": installed_package.manifest.version,
                 "installed_from": source.display().to_string(),
+                "provenance": provenance,
                 "provides": manifest_json["provides"],
                 "grants": manifest_json["grants"],
                 "secrets": manifest_json["secrets"],
@@ -771,6 +888,100 @@ mod tests {
             root.join(PLUGINS_DIR),
         );
         (service, storage)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_shipped_plugin_installs_itself_once_per_version_and_serves_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let (service, storage) = service(dir.path());
+        crate::shipped_plugins::regenerate(dir.path())
+            .await
+            .unwrap();
+        let packages = crate::shipped_plugins::root(dir.path());
+        let names = ["succession-summariser"];
+
+        let installed = service.install_shipped(&packages, &names, &[]).await;
+        assert_eq!(installed.len(), 1);
+        let summary = &installed[0];
+        assert_eq!(summary.name, "succession-summariser");
+        assert_eq!(summary.revision, 1);
+        assert_eq!(summary.provenance, PluginProvenance::Shipped);
+        assert_eq!(summary.revisions[0].provenance, PluginProvenance::Shipped);
+        assert_eq!(summary.provides.slots, vec!["succession"]);
+        assert!(
+            summary.enabled_for_install,
+            "a shipped part serves by default"
+        );
+        assert_eq!(summary.service, PluginServiceState::Serving);
+
+        // The same boot again installs nothing.
+        assert!(
+            service
+                .install_shipped(&packages, &names, &[])
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            service.summary("succession-summariser").unwrap().revision,
+            1
+        );
+
+        // The person switches it off; a newer shipped version is a new
+        // revision, and their answer stands.
+        service
+            .set_enablement("succession-summariser", None, false, None)
+            .await
+            .unwrap();
+        let manifest = packages.join("succession-summariser/plugin.toml");
+        let newer = std::fs::read_to_string(&manifest)
+            .unwrap()
+            .replace("version = \"1.0.0\"", "version = \"1.1.0\"");
+        std::fs::write(&manifest, newer).unwrap();
+        let reinstalled = service.install_shipped(&packages, &names, &[]).await;
+        assert_eq!(reinstalled.len(), 1);
+        assert_eq!(reinstalled[0].revision, 2);
+        assert_eq!(reinstalled[0].version, "1.1.0");
+        assert!(!reinstalled[0].enabled_for_install);
+        assert_eq!(reinstalled[0].revisions.len(), 2);
+
+        // Their own revision of the shipped plugin, installed over it, stays
+        // the one serving: the shipped version is already on the record.
+        let own = dir.path().join("own");
+        std::fs::create_dir_all(&own).unwrap();
+        for file in ["plugin.toml", "plugin.js"] {
+            std::fs::copy(
+                packages.join("succession-summariser").join(file),
+                own.join(file),
+            )
+            .unwrap();
+        }
+        let theirs = service.install(&own, &[], None).await.expect("installs");
+        assert_eq!(theirs.revision, 3);
+        assert_eq!(theirs.provenance, PluginProvenance::Installed);
+        assert!(
+            service
+                .install_shipped(&packages, &names, &[])
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            service.summary("succession-summariser").unwrap().revision,
+            3
+        );
+
+        // A package the operator installs reads as installed beside it.
+        let source = dir.path().join("src");
+        write_package(&source, r#"swage.provide.tool("echo", (p) => p);"#);
+        let echo = service.install(&source, &[], None).await.expect("installs");
+        assert_eq!(echo.provenance, PluginProvenance::Installed);
+        let events = storage.list_audit_events().await.unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_kind == "plugin_installed"
+                    && event.entity_id == "succession-summariser"
+                    && event.metadata["provenance"] == "shipped")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
