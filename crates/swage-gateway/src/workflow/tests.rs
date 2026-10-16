@@ -19797,3 +19797,95 @@ async fn review_fix_3_live_worker_liveness() {
     assert!(expected[0]["completed_at"].is_null());
     assert!(expected[0]["started_at"].is_string());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_fix_3_overview_omits_worker_bodies() {
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .unwrap();
+    let (run_id, _) = journalled_agent_call(&storage, topic.id).await;
+    let request = serde_json::to_value(swage_workflow::fixtures::agent_call_request(
+        "private worker prompt".into(),
+    ))
+    .unwrap();
+    let entry = storage
+        .create_workflow_journal_intent(NewWorkflowJournalIntent {
+            run_id,
+            seq: 1,
+            kind: "agent_call".into(),
+            args_hash: journal_args_hash(&request),
+            request,
+            effect_kind: None,
+            idempotency_key: None,
+            target_kind: None,
+        })
+        .await
+        .unwrap();
+    storage
+        .complete_workflow_journal_entry(
+            entry.id,
+            serde_json::to_value(AgentCallResult {
+                output: serde_json::json!("private worker result"),
+                usage: WorkflowCallUsage::Known {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
+                working_directory: None,
+                served_model: None,
+                provider_route: None,
+                session_id: None,
+                thread_id: None,
+                turn_id: None,
+                worktree: None,
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let state = AppState::new_with_config_root(
+        storage.clone(),
+        storage.clone(),
+        Arc::new(crate::turn::tests::MockProvider::new(Vec::new())),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    let overview = crate::tool::workflow_run_status::status_for_session(&state, session.id, None)
+        .await
+        .unwrap();
+    let named =
+        crate::tool::workflow_run_status::status_for_session(&state, session.id, Some(run_id))
+            .await
+            .unwrap();
+    let workers = overview["runs"][0]["workers"].as_array().unwrap();
+    assert_eq!(workers.len(), 2);
+    for compact in workers {
+        assert!(
+            compact.get("request").is_none(),
+            "overview must omit worker request bodies: {compact}"
+        );
+        assert!(
+            compact.get("result").is_none(),
+            "overview must omit worker result bodies: {compact}"
+        );
+        assert!(
+            compact.get("agent_call").is_none(),
+            "overview must omit full dispatch and provider rounds"
+        );
+    }
+    assert_eq!(workers[1]["status"], "completed");
+    assert!(
+        named["runs"][0]["workers"][1]["request"]
+            .to_string()
+            .contains("private worker prompt")
+    );
+    assert_eq!(
+        named["runs"][0]["workers"][1]["result"]["output"],
+        "private worker result"
+    );
+}

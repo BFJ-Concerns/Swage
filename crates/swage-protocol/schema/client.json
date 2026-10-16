@@ -292,6 +292,9 @@
     "workflow_script_list": {
       "$ref": "#/$defs/WorkflowScriptListResponse"
     },
+    "workflow_worker_activity": {
+      "$ref": "#/$defs/WorkflowWorkerActivity"
+    },
     "workspace_attachment_list": {
       "$ref": "#/$defs/WorkspaceAttachmentListResponse"
     },
@@ -395,6 +398,7 @@
     "workflow_run_list",
     "workflow_run_ending_notice",
     "answer_workflow_run_hold_response",
+    "workflow_worker_activity",
     "workflow_run_status_request",
     "delegation_start_result",
     "workflow_run_start_result",
@@ -9459,6 +9463,51 @@
       "required": [
         "journal_entry_id",
         "seq"
+      ]
+    },
+    "WorkflowWorkerActivity": {
+      "description": "One worker's activity in an open-run overview.",
+      "type": "object",
+      "properties": {
+        "agent_definition_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "liveness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowWorkerLiveness"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status": {
+          "$ref": "#/$defs/WorkflowJournalEntryStatus"
+        }
+      },
+      "required": [
+        "id",
+        "seq",
+        "status"
       ]
     },
     "WorkflowWorkerLiveness": {

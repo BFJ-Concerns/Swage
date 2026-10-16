@@ -9070,6 +9070,51 @@
         ],
         "type": "object"
       },
+      "WorkflowWorkerActivity": {
+        "description": "One worker's activity in an open-run overview.",
+        "properties": {
+          "agent_definition_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "liveness": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowWorkerLiveness"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/WorkflowJournalEntryStatus"
+          }
+        },
+        "required": [
+          "id",
+          "seq",
+          "status"
+        ],
+        "type": "object"
+      },
       "WorkflowWorkerLiveness": {
         "description": "Earliest liveness evidence for one workflow worker.",
         "properties": {

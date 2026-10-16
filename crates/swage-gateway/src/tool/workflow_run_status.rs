@@ -37,7 +37,11 @@ fn event_value(event: &WorkflowRunEventRecord) -> Value {
     })
 }
 
-async fn run_value(state: &AppState, run: &WorkflowRunRecord) -> Result<Value, String> {
+async fn run_value(
+    state: &AppState,
+    run: &WorkflowRunRecord,
+    detailed: bool,
+) -> Result<Value, String> {
     let pending = state
         .storage
         .list_pending_workflow_run_events(run.id)
@@ -53,6 +57,27 @@ async fn run_value(state: &AppState, run: &WorkflowRunRecord) -> Result<Value, S
         .into_iter()
         .filter(|entry| entry.agent_call.is_some())
         .collect::<Vec<_>>();
+    let workers = if detailed {
+        serde_json::to_value(workers)
+    } else {
+        serde_json::to_value(
+            workers
+                .into_iter()
+                .map(|entry| {
+                    let call = entry.agent_call.expect("filtered worker entry");
+                    swage_protocol::client::workflow::WorkflowWorkerActivity {
+                        id: entry.id,
+                        seq: entry.seq,
+                        label: entry.label,
+                        status: entry.status,
+                        agent_definition_id: call.agent_definition_id,
+                        liveness: call.liveness,
+                    }
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+    .map_err(|error| error.to_string())?;
     Ok(json!({
         "workers": workers,
         "run_id": run.id,
@@ -107,7 +132,7 @@ pub async fn status_for_session(
 
     let mut values = Vec::with_capacity(runs.len());
     for run in &runs {
-        values.push(run_value(state, run).await?);
+        values.push(run_value(state, run, run_id.is_some()).await?);
     }
     let mut ended = state
         .storage

@@ -30,6 +30,7 @@ fn typescript_bindings_are_regenerated() {
     client::workflow::WorkflowRunEndingNotice::export_all(&cfg).expect("export ending notice");
     client::workflow::AnswerWorkflowRunHoldResponse::export_all(&cfg)
         .expect("export hold answer response");
+    client::workflow::WorkflowWorkerActivity::export_all(&cfg).expect("export worker activity");
     client::workflow::WorkflowRunStatusRequest::export_all(&cfg).expect("export status request");
     client::workflow::DelegationStartResult::export_all(&cfg)
         .expect("export delegation start result");

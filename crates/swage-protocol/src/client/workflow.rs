@@ -717,6 +717,19 @@ pub struct WorkflowAgentCallDetail {
     pub provider_rounds: Option<Vec<WorkflowProviderRound>>,
 }
 
+/// One worker's activity in an open-run overview.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct WorkflowWorkerActivity {
+    pub id: Uuid,
+    #[ts(type = "number")]
+    pub seq: u64,
+    pub label: Option<String>,
+    pub status: WorkflowJournalEntryStatus,
+    pub agent_definition_id: Option<String>,
+    pub liveness: Option<WorkflowWorkerLiveness>,
+}
+
 /// Earliest liveness evidence for one workflow worker.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
