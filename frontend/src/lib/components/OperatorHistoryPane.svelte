@@ -73,7 +73,10 @@
         return keys.flatMap((key) => changedFields(before[key], after[key], [...path, key]));
       }
     }
-    return [{ id: JSON.stringify(path), label: fieldLabel(path), prior: formatValue(prior), next: formatValue(next) }];
+    const priorValue = formatValue(prior);
+    const nextValue = formatValue(next);
+    if (priorValue === nextValue) return [];
+    return [{ id: JSON.stringify(path), label: fieldLabel(path), prior: priorValue, next: nextValue }];
   }
 
   function auditFilter(before?: AuditEventCursor) {

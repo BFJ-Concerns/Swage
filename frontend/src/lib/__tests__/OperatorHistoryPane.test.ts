@@ -203,7 +203,7 @@ describe("OperatorHistoryPane", () => {
     },
     ...(["creation", "deletion"] as const).map((action) => {
       const snapshot = { providers: { google: {
-        api_key_env: null, api_key_secret_ref: null, base_url: null,
+        api_key: null, api_key_env: null, api_key_secret_ref: null, base_url: null,
         command: null, has_credential: false, protocol: "google",
         state_dir: null, worker_staleness_threshold_ms: null,
       } } };
@@ -212,10 +212,7 @@ describe("OperatorHistoryPane", () => {
         prior: action === "creation" ? null : snapshot,
         next: action === "creation" ? snapshot : null,
         rows: [
-          ["API key", "unset"], ["Stored credential", "unset"],
-          ["Base URL", "unset"], ["Command", "unset"],
           ["Credential", "false"], ["Protocol", "google"],
-          ["State dir", "unset"], ["Worker staleness threshold ms", "unset"],
         ].map(([label, value]) => [
           `Providers › google › ${label}`,
           action === "creation" ? "unset" : value,
