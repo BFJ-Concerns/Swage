@@ -117,6 +117,16 @@ describe("TopicSettingsPage", () => {
     expect(document.querySelector('[role="alert"]')).toBeNull();
   });
 
+  it("shows the topic's effective default model in its overview", async () => {
+    component = mount(TopicSettingsPage, { target: document.body, props: {
+      topic: { ...topic, effective_default_model: "local:topic-model" }, tab: "overview",
+    } });
+    await flushUi();
+    const rows = Array.from(document.querySelectorAll(".shell-row"));
+    const model = rows.find((row) => row.querySelector(".shell-label")?.textContent === "Default model");
+    expect(model?.querySelector(".shell-value")?.textContent).toBe("local:topic-model");
+  });
+
   it("loads topic-scoped data for the overview", async () => {
     component = mount(TopicSettingsPage, {
       target: document.body,

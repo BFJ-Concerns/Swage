@@ -314,6 +314,10 @@
             <span class="shell-value">{topic.slug}</span>
           </div>
           <div class="shell-row">
+            <span class="shell-label">Default model</span>
+            <span class="shell-value">{topic.effective_default_model ?? "No model configured"}</span>
+          </div>
+          <div class="shell-row">
             <span class="shell-label">Workspaces</span>
             <span class="shell-value">{workspaces.length}</span>
           </div>
@@ -524,6 +528,7 @@
     display: -webkit-box;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
+    line-clamp: 2;
     overflow: hidden;
     letter-spacing: 0.02em;
     text-transform: uppercase;

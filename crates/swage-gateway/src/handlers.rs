@@ -1030,7 +1030,8 @@ pub async fn create_topic(
     State(state): State<AppState>,
     Json(req): Json<CreateTopicRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let svc = TopicService::new(state.topic_store, state.config_root);
+    let config = state.active_config();
+    let svc = TopicService::new(state.topic_store, state.config_root).with_config(config);
     let resp = svc.create_topic(req).await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
@@ -1041,7 +1042,8 @@ pub async fn create_topic(
 pub async fn list_topics(
     State(state): State<AppState>,
 ) -> Result<Json<TopicListResponse>, ApiError> {
-    let svc = TopicService::new(state.topic_store, state.config_root);
+    let config = state.active_config();
+    let svc = TopicService::new(state.topic_store, state.config_root).with_config(config);
     let resp = svc.list_topics().await?;
     Ok(Json(resp))
 }
@@ -1053,7 +1055,8 @@ pub async fn get_topic(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<TopicResponse>, ApiError> {
-    let svc = TopicService::new(state.topic_store, state.config_root);
+    let config = state.active_config();
+    let svc = TopicService::new(state.topic_store, state.config_root).with_config(config);
     let resp = svc.get_topic(id).await?;
     Ok(Json(resp))
 }
@@ -1066,7 +1069,8 @@ pub async fn update_topic(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateTopicRequest>,
 ) -> Result<Json<TopicResponse>, ApiError> {
-    let svc = TopicService::new(state.topic_store, state.config_root);
+    let config = state.active_config();
+    let svc = TopicService::new(state.topic_store, state.config_root).with_config(config);
     let resp = svc.update_topic(id, req).await?;
     Ok(Json(resp))
 }
@@ -1079,7 +1083,8 @@ pub async fn delete_topic(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let svc = TopicService::new(state.topic_store, state.config_root);
+    let config = state.active_config();
+    let svc = TopicService::new(state.topic_store, state.config_root).with_config(config);
     svc.delete_topic(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

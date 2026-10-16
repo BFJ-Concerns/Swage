@@ -6044,6 +6044,14 @@
           "description": {
             "type": "string"
           },
+          "effective_default_model": {
+            "default": null,
+            "description": "Default model selected by the topic's configuration cascade.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "format": "uuid",
             "type": "string"

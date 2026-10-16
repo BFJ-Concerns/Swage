@@ -1148,6 +1148,101 @@ describe("App", () => {
     expect(surfaceNavigation?.parentElement?.textContent).toContain("MANAGED");
   });
 
+  it.each(["topic-a", "topic-b"])("preselects and submits %s's model for a fresh session", async (model) => {
+    const selectedTopic = makeTopic({ effective_default_model: model });
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([selectedTopic]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValue([]);
+    const entry = { provider_id: "local", model_id: "wire", aliases: [], generation_preset: null, default_effort: null };
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(makeSettings({
+      global: entry, "topic-a": entry,
+    }));
+    vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce({
+      id: "created-topic-session", topic_id: selectedTopic.id, agent_id: "gateway",
+      created_at: "2026-10-15T00:00:00Z", last_activity: "2026-10-15T00:00:00Z",
+    });
+    component = mount(App, { target: document.body });
+    await settleUi();
+    await startSessionInTopic(selectedTopic.id);
+    const picker = document.querySelector<HTMLSelectElement>('[aria-label="Model"]');
+    expect(picker?.value).toBe(model);
+    const textarea = document.querySelector("textarea")!;
+    flushSync(() => {
+      textarea.value = "Use the topic model";
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    flushSync(() => (document.querySelector(".action.send") as HTMLButtonElement).click());
+    await settleUi();
+    expect(conversationsApi.createConversation).toHaveBeenCalledWith(selectedTopic.id, model, null, null);
+  });
+
+  it.each([null, "global"])("topic default %s controls model availability", async (model) => {
+    const selectedTopic = makeTopic({ effective_default_model: model });
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([selectedTopic]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
+    const entry = { provider_id: "local", model_id: "wire", aliases: [], generation_preset: null, default_effort: null };
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValueOnce(makeSettings({ global: entry }));
+    if (model) vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce({
+      id: "created-topic-session", topic_id: selectedTopic.id, agent_id: "gateway",
+      created_at: "2026-10-15T00:00:00Z", last_activity: "2026-10-15T00:00:00Z",
+    });
+    component = mount(App, { target: document.body });
+    await settleUi();
+    await startSessionInTopic(selectedTopic.id);
+    const picker = document.querySelector<HTMLSelectElement>('[aria-label="Model"]');
+    const offered = Array.from(picker?.options ?? []).map(option => option.value);
+    expect(offered).toEqual(model ? ["global"] : []);
+    if (model) expect(picker?.value).toBe("global");
+    else expect(document.body.textContent).toContain("No models are configured.");
+    const textarea = document.querySelector("textarea")!;
+    flushSync(() => {
+      textarea.value = "Use the inherited model";
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const send = document.querySelector<HTMLButtonElement>(".action.send")!;
+    expect(send.disabled).toBe(!model);
+    flushSync(() => send.click());
+    flushSync(() => textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    await settleUi();
+    if (model) expect(conversationsApi.createConversation).toHaveBeenCalledWith(selectedTopic.id, "global", null, null);
+    else expect(conversationsApi.createConversation).not.toHaveBeenCalled();
+  });
+
+  it("submits the refreshed inherited topic default after a settings save", async () => {
+    const topic = makeTopic({ effective_default_model: "old-model" });
+    const entry = { provider_id: "local", model_id: "wire", aliases: [], generation_preset: null };
+    const before = makeSettings({ "old-model": entry, "new-model": entry });
+    before.default_model = "old-model";
+    const saved = structuredClone(before);
+    saved.default_model = "new-model";
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValueOnce(before).mockResolvedValueOnce(before).mockResolvedValue(saved);
+    vi.mocked(settingsApi.saveSettings).mockResolvedValue(saved);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([topic]).mockResolvedValueOnce([{ ...topic, effective_default_model: "new-model" }]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValue([]);
+    vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce({
+      id: "created-topic-session", topic_id: topic.id, agent_id: "gateway",
+      created_at: "2026-10-15T00:00:00Z", last_activity: "2026-10-15T00:00:00Z",
+    });
+    component = mount(App, { target: document.body });
+    await settleUi();
+    await startSessionInTopic(topic.id);
+    const settings = Array.from(document.querySelectorAll("button")).find(b => b.textContent?.trim() === "Settings");
+    flushSync(() => settings!.click());
+    await settleUi();
+    const model = Array.from(document.querySelectorAll("button")).find(b => b.textContent?.trim().startsWith("new-model"));
+    flushSync(() => model!.click());
+    await waitForText("Saved automatically. New turns will use the updated runtime.");
+    flushSync(() => document.querySelector<HTMLButtonElement>('button[aria-label="Close settings"]')!.click());
+    await settleUi();
+    const textarea = document.querySelector("textarea")!;
+    flushSync(() => {
+      textarea.value = "Use the saved default";
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    flushSync(() => document.querySelector<HTMLButtonElement>(".action.send")!.click());
+    await settleUi();
+    expect(conversationsApi.createConversation).toHaveBeenCalledWith(topic.id, "new-model", null, null);
+  });
+
   it("creates and navigates when the sidebar starts a conversation", async () => {
     const defaultTopic = makeTopic();
     const created: ConversationResponse = {
@@ -1970,7 +2065,7 @@ describe("App", () => {
     vi.mocked(settingsApi.saveSettings)
       .mockResolvedValueOnce(saved)
       .mockResolvedValueOnce(configured);
-    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([makeTopic()]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([makeTopic({ effective_default_model: null })]).mockResolvedValueOnce([makeTopic({ effective_default_model: "local/new-model" })]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       makeConversationSummary({ id: "conv-settings-model" }),
     ]);
