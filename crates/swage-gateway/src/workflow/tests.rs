@@ -5811,7 +5811,7 @@ async fn workflow_read_only_attachment_placement_stays_read_only() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_workflow_workers_write_only_inside_their_own_worktrees() {
-    assert_live_workflow_workers_write_only_inside_their_own_worktrees().await;
+    Box::pin(assert_live_workflow_workers_write_only_inside_their_own_worktrees()).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -5821,7 +5821,7 @@ async fn live_worker_worktree_journey_completes_twenty_times_under_parallel_load
     use futures::{StreamExt, stream};
     stream::iter(1..=20)
         .map(|attempt| async move {
-            assert_live_workflow_workers_write_only_inside_their_own_worktrees().await;
+            Box::pin(assert_live_workflow_workers_write_only_inside_their_own_worktrees()).await;
             eprintln!("live worker worktree journey completed: {attempt}/20");
         })
         .buffer_unordered(4)
