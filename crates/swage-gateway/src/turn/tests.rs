@@ -18620,6 +18620,7 @@ async fn an_image_url_the_provider_cannot_resolve_is_refused_before_persistence(
     // The reference the adapter can inline is admitted by the same gate.
     crate::turn::check_attachment_support(
         &state.workflow_capabilities,
+        &swage_config::AttachmentsConfig::default(),
         &[MessageAttachment::ImageUrl {
             url: "data:image/png;base64,cG5nLWJ5dGVz".into(),
         }],
@@ -20248,4 +20249,154 @@ async fn approval_scope_expired_live_waiter_interrupts_turn() {
 #[tokio::test]
 async fn approval_scope_expired_live_waiter_records_expired_feedback() {
     expired_live_waiter(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn image_scheme_refusals_are_audited_before_returning_without_a_provider_request() {
+    use swage_storage::AuditStore;
+    let storage = Arc::new(MockStorage::new());
+    let (provider, requests) = CapturingMultiRoundProvider::new(vec![
+        vec![
+            StreamChunk::Delta {
+                content: "seen".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "seen".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]);
+    let (_, session_id) =
+        make_state_with_config_and_storage(vec![], vision_capable_config(), Arc::clone(&storage))
+            .await;
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        vision_capable_config(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    for (url, scheme) in [
+        ("http://example.test/a.png", "http"),
+        ("file:///private/image.png", "file"),
+        ("ftp://example.test/a.png", "ftp"),
+    ] {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let error = process_turn(
+            &state,
+            session_id,
+            None,
+            TurnInput::with_attachments(
+                "look",
+                vec![MessageAttachment::ImageUrl { url: url.into() }],
+            ),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect_err("scheme must refuse the turn");
+        assert!(
+            matches!(&error, GatewayError::ValidationError(reason) if reason.contains(scheme) && reason.contains("https, data")),
+            "{error}"
+        );
+        let events = storage
+            .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                session_id: Some(session_id),
+                event_kind: Some("image_reference_refused".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let event = events
+            .first()
+            .expect("refusal is recorded before returning");
+        assert_eq!(event.session_id, Some(session_id));
+        assert_eq!(event.entity_kind, "session");
+        assert_eq!(event.entity_id, session_id.to_string());
+        assert_eq!(event.metadata["scheme"], scheme);
+        if let GatewayError::ValidationError(reason) = &error {
+            assert_eq!(event.metadata["reason"], *reason);
+        }
+        assert!(
+            !event.metadata.to_string().contains(url),
+            "do not record the reference itself"
+        );
+    }
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "refused turns never call the provider"
+    );
+    let db = storage.db.lock().await;
+    assert!(
+        db.messages.is_empty() && db.turns.is_empty(),
+        "refused inputs are not persisted"
+    );
+    drop(db);
+    for url in ["https://example.test/a.png", "data:image/png;base64,cG5n"] {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            TurnInput::with_attachments(
+                "look",
+                vec![MessageAttachment::ImageUrl { url: url.into() }],
+            ),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("default scheme reaches the provider");
+        let captured = requests.lock().unwrap();
+        let user = captured
+            .last()
+            .unwrap()
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role() == Role::User)
+            .unwrap();
+        assert!(
+            user.content()
+                .contains(&ContentPart::ImageUrl { url: url.into() }),
+            "accepted reference reaches provider intact"
+        );
+    }
+    assert_eq!(requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn image_scheme_refusal_survives_an_audit_write_failure() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) =
+        make_state_with_config_and_storage(vec![], vision_capable_config(), Arc::clone(&storage))
+            .await;
+    storage.fail_audit_writes.store(true, Ordering::SeqCst);
+    let error = resolve_turn_model_and_attachments(
+        &state,
+        state.active_config(),
+        None,
+        None,
+        session_id,
+        &[MessageAttachment::ImageUrl {
+            url: "http://example.test/a.png".into(),
+        }],
+    )
+    .await
+    .expect_err("audit failure cannot admit the reference");
+    assert!(
+        matches!(&error, GatewayError::ValidationError(reason) if reason.contains("http") && reason.contains("https, data")),
+        "{error}"
+    );
+    assert!(storage.db.lock().await.audit_events.is_empty());
 }
