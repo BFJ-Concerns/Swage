@@ -256,10 +256,7 @@ pub(crate) async fn apply_approval_scope(
                             access: None,
                         });
                     crate::settings::persist_permanent_tool_approval_for_topic(
-                        &state.config_root,
-                        &config,
-                        &topic,
-                        tool_name,
+                        state, &config, &topic, tool_name,
                     )
                     .await
                 }

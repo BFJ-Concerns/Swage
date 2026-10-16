@@ -47,6 +47,8 @@ async fn write_config_atomically(path: &std::path::Path, body: &str) -> Result<(
             "config path has no valid file name".to_string(),
         ));
     }
+    #[cfg(test)]
+    config_write_pause::wait(path).await;
     let path = path.to_path_buf();
     let body = body.as_bytes().to_vec();
     tokio::task::spawn_blocking(move || swage_client::runtime::write_atomically(&path, &body))
@@ -143,6 +145,7 @@ pub async fn save_settings(
     request: SaveSettingsRequest,
 ) -> Result<SettingsResponse, ApiError> {
     validate_settings_request(&request)?;
+    let _config_update = state.config_updates.lock().await;
     let prior_settings = settings_audit_snapshot(&load_settings(state).await?)?;
     let SaveSettingsRequest {
         default_provider,
@@ -346,13 +349,13 @@ pub async fn save_settings(
 }
 
 pub(crate) async fn persist_permanent_tool_approval_for_topic(
-    config_root: &std::path::Path,
+    state: &AppState,
     config: &swage_config::ResolvedConfig,
     topic: &swage_storage::model::Topic,
     tool_name: &str,
 ) -> Result<(), ApiError> {
-    let path = scope_config_path(config_root, &topic.location());
-    persist_permanent_tool_approval_to_path(config, tool_name, path).await
+    let path = scope_config_path(&state.config_root, &topic.location());
+    persist_permanent_tool_approval_to_path(state, config, tool_name, path).await
 }
 
 pub(crate) async fn persist_permanent_tool_approval_globally(
@@ -360,14 +363,16 @@ pub(crate) async fn persist_permanent_tool_approval_globally(
     tool_name: &str,
 ) -> Result<(), ApiError> {
     let path = global_config_path(&state.config_root);
-    persist_permanent_tool_approval_to_path(&state.active_config(), tool_name, path).await
+    persist_permanent_tool_approval_to_path(state, &state.active_config(), tool_name, path).await
 }
 
 async fn persist_permanent_tool_approval_to_path(
+    state: &AppState,
     config: &swage_config::ResolvedConfig,
     tool_name: &str,
     path: PathBuf,
 ) -> Result<(), ApiError> {
+    let _config_update = state.config_updates.lock().await;
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(|error| {
             ApiError::validation(format!("failed to create config directory: {error}"))
@@ -1066,6 +1071,7 @@ fn validate_named_list(label: &str, values: &[String]) -> Result<(), ApiError> {
     Ok(())
 }
 
+// Called only within the serialised general settings update.
 async fn persist_provider_key(
     state: &AppState,
     provider_id: &str,
@@ -2707,5 +2713,32 @@ mod tests {
         assert!(body.contains("[context]"));
         assert!(body.contains("assembly = \"compact\""));
         assert!(body.contains("budget = 8192"));
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod config_write_pause {
+    use std::sync::{LazyLock, Mutex};
+    use tokio::sync::oneshot;
+
+    use super::*;
+
+    type Pause = (oneshot::Sender<()>, oneshot::Receiver<()>);
+    static PAUSES: LazyLock<Mutex<HashMap<PathBuf, Pause>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub fn before_write(path: PathBuf) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (reached, waiting) = oneshot::channel();
+        let (resume, released) = oneshot::channel();
+        PAUSES.lock().unwrap().insert(path, (reached, released));
+        (waiting, resume)
+    }
+
+    pub async fn wait(path: &std::path::Path) {
+        let pause = PAUSES.lock().unwrap().remove(path);
+        if let Some((reached, released)) = pause {
+            reached.send(()).unwrap();
+            released.await.unwrap();
+        }
     }
 }

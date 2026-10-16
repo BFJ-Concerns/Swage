@@ -54,6 +54,7 @@ pub async fn save_security_settings(
 ) -> Result<SecuritySettingsResponse, ApiError> {
     let resolved = ResolvedScope::resolve(state, &scope).await?;
     validate_overrides(&scope, &request.overrides)?;
+    let _config_update = state.config_updates.lock().await;
     let prior = resolved.read(state).await?;
 
     let mut partial = read_partial(&resolved.config_path).await?;
@@ -514,6 +515,63 @@ mod tests {
             root.path().to_path_buf(),
         );
         (state, storage, root)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_general_and_security_saves_preserve_both_fields() {
+        let (state, _, root) = fixture().await;
+        let mut general =
+            serde_json::to_value(crate::settings::load_settings(&state).await.unwrap()).unwrap();
+        general["tool_runtime"]["max_output_bytes"] = serde_json::json!(123_456);
+        let path = root.path().join("config.toml");
+        let (waiting, resume) = crate::settings::config_write_pause::before_write(path.clone());
+        let general_state = state.clone();
+        let general_save = tokio::spawn(async move {
+            crate::settings::save_settings(
+                &general_state,
+                serde_json::from_value(general).unwrap(),
+            )
+            .await
+            .unwrap();
+        });
+        // The general save has read the file and is about to replace it.
+        waiting.await.unwrap();
+        let security_state = state.clone();
+        let mut security_save = tokio::spawn(async move {
+            save_security_settings(
+                &security_state,
+                SettingsScope::Install,
+                save(SecurityOverrides {
+                    allow_degraded_execution: Some(true),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        });
+        // An unprotected writer finishes here; a serialised writer waits for
+        // the paused save. Keep the pending task alive across the timeout.
+        let security_finished =
+            tokio::time::timeout(std::time::Duration::from_secs(5), &mut security_save).await;
+        resume.send(()).unwrap();
+        general_save.await.unwrap();
+        match security_finished {
+            Ok(result) => result.unwrap(),
+            Err(_) => security_save.await.unwrap(),
+        }
+        let partial = read_partial(&path).await.unwrap();
+        assert_eq!(
+            partial.tools.as_ref().unwrap().max_output_bytes,
+            Some(123_456),
+            "successful general save was lost by the concurrent security save"
+        );
+        assert_eq!(
+            overrides_from_partial(&partial)
+                .unwrap()
+                .allow_degraded_execution,
+            Some(true),
+            "successful security save was lost by the concurrent general save"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

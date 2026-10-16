@@ -49,7 +49,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
-- General settings autosaves preserve sandbox and approval settings saved through Security.
+- General settings autosaves preserve sandbox and approval settings saved through Security, including when saves overlap.
 
 - CLI pairing reads its code from the terminal when the prompt is piped, and names `--pairing-code` when no terminal is available.
 

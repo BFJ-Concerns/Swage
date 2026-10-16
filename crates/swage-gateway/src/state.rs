@@ -79,6 +79,8 @@ impl ApprovalWaiter {
 pub struct AppState {
     /// Configuration root selected when this gateway instance was constructed.
     pub config_root: PathBuf,
+    /// Serialises config file updates and their corresponding runtime snapshots.
+    pub(crate) config_updates: Arc<AsyncMutex<()>>,
     /// Persistent storage backend (sessions, threads, turns, messages, tool calls).
     pub storage: Arc<dyn Storage>,
     /// Topic storage backend. Separate from `storage` because `TopicStore` is
@@ -369,6 +371,7 @@ impl AppState {
         }
         Self {
             config_root,
+            config_updates: Arc::new(AsyncMutex::new(())),
             storage: storage.clone(),
             topic_store,
             provider: provider.clone(),
