@@ -3378,6 +3378,25 @@ impl DeviceStore for MockStorage {
 
 #[async_trait]
 impl ChannelLinkStore for MockStorage {
+    async fn save_channel_link_code(
+        &self,
+        _: swage_storage::model::ChannelLinkCode,
+    ) -> Result<(), StorageError> {
+        unimplemented!()
+    }
+    async fn list_channel_link_codes(
+        &self,
+    ) -> Result<Vec<swage_storage::model::ChannelLinkCode>, StorageError> {
+        unimplemented!()
+    }
+    async fn redeem_channel_link_code(
+        &self,
+        _: &str,
+        _: NewChannelLink,
+    ) -> Result<Option<ChannelLink>, StorageError> {
+        unimplemented!()
+    }
+
     async fn upsert_channel_link(&self, link: NewChannelLink) -> Result<ChannelLink, StorageError> {
         let now = chrono::Utc::now();
         let key = (
@@ -5212,6 +5231,12 @@ impl swage_storage::store::ChannelQueueStore for MockStorage {
         Ok(None)
     }
 
+    async fn list_pending_channel_messages(
+        &self,
+    ) -> Result<Vec<swage_storage::ChannelInboundMessage>, StorageError> {
+        Ok(Vec::new())
+    }
+
     async fn list_pending_channel_origins(
         &self,
     ) -> Result<Vec<swage_storage::PendingChannelOrigin>, StorageError> {
@@ -5346,6 +5371,17 @@ impl swage_storage::store::AuditStore for MockStorage {
 
 #[async_trait]
 impl swage_storage::store::TurnQueueStore for MockStorage {
+    async fn enqueue_turn_inputs(
+        &self,
+        inputs: Vec<swage_storage::NewQueuedTurnInput>,
+    ) -> Result<Vec<swage_storage::QueuedTurnInput>, StorageError> {
+        let mut queued = Vec::new();
+        for input in inputs {
+            queued.push(self.enqueue_turn_input(input).await?);
+        }
+        Ok(queued)
+    }
+
     async fn enqueue_turn_input(
         &self,
         input: swage_storage::NewQueuedTurnInput,
@@ -5359,6 +5395,7 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
             .max()
             .map_or(0, |seq| seq + 1);
         let queued = swage_storage::QueuedTurnInput {
+            delivery_targets: input.delivery_targets,
             attended: input.attended,
             client_id: input.client_id,
             id: Uuid::new_v4(),
@@ -5437,6 +5474,10 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
             .turn_queue
             .retain(|item| item.session_id != session_id);
         Ok(Some(swage_storage::DrainedTurnQueue {
+            delivery_targets: queued
+                .iter()
+                .flat_map(|input| input.delivery_targets.clone())
+                .collect(),
             attended: queued.iter().any(|input| input.attended),
             turn,
             messages,
