@@ -6318,7 +6318,7 @@ async fn timed_out_agent_call_is_cancelled_journalled_and_replayed_without_reinv
             Some(swage_core::Effort::High)
         );
     }
-    wait_for_worker_turn_interrupted(&storage).await;
+    wait_for_worker_turn_cancelled(&storage).await;
     assert!(
         state.active_turns.lock().await.is_empty(),
         "timed-out worker must release its active-turn registration"
@@ -6437,7 +6437,7 @@ async fn parent_cancellation_wins_over_a_configured_agent_call_timeout() {
         1
     );
     assert_eq!(provider.requests.lock().expect("requests").len(), 1);
-    wait_for_worker_turn_interrupted(&storage).await;
+    wait_for_worker_turn_cancelled(&storage).await;
     assert!(
         state.active_turns.lock().await.is_empty(),
         "cancelled worker must release its active-turn registration"
@@ -17595,7 +17595,7 @@ async fn wait_for_provider_requests(provider: &ScriptedRecordingProvider, expect
     .expect("provider request");
 }
 
-async fn wait_for_worker_turn_interrupted(storage: &SqliteStorage) {
+async fn wait_for_worker_turn_cancelled(storage: &SqliteStorage) {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let sessions = storage
@@ -17614,8 +17614,8 @@ async fn wait_for_worker_turn_interrupted(storage: &SqliteStorage) {
                         .expect("worker turns")
                     {
                         match turn.state {
-                            TurnState::Interrupted => return,
-                            TurnState::Completed | TurnState::Failed => {
+                            TurnState::Cancelled => return,
+                            TurnState::Interrupted | TurnState::Completed | TurnState::Failed => {
                                 panic!("cancelled worker turn ended {:?}", turn.state)
                             }
                             _ => {}
@@ -17627,7 +17627,7 @@ async fn wait_for_worker_turn_interrupted(storage: &SqliteStorage) {
         }
     })
     .await
-    .expect("worker turn becomes interrupted");
+    .expect("worker turn becomes cancelled");
 }
 
 async fn recorded_terminal_account(storage: &SqliteStorage, run_id: Uuid) -> Value {
@@ -19124,7 +19124,7 @@ async fn a_worker_cancelled_mid_round_reads_cut_short_not_failed() {
         .await
         .expect("cancel the running run");
     wait_for_terminal(&state, run.id).await;
-    wait_for_worker_turn_interrupted(&storage).await;
+    wait_for_worker_turn_cancelled(&storage).await;
 
     let detail = get_run(State(state), Path(run.id)).await.expect("detail").0;
     let entry = detail

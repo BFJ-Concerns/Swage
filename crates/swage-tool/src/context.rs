@@ -34,6 +34,8 @@ pub trait ToolContext: Send + Sync {
     ///
     /// Available when the dispatcher is invoked from within an agent turn.
     /// Used by tools that need to persist auxiliary records against the turn.
+    fn mark_execution_started(&self) {}
+
     fn turn_id(&self) -> Option<uuid::Uuid> {
         None
     }

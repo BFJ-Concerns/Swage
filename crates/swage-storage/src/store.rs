@@ -704,6 +704,7 @@ pub trait ToolCallStore: Send + Sync {
         duration_ms: i64,
         truncated: bool,
         total_bytes: Option<i64>,
+        execution: Option<swage_protocol::client::conversation::ToolExecution>,
     ) -> Result<(), StorageError>;
 
     /// Fetch all tool calls for a turn, ordered by position ascending.
@@ -734,8 +735,26 @@ pub trait ToolCallStore: Send + Sync {
                 true,
                 swage_core::tool_result_reference(&turn_id.to_string(), &record.call_id),
             );
-            self.update_tool_call_result(record.id, result, &model_result, status, 0, false, None)
-                .await?;
+            let execution = (status == CANCELLED_TOOL_STATUS).then(|| {
+                record
+                    .execution
+                    .unwrap_or(swage_protocol::client::conversation::ToolExecution {
+                        outcome: swage_protocol::client::conversation::ToolOutcome::Cancelled,
+                        stage: swage_protocol::client::conversation::ToolExecutionStage::Unknown,
+                        completion: swage_protocol::client::conversation::ToolCompletion::Unknown,
+                    })
+            });
+            self.update_tool_call_result(
+                record.id,
+                result,
+                &model_result,
+                status,
+                0,
+                false,
+                None,
+                execution,
+            )
+            .await?;
             settled += 1;
         }
         Ok(settled)
@@ -753,7 +772,8 @@ pub const INTERRUPTED_TOOL_RESULT: &str =
 pub const CANCELLED_TOOL_STATUS: &str = "cancelled";
 
 /// Result a started tool call settles with when its turn was stopped; the
-/// call's execution was dropped, which stops the work it started.
+/// call's dispatch was dropped. Completion certainty is recorded separately;
+/// dropping a future does not establish that external effects stopped.
 pub const CANCELLED_TOOL_RESULT: &str = "tool call was cancelled when its turn was stopped";
 
 /// Status for a call that ran but whose result could not be recorded.
@@ -2725,6 +2745,7 @@ mod tests {
             _duration_ms: i64,
             _truncated: bool,
             _total_bytes: Option<i64>,
+            _execution: Option<swage_protocol::client::conversation::ToolExecution>,
         ) -> Result<(), StorageError> {
             unimplemented!()
         }

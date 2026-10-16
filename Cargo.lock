@@ -3134,6 +3134,7 @@ dependencies = [
  "swage-core",
  "swage-protocol",
  "swage-safety",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",

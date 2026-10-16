@@ -4334,6 +4334,16 @@
                 "minimum": 0,
                 "type": "integer"
               },
+              "execution": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ToolExecution"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "parent_call_id": {
                 "description": "call_id of the enclosing tool if this is a sub-tool invocation.\n\nOmitted from the serialised JSON when None.",
                 "type": [
@@ -4721,6 +4731,9 @@
                 },
                 "type": "array"
               },
+              "failure_message": {
+                "type": "string"
+              },
               "turn_id": {
                 "format": "uuid",
                 "type": "string"
@@ -4732,6 +4745,7 @@
             },
             "required": [
               "type",
+              "failure_message",
               "turn_id",
               "attempts",
               "errors"
@@ -5918,6 +5932,16 @@
               "null"
             ]
           },
+          "execution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ToolExecution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "parent_call_id": {
             "type": [
               "string",
@@ -5960,6 +5984,53 @@
           "truncated"
         ],
         "type": "object"
+      },
+      "ToolCompletion": {
+        "enum": [
+          "not_run",
+          "confirmed",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "ToolExecution": {
+        "properties": {
+          "completion": {
+            "$ref": "#/components/schemas/ToolCompletion"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ToolOutcome"
+          },
+          "stage": {
+            "$ref": "#/components/schemas/ToolExecutionStage"
+          }
+        },
+        "required": [
+          "outcome",
+          "stage",
+          "completion"
+        ],
+        "type": "object"
+      },
+      "ToolExecutionStage": {
+        "enum": [
+          "not_started",
+          "started",
+          "finished",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "ToolOutcome": {
+        "description": "What the dispatcher established about a call, independently of its payload.",
+        "enum": [
+          "succeeded",
+          "failed",
+          "refused",
+          "rejected",
+          "cancelled"
+        ],
+        "type": "string"
       },
       "ToolPermissionConfig": {
         "additionalProperties": false,
@@ -6246,6 +6317,12 @@
             ],
             "description": "The execution boundary the turn ran inside, once its dispatcher\nsettled. Null until then."
           },
+          "failure_message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "input_tokens": {
             "format": "int64",
             "type": [
@@ -6291,6 +6368,7 @@
           "incomplete",
           "failed",
           "interrupted",
+          "cancelled",
           "awaiting_approval",
           "delegating"
         ],

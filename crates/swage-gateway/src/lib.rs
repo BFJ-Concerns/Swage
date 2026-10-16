@@ -204,6 +204,7 @@ pub(crate) mod test_support {
     pub(crate) struct SwageHomeGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
         _temp_dir: Option<tempfile::TempDir>,
+        previous: Option<OsString>,
         root: PathBuf,
     }
 
@@ -214,8 +215,10 @@ pub(crate) mod test_support {
                 .unwrap_or_else(|error| error.into_inner());
             let temp_dir = tempfile::TempDir::new().expect("temporary swage home");
             let root = temp_dir.path().to_path_buf();
+            let previous = std::env::var_os("SWAGE_HOME");
             unsafe { std::env::set_var("SWAGE_HOME", &root) };
             Self {
+                previous,
                 _lock: lock,
                 _temp_dir: Some(temp_dir),
                 root,
@@ -227,8 +230,10 @@ pub(crate) mod test_support {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             let root = path.as_ref().to_path_buf();
+            let previous = std::env::var_os("SWAGE_HOME");
             unsafe { std::env::set_var("SWAGE_HOME", &root) };
             Self {
+                previous,
                 _lock: lock,
                 _temp_dir: None,
                 root,
@@ -246,7 +251,10 @@ pub(crate) mod test_support {
 
     impl Drop for SwageHomeGuard {
         fn drop(&mut self) {
-            unsafe { std::env::remove_var("SWAGE_HOME") };
+            match self.previous.take() {
+                Some(previous) => unsafe { std::env::set_var("SWAGE_HOME", previous) },
+                None => unsafe { std::env::remove_var("SWAGE_HOME") },
+            }
         }
     }
 

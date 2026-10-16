@@ -9,6 +9,8 @@ use serde_json::Value;
 /// Configuration for an agent instance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
+    #[serde(default = "default_identical_failure_bound")]
+    pub max_identical_tool_failures: u32,
     /// Unique identifier for this agent — propagated to all storage records.
     pub agent_id: String,
     /// When to trigger context compaction.
@@ -55,6 +57,10 @@ pub struct AgentConfig {
     pub approval_prompts_enabled: bool,
 }
 
+const fn default_identical_failure_bound() -> u32 {
+    3
+}
+
 const fn approval_prompts_enabled_by_default() -> bool {
     true
 }
@@ -66,6 +72,7 @@ impl AgentConfig {
     /// Call [`validate`][Self::validate] before using the config with an agent.
     pub fn new(agent_id: impl Into<String>) -> Self {
         Self {
+            max_identical_tool_failures: default_identical_failure_bound(),
             agent_id: agent_id.into(),
             compaction_threshold: CompactionThreshold::MessageCount(100),
             metadata: HashMap::new(),

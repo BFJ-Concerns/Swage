@@ -302,6 +302,7 @@ pub(crate) fn build_agent_config_with_workspace(
     let mut agent_config = AgentConfig::new(agent_id).with_workspace(workspace_root, allowed_paths);
     agent_config.compaction_threshold = compaction_threshold(config);
     agent_config.skip_permissions = config.dangerously_skip_permissions;
+    agent_config.max_identical_tool_failures = config.tools.max_identical_failures;
     if !config.default_model_id().is_empty() {
         agent_config.model_id = Some(config.default_model_id().to_string());
     }

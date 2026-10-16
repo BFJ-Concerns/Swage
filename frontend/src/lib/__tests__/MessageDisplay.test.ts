@@ -568,7 +568,7 @@ describe("turns that ended without a reply, as loaded", () => {
     expect(request?.textContent).toContain("Interrupted before a reply");
   });
 
-  it("shows a running call stopped live with an unknown outcome, before any reload", async () => {
+  it("shows a running call stopped live as cancelled before any reload", async () => {
     const api = await import("../api/conversations");
     vi.spyOn(api, "createConversation").mockResolvedValue({
       id: "conv-live",
@@ -594,13 +594,12 @@ describe("turns that ended without a reply, as loaded", () => {
       arguments: { command: "sleep 30" },
     });
     // On Stop the gateway ends the running call as cancelled with no result
-    // before it reports the turn cancelled. The wire carries that missing
-    // result as JSON null, which the generated event type does not admit.
+    // before it reports the turn cancelled. The absent result is JSON null.
     streamingStore.handleServerEvent({
       type: "tool_end",
       call_id: "call-sleep",
       tool: "shell",
-      result: null as unknown as string,
+      result: null,
       status: "cancelled",
       duration_ms: 6200,
       truncated: false,
@@ -610,9 +609,9 @@ describe("turns that ended without a reply, as loaded", () => {
 
     const request = document.body.querySelector('[aria-label="Your message"]');
     expect(request?.querySelector(".tool-call")?.textContent).toContain(
-      "its outcome is unknown",
+      "cancelled",
     );
-    expect(request?.textContent).toContain("Interrupted before a reply");
+    expect(request?.textContent).toContain("Cancelled before a reply");
   });
 
   it("leaves a request whose turn replied without a failure account", () => {

@@ -340,6 +340,7 @@ pub(super) async fn project_agent_events(
                 }
             }
             AgentEvent::ToolEnd {
+                execution,
                 call_id,
                 tool_name,
                 result,
@@ -347,6 +348,7 @@ pub(super) async fn project_agent_events(
                 duration_ms,
             } => {
                 let tool_end = ServerEvent::ToolEnd {
+                    execution,
                     call_id,
                     tool: tool_name,
                     result,
@@ -420,9 +422,27 @@ pub(super) async fn project_agent_events(
                 attempts,
                 errors,
             } => {
+                let message = format!(
+                    "Structured output validation failed after {attempts} attempts: {}",
+                    errors
+                        .iter()
+                        .map(|error| if error.path.is_empty() {
+                            error.message.clone()
+                        } else {
+                            format!("{}: {}", error.path, error.message)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                );
+                if let Some(reason) =
+                    record_failure_explanation(state, session_id, turn_id, &message).await
+                {
+                    record_integrity_lost.get_or_insert(reason);
+                }
                 // Schema exhaustion is an error condition — always deliver regardless
                 // of subscription state.
                 let _ = ws_tx.send(ServerEvent::OutputSchemaFailed {
+                    failure_message: message,
                     turn_id,
                     attempts,
                     errors,

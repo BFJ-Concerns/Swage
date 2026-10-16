@@ -33,13 +33,13 @@ impl<T> CancellationStorage for T where T: AgentMessageStore + ThreadStore + Tur
 ///
 /// 1. **Active delegation entry** — looks up the exact delegation by message
 ///    ID, triggers its cancellation token (stopping the in-memory execution),
-///    and interrupts only the turns in that delegation's thread.
+///    and cancels only the turns in that delegation's thread.
 /// 2. **Thread-ID annotation** — if no live entry exists (e.g. execution
 ///    already completed) but the Delegate message payload carries a
-///    `_thread_id` annotation (injected by `DelegationExecutor`), interrupts
+///    `_thread_id` annotation (injected by `DelegationExecutor`), cancels
 ///    only the turns in that specific thread.
 /// 3. **Last resort** — falls back to `find_in_progress_by_agent`, which
-///    interrupts all in-progress turns for the target agent. This is the
+///    cancels all in-progress turns for the target agent. This is the
 ///    broadest scope and only fires when neither of the above is available.
 ///
 /// The cancel message itself is already claimed (delivered) by the mailbox.
@@ -77,11 +77,11 @@ pub async fn handle_cancel(
         // this token between rounds and tool calls.
         cancel_token.cancel();
 
-        // Interrupt only the turns in this delegation's thread.
+        // Cancel only the turns in this delegation's thread.
         // The active-delegation path uses a narrower set of interruptible
         // states (no AwaitingApproval) since the live cancel token handles
         // in-flight approval waits directly.
-        interrupt_turns_in_thread(
+        cancel_turns_in_thread(
             storage,
             thread_id,
             &[TurnState::Pending, TurnState::Processing],
@@ -100,7 +100,7 @@ pub async fn handle_cancel(
     if let Some(thread_id_str) = delegate.payload.get("_thread_id").and_then(|v| v.as_str())
         && let Ok(thread_id) = thread_id_str.parse::<Uuid>()
     {
-        interrupt_turns_in_thread(
+        cancel_turns_in_thread(
             storage,
             thread_id,
             &[
@@ -113,7 +113,7 @@ pub async fn handle_cancel(
         return Ok(());
     }
 
-    // Last resort: no thread annotation — interrupt all in-progress turns.
+    // Last resort: no thread annotation — cancel all in-progress turns.
     // This is deliberately broad until delegated-turn cancellation can target
     // the exact recipient thread.
     let active_turns = storage
@@ -124,7 +124,7 @@ pub async fn handle_cancel(
 
     for turn in active_turns {
         storage
-            .update_turn_state(turn.id, TurnState::Interrupted)
+            .update_turn_state(turn.id, TurnState::Cancelled)
             .await?;
     }
 
@@ -135,13 +135,13 @@ pub async fn handle_cancel(
     Ok(())
 }
 
-/// Interrupt turns in a thread that match any of the given states, then reset
+/// Cancel turns in a thread that match any of the given states, then reset
 /// the thread to Idle.
 ///
 /// Used by the cancel fallback paths where no live cancellation token exists —
-/// interruption is communicated solely via storage writes. Logs warnings on
-/// storage errors so stuck threads are diagnosable.
-async fn interrupt_turns_in_thread(
+/// cancellation is communicated solely via storage writes. Storage failures
+/// propagate so incomplete settlement is visible to the caller.
+async fn cancel_turns_in_thread(
     storage: &dyn CancellationStorage,
     thread_id: Uuid,
     interruptible_states: &[TurnState],
@@ -150,7 +150,7 @@ async fn interrupt_turns_in_thread(
     for turn in turns {
         if interruptible_states.contains(&turn.state) {
             storage
-                .update_turn_state(turn.id, TurnState::Interrupted)
+                .update_turn_state(turn.id, TurnState::Cancelled)
                 .await?;
         }
     }
@@ -192,15 +192,6 @@ pub async fn handle_shutdown(
 ) -> Result<(), AgentError> {
     debug_assert_eq!(shutdown_msg.kind, MessageKind::Shutdown);
 
-    // Cancel live execution tokens for all delegations targeting this agent.
-    // Without this, agent turn loops continue running — they stop on
-    // CancellationToken, not turn state changes in storage.
-    if let Some(registry) = active_delegations {
-        registry
-            .cancel_for_agent(&shutdown_msg.recipient_agent_id)
-            .await;
-    }
-
     // Mark any in-progress turns as Interrupted in storage — covers turns
     // whose tokens aren't in the registry (already finished, or registry
     // wasn't provided).
@@ -221,6 +212,16 @@ pub async fn handle_shutdown(
     // this, threads stay in Processing and reject subsequent turn creation.
     for thread_id in thread_ids {
         reset_thread_to_idle(storage, thread_id).await?;
+    }
+
+    // The interruption is durable before a live loop observes cancellation.
+    // Cancel live execution tokens for all delegations targeting this agent.
+    // Without this, agent turn loops continue running — they stop on
+    // CancellationToken, not turn state changes in storage.
+    if let Some(registry) = active_delegations {
+        registry
+            .cancel_for_agent(&shutdown_msg.recipient_agent_id)
+            .await;
     }
 
     Ok(())
@@ -521,7 +522,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn cancel_interrupts_active_turn() {
+    async fn cancel_marks_active_turn_cancelled() {
         let (storage, turn_id) = setup_with_turn("agent-b").await;
 
         // Create a delegate message to establish the correlation chain.
@@ -562,7 +563,7 @@ mod tests {
             .unwrap();
 
         let turn = storage.get_turn(turn_id).await.unwrap().unwrap();
-        assert_eq!(turn.state, TurnState::Interrupted);
+        assert_eq!(turn.state, TurnState::Cancelled);
 
         // Verify the thread was also reset to Idle — without this, the thread
         // remains stuck in Processing and future turns fail with TurnInProgress.
@@ -667,8 +668,8 @@ mod tests {
         let ta = storage.get_turn(turn_a.id).await.unwrap().unwrap();
         assert_eq!(
             ta.state,
-            TurnState::Interrupted,
-            "annotated thread's turn should be interrupted"
+            TurnState::Cancelled,
+            "annotated thread's turn should be cancelled"
         );
 
         // Thread A should be reset to Idle.
@@ -735,8 +736,8 @@ mod tests {
         let turn = storage.get_turn(turn_id).await.unwrap().unwrap();
         assert_eq!(
             turn.state,
-            TurnState::Interrupted,
-            "should still interrupt via broad fallback"
+            TurnState::Cancelled,
+            "should still cancel via broad fallback"
         );
     }
 
@@ -817,8 +818,8 @@ mod tests {
         let ta = storage.get_turn(turn_a.id).await.unwrap().unwrap();
         assert_eq!(
             ta.state,
-            TurnState::Interrupted,
-            "targeted turn should be interrupted"
+            TurnState::Cancelled,
+            "targeted turn should be cancelled"
         );
 
         // Second delegation's turn still processing — not affected.
@@ -892,7 +893,7 @@ mod tests {
         assert!(cancel_token.is_cancelled());
         assert_eq!(
             inner.get_turn(turn_id).await.unwrap().unwrap().state,
-            TurnState::Interrupted
+            TurnState::Cancelled
         );
         assert_eq!(
             ThreadStore::get(inner.as_ref(), thread.id)
