@@ -3,6 +3,8 @@
 //! Keeps audio support behind one runtime boundary so the gateway and clients
 //! do not need provider-specific branching.
 
+use std::sync::RwLock;
+
 use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
@@ -130,6 +132,13 @@ pub struct OpenAiVoiceProvider {
     api_key: Option<MaskedString>,
     base_url: String,
     routes: VoiceModelRoutes,
+    speech_status: RwLock<SpeechStatus>,
+}
+
+enum SpeechStatus {
+    Unverified,
+    Available,
+    Failed(String),
 }
 
 impl OpenAiVoiceProvider {
@@ -140,6 +149,7 @@ impl OpenAiVoiceProvider {
             api_key: endpoint.api_key,
             base_url: endpoint.base_url,
             routes,
+            speech_status: RwLock::new(SpeechStatus::Unverified),
         }
     }
 
@@ -185,83 +195,10 @@ impl OpenAiVoiceProvider {
         headers
     }
 
-    fn supported_voices() -> Vec<String> {
-        [
-            "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect()
-    }
-}
-
-#[derive(Deserialize)]
-struct OpenAiTranscriptionResponse {
-    text: String,
-}
-
-#[async_trait]
-impl VoiceProvider for OpenAiVoiceProvider {
-    fn capabilities(&self) -> VoiceCapabilities {
-        VoiceCapabilities {
-            transcription: self.routes.transcription_model.is_some(),
-            synthesis: self.routes.speech_model.is_some(),
-            default_voice: Some("alloy".to_string()),
-            supported_voices: Self::supported_voices(),
-            unavailable_reason: self.unavailable_reason(),
-        }
-    }
-
-    async fn transcribe(
+    async fn request_speech(
         &self,
-        request: TranscriptionRequest,
-    ) -> Result<TranscriptionResponse, ProviderError> {
-        let model = self.route_model(&self.routes.transcription_model)?;
-        let file_part = reqwest::multipart::Part::bytes(request.audio_bytes)
-            .mime_str(&request.mime_type)
-            .map_err(|error| ProviderError::InvalidRequest {
-                message: format!("invalid audio mime type: {error}"),
-            })?
-            .file_name("input-audio");
-
-        let form = reqwest::multipart::Form::new()
-            .part("file", file_part)
-            .text("model", model.to_string());
-
-        let response = reqwest::Client::new()
-            .post(format!(
-                "{}/audio/transcriptions",
-                self.base_url.trim_end_matches('/')
-            ))
-            .headers(self.auth_headers())
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|error| ProviderError::Network {
-                provider: "openai-voice".to_string(),
-                message: error.to_string(),
-            })?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to read body>".to_string());
-            return Err(ProviderError::HttpError {
-                status: status.as_u16(),
-                body,
-            });
-        }
-
-        let parsed: OpenAiTranscriptionResponse = response
-            .json()
-            .await
-            .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
-        Ok(TranscriptionResponse { text: parsed.text })
-    }
-
-    async fn synthesise(&self, request: SpeechRequest) -> Result<SpeechResponse, ProviderError> {
+        request: SpeechRequest,
+    ) -> Result<SpeechResponse, ProviderError> {
         let model = self.route_model(&self.routes.speech_model)?;
         let voice = request.voice.unwrap_or_else(|| {
             self.capabilities()
@@ -322,6 +259,105 @@ impl VoiceProvider for OpenAiVoiceProvider {
             mime_type,
             voice,
         })
+    }
+
+    fn supported_voices() -> Vec<String> {
+        [
+            "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    }
+}
+
+#[derive(Deserialize)]
+struct OpenAiTranscriptionResponse {
+    text: String,
+}
+
+#[async_trait]
+impl VoiceProvider for OpenAiVoiceProvider {
+    fn capabilities(&self) -> VoiceCapabilities {
+        let speech_status = self.speech_status.read().unwrap_or_else(|e| e.into_inner());
+        VoiceCapabilities {
+            transcription: self.routes.transcription_model.is_some(),
+            synthesis: self.routes.speech_model.is_some()
+                && matches!(*speech_status, SpeechStatus::Available),
+            default_voice: Some("alloy".to_string()),
+            supported_voices: Self::supported_voices(),
+            unavailable_reason: match (&self.routes.speech_model, &*speech_status) {
+                (Some(model), SpeechStatus::Unverified) => Some(format!(
+                    "speech model `{model}` has not been checked. Check the Speech model in Voice settings"
+                )),
+                (_, SpeechStatus::Failed(reason)) => Some(reason.clone()),
+                _ => self.unavailable_reason(),
+            },
+        }
+    }
+
+    async fn transcribe(
+        &self,
+        request: TranscriptionRequest,
+    ) -> Result<TranscriptionResponse, ProviderError> {
+        let model = self.route_model(&self.routes.transcription_model)?;
+        let file_part = reqwest::multipart::Part::bytes(request.audio_bytes)
+            .mime_str(&request.mime_type)
+            .map_err(|error| ProviderError::InvalidRequest {
+                message: format!("invalid audio mime type: {error}"),
+            })?
+            .file_name("input-audio");
+
+        let form = reqwest::multipart::Form::new()
+            .part("file", file_part)
+            .text("model", model.to_string());
+
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{}/audio/transcriptions",
+                self.base_url.trim_end_matches('/')
+            ))
+            .headers(self.auth_headers())
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|error| ProviderError::Network {
+                provider: "openai-voice".to_string(),
+                message: error.to_string(),
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to read body>".to_string());
+            return Err(ProviderError::HttpError {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        let parsed: OpenAiTranscriptionResponse = response
+            .json()
+            .await
+            .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
+        Ok(TranscriptionResponse { text: parsed.text })
+    }
+
+    async fn synthesise(&self, request: SpeechRequest) -> Result<SpeechResponse, ProviderError> {
+        let result = self.request_speech(request).await;
+        *self
+            .speech_status
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = match &result {
+            Ok(_) => SpeechStatus::Available,
+            Err(error) => SpeechStatus::Failed(format!(
+                "speech model `{}` failed: {error}. Check the Speech model in Voice settings and try again",
+                self.routes.speech_model.as_deref().unwrap_or("not set")
+            )),
+        };
+        result
     }
 }
 
@@ -465,12 +501,18 @@ mod tests {
     }
 
     #[test]
-    fn openai_voice_provider_reports_expected_defaults() {
+    fn openai_voice_provider_reports_speech_as_unverified_until_requested() {
         let provider = routed("https://api.openai.com/v1", both_routes());
         let capabilities = provider.capabilities();
         assert!(capabilities.transcription);
-        assert!(capabilities.synthesis);
-        assert_eq!(capabilities.unavailable_reason, None);
+        assert!(!capabilities.synthesis);
+        assert!(
+            capabilities
+                .unavailable_reason
+                .as_deref()
+                .unwrap()
+                .contains("has not been checked")
+        );
         assert_eq!(capabilities.default_voice.as_deref(), Some("alloy"));
         assert!(
             capabilities

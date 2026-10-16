@@ -304,7 +304,7 @@
   const shouldAutosaveSettings = $derived(HOT_AUTOSAVE_TABS.has(tab));
 
   $effect(() => {
-    if (!hasLoadedSettings || !shouldAutosaveSettings) return;
+    if (!hasLoadedSettings || !shouldAutosaveSettings || isPersisting) return;
     const fingerprint = settingsFingerprint();
     if (!fingerprint || fingerprint === lastPersistedSettingsFingerprint) return;
 
@@ -384,7 +384,7 @@
       <InformationalSettingsPanel {tab} />
     {:else if tab === "voice"}
       {#if settings}
-        <VoiceSettingsPanel bind:settings />
+        <VoiceSettingsPanel bind:settings onsave={() => persist()} saving={isPersisting} />
       {/if}
     {:else if tab === "recovery"}
       <RecoverySettingsPanel />
