@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -82,6 +83,7 @@ def main():
             database.execute("CREATE TABLE isolation_sentinel (value TEXT)")
             database.execute("INSERT INTO isolation_sentinel VALUES ('untouched')")
         before = {str(path): snapshot(path) for path in protected}
+        print("sentinel snapshot before: " + json.dumps(before, sort_keys=True), flush=True)
         print(f"sentinel tree: {root}", flush=True)
         print(f"SWAGE_HOME: {env.get('SWAGE_HOME', '<unset>')}", flush=True)
         print("operator tripwire before:", flush=True)
@@ -92,6 +94,7 @@ def main():
             print("operator tripwire after:", flush=True)
             final_tripwire = tripwire(operator_home)
             after = {str(path): snapshot(path) for path in protected}
+            print("sentinel snapshot after: " + json.dumps(after, sort_keys=True), flush=True)
             changed = before != after or original_tripwire != final_tripwire
             for path in protected:
                 old, new = before[str(path)], after[str(path)]
