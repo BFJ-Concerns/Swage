@@ -85,6 +85,8 @@ const baseCall: WorkflowAgentCallDetail = {
     grants: ["file_read"],
     attempts: [
       {
+        cause: { cause: "first" },
+        opened_at: "2026-09-02T10:00:00Z",
         model: "test-model",
         effort: "low",
         session_id: null,
@@ -218,6 +220,51 @@ describe("WorkflowRunDetail", () => {
     expect(termination).not.toContain("Failed");
   });
 
+  it("words a redispatch after an interruption apart from a fallback", async () => {
+    const first = baseCall.dispatch!.attempts[0];
+    await render(
+      runWith({
+        ...baseCall,
+        dispatch: {
+          ...baseCall.dispatch!,
+          attempts: [
+            first,
+            { ...first, cause: { cause: "after_interruption" }, model: "test-model" },
+          ],
+        },
+      } as unknown as WorkflowAgentCallDetail),
+    );
+    let attempts = document.querySelector(".attempts")!.textContent!;
+    expect(attempts).toContain("attempt 2 — dispatched again after a gateway interruption");
+    expect(attempts).toContain("attempt 1's outcome is unknown");
+    expect(attempts).toContain("may have been applied");
+    expect(attempts).not.toContain("fallback");
+
+    unmount(component!);
+    component = undefined;
+    document.body.replaceChildren();
+    await render(
+      runWith({
+        ...baseCall,
+        dispatch: {
+          ...baseCall.dispatch!,
+          attempts: [
+            first,
+            {
+              ...first,
+              cause: { cause: "provider_fallback", primary_failure: "unknown model pinned" },
+              model: "fallback",
+            },
+          ],
+        },
+      } as unknown as WorkflowAgentCallDetail),
+    );
+    attempts = document.querySelector(".attempts")!.textContent!;
+    expect(attempts).toContain("the primary failed (unknown model pinned); the declared fallback served");
+    expect(attempts).not.toContain("interrupt");
+    expect(document.querySelector(".call")!.textContent).toContain("fallback, low");
+  });
+
   it("tells an outstanding provider round from a settled one", async () => {
     await render(
       runWith({
@@ -283,6 +330,8 @@ describe("WorkflowRunDetail", () => {
           ...baseCall.dispatch!,
           attempts: [
             {
+              cause: { cause: "first" },
+              opened_at: "2026-09-02T10:00:00Z",
               model: "interrupted-model",
               effort: "low",
               session_id: null,
@@ -290,6 +339,8 @@ describe("WorkflowRunDetail", () => {
               turn_id: null,
             },
             {
+              cause: { cause: "after_interruption" },
+              opened_at: "2026-09-02T10:00:03Z",
               model: "test-model",
               effort: "low",
               session_id: null,

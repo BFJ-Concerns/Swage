@@ -17,16 +17,16 @@ use swage_protocol::client::workflow::{
     AnswerWorkflowRunHoldRequest, AnswerWorkflowRunHoldResponse, CreateWorkflowScriptRequest,
     PostWorkflowRunEventRequest, PostWorkflowRunEventResponse, StartInlineWorkflowRunRequest,
     StartWorkflowRunRequest, UpdateWorkflowScriptRequest, WorkflowAgentCallDispatch,
-    WorkflowArgumentContract, WorkflowBudget, WorkflowCallUsage, WorkflowCutShortCause,
-    WorkflowHandoverEvent, WorkflowHandoverEventDelivery, WorkflowHandoverFailedCall,
-    WorkflowHandoverFailedCallRef, WorkflowJournalEntryKind, WorkflowJournalResult,
-    WorkflowPartialResult, WorkflowPartialResults, WorkflowRouteBudget, WorkflowRun,
-    WorkflowRunDetailResponse, WorkflowRunEnding, WorkflowRunEvent, WorkflowRunEventSource,
-    WorkflowRunHandover, WorkflowRunHold, WorkflowRunHoldRejection, WorkflowRunHoldState,
-    WorkflowRunListResponse, WorkflowRunState, WorkflowRunTerminalAccount, WorkflowScript,
-    WorkflowScriptListResponse, WorkflowUsageUnavailableReason, WorkflowWorkerAccount,
-    WorkflowWorkerPartition, WorkflowWorkerPlacementRecord, WorkflowWorkerTermination,
-    WorkflowWorktreeCompletion,
+    WorkflowAgentCallResolution, WorkflowArgumentContract, WorkflowAttemptCause, WorkflowBudget,
+    WorkflowCallUsage, WorkflowCutShortCause, WorkflowHandoverEvent, WorkflowHandoverEventDelivery,
+    WorkflowHandoverFailedCall, WorkflowHandoverFailedCallRef, WorkflowJournalEntryKind,
+    WorkflowJournalResult, WorkflowPartialResult, WorkflowPartialResults, WorkflowRouteBudget,
+    WorkflowRun, WorkflowRunDetailResponse, WorkflowRunEnding, WorkflowRunEvent,
+    WorkflowRunEventSource, WorkflowRunHandover, WorkflowRunHold, WorkflowRunHoldRejection,
+    WorkflowRunHoldState, WorkflowRunInterruption, WorkflowRunListResponse, WorkflowRunState,
+    WorkflowRunTerminalAccount, WorkflowScript, WorkflowScriptListResponse,
+    WorkflowUsageUnavailableReason, WorkflowWorkerAccount, WorkflowWorkerPartition,
+    WorkflowWorkerPlacementRecord, WorkflowWorkerTermination, WorkflowWorktreeCompletion,
 };
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
@@ -495,21 +495,47 @@ impl AppState {
     }
 }
 
-/// Append one attempt of an agent call to its journal entry, and settle what
-/// the attempts it supersedes left outstanding.
+/// Open one attempt of an agent call on its journal entry before its turn
+/// starts: the cause the run dispatches it for, and when. The turn resolves
+/// it before any provider work (`resolve_agent_call_attempt`); an attempt
+/// the gateway dies between the two writes of stays in the record with its
+/// cause and no resolution.
+pub(crate) async fn open_agent_call_attempt(
+    storage: &dyn Storage,
+    journal_entry_id: Uuid,
+    cause: WorkflowAttemptCause,
+) -> Result<(), swage_core::StorageError> {
+    let opened = WorkflowAgentCallResolution {
+        cause,
+        opened_at: chrono::Utc::now(),
+        model: None,
+        effort: None,
+        session_id: None,
+        thread_id: None,
+        turn_id: None,
+    };
+    let opened = serde_json::to_value(opened)
+        .map_err(|error| swage_core::StorageError::QueryFailed(error.to_string()))?;
+    storage
+        .open_workflow_call_attempt(journal_entry_id, opened)
+        .await
+}
+
+/// Resolve the open attempt of an agent call with what its turn resolved,
+/// and settle what the attempts it supersedes left outstanding.
 ///
 /// Replay re-dispatches an unfinished call under a new turn. The attempts it
 /// follows can no longer receive a provider response, so their open rounds
 /// are ended as interrupted at the moment that becomes true — leaving them
 /// reading as outstanding would say a request might still come back when
 /// nothing can answer it.
-pub(crate) async fn record_agent_call_attempt(
+pub(crate) async fn resolve_agent_call_attempt(
     storage: &dyn Storage,
     journal_entry_id: Uuid,
-    attempt: Value,
+    resolution: Value,
 ) -> Result<(), swage_core::StorageError> {
     let superseded = storage
-        .record_workflow_call_attempt(journal_entry_id, attempt)
+        .resolve_workflow_call_attempt(journal_entry_id, resolution)
         .await?;
     let superseded: Vec<swage_protocol::client::workflow::WorkflowAgentCallResolution> = superseded
         .into_iter()
@@ -2581,6 +2607,32 @@ async fn persist_workflow_worker_liveness(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Why the run dispatches an attempt of `journal_entry_id` now: the call's
+/// first, or one following attempts an interruption cut off — the entry
+/// already carries attempts only when replay re-dispatches it, since a call
+/// that settled is never dispatched again.
+async fn attempt_cause_for(
+    storage: &dyn Storage,
+    run_id: Uuid,
+    journal_entry_id: Uuid,
+) -> Result<WorkflowAttemptCause, WorkflowHostError> {
+    let journal = storage
+        .list_workflow_journal(run_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let earlier = journal
+        .iter()
+        .find(|entry| entry.id == journal_entry_id)
+        .and_then(|entry| entry.dispatch_attempts.as_ref())
+        .and_then(Value::as_array)
+        .is_some_and(|attempts| !attempts.is_empty());
+    Ok(if earlier {
+        WorkflowAttemptCause::AfterInterruption
+    } else {
+        WorkflowAttemptCause::First
+    })
+}
+
 async fn execute_workflow_agent_turn(
     state: &AppState,
     session_id: Uuid,
@@ -2595,7 +2647,14 @@ async fn execute_workflow_agent_turn(
     journal_entry_id: Uuid,
     requested_model: Option<String>,
     reuse_persisted_input: bool,
+    cause: WorkflowAttemptCause,
 ) -> Result<WorkflowTurnAttempt, WorkflowHostError> {
+    // The attempt is opened with its cause before the turn exists, so the
+    // record says why a worker was dispatched even if nothing ever resolves
+    // what it ran with.
+    open_agent_call_attempt(state.storage.as_ref(), journal_entry_id, cause)
+        .await
+        .map_err(|error| format!("failed to open the agent call attempt: {error}"))?;
     let (event_tx, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let mut events = Vec::new();
     let provider_failure = Arc::new(std::sync::Mutex::new(None));
@@ -3088,6 +3147,7 @@ async fn run_ephemeral_agent_call_with_admission(
         assembly: request.assembly.clone(),
         skills: persisted_skills.or_else(|| request.skills.clone()),
     };
+    let cause = attempt_cause_for(state.storage.as_ref(), run_id, journal_entry_id).await?;
     let primary = execute_workflow_agent_turn(
         state,
         session_id,
@@ -3102,6 +3162,7 @@ async fn run_ephemeral_agent_call_with_admission(
         journal_entry_id,
         request.model.clone(),
         false,
+        cause,
     )
     .await?;
     let emitted_output = primary
@@ -3209,6 +3270,9 @@ async fn run_ephemeral_agent_call_with_admission(
                 journal_entry_id,
                 Some(fallback_model.clone()),
                 reuse_persisted_input,
+                WorkflowAttemptCause::ProviderFallback {
+                    primary_failure: error.clone(),
+                },
             )
             .await?;
             fallback.outcome.map_err(|fallback_error| {
@@ -3487,6 +3551,17 @@ fn worker_account(
         placement: worker_placement_of(entry, placements),
         worktree: worker_worktree_completion(entry),
         termination,
+        redispatched_after_interruption: entry
+            .dispatch_attempts
+            .clone()
+            .and_then(|attempts| {
+                serde_json::from_value::<Vec<WorkflowAgentCallResolution>>(attempts).ok()
+            })
+            .is_some_and(|attempts| {
+                attempts
+                    .iter()
+                    .any(|attempt| attempt.cause == WorkflowAttemptCause::AfterInterruption)
+            }),
     }
 }
 
@@ -7994,6 +8069,17 @@ fn run_wire(record: WorkflowRunRecord) -> Result<WorkflowRun, ApiError> {
             .map_err(|error| {
                 internal(format!(
                     "workflow run {} terminal account does not match the recorded contract: {error}",
+                    record.id
+                ))
+            })?,
+        interruptions: record
+            .interruptions
+            .into_iter()
+            .map(serde_json::from_value::<WorkflowRunInterruption>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                internal(format!(
+                    "workflow run {} interruption record does not match the recorded contract: {error}",
                     record.id
                 ))
             })?,

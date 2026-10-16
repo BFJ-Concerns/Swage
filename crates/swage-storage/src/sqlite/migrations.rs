@@ -102,8 +102,19 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ),
         ("065_turn_execution_isolation", ADD_TURN_EXECUTION_ISOLATION),
         ("066_turn_failure_message", ADD_TURN_FAILURE_MESSAGE),
+        (
+            "069_workflow_run_interruptions",
+            ADD_WORKFLOW_RUN_INTERRUPTIONS,
+        ),
     ]
 }
+
+/// Every gateway interruption a run lived through, as a JSON list of
+/// `{ detected_at, run_state }` entries written by the boot that found the
+/// run running or parked with no gateway alive to serve it.
+const ADD_WORKFLOW_RUN_INTERRUPTIONS: &str = "
+    ALTER TABLE workflow_runs ADD COLUMN interruptions_json TEXT NOT NULL DEFAULT '[]';
+";
 
 /// The execution boundary a turn ran inside, recorded when its dispatcher
 /// settled: the isolated, degraded, declared and its detail (the

@@ -70,6 +70,29 @@
     return worker.label ?? `worker ${worker.seq}`;
   }
 
+  // A worker dispatched again after an interruption is marked where it
+  // stands: its interrupted attempt's tool calls have unknown outcomes.
+  function describeRedispatch(worker: WorkflowWorkerAccount): string | null {
+    return worker.redispatched_after_interruption
+      ? "redispatched after an interruption — the interrupted attempt's tool calls have unknown outcomes and may have been applied"
+      : null;
+  }
+
+  const redispatchedAny = $derived(
+    account
+      ? Object.values(account.workers).some((workers) =>
+          workers.some((worker) => worker.redispatched_after_interruption),
+        )
+      : false,
+  );
+
+  function describeInterruption(interruption: { detected_at: string; run_state: string }): string {
+    const when = new Date(interruption.detected_at).toLocaleString();
+    return interruption.run_state === "parked"
+      ? `${when} — the gateway stopped while this run was parked; its wait outlived the gateway`
+      : `${when} — the gateway stopped while this run was executing; its unsettled calls were dispatched again`;
+  }
+
   function renderOutput(output: unknown): string {
     return typeof output === "string" ? output : JSON.stringify(output);
   }
@@ -89,10 +112,26 @@
       <p class="state">{run.state}</p>
     </header>
 
+    {#if run.interruptions.length > 0}
+      <section class="interruptions">
+        <h3>Interruptions</h3>
+        <ul>
+          {#each run.interruptions as interruption, index (index)}
+            <li class="detail">{describeInterruption(interruption)}</li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
+
     {#if account}
       <section class="ending">
         <h3>Ending</h3>
         <p class="ending-line">{describeEnding(account.ending)}</p>
+        {#if redispatchedAny}
+          <p class="detail disclosure">
+            Workers redispatched after an interruption may have repeated their effects.
+          </p>
+        {/if}
       </section>
 
       <section class="workers">
@@ -106,6 +145,9 @@
                   <li>
                     <span class="worker">{describeWorker(worker)}</span>
                     <span class="detail">{describeTermination(worker)}</span>
+                    {#if describeRedispatch(worker)}
+                      <span class="detail redispatch">{describeRedispatch(worker)}</span>
+                    {/if}
                     {#if worker.placement}
                       <span class="placement">{worker.placement}</span>
                     {/if}

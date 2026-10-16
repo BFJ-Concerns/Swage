@@ -47,6 +47,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- A workflow run's record shows every gateway interruption it lived through — a boot that found it running, or parked — and the run view lists them. Each attempt of a worker call records why it was dispatched: the first dispatch, a redispatch after an interruption (whose earlier attempt's outcome is unknown and whose tool calls may have been applied), or the declared fallback serving after the primary failed; the run detail words the two apart instead of calling every redispatch an interruption. The run's Done summary marks workers redispatched after an interruption and discloses that their effects may have been repeated.
+
 - Shared-session channel arrivals keep their order across chats, and queued branch replies stay on their own thread in the live conversation.
 
 - Developer channel messages join the durable session queue during a turn. Telegram polling continues while the assistant answers; queued inputs retain their thread destinations, replies are delivered once per target, and deleting a session settles its waiting scheduled work. Delayed queue acknowledgements cannot restore drained messages.

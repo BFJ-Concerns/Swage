@@ -2365,7 +2365,14 @@ impl swage_storage::WorkflowStore for MockStorage {
     ) -> Result<(), StorageError> {
         Ok(())
     }
-    async fn record_workflow_call_attempt(
+    async fn open_workflow_call_attempt(
+        &self,
+        _: Uuid,
+        _: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+    async fn resolve_workflow_call_attempt(
         &self,
         _: Uuid,
         _: serde_json::Value,
@@ -2418,7 +2425,10 @@ impl swage_storage::WorkflowStore for MockStorage {
     ) -> Result<bool, StorageError> {
         unimplemented!()
     }
-    async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {
+    async fn record_gateway_interruption(
+        &self,
+        _: chrono::DateTime<chrono::Utc>,
+    ) -> Result<swage_storage::model::GatewayInterruptionCounts, StorageError> {
         unimplemented!()
     }
     async fn try_transition_workflow_run_state(
@@ -2582,7 +2592,9 @@ impl swage_storage::WorkflowStore for MockStorage {
         &self,
         _: Uuid,
     ) -> Result<Vec<swage_storage::WorkflowJournalRecord>, StorageError> {
-        unimplemented!()
+        // The mock keeps no journal: every call it dispatches is a first
+        // attempt, and nothing it is asked about has entries.
+        Ok(Vec::new())
     }
 }
 
