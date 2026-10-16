@@ -22,9 +22,11 @@ agent id can behave differently per topic without requiring separate ids.
 
 ### How the overlay works
 
-When a session starts, the gateway resolves the file-based configuration
-cascade (Global → Topic → Agent `.toml` files) into a resolved config, then
-overlays the agent definition on top. The overlay:
+At each turn, the gateway overlays the session's topic and agent layers
+(their `config.toml` files and `instructions/` directories, Global → Topic →
+Agent) on the running configuration — the global layer as loaded at startup
+and replaced by Settings saves — then overlays the agent definition on top.
+The overlay:
 
 - **Instructions** are appended after operator instructions, preserving the
   operator's ambient guidance while letting the definition extend it.
@@ -571,9 +573,11 @@ them:
 - **Desktop app:** quit and reopen the app.
 - **Standalone process:** stop and start the process.
 
-Sessions whose topic or agent has its own `config.toml` re-resolve the full
-configuration hierarchy — global file included — on each turn, so edits can
-reach those sessions without a restart.
+Only the global `config.toml` needs the restart: it is read when the gateway
+starts and rewritten by Settings saves, which apply at once. A topic's or
+agent's `config.toml` and `instructions/` are read at each turn and overlaid
+on the running configuration, so an edit there applies to the next turn
+under that scope, in every session alike, with no restart.
 
 ### Disabling experimentation
 

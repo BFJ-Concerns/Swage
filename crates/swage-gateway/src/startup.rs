@@ -32,14 +32,17 @@ const CODEX_COMPLETION_UNSUPPORTED_REASON: &str = "Codex turns run through the A
 ///
 /// Errors during startup are printed to stderr and the process exits.
 pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: Option<String>) {
-    // Step 1: Load configuration. Errors go to stderr — no logging yet.
-    // The gateway's own configuration is the global layer with a default
-    // agent overlay; a configured name selects the topic whose layer applies.
+    // Step 1: Load the running configuration. Errors go to stderr — no
+    // logging yet. This is the global layer — plus the topic's where a
+    // configured name selects one — read from disk here and at no later
+    // point: settings saves replace it in place, and each turn overlays its
+    // session's topic and agent layers on it (swage-config's resolver states
+    // the reload policy).
     let scope = match config_path.as_deref() {
         Some(name) => swage_core::ScopeLocation::topic(name),
         None => swage_core::ScopeLocation::General,
     };
-    let mut config = match swage_config::load_resolved_config(&scope, "default") {
+    let mut config = match swage_config::load_running_config(&scope) {
         Ok(c) => c,
         Err(e) => {
             for problem in &e.problems {

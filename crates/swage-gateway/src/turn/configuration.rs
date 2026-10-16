@@ -2,7 +2,6 @@ use super::{
     AgentConfig, AppState, GatewayError, Path, PathBuf, TrustedWorkspacePolicy, Uuid,
     load_trusted_workspace_policy,
 };
-use swage_config::RESERVED_WORKFLOW_AGENT_ID;
 use swage_core::ScopeLocation;
 
 /// Host-only session metadata carrying every agent context whose effective
@@ -502,24 +501,21 @@ pub(crate) fn load_session_config(
     load_session_config_from_root(&state.config_root, state.active_config(), scope, agent_id)
 }
 
+/// Resolve the configuration a turn runs under: the running configuration —
+/// the global layer as loaded at startup and replaced by settings saves —
+/// with the session's topic and agent layers read now and overlaid on it.
+/// That is the one reload policy for every scope (swage-config's resolver
+/// states it): a global file edit applies at the next start everywhere, a
+/// topic or agent file edit at the next turn under it, and a scope with no
+/// files of its own runs under the running configuration unchanged. A
+/// present but invalid scope file fails the turn.
 pub(crate) fn load_session_config_from_root(
     root: &Path,
     active_config: swage_config::ResolvedConfig,
     scope: &ScopeLocation,
     agent_id: &str,
 ) -> Result<swage_config::ResolvedConfig, GatewayError> {
-    // The general scope has no scope-level layer; a topic's is its own
-    // config.toml. Either may carry an agent overlay beneath it.
-    let scope_config_exists =
-        !scope.is_general() && scope.data_dir(root).join("config.toml").exists();
-    let agent_config_exists = agent_id != RESERVED_WORKFLOW_AGENT_ID
-        && scope.agent_dir(root, agent_id).join("config.toml").exists();
-
-    if !scope_config_exists && !agent_config_exists {
-        return Ok(active_config);
-    }
-
-    swage_config::load_resolved_config_from(root, scope, agent_id)
+    swage_config::overlay_scope_layers(active_config, root, scope, agent_id)
         .map_err(|error| GatewayError::ConfigError(error.to_string()))
 }
 
@@ -918,6 +914,7 @@ pub(super) fn ensure_selected_model_available(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use swage_config::RESERVED_WORKFLOW_AGENT_ID;
 
     #[test]
     fn catalogue_lookup_and_provider_route_resolve_alias_identically() {
@@ -1019,6 +1016,54 @@ mod tests {
             ordinary.server.port, 4100,
             "a normal agent directory must still select its resolved configuration"
         );
+    }
+
+    #[test]
+    fn every_scope_reads_the_global_layer_from_the_running_configuration() {
+        let root = tempfile::tempdir().expect("temporary root");
+        // A hand edit to the global file made after startup: it waits for
+        // the next start in every scope, whether or not a scope file exists.
+        std::fs::write(root.path().join("config.toml"), "[server]\nport = 9000\n")
+            .expect("write global config");
+        let topic = ScopeLocation::topic("dispatch");
+        let topic_config = topic.data_dir(root.path()).join("config.toml");
+        std::fs::create_dir_all(topic_config.parent().expect("topic directory"))
+            .expect("create topic directory");
+        std::fs::write(&topic_config, "[communication]\nmessage_ttl_secs = 73\n")
+            .expect("write topic overlay");
+
+        let mut running = swage_config::ResolvedConfig {
+            instructions: "RUNNING_INSTRUCTIONS".to_string(),
+            ..Default::default()
+        };
+        running.server.port = 4242;
+
+        for (scope, agent_id, expected_ttl) in [
+            (
+                ScopeLocation::General,
+                "gateway",
+                running.communication.message_ttl_secs,
+            ),
+            (topic.clone(), "reviewer", 73),
+            (topic.clone(), RESERVED_WORKFLOW_AGENT_ID, 73),
+        ] {
+            let config =
+                load_session_config_from_root(root.path(), running.clone(), &scope, agent_id)
+                    .expect("session configuration");
+            assert_eq!(
+                config.server.port, 4242,
+                "{scope:?}/{agent_id}: the global layer is the running configuration, not the file"
+            );
+            assert_eq!(
+                config.communication.message_ttl_secs, expected_ttl,
+                "{scope:?}/{agent_id}: the topic layer applies where the session has one"
+            );
+            assert!(
+                config.instructions.starts_with("RUNNING_INSTRUCTIONS"),
+                "{scope:?}/{agent_id}: the running instructions survive: {}",
+                config.instructions
+            );
+        }
     }
 
     #[test]
