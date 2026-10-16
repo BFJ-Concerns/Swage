@@ -146,6 +146,7 @@ const SESSION_SURFACES_AND_LIBRARY: &str = "
         title            TEXT NOT NULL,
         library_entry_id TEXT REFERENCES surface_library_entries(id) ON DELETE SET NULL,
         seeded_from_name TEXT,
+        shape_only       INTEGER NOT NULL DEFAULT 0 CHECK (shape_only IN (0, 1)),
         seeded_at        TEXT,
         created_at       TEXT NOT NULL,
         updated_at       TEXT NOT NULL
@@ -169,6 +170,7 @@ const SESSION_SURFACES_AND_LIBRARY: &str = "
         body        TEXT NOT NULL,
         tags        TEXT NOT NULL,
         author      TEXT NOT NULL,
+        resolved_at TEXT,
         created_at  TEXT NOT NULL,
         updated_at  TEXT NOT NULL
     );

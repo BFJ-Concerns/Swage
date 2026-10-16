@@ -7,6 +7,9 @@ All notable changes to Swage are documented in this file.
 ### Added
 
 - The turn context inspector opens complete recorded provider requests and element text, and shows effective model, provider, effort, budgets and request divergences.
+- Session surfaces can be renamed from their header or by the agent without changing the library entry or original surface.
+- Either party can resolve a surface note; it leaves the working view and remains in the surface record.
+- Agents can replace or remove a uniquely matched passage of a module without resubmitting unrelated content.
 
 - Settings has a Memory tab listing every memory page, general and per topic, to read; a chat box there changes memory by instructing the curator, showing its reply and each page it changed. The curator's notice links open the page they name.
 - Settings edits the web search provider and applies saved changes to new turns.
@@ -58,6 +61,14 @@ All notable changes to Swage are documented in this file.
 - Turn inspector instruction summaries count each configured file at its original hierarchy level, including topic instructions.
 
 - Turn records retain every provider stream attempt, including the initial request and retries, with start and end times and redacted failure details.
+- Surface renames and note resolutions commit with their audit event; a failed audit write leaves the surface unchanged.
+
+- Surface reads by the agent omit resolved notes while the HTTP response and stored record retain them.
+
+- Retrying a surface rename or note resolution clears the previous failure notice.
+
+- Failed checklist saves keep an open surface note and its unsaved text.
+
 - Shared-session channel arrivals keep their order across chats, and queued branch replies stay on their own thread in the live conversation.
 
 - Developer channel messages join the durable session queue during a turn. Telegram polling continues while the assistant answers; queued inputs retain their thread destinations, replies are delivered once per target, and deleting a session settles its waiting scheduled work. Delayed queue acknowledgements cannot restore drained messages.
@@ -68,6 +79,15 @@ All notable changes to Swage are documented in this file.
 - Saving an agent definition refuses `require_approval` in its tool-permission overlay instead of accepting an ignored approval requirement.
 - The web UI serves Bebas Neue, Hanken Grotesk and DM Mono from bundled font files without contacting Google Fonts.
 - LAN installation accepts a host and port, saves valid gateway defaults, and finds release artefacts under a custom Cargo target directory.
+- Failed surface renames and note resolutions preserve unsaved module edits and note drafts.
+
+- Library cards and topic-default choices distinguish same-name saves by time and origin.
+- Agent catalogue results include save times; saving an existing name explains that it creates a separate entry.
+- The save-to-library form has persistent visible labels, reviewable descriptions and tags, and explains what is preserved.
+- Shape-only surface copies explain why their modules start empty.
+- Surface tools resolve session surfaces by title and return useful surface listings for invalid references and unknown arguments.
+- Rendered checklist boxes save their changes to Markdown with the same revision checks and conflict choice as a module edit.
+- Whole-module replacements report when they discard most of the previous source.
 - Browser navigation keeps working after settings or grant changes, retaining the logged-in profile; startup timeouts explain how to recover.
 
 - Oversized browser snapshots retain the article’s opening paragraph through ignored accessibility wrappers and preceding infobox tables instead of eliding it.

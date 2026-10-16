@@ -98,6 +98,7 @@ function mockConversationStoreWithSessions(
 function mockSurfacesStore(): SurfacesStore {
   const surface = {
     id: "surface-1",
+    shape_only: false,
     session_id: "conv-1",
     title: "Release checklist",
     created_at: "2026-08-29T10:00:00Z",
@@ -142,6 +143,8 @@ function mockSurfacesStore(): SurfacesStore {
     moveModule: async () => {},
     annotate: async () => {},
     updateAnnotation: async () => {},
+    renameSurface: async () => {},
+    resolveAnnotation: async () => {},
     removeAnnotation: async () => {},
     stopListening: () => {},
   };
