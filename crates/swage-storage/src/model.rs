@@ -401,6 +401,17 @@ pub struct DeviceRegistration {
     pub registered_at: DateTime<Utc>,
 }
 
+/// An unredeemed channel link code, persisted until redemption or expiry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelLinkCode {
+    pub code: String,
+    pub integration: String,
+    pub topic_id: Option<Uuid>,
+    pub agent_id: Option<String>,
+    pub home_target: Option<serde_json::Value>,
+    pub expires_at: DateTime<Utc>,
+}
+
 /// A durable onboarding link for an external communication channel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelLink {
@@ -2313,6 +2324,7 @@ pub struct NewMessage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueuedTurnInput {
     /// Identifies the originating client's optimistic send, when supplied.
+    pub delivery_targets: Vec<serde_json::Value>,
     pub client_id: Option<Uuid>,
     /// Whether the source expects a person to review tool approvals.
     pub attended: bool,
@@ -2335,6 +2347,7 @@ pub struct QueuedTurnInput {
 /// Input for queueing a message behind a running turn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NewQueuedTurnInput {
+    pub delivery_targets: Vec<serde_json::Value>,
     pub client_id: Option<Uuid>,
     pub attended: bool,
     pub session_id: Uuid,
@@ -2348,12 +2361,13 @@ pub struct NewQueuedTurnInput {
     pub channel_message_ids: Vec<Uuid>,
 }
 
-/// A session's queue run as one turn: the turn row, and one recorded message
+/// The queue's first consecutive thread group: its turn and one recorded message
 /// per queued input in arrival order.
 #[derive(Debug, Clone)]
 pub struct DrainedTurnQueue {
     /// A batch is attended if any of its inputs was attended at its source.
     pub attended: bool,
+    pub delivery_targets: Vec<serde_json::Value>,
     pub schedule_run_ids: Vec<Uuid>,
     pub channel_origins: Vec<PendingChannelOrigin>,
     pub turn: Turn,

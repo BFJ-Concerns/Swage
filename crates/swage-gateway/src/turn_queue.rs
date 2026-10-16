@@ -2,9 +2,9 @@
 //!
 //! A person's message is never refused for arriving mid-turn: it is
 //! accepted, held durably in arrival order, shown as queued to every open
-//! view, and becomes the next turn's input the moment the running turn ends
-//! — one turn, every queued message in it, each recorded as its own message
-//! with the origin it arrived with. Stopping a turn leaves the queue intact:
+//! view, and becomes input when the running turn ends. Consecutive messages
+//! for the same thread share a turn, each recorded as its own message with
+//! the origin it arrived with; a different destination starts the next group. Stopping a turn leaves the queue intact:
 //! the person decides what happens next. A gateway restart drains any queue
 //! it finds once the orphaned turns are settled. One queue serves every
 //! entry point; the HTTP and WebSocket person paths enqueue here, and a
@@ -78,6 +78,7 @@ pub async fn queue_input(
         None,
         Vec::new(),
         TurnAttendance::Attended,
+        Vec::new(),
     )
     .await
 }
@@ -92,10 +93,16 @@ pub(crate) async fn queue_input_with_attribution(
     schedule_run_id: Option<Uuid>,
     channel_message_ids: Vec<Uuid>,
     attendance: TurnAttendance,
+    delivery_targets: Vec<crate::channel_gateway::DeliveryTarget>,
 ) -> Result<QueuedMessageView, GatewayError> {
     let queued = state
         .storage
         .enqueue_turn_input(NewQueuedTurnInput {
+            delivery_targets: delivery_targets
+                .into_iter()
+                .map(serde_json::to_value)
+                .collect::<Result<_, _>>()
+                .map_err(|error| GatewayError::ValidationError(error.to_string()))?,
             attended: attendance == TurnAttendance::Attended,
             client_id: input.client_id,
             session_id,
@@ -107,30 +114,43 @@ pub(crate) async fn queue_input_with_attribution(
             channel_message_ids,
         })
         .await?;
-    let view = queued_message_view(&queued)?;
-    state
-        .send_to_session(
-            session_id,
-            &ServerEvent::MessageQueued {
+    announce_queued_inputs(state, session_id, &[queued])
+        .await?
+        .pop()
+        .ok_or_else(|| GatewayError::ValidationError("enqueue returned no input".into()))
+}
+
+/// Announce a committed arrival batch, then allow its drain to start.
+pub(crate) async fn announce_queued_inputs(
+    state: &AppState,
+    session_id: Uuid,
+    queued: &[QueuedTurnInput],
+) -> Result<Vec<QueuedMessageView>, GatewayError> {
+    let mut views = Vec::with_capacity(queued.len());
+    for queued in queued {
+        let view = queued_message_view(queued)?;
+        state
+            .send_to_session(
                 session_id,
-                queued: view.clone(),
-            },
-        )
-        .await;
-    // The running turn may have ended between the caller's check and this
-    // enqueue, leaving nobody to drain; a drain that finds a turn running
-    // simply leaves the queue to that turn's end.
+                &ServerEvent::MessageQueued {
+                    session_id,
+                    queued: view.clone(),
+                },
+            )
+            .await;
+        views.push(view);
+    }
     if !state.active_turns.lock().await.contains_key(&session_id) {
         spawn_drain(state.clone(), session_id);
     }
-    Ok(view)
+    Ok(views)
 }
 
 /// Whether new input for the session must join its queue rather than start a
 /// turn of its own. Queued messages reach the session's next turn in arrival
 /// order, so while any stand — left by a Stop, or not yet drained — input that
 /// finds the session idle queues behind them, and the drain that queueing
-/// starts runs them all as one turn.
+/// starts runs consecutive messages for the same thread as one turn.
 pub async fn has_queued_input(state: &AppState, session_id: Uuid) -> Result<bool, GatewayError> {
     Ok(!state
         .storage
@@ -160,9 +180,9 @@ pub fn spawn_drain(state: AppState, session_id: Uuid) {
     });
 }
 
-/// Run everything queued for the session as one turn: the store claims the
-/// session with the turn, records each queued message as its own row with
-/// its origin, and empties the queue in one transaction, so a claim that
+/// Run the first consecutive thread group as one turn: the store claims the
+/// session with the turn, records each message in the group as its own row with
+/// its origin, and removes that group in one transaction, so a claim that
 /// loses to a live turn changes nothing and a failure leaves no half-state.
 /// `None` when nothing was queued or a turn is already running (the queue
 /// waits for that turn's end).
@@ -238,6 +258,7 @@ pub async fn drain_queue(state: &AppState, session_id: Uuid) -> Result<Option<Uu
                 &ServerEvent::QueueDrained {
                     session_id,
                     turn_id: turn.id,
+                    thread_id: turn.thread_id,
                     queued_ids: drained.queued_ids.clone(),
                 },
             )
@@ -313,13 +334,32 @@ pub async fn drain_queue(state: &AppState, session_id: Uuid) -> Result<Option<Uu
         }
     }
     if settled.state == TurnState::Completed {
+        let mut targets = drained
+            .delivery_targets
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<Result<Vec<crate::channel_gateway::DeliveryTarget>, _>>()
+            .map_err(|error| GatewayError::ValidationError(error.to_string()))?;
         for origin in drained.channel_origins {
-            if let Err(error) =
-                crate::channel_gateway::deliver_queued_response(state, session_id, &settled, origin)
-                    .await
-            {
-                delivery_error.get_or_insert(error);
-            }
+            targets.extend(crate::channel_gateway::queued_response_targets(state, origin).await?);
+        }
+        let mut unique = Vec::new();
+        for target in targets {
+            crate::channel_gateway::push_unique_target(&mut unique, target);
+        }
+        if let Err(error) = crate::channel_gateway::deliver_to_targets(
+            state,
+            session_id,
+            crate::channel_gateway::DeliveryAttribution {
+                run_id: None,
+                turn_id: Some(settled.id),
+            },
+            &unique,
+            settled.assistant_response.as_deref().unwrap_or_default(),
+        )
+        .await
+        {
+            delivery_error.get_or_insert(error);
         }
     }
     result?;
@@ -1190,6 +1230,7 @@ mod tests {
         state
             .storage
             .enqueue_turn_input(NewQueuedTurnInput {
+                delivery_targets: Vec::new(),
                 attended: true,
                 client_id: None,
                 session_id,
