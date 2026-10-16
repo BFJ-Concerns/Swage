@@ -36,6 +36,11 @@ pub(crate) fn row_to_annotation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sur
     let created: String = row.get(6)?;
     let updated: String = row.get(7)?;
     Ok(SurfaceAnnotation {
+        resolved_at: row
+            .get::<_, Option<String>>(8)?
+            .as_deref()
+            .map(parse_dt)
+            .transpose()?,
         id: parse_uuid(&id)?,
         surface_id: parse_uuid(&surface_id)?,
         module_id: parse_uuid(&module_id)?,
@@ -48,7 +53,7 @@ pub(crate) fn row_to_annotation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sur
 }
 
 pub(crate) const COLUMNS: &str =
-    "id, surface_id, module_id, body, tags, author, created_at, updated_at";
+    "id, surface_id, module_id, body, tags, author, created_at, updated_at, resolved_at";
 
 #[async_trait]
 impl SurfaceAnnotationStore for SqliteStorage {
@@ -82,6 +87,7 @@ impl SurfaceAnnotationStore for SqliteStorage {
                 params![&now_str, annotation.surface_id.to_string()],
             )?;
             Ok(SurfaceAnnotation {
+                resolved_at: None,
                 id,
                 surface_id: annotation.surface_id,
                 module_id: annotation.module_id,
@@ -145,6 +151,41 @@ impl SurfaceAnnotationStore for SqliteStorage {
                 params![&now_str, id.to_string()],
             )?;
             Ok(())
+        })
+        .await
+    }
+
+    async fn resolve_surface_annotation(
+        &self,
+        id: Uuid,
+        mut audit_event: NewAuditEvent,
+    ) -> Result<bool, StorageError> {
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let now = Utc::now();
+            let now_str = now.to_rfc3339();
+            let changed = tx.execute(
+                "UPDATE surface_annotations SET resolved_at = ?1, updated_at = ?1
+                 WHERE id = ?2 AND resolved_at IS NULL",
+                params![now_str, id.to_string()],
+            )?;
+            if changed > 0 {
+                tx.execute(
+                    "UPDATE surfaces SET updated_at = ?1
+                     WHERE id = (SELECT surface_id FROM surface_annotations WHERE id = ?2)",
+                    params![now_str, id.to_string()],
+                )?;
+                let body: String = tx.query_row(
+                    "SELECT body FROM surface_annotations WHERE id = ?1",
+                    [id.to_string()],
+                    |row| row.get(0),
+                )?;
+                audit_event.metadata["resolved_at"] = serde_json::json!(now);
+                audit_event.metadata["body"] = serde_json::json!(body);
+                super::audit::insert_audit_event(&tx, audit_event)?;
+            }
+            tx.commit()?;
+            Ok(changed > 0)
         })
         .await
     }

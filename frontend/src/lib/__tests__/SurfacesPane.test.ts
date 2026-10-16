@@ -10,6 +10,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { mount, unmount, flushSync } from "svelte";
 import { fromStore, writable } from "svelte/store";
 import { compile } from "svelte/compiler";
+import SurfaceLibrary from "../components/SurfaceLibrary.svelte";
 import SurfacesPane from "../components/SurfacesPane.svelte";
 import surfacesPaneSource from "../components/SurfacesPane.svelte?raw";
 import type { SurfacesStore } from "../stores/surfaces";
@@ -37,6 +38,7 @@ function surface(modules: SurfaceModuleView[]): SurfaceResponse {
   return {
     id: SURFACE_ID,
     session_id: SESSION_ID,
+    shape_only: false,
     title: "Planning",
     created_at: "2026-10-04T10:00:00Z",
     updated_at: "2026-10-04T10:00:00Z",
@@ -70,6 +72,8 @@ function fakeStore(initial: SurfaceResponse) {
     annotate: vi.fn(async () => {}),
     updateAnnotation: vi.fn(async () => {}),
     removeAnnotation: vi.fn(async () => {}),
+    renameSurface: vi.fn(async () => {}),
+    resolveAnnotation: vi.fn(async () => {}),
     stopListening: vi.fn(),
   };
   return store as typeof store & SurfacesStore;
@@ -253,4 +257,222 @@ describe("SurfacesPane module controls", () => {
       style.remove();
     }
   });
+});
+
+
+describe("surface workspace corrections", () => {
+  let component: MountedComponent | undefined;
+  afterEach(() => { if (component) unmount(component); component = undefined; document.body.innerHTML = ""; });
+  function show(store: SurfacesStore) {
+    component = mount(SurfacesPane, { target: document.body, props: { store, sessionId: SESSION_ID } });
+    flushSync();
+  }
+  it("keeps visible save labels and reviewable values with a preservation statement", async () => {
+    show(fakeStore(surface([])));
+    button("Save to library").click(); await settled();
+    for (const name of ["Library name", "Library description", "Library tags"]) {
+      const field = document.querySelector(`[aria-label="${name}"]`) as HTMLInputElement;
+      expect(field?.labels?.length, name).toBeGreaterThan(0);
+      expect(field.labels![0].textContent).toContain(name);
+    }
+    expect(document.querySelector('[aria-label="Library description"]')?.tagName).toBe("TEXTAREA");
+    expect(document.body.textContent).toContain("Notes stay with this session");
+  });
+  it("explains that a repeated name creates a separate library entry", async () => {
+    const store = fakeStore(surface([]));
+    Object.assign(store, { library: [{ id: "saved", name: "Planning", description: "Plan", tags: [], updated_at: "2026-10-01T10:00:00Z", origin_topic_deleted: false }] });
+    show(store); button("Save to library").click(); await settled();
+    const description = document.querySelector('[aria-label="Library description"]') as HTMLInputElement;
+    description.value = "A plan"; description.dispatchEvent(new Event("input", { bubbles: true }));
+    await settled(); button("Save").click(); await settled();
+    expect(store.saveToLibrary).toHaveBeenCalled();
+    expect(document.body.textContent).toContain("separate entry");
+  });
+  it("explains shape-only seeding but does not label a populated copy as empty", async () => {
+    const store = fakeStore(Object.assign(surface([]), { shape_only: true, seeded_from_name: "Atlas" }));
+    show(store);
+    expect(document.body.textContent).toContain("start empty");
+    store.setActive(Object.assign(surface([module("m", "# Saved content", 0)]), { shape_only: false, seeded_from_name: "Atlas" }));
+    await settled(); expect(document.body.textContent).not.toContain("start empty");
+    expect(document.body.textContent).toContain("Saved content");
+  });
+  it("renames from the header through the store", async () => {
+    const renameSurface = vi.fn(async () => {});
+    const store = Object.assign(fakeStore(surface([])), { renameSurface });
+    show(store); expect(document.body.textContent).toContain("Rename surface"); button("Rename surface").click(); await settled();
+    const title = document.querySelector('[aria-label="Surface title"]') as HTMLInputElement;
+    title.value = "Boreal plan"; title.dispatchEvent(new Event("input", { bubbles: true }));
+    await settled(); button("Save title").click(); await settled();
+    expect(renameSurface).toHaveBeenCalledWith(SURFACE_ID, "Boreal plan");
+    button("Rename surface").click(); await settled();
+    store.setActive({ ...surface([]), id: "other" }); await settled();
+    expect(document.querySelector('[aria-label="Surface title"]')).toBeNull();
+    expect(renameSurface).toHaveBeenCalledTimes(1);
+  });
+  it("ticks rendered checklists through the revision-guarded save", async () => {
+    const store = fakeStore(surface([module("m", "- [ ] Draft approved by Maya\n- [x] Retain this", 0)]));
+    show(store);
+    const checkbox = document.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    expect(checkbox.disabled).toBe(false); checkbox.click(); await settled();
+    expect(store.writeModule).toHaveBeenCalledWith(SURFACE_ID, "m", "- [x] Draft approved by Maya\n- [x] Retain this", 0);
+  });
+  it("shows the newer source when a checklist toggle conflicts", async () => {
+    const original = module("m", "- [ ] Draft approved by Maya", 0);
+    const store = fakeStore(surface([original]));
+    store.writeModule.mockResolvedValueOnce({ ...original, source: "- [ ] Newer wording", revision: 1 });
+    show(store); (document.querySelector('input[type="checkbox"]') as HTMLInputElement).click(); await settled();
+    expect(document.querySelector('[role="alert"]')?.textContent ?? "").toContain("Newer wording");
+    expect(store.writeModule).toHaveBeenCalledTimes(1);
+  });
+  it.each(["rename", "resolution"] as const)("preserves module and note drafts after a failed %s", async (operation) => {
+    const plan = module("m", "# Plan", 0);
+    plan.annotations = [
+      { id: "note", module_id: "m", body: "Act on this", tags: [], author: "gateway", created_at: "2026-10-01T10:00:00Z", updated_at: "2026-10-01T10:00:00Z" },
+    ];
+    const initial = surface([plan]);
+    const store = fakeStore(initial);
+    const failure = new Error(`${operation} temporarily unavailable`);
+    if (operation === "rename") store.renameSurface.mockRejectedValueOnce(failure);
+    else store.resolveAnnotation.mockRejectedValueOnce(failure);
+    store.openSurface.mockImplementationOnce(async () => {
+      store.setActive({ ...initial, modules: [{ ...plan, source: "# Refreshed plan", revision: 1 }] });
+    });
+    show(store);
+    button("Add note").click();
+    await settled();
+    const note = document.querySelector('input[placeholder="Note on this module"]') as HTMLInputElement;
+    note.value = "Unsaved note";
+    note.dispatchEvent(new Event("input", { bubbles: true }));
+    button("Edit", document.querySelector(".module-actions")!).click();
+    await settled();
+    const editor = document.querySelector("article.module textarea") as HTMLTextAreaElement;
+    editor.value = "# Unsaved module edit";
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    await settled();
+
+    if (operation === "rename") {
+      button("Rename surface").click();
+      await settled();
+      const title = document.querySelector('[aria-label="Surface title"]') as HTMLInputElement;
+      title.value = "Renamed plan";
+      title.dispatchEvent(new Event("input", { bubbles: true }));
+      await settled();
+      button("Save title").click();
+    } else button("Resolve").click();
+    await settled();
+
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(failure.message);
+    expect(store.openSurface).toHaveBeenCalledWith(SURFACE_ID);
+    expect.soft(document.querySelector<HTMLTextAreaElement>("article.module textarea")?.value, "module draft").toBe("# Unsaved module edit");
+    expect.soft(document.querySelector<HTMLInputElement>('input[placeholder="Note on this module"]')?.value, "note draft").toBe("Unsaved note");
+    expect(store.writeModule).not.toHaveBeenCalled();
+    expect(store.annotate).not.toHaveBeenCalled();
+  });
+
+  it("preserves an open note draft after a failed checklist toggle", async () => {
+    const initial = surface([module("m", "- [ ] Draft approved by Maya", 0)]);
+    const store = fakeStore(initial);
+    store.writeModule.mockRejectedValueOnce(new Error("Checklist save unavailable"));
+    store.openSurface.mockImplementationOnce(async () => { store.setActive({ ...initial }); });
+    show(store);
+    button("Add note").click(); await settled();
+    const note = document.querySelector<HTMLInputElement>('input[placeholder="Note on this module"]')!;
+    note.value = "Unsaved checklist note";
+    note.dispatchEvent(new Event("input", { bubbles: true }));
+    await settled();
+    document.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();
+    await settled();
+    expect(store.writeModule).toHaveBeenCalledWith(SURFACE_ID, "m", "- [x] Draft approved by Maya", 0);
+    expect(store.openSurface).toHaveBeenCalledWith(SURFACE_ID);
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("Checklist save unavailable");
+    expect(document.querySelector<HTMLInputElement>('input[placeholder="Note on this module"]')?.value, "open note draft").toBe("Unsaved checklist note");
+  });
+
+  it.each(["rename", "resolution"] as const)("clears the failure notice after a successful %s retry", async (operation) => {
+    const plan = module("m", "# Plan", 0);
+    plan.annotations = [{ id: "note", module_id: "m", body: "Act on this", tags: [], author: "gateway", created_at: "2026-10-01T10:00:00Z", updated_at: "2026-10-01T10:00:00Z" }];
+    const store = fakeStore(surface([plan]));
+    const mutation = operation === "rename" ? store.renameSurface : store.resolveAnnotation;
+    mutation.mockRejectedValueOnce(new Error("The change was not applied."));
+    show(store);
+    if (operation === "rename") { button("Rename surface").click(); await settled(); }
+    const submit = () => button(operation === "rename" ? "Save title" : "Resolve").click();
+    submit(); await settled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("The change was not applied.");
+    submit(); await settled();
+    expect(mutation).toHaveBeenCalledTimes(2);
+    expect(document.querySelector('[role="alert"]'), "successful retry failure notice").toBeNull();
+  });
+
+  it("requests resolution of an open note and filters recorded resolved notes", async () => {
+    const m = module("m", "# Plan", 0);
+    m.annotations = [
+      { id: "note", module_id: "m", body: "Act on this", tags: [], author: "gateway", created_at: "2026-10-01T10:00:00Z", updated_at: "2026-10-01T10:00:00Z" },
+      { id: "resolved", module_id: "m", body: "Already acted on", tags: [], author: "user", resolved_at: "2026-10-15T10:00:00Z", created_at: "2026-10-01T10:00:00Z", updated_at: "2026-10-15T10:00:00Z" },
+    ];
+    const resolveAnnotation = vi.fn(async () => {});
+    const store = Object.assign(fakeStore(surface([m])), { resolveAnnotation });
+    show(store); expect(document.body.textContent).toContain("Resolve"); button("Resolve").click(); await settled();
+    expect(resolveAnnotation).toHaveBeenCalledWith(SURFACE_ID, "note");
+    expect(document.body.textContent).toContain("Act on this");
+    expect(document.body.textContent).not.toContain("Already acted on");
+  });
+
+  it("does not toggle a matching task example inside a nested code block", async () => {
+    const source = "- [x] Parent\n\n  ```md\n  - [ ] Nested\n  ```\n\n  - [ ] Nested";
+    const store = fakeStore(surface([module("m", source, 0)]));
+    show(store);
+    const boxes = document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+    expect(boxes).toHaveLength(2);
+    boxes[1].click(); await settled();
+    expect(store.writeModule).toHaveBeenCalledWith(SURFACE_ID, "m", source.slice(0, source.lastIndexOf("[ ]")) + source.slice(source.lastIndexOf("[ ]")).replace("[ ]", "[x]"), 0);
+  });
+  it("maps quoted tasks without changing a later unquoted task", async () => {
+    const source = "> - [ ] Quoted task\n\n- [ ] Later task";
+    const store = fakeStore(surface([module("m", source, 0)]));
+    show(store);
+    const boxes = document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+    expect(boxes).toHaveLength(2);
+    boxes[0].click(); await settled();
+    expect(store.writeModule).toHaveBeenCalledWith(SURFACE_ID, "m", "> - [x] Quoted task\n\n- [ ] Later task", 0);
+  });
+  it("preserves CRLF and Unicode when unticking a later task", async () => {
+    const source = "- [ ] Café 🌿\r\n- [x] Retain";
+    const store = fakeStore(surface([module("m", source, 0)]));
+    show(store);
+    document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')[1].click(); await settled();
+    expect(store.writeModule).toHaveBeenCalledWith(SURFACE_ID, "m", source.replace("[x] Retain", "[ ] Retain"), 0);
+  });
+  it("maps nested and ordered tasks to source while leaving code examples alone", async () => {
+    const source = "```md\n- [ ] Example\n```\n\n- [x] First\n  - [ ] Nested\n\n1. [ ] Ordered";
+    const store = fakeStore(surface([module("m", source, 0)]));
+    show(store);
+    const boxes = document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+    expect(boxes).toHaveLength(3);
+    boxes[1].click(); await settled();
+    expect(store.writeModule).toHaveBeenLastCalledWith(SURFACE_ID, "m", source.replace("- [ ] Nested", "- [x] Nested"), 0);
+    document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')[0].click(); await settled();
+    expect(store.writeModule).toHaveBeenLastCalledWith(SURFACE_ID, "m", source.replace("- [x] First", "- [ ] First"), 0);
+    document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')[2].click(); await settled();
+    expect(store.writeModule).toHaveBeenLastCalledWith(SURFACE_ID, "m", source.replace("1. [ ] Ordered", "1. [x] Ordered"), 0);
+  });
+
+});
+
+it("distinguishes identical library cards by their recorded save times", () => {
+  const store = fakeStore(surface([]));
+  const times = ["2026-10-01T10:00:00Z", "2026-10-02T10:00:00Z"];
+  Object.assign(store, { library: times.map((updated_at, i) => ({ id: String(i), name: "Plan", description: "Plan", tags: [], updated_at, origin_topic_deleted: false })) });
+  const component = mount(SurfaceLibrary, { target: document.body, props: { store, sessionId: null } });
+  flushSync();
+  try {
+    const cards = Array.from(document.querySelectorAll(".entry"));
+    expect(cards).toHaveLength(times.length);
+    cards.forEach((card, index) => {
+      const savedAt = card.querySelector("time");
+      expect(savedAt?.dateTime, `save time on card ${index}`).toBe(times[index]);
+      expect(savedAt?.textContent).toContain(times[index]);
+    });
+  }
+  finally { unmount(component); document.body.innerHTML = ""; }
 });

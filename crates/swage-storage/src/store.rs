@@ -1494,6 +1494,13 @@ pub trait ProviderRoundStore: Send + Sync {
 
 #[async_trait]
 pub trait SurfaceStore: Send + Sync {
+    /// Rename and audit one surface atomically, returning the displaced title.
+    async fn rename_surface(
+        &self,
+        id: Uuid,
+        title: &str,
+        audit_event: NewAuditEvent,
+    ) -> Result<Option<String>, StorageError>;
     async fn create_page(&self, surface: NewSurface) -> Result<Surface, StorageError>;
     async fn get_page(&self, id: Uuid) -> Result<Option<Surface>, StorageError>;
     /// A session's surfaces, oldest first — the surfaces open with it.
@@ -1606,6 +1613,12 @@ pub trait SurfaceStore: Send + Sync {
 /// a superseded body survives in the audit trail, not in a version row.
 #[async_trait]
 pub trait SurfaceAnnotationStore: Send + Sync {
+    /// Resolve and audit a note and stamp its surface atomically. False if already resolved or absent.
+    async fn resolve_surface_annotation(
+        &self,
+        id: Uuid,
+        audit_event: NewAuditEvent,
+    ) -> Result<bool, StorageError>;
     async fn create_surface_annotation(
         &self,
         annotation: NewSurfaceAnnotation,
@@ -2498,6 +2511,14 @@ mod tests {
 
     #[async_trait]
     impl SurfaceStore for StubStorage {
+        async fn rename_surface(
+            &self,
+            _id: Uuid,
+            _title: &str,
+            _audit_event: NewAuditEvent,
+        ) -> Result<Option<String>, StorageError> {
+            unimplemented!()
+        }
         async fn create_page(&self, _: NewSurface) -> Result<Surface, StorageError> {
             unimplemented!()
         }
@@ -2595,6 +2616,13 @@ mod tests {
 
     #[async_trait]
     impl SurfaceAnnotationStore for StubStorage {
+        async fn resolve_surface_annotation(
+            &self,
+            _id: Uuid,
+            _audit_event: NewAuditEvent,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
         async fn create_surface_annotation(
             &self,
             _: NewSurfaceAnnotation,
