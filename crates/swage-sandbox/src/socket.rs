@@ -13,9 +13,10 @@ use tokio::net::UnixListener;
 const FALLBACK_SOCKET_PARENT: &str = "/tmp";
 
 /// The short root used when `XDG_RUNTIME_DIR` is unset or too long: a
-/// per-user `swage-<uid>` directory under `/tmp`. Bubblewrap overlays `/tmp`
-/// with an empty tmpfs, so the sandbox sees a socket here only through the
-/// command builder's bind of the socket file itself.
+/// per-user `swage-<uid>` directory under `/tmp`. Bubblewrap gives `/tmp`
+/// private scratch space with existing host entries mounted read-only. The
+/// socket file's writable bind lets the sandbox connect without write access
+/// to the host runtime directory.
 fn fallback_socket_root() -> PathBuf {
     // Safety: geteuid has no preconditions and cannot fail.
     let uid = unsafe { libc::geteuid() };
