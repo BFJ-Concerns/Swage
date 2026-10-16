@@ -46,7 +46,7 @@ All notable changes to Swage are documented in this file.
 - New topic sessions select the topic’s configured default model, including API requests without a model; topic settings show the effective default and fresh composers preselect it.
 - A topic whose configuration cannot be read still appears in the topic list, and its composer offers no model, instead of the whole list failing and the web UI failing to load.
 
-- Topic settings distinguish loading from an empty workspace list and offer a retry after an initial load failure.
+- Topic settings distinguish loading from an empty workspace list and offer a retry after any topic-settings load failure.
 - Long topic names use a compact heading so workspace controls stay in view.
 
 - Session previews in the recent list, sidebar, conversation selector, delete controls and Operator deck show plain text without Markdown formatting or link destinations. Operator session summaries are limited to three lines.

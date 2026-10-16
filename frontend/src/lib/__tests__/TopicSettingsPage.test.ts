@@ -117,6 +117,28 @@ describe("TopicSettingsPage", () => {
     expect(document.querySelector('[role="alert"]')).toBeNull();
   });
 
+  it("retries a failed refresh after a successful load", async () => {
+    vi.mocked(topicsApi.detachTopicWorkspace).mockResolvedValue();
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "workspaces" } });
+    await flushUi();
+    expect(document.body.textContent).toContain("/work/source");
+    vi.mocked(topicsApi.listTopicWorkspaces).mockRejectedValueOnce(new Error("Refresh failed"));
+    Array.from(document.querySelectorAll("button")).find(button => button.textContent?.trim() === "Detach")!.click();
+    await flushUi();
+    expect(topicsApi.listTopicWorkspaces).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).toContain("Refresh failed");
+    const retry = Array.from(document.querySelectorAll("button")).find(button => button.textContent?.trim() === "Retry");
+    expect(retry, "failed refresh offers Retry").toBeDefined();
+    vi.mocked(topicsApi.listTopicWorkspaces).mockResolvedValueOnce([]);
+    retry!.click();
+    await flushUi();
+    expect(topicsApi.listTopicWorkspaces).toHaveBeenCalledTimes(3);
+    expect(topicsApi.listTopicSessions).toHaveBeenCalledTimes(3);
+    expect(document.body.textContent).toContain("No workspace folders");
+    expect(document.body.textContent).not.toContain("/work/source");
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
+
   it("shows the topic's effective default model in its overview", async () => {
     component = mount(TopicSettingsPage, { target: document.body, props: {
       topic: { ...topic, effective_default_model: "local:topic-model" }, tab: "overview",

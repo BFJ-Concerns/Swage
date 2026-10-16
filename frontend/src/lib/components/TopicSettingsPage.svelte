@@ -297,9 +297,7 @@
     {#if error}
       <div class="notice error" role="alert">
         {error}
-        {#if !worktopicsLoaded}
-          <button type="button" disabled={isLoading} onclick={() => void loadTopicSettings()}>Retry</button>
-        {/if}
+        <button type="button" disabled={isLoading} onclick={() => void loadTopicSettings()}>Retry</button>
       </div>
     {:else if isLoading}
       <div class="notice">Loading topic settings…</div>
