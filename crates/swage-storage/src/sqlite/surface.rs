@@ -13,9 +13,9 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    LibraryEntry, LibraryEntryModule, LibrarySeeding, ModuleSourceReplacement, NewAuditEvent,
-    NewLibraryEntry, NewLibraryEntryModule, NewSurface, NewSurfaceModule, RemovedSurfaceModule,
-    Surface, SurfaceModule,
+    LibraryEntry, LibraryEntryModule, LibrarySeeding, ModuleDelivery, ModuleSourceReplacement,
+    NewAuditEvent, NewLibraryEntry, NewLibraryEntryModule, NewSurface, NewSurfaceModule,
+    RemovedSurfaceModule, Surface, SurfaceModule,
 };
 use crate::sqlite::SqliteStorage;
 use crate::sqlite::surface_annotation::{COLUMNS as ANNOTATION_COLUMNS, row_to_annotation};
@@ -27,7 +27,7 @@ const SURFACE_COLUMNS: &str = "id, session_id, title, created_at, updated_at, li
 const ENTRY_COLUMNS: &str = "id, name, description, tags, origin_topic_id, saved_from_surface_id, \
     created_at, updated_at";
 const MODULE_COLUMNS: &str =
-    "id, surface_id, kind, position, source, created_at, updated_at, revision";
+    "id, surface_id, kind, position, source, created_at, updated_at, revision, delivery_json";
 const ENTRY_MODULE_COLUMNS: &str = "id, entry_id, kind, position, source, created_at, updated_at";
 
 fn row_to_surface(row: &rusqlite::Row<'_>) -> rusqlite::Result<Surface> {
@@ -90,6 +90,7 @@ fn row_to_module(row: &rusqlite::Row<'_>) -> rusqlite::Result<SurfaceModule> {
     let surface_id: String = row.get(1)?;
     let created: String = row.get(5)?;
     let updated: String = row.get(6)?;
+    let delivery: Option<String> = row.get(8)?;
     Ok(SurfaceModule {
         id: parse_uuid(&id)?,
         surface_id: parse_uuid(&surface_id)?,
@@ -97,9 +98,23 @@ fn row_to_module(row: &rusqlite::Row<'_>) -> rusqlite::Result<SurfaceModule> {
         position: row.get(3)?,
         source: row.get(4)?,
         revision: row.get(7)?,
+        delivery: parse_delivery(delivery.as_deref())?,
         created_at: parse_dt(&created)?,
         updated_at: parse_dt(&updated)?,
     })
+}
+
+/// The delivery a module row records, as written by `encode_delivery`.
+fn parse_delivery(raw: Option<&str>) -> rusqlite::Result<Option<ModuleDelivery>> {
+    raw.map(serde_json::from_str).transpose().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(error))
+    })
+}
+
+/// A module's delivery as the row stores it: JSON of the wire shape, or
+/// NULL for a module written by hand.
+fn encode_delivery(delivery: Option<&ModuleDelivery>) -> Option<String> {
+    delivery.map(|delivery| serde_json::to_string(delivery).expect("a delivery serialises"))
 }
 
 fn module_by_id(conn: &rusqlite::Connection, id: Uuid) -> rusqlite::Result<Option<SurfaceModule>> {
@@ -262,8 +277,8 @@ impl SurfaceStore for SqliteStorage {
             let now = Utc::now();
             let now_str = now.to_rfc3339();
             conn.execute(
-                "INSERT INTO surface_modules (id, surface_id, kind, position, source, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                "INSERT INTO surface_modules (id, surface_id, kind, position, source, created_at, updated_at, delivery_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
                 params![
                     id.to_string(),
                     module.surface_id.to_string(),
@@ -271,6 +286,7 @@ impl SurfaceStore for SqliteStorage {
                     module.position,
                     &module.source,
                     &now_str,
+                    encode_delivery(module.delivery.as_ref()),
                 ],
             )?;
             conn.execute(
@@ -284,6 +300,7 @@ impl SurfaceStore for SqliteStorage {
                 position: module.position,
                 source: module.source,
                 revision: 0,
+                delivery: module.delivery,
                 created_at: now,
                 updated_at: now,
             })
@@ -300,6 +317,7 @@ impl SurfaceStore for SqliteStorage {
         surface_id: Uuid,
         kind: &str,
         source: &str,
+        delivery: Option<ModuleDelivery>,
     ) -> Result<SurfaceModule, StorageError> {
         let kind = kind.to_owned();
         let source = source.to_owned();
@@ -309,10 +327,17 @@ impl SurfaceStore for SqliteStorage {
             // The position is read and written in one statement under the
             // connection lock: two appends never share a position.
             conn.execute(
-                "INSERT INTO surface_modules (id, surface_id, kind, position, source, created_at, updated_at)
-                 SELECT ?1, ?2, ?3, COALESCE(MAX(position) + 1, 0), ?4, ?5, ?5
+                "INSERT INTO surface_modules (id, surface_id, kind, position, source, created_at, updated_at, delivery_json)
+                 SELECT ?1, ?2, ?3, COALESCE(MAX(position) + 1, 0), ?4, ?5, ?5, ?6
                  FROM surface_modules WHERE surface_id = ?2",
-                params![id.to_string(), surface_id.to_string(), &kind, &source, &now_str],
+                params![
+                    id.to_string(),
+                    surface_id.to_string(),
+                    &kind,
+                    &source,
+                    &now_str,
+                    encode_delivery(delivery.as_ref()),
+                ],
             )?;
             conn.execute(
                 "UPDATE surfaces SET updated_at = ?1 WHERE id = ?2",
@@ -747,11 +772,44 @@ mod tests {
                     kind: "document".into(),
                     position: position as i32,
                     source: (*source).into(),
+                    delivery: None,
                 })
                 .await
                 .unwrap();
         }
         surface
+    }
+
+    /// A delivered module records what delivered it and when; one written
+    /// by hand records nothing, and the record survives a re-read.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_appended_module_keeps_its_delivery_and_a_hand_written_one_has_none() {
+        let (storage, _topic, session) = make_session().await;
+        let surface = surface_with_modules(&storage, session, &[]).await;
+        let delivery = ModuleDelivery::ScheduleRun {
+            run_id: Uuid::new_v4(),
+            schedule_id: Uuid::new_v4(),
+            delivered_at: Utc::now(),
+        };
+        let delivered = storage
+            .append_surface_module(
+                surface.id,
+                "document",
+                "# Delivered",
+                Some(delivery.clone()),
+            )
+            .await
+            .unwrap();
+        let by_hand = storage
+            .append_surface_module(surface.id, "document", "# Mine", None)
+            .await
+            .unwrap();
+        assert_eq!(delivered.delivery, Some(delivery.clone()));
+        assert_eq!(by_hand.delivery, None);
+
+        let listed = storage.list_surface_modules(surface.id).await.unwrap();
+        assert_eq!(listed[0].delivery, Some(delivery));
+        assert_eq!(listed[1].delivery, None);
     }
 
     /// Save a surface the way the gateway does: its modules copied in order.

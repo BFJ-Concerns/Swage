@@ -248,6 +248,7 @@ mod tests {
                 kind: "document".into(),
                 position,
                 source: "# Draft".into(),
+                delivery: None,
             })
             .await
             .unwrap()

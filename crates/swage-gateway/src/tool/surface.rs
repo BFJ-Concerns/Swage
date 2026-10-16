@@ -649,6 +649,7 @@ impl SurfaceWriteTool {
                 expected_revision,
             },
             &author,
+            None,
         )
         .await
         .map_err(|error| failed(WRITE_TOOL, error))?;
@@ -902,6 +903,7 @@ mod tests {
                 expected_revision: Some(0),
             },
             "user",
+            None,
         )
         .await
         .unwrap();

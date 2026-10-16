@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- A module a scheduled run, a workflow run or a routed turn delivers to a surface records what delivered it and when, and the surface shows the attribution above the module.
 - Session surfaces can be renamed from their header or by the agent without changing the library entry or original surface.
 - Either party can resolve a surface note; it leaves the working view and remains in the surface record.
 - Agents can replace or remove a uniquely matched passage of a module without resubmitting unrelated content.

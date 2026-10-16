@@ -9,22 +9,22 @@ use crate::model::{
     ChannelInboundMessage, ChannelLink, ContextSnapshotRecord, CurationAssertion, DeliveryRecord,
     DeviceRegistration, DrainedTurnQueue, ExtractionDerivation, InboundAudit, KnowledgeCitation,
     KnowledgeSearchHit, LibraryEntry, LibraryEntryModule, LibrarySeeding, Material, Message,
-    ModuleSourceReplacement, NewAgentDefinition, NewAgentMessage, NewApprovalRequest,
-    NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelInboundMessage, NewChannelLink,
-    NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration, NewKnowledgeCitation,
-    NewLibraryEntry, NewLibraryEntryModule, NewMaterial, NewMessage, NewOrientationCard,
-    NewSchedule, NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation, NewSurface,
-    NewSurfaceAnnotation, NewSurfaceModule, NewTaskDefinition, NewThread, NewToolCall, NewTopic,
-    NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowRunHold,
-    NewWorkflowRunHoldRejection, NewWorkflowScript, NewWorkspaceAttachment, OrientationCard,
-    OrientationCardLifecycle, PendingChannelOrigin, ProviderRoundRecord, RemovedSurfaceModule,
-    Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SessionActivity,
-    SessionListing, SessionVariable, SourceCapture, SourceObservation, Surface, SurfaceAnnotation,
-    SurfaceModule, TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord, Topic,
-    TopicSlug, Turn, TurnIsolation, TurnState, UpdateSchedule, WorkflowHoldSettlement,
-    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
-    WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
-    WorkspaceAttachment,
+    ModuleDelivery, ModuleSourceReplacement, NewAgentDefinition, NewAgentMessage,
+    NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelInboundMessage,
+    NewChannelLink, NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration,
+    NewKnowledgeCitation, NewLibraryEntry, NewLibraryEntryModule, NewMaterial, NewMessage,
+    NewOrientationCard, NewSchedule, NewScheduleRun, NewSecretRecord, NewSession,
+    NewSourceObservation, NewSurface, NewSurfaceAnnotation, NewSurfaceModule, NewTaskDefinition,
+    NewThread, NewToolCall, NewTopic, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun,
+    NewWorkflowRunEvent, NewWorkflowRunHold, NewWorkflowRunHoldRejection, NewWorkflowScript,
+    NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle, PendingChannelOrigin,
+    ProviderRoundRecord, RemovedSurfaceModule, Schedule, ScheduleRun, ScheduleRunUpdate,
+    SecretRecord, Session, SessionActivity, SessionListing, SessionVariable, SourceCapture,
+    SourceObservation, Surface, SurfaceAnnotation, SurfaceModule, TaskDefinition, Thread,
+    ThreadBranch, ThreadState, ToolCallRecord, Topic, TopicSlug, Turn, TurnIsolation, TurnState,
+    UpdateSchedule, WorkflowHoldSettlement, WorkflowJournalRecord, WorkflowRunEventRecord,
+    WorkflowRunHoldAnswer, WorkflowRunHoldRecord, WorkflowRunHoldRejectionRecord,
+    WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
 };
 use crate::model::{NewQueuedTurnInput, QueuedTurnInput};
 
@@ -1492,12 +1492,14 @@ pub trait SurfaceStore: Send + Sync {
     ) -> Result<SurfaceModule, StorageError>;
     async fn get_surface_module(&self, id: Uuid) -> Result<Option<SurfaceModule>, StorageError>;
     /// Append a module instance after the surface's last one, its position
-    /// assigned under the connection lock so two appends never share one.
+    /// assigned under the connection lock so two appends never share one;
+    /// `delivery` records the run or turn whose output it is, when one is.
     async fn append_surface_module(
         &self,
         surface_id: Uuid,
         kind: &str,
         source: &str,
+        delivery: Option<ModuleDelivery>,
     ) -> Result<SurfaceModule, StorageError>;
     /// A surface's module instances in position order.
     async fn list_surface_modules(
@@ -2520,6 +2522,7 @@ mod tests {
             _: Uuid,
             _: &str,
             _: &str,
+            _: Option<ModuleDelivery>,
         ) -> Result<SurfaceModule, StorageError> {
             unimplemented!()
         }

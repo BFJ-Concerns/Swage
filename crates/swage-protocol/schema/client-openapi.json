@@ -2808,6 +2808,85 @@
         ],
         "type": "object"
       },
+      "ModuleDelivery": {
+        "description": "What delivered a module to its surface, recorded as the module is\nwritten: the run or turn whose output it is, and when. A module a person\nor an agent writes by hand carries none.",
+        "oneOf": [
+          {
+            "description": "A scheduled run's output, routed to the surface.",
+            "properties": {
+              "by": {
+                "const": "schedule_run",
+                "type": "string"
+              },
+              "delivered_at": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "run_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "schedule_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "by",
+              "run_id",
+              "schedule_id",
+              "delivered_at"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A workflow run's delivery to its granted surface target.",
+            "properties": {
+              "by": {
+                "const": "workflow_run",
+                "type": "string"
+              },
+              "delivered_at": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "run_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "by",
+              "run_id",
+              "delivered_at"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A conversation turn's response, routed to the surface.",
+            "properties": {
+              "by": {
+                "const": "turn",
+                "type": "string"
+              },
+              "delivered_at": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "turn_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "by",
+              "turn_id",
+              "delivered_at"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "MoveSurfaceModuleRequest": {
         "description": "Place a module among its surface's modules: 0 is first, and a position\npast the end is the end.",
         "properties": {
@@ -5759,6 +5838,17 @@
               "$ref": "#/components/schemas/SurfaceAnnotationView"
             },
             "type": "array"
+          },
+          "delivery": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModuleDelivery"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The run or turn that delivered this module, when one did."
           },
           "id": {
             "format": "uuid",

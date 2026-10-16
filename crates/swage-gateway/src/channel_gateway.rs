@@ -47,7 +47,7 @@ fn webhook_client(timeout: Duration) -> Result<reqwest::Client, reqwest::Error> 
 pub use swage_protocol::client::delivery::{
     DeliveryRoutingRequest, DeliveryTarget, ExternalChannelIntegration,
 };
-use swage_protocol::client::surface::WriteSurfaceModuleRequest;
+use swage_protocol::client::surface::{ModuleDelivery, WriteSurfaceModuleRequest};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChannelOrigin {
@@ -670,7 +670,7 @@ pub async fn deliver_to_targets(
     let mut recording_failure: Option<GatewayError> = None;
     for target in targets {
         let (status, delivery_error) =
-            match deliver_to_target(state, session_id, target, content).await {
+            match deliver_to_target(state, session_id, &attribution, target, content).await {
                 Ok(DeliveryOutcome::Sent) => ("sent", None),
                 Ok(DeliveryOutcome::NotSent) => (
                     "not_sent",
@@ -722,7 +722,31 @@ pub async fn deliver_to_targets(
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DeliveryAttribution {
     pub run_id: Option<Uuid>,
+    /// The schedule a run belongs to, when the run is a schedule's.
+    pub schedule_id: Option<Uuid>,
     pub turn_id: Option<Uuid>,
+}
+
+impl DeliveryAttribution {
+    /// The delivery a module written under this attribution records: the
+    /// schedule run's, or the turn's where no run is behind the output.
+    pub fn module_delivery(
+        &self,
+        delivered_at: chrono::DateTime<chrono::Utc>,
+    ) -> Option<ModuleDelivery> {
+        match (self.run_id, self.schedule_id, self.turn_id) {
+            (Some(run_id), Some(schedule_id), _) => Some(ModuleDelivery::ScheduleRun {
+                run_id,
+                schedule_id,
+                delivered_at,
+            }),
+            (None, _, Some(turn_id)) => Some(ModuleDelivery::Turn {
+                turn_id,
+                delivered_at,
+            }),
+            _ => None,
+        }
+    }
 }
 
 enum DeliveryOutcome {
@@ -733,6 +757,7 @@ enum DeliveryOutcome {
 async fn deliver_to_target(
     state: &AppState,
     session_id: Uuid,
+    attribution: &DeliveryAttribution,
     target: &DeliveryTarget,
     content: &str,
 ) -> Result<DeliveryOutcome, GatewayError> {
@@ -766,6 +791,7 @@ async fn deliver_to_target(
                     expected_revision: None,
                 },
                 "delivery",
+                attribution.module_delivery(chrono::Utc::now()),
             )
             .await?;
             Ok(DeliveryOutcome::Sent)

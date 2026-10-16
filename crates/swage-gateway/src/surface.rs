@@ -25,7 +25,7 @@ use swage_core::{GatewayError, StorageError};
 use swage_protocol::client::surface::{
     CreateSurfaceAnnotationRequest, CreateSurfaceRequest, DeleteSurfaceAnnotationResponse,
     DeleteSurfaceModuleResponse, LibraryEntryModuleView, LibraryEntryResponse, LibraryEntrySummary,
-    LibraryListResponse, MoveSurfaceModuleRequest, RenameSurfaceRequest,
+    LibraryListResponse, ModuleDelivery, MoveSurfaceModuleRequest, RenameSurfaceRequest,
     SaveSurfaceToLibraryRequest, SurfaceAnnotationView, SurfaceListResponse, SurfaceModuleView,
     SurfaceResponse, SurfaceSummary, TopicDefaultSurfaceRequest, UpdateSurfaceAnnotationRequest,
     WriteSurfaceModuleRequest, WriteSurfaceModuleResponse,
@@ -632,6 +632,7 @@ pub async fn write_surface_module(
     surface_id: Uuid,
     request: WriteSurfaceModuleRequest,
     author: &str,
+    delivery: Option<ModuleDelivery>,
 ) -> Result<WriteSurfaceModuleResponse, GatewayError> {
     let surface = surface_or_invalid(state, surface_id).await?;
 
@@ -676,7 +677,7 @@ pub async fn write_surface_module(
             }
             let created = state
                 .storage
-                .append_surface_module(surface.id, kind, &request.source)
+                .append_surface_module(surface.id, kind, &request.source, delivery)
                 .await?;
             (created, None)
         }
@@ -701,6 +702,7 @@ pub async fn write_surface_module(
                 "module_id": module.id,
                 "kind": module.kind,
                 "author": author,
+                "delivery": module.delivery,
                 "prior_source": prior_source,
                 "new_source": request.source,
             }),
@@ -1143,6 +1145,7 @@ fn module_view(
         source: module.source,
         revision: module.revision,
         updated_at: module.updated_at,
+        delivery: module.delivery,
         annotations,
     }
 }
@@ -1207,7 +1210,7 @@ pub async fn write_surface_module_handler(
     Json(request): Json<WriteSurfaceModuleRequest>,
 ) -> Result<Json<WriteSurfaceModuleResponse>, ApiError> {
     Ok(Json(
-        write_surface_module(&state, surface_id, request, "user").await?,
+        write_surface_module(&state, surface_id, request, "user", None).await?,
     ))
 }
 
@@ -1378,6 +1381,7 @@ mod tests {
                     expected_revision: None,
                 },
                 "user",
+                None,
             )
             .await
             .unwrap(),
@@ -1403,6 +1407,7 @@ mod tests {
                     expected_revision: None,
                 },
                 "user",
+                None,
             )
             .await
             .unwrap(),
@@ -1624,6 +1629,7 @@ mod tests {
             surface_id,
             replace(module_id, 0, "# Agent's"),
             "gateway",
+            None,
         )
         .await
         .unwrap();
@@ -1640,6 +1646,7 @@ mod tests {
             surface_id,
             replace(module_id, 0, "# Person's"),
             "user",
+            None,
         )
         .await
         .unwrap();
@@ -1673,6 +1680,7 @@ mod tests {
             surface_id,
             replace(module_id, current.revision, "# Person's, knowingly"),
             "user",
+            None,
         )
         .await
         .unwrap();
@@ -1695,6 +1703,7 @@ mod tests {
                 expected_revision: None,
             },
             "gateway",
+            None,
         )
         .await
         .unwrap_err();
@@ -1778,6 +1787,7 @@ mod tests {
                     expected_revision: None,
                 },
                 "user",
+                None,
             )
             .await
             .unwrap();

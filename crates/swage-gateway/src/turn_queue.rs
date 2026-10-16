@@ -352,6 +352,7 @@ pub async fn drain_queue(state: &AppState, session_id: Uuid) -> Result<Option<Uu
             session_id,
             crate::channel_gateway::DeliveryAttribution {
                 run_id: None,
+                schedule_id: None,
                 turn_id: Some(settled.id),
             },
             &unique,

@@ -1461,6 +1461,7 @@ async fn deliver_run_output(
         session_id,
         crate::channel_gateway::DeliveryAttribution {
             run_id: Some(run_id),
+            schedule_id: Some(schedule.id),
             turn_id: Some(turn_id),
         },
         &targets,

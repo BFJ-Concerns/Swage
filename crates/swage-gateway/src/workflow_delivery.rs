@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, HeaderValue};
 use serde_json::Value;
-use swage_protocol::client::surface::WriteSurfaceModuleRequest;
+use swage_protocol::client::surface::{ModuleDelivery, WriteSurfaceModuleRequest};
 use swage_storage::Storage;
 use swage_workflow::{EffectKind, EffectPayload, EffectReceipt};
 use tokio_util::sync::CancellationToken;
@@ -35,6 +35,7 @@ pub(crate) trait DeliveryCapability: Send + Sync {
 
 pub(crate) async fn capability_from_grant(
     state: Option<AppState>,
+    run_id: Uuid,
     topic_id: Uuid,
     storage: Arc<dyn Storage>,
     grant: Option<&Value>,
@@ -62,6 +63,7 @@ pub(crate) async fn capability_from_grant(
         Some("surface") => Ok(Arc::new(
             SurfaceDeliveryCapability::from_grant(
                 state.ok_or_else(|| "surface delivery needs gateway state".to_string())?,
+                run_id,
                 topic_id,
                 target,
             )
@@ -73,11 +75,18 @@ pub(crate) async fn capability_from_grant(
 
 struct SurfaceDeliveryCapability {
     state: AppState,
+    /// The run delivering, recorded on each module it writes.
+    run_id: Uuid,
     surface_id: Uuid,
 }
 
 impl SurfaceDeliveryCapability {
-    async fn from_grant(state: AppState, topic_id: Uuid, target: &Value) -> Result<Self, String> {
+    async fn from_grant(
+        state: AppState,
+        run_id: Uuid,
+        topic_id: Uuid,
+        target: &Value,
+    ) -> Result<Self, String> {
         let surface_id = target
             .get("surface_id")
             .and_then(Value::as_str)
@@ -102,7 +111,11 @@ impl SurfaceDeliveryCapability {
         if owner.topic_id != topic_id {
             return Err("surface delivery target is not in the workflow's topic".into());
         }
-        Ok(Self { state, surface_id })
+        Ok(Self {
+            state,
+            run_id,
+            surface_id,
+        })
     }
 }
 
@@ -134,6 +147,10 @@ impl DeliveryCapability for SurfaceDeliveryCapability {
                     expected_revision: None,
                 },
                 "workflow delivery",
+                Some(ModuleDelivery::WorkflowRun {
+                    run_id: self.run_id,
+                    delivered_at: chrono::Utc::now(),
+                }),
             ) => result.map_err(|error| error.to_string())?,
             () = cancellation.cancelled() => return Err("WorkflowCancelledError: delivery cancelled".into()),
         };
@@ -318,10 +335,16 @@ mod tests {
             "url": format!("http://{address}/deliver"),
             "secret_ref": secret.reference,
         }]);
-        let capability =
-            capability_from_grant(None, Uuid::new_v4(), storage, Some(&grant), Some("public"))
-                .await
-                .unwrap();
+        let capability = capability_from_grant(
+            None,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            storage,
+            Some(&grant),
+            Some("public"),
+        )
+        .await
+        .unwrap();
         capability
             .deliver(
                 Uuid::new_v4(),
@@ -370,8 +393,10 @@ mod tests {
             "name": "daily-surface",
             "surface_id": surface.id,
         }]);
+        let run_id = Uuid::new_v4();
         let capability = capability_from_grant(
             Some(state.clone()),
+            run_id,
             topic.id,
             Arc::clone(&storage) as Arc<dyn Storage>,
             Some(&grant),
@@ -401,6 +426,14 @@ mod tests {
         let modules = storage.list_surface_modules(surface.id).await.unwrap();
         assert_eq!(modules.len(), 1);
         assert_eq!(modules[0].source, "# Delivered\n\nThe scheduled result");
+        assert!(
+            matches!(
+                modules[0].delivery,
+                Some(ModuleDelivery::WorkflowRun { run_id: by, .. }) if by == run_id
+            ),
+            "the module records the run that delivered it: {:?}",
+            modules[0].delivery
+        );
         let event = events
             .recv()
             .await
@@ -455,6 +488,7 @@ mod tests {
 
         let result = capability_from_grant(
             Some(state),
+            Uuid::new_v4(),
             workflow_topic.id,
             Arc::clone(&storage) as Arc<dyn Storage>,
             Some(&grant),
@@ -484,9 +518,16 @@ mod tests {
             },
         ]);
 
-        let capability = capability_from_grant(None, Uuid::new_v4(), storage, Some(&grant), None)
-            .await
-            .unwrap();
+        let capability = capability_from_grant(
+            None,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            storage,
+            Some(&grant),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(capability.kind(), "webhook");
     }
 }

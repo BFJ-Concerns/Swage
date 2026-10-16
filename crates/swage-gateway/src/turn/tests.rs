@@ -4430,6 +4430,7 @@ impl swage_storage::SurfaceStore for MockStorage {
         _: Uuid,
         _: &str,
         _: &str,
+        _: Option<swage_storage::model::ModuleDelivery>,
     ) -> Result<swage_storage::SurfaceModule, StorageError> {
         unimplemented!()
     }
