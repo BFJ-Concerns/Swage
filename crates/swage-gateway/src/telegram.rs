@@ -424,7 +424,7 @@ async fn ingest_updates(
         }
     }
     if inserted > 0 {
-        crate::channel_gateway::drain_channel_queue(state.clone()).await;
+        crate::channel_gateway::drain_channel_queue_checked(state).await?;
     }
     Ok(())
 }
@@ -455,10 +455,12 @@ async fn redeem_link_control(
     bot_id: &str,
     control: LinkControl,
 ) -> Result<(), GatewayError> {
-    let record = {
-        let mut codes = state.channel_link_codes.lock().await;
-        codes.remove(&control.code)
-    };
+    let record = state
+        .storage
+        .list_channel_link_codes()
+        .await?
+        .into_iter()
+        .find(|record| record.code == control.code);
 
     let Some(record) = record else {
         client
@@ -470,9 +472,7 @@ async fn redeem_link_control(
         return Ok(());
     };
 
-    if record.expires_at < chrono::Utc::now()
-        || record.integration != ExternalChannelIntegration::Telegram
-    {
+    if record.expires_at < chrono::Utc::now() || record.integration != "telegram" {
         client
             .send_message(
                 &control.chat_id,
@@ -482,7 +482,7 @@ async fn redeem_link_control(
         return Ok(());
     }
 
-    let response = crate::onboarding::create_channel_link(
+    let response = crate::onboarding::create_channel_link_with_code(
         state,
         CreateChannelLinkRequest {
             integration: "telegram".into(),
@@ -490,12 +490,18 @@ async fn redeem_link_control(
             conversation: control.chat_id.clone(),
             topic_id: record.topic_id,
             agent_id: record.agent_id,
-            home_target: record.home_target.or(Some(DeliveryTarget::Channel {
-                integration: ExternalChannelIntegration::Telegram,
-                account: bot_id.to_string(),
-                conversation: control.chat_id.clone(),
-            })),
+            home_target: record
+                .home_target
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| GatewayError::ValidationError(error.to_string()))?
+                .or(Some(DeliveryTarget::Channel {
+                    integration: ExternalChannelIntegration::Telegram,
+                    account: bot_id.to_string(),
+                    conversation: control.chat_id.clone(),
+                })),
         },
+        Some(&control.code),
     )
     .await?;
     record_telegram_audit(
@@ -1083,6 +1089,20 @@ mod tests {
         );
     }
 
+    async fn wait_for_delivery(storage: &SqliteStorage) -> Vec<swage_storage::DeliveryRecord> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let deliveries = storage.list_delivery_records().await.unwrap();
+                if !deliveries.is_empty() {
+                    return deliveries;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the completed delivery attempt must be recorded")
+    }
+
     async fn recover_and_drain_queues_at_startup(state: &AppState) {
         state
             .storage
@@ -1095,6 +1115,35 @@ mod tests {
         crate::turn_queue::drain_queues_at_startup(state)
             .await
             .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn polling_returns_while_the_channel_turn_is_still_running() {
+        let (base_url, telegram) = start_mock_telegram().await;
+        let client = connect_mock_client(base_url).await;
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let (started, reached) = oneshot::channel();
+        let (release, waiting) = oneshot::channel();
+        let state = test_state(
+            storage,
+            GatedProvider::new(vec![(started, waiting, "reply")]),
+            client.clone(),
+        );
+        link_chat(&state, &client, &telegram, 1, 777).await;
+        telegram.push_update(2, 777, "first");
+        let polling_state = state.clone();
+        let polling_client = client.clone();
+        let mut poll =
+            tokio::spawn(async move { poll_once(&polling_state, &polling_client).await });
+        reached.await.unwrap();
+        let returned = tokio::time::timeout(Duration::from_secs(1), &mut poll).await;
+        release.send(()).unwrap();
+        assert!(
+            returned.is_ok(),
+            "polling must return before the active model turn finishes"
+        );
+        returned.unwrap().unwrap().unwrap();
+        telegram.wait_for_reply("777", "reply").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1111,6 +1160,7 @@ mod tests {
         Box::pin(link_chat(&state, &client, &telegram_state, 1, 777)).await;
         telegram_state.push_update(2, 777, "hello");
         Box::pin(poll_once(&state, &client)).await.unwrap();
+        telegram_state.wait_for_reply("777", "telegram reply").await;
 
         let sent = telegram_state.sent.lock().unwrap().clone();
         assert_eq!(sent.len(), 2);
@@ -1119,10 +1169,103 @@ mod tests {
         assert_eq!(sent[1].chat_id, "777");
         assert_eq!(sent[1].text, "telegram reply");
 
-        let deliveries = storage.list_delivery_records().await.unwrap();
+        let deliveries = wait_for_delivery(&storage).await;
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].status, "sent");
         assert_eq!(deliveries[0].content, "telegram reply");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn link_codes_last_a_day_and_survive_reconstruction_until_redeemed() {
+        let (base_url, telegram) = start_mock_telegram().await;
+        let client = connect_mock_client(base_url).await;
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("codes.db");
+        let (state, storage) = file_state(&database, MockProvider::new(vec![]), client.clone());
+        let issued = chrono::Utc::now();
+        let code = issue_link_code(&state).await;
+        drop(state);
+        drop(storage);
+        let (rebuilt, storage) = file_state(&database, MockProvider::new(vec![]), client.clone());
+        let visible = crate::onboarding::list_channel_link_codes(&rebuilt)
+            .await
+            .unwrap();
+        assert_eq!(
+            visible.len(),
+            1,
+            "an unredeemed code must survive application reconstruction"
+        );
+        assert_eq!(visible[0].link_code, code);
+        assert!(
+            (visible[0].expires_at - issued).num_seconds() >= 86399,
+            "a link code must last 24 hours"
+        );
+        assert_eq!(
+            crate::onboarding::list_channel_link_codes(&rebuilt)
+                .await
+                .unwrap()[0]
+                .link_code,
+            code
+        );
+        assert!(
+            storage.list_channel_links().await.unwrap().is_empty(),
+            "reading a code must not create a link"
+        );
+        telegram.push_update(1, 777, &format!("/link {code}"));
+        poll_once(&rebuilt, &client).await.unwrap();
+        assert!(
+            crate::onboarding::list_channel_link_codes(&rebuilt)
+                .await
+                .unwrap()
+                .is_empty(),
+            "redemption must remove a code from the readable view"
+        );
+        telegram.push_update(2, 888, &format!("/link {code}"));
+        poll_once(&rebuilt, &client).await.unwrap();
+        assert_eq!(storage.list_channel_links().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invalid_link_destination_does_not_consume_the_code() {
+        let (base_url, _) = start_mock_telegram().await;
+        let client = connect_mock_client(base_url).await;
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let state = test_state(storage.clone(), MockProvider::new(vec![]), client.clone());
+        let code = crate::onboarding::create_channel_link_code(
+            &state,
+            CreateChannelLinkCodeRequest {
+                integration: ExternalChannelIntegration::Telegram,
+                topic_id: Some(uuid::Uuid::new_v4()),
+                agent_id: None,
+                home_target: None,
+            },
+        )
+        .await
+        .unwrap()
+        .link_code;
+        let result = redeem_link_control(
+            &state,
+            &client,
+            client.bot_id().unwrap(),
+            LinkControl {
+                update_id: "1".into(),
+                chat_id: "777".into(),
+                code: code.clone(),
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            crate::onboarding::list_channel_link_codes(&state)
+                .await
+                .unwrap()
+                .iter()
+                .map(|record| record.link_code.as_str())
+                .collect::<Vec<_>>(),
+            vec![code.as_str()],
+            "validation failure must leave the code retrievable"
+        );
+        assert!(storage.list_channel_links().await.unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1162,11 +1305,20 @@ mod tests {
             client.clone(),
         );
         let code = issue_link_code(&state).await;
-        {
-            let mut codes = state.channel_link_codes.lock().await;
-            codes.get_mut(&code).unwrap().expires_at =
-                chrono::Utc::now() - chrono::Duration::seconds(1);
-        }
+        let expired_code = code.clone();
+        storage
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE channel_link_codes SET expires_at = ?1 WHERE code = ?2",
+                    [
+                        (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339(),
+                        expired_code,
+                    ],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
 
         telegram.push_update(1, 777, &format!("/link {code}"));
         Box::pin(poll_once(&state, &client)).await.unwrap();
@@ -1251,6 +1403,7 @@ mod tests {
         Box::pin(link_chat(&state, &client, &telegram, 1, 777)).await;
         telegram.push_update(2, 777, "before");
         Box::pin(poll_once(&state, &client)).await.unwrap();
+        telegram.wait_for_reply("777", "before restart").await;
         let first_session = storage
             .find_session_by_channel_origin("telegram", client.bot_id().unwrap(), "777")
             .await
@@ -1265,6 +1418,7 @@ mod tests {
         );
         telegram.push_update(3, 777, "after");
         Box::pin(poll_once(&restarted, &client)).await.unwrap();
+        telegram.wait_for_reply("777", "after restart").await;
 
         assert!(
             telegram.offsets.lock().unwrap().contains(&Some(3)),
@@ -1527,7 +1681,12 @@ mod tests {
         Box::pin(link_chat(&state, &client, &telegram, 1, 777)).await;
         telegram.fail_send.store(true, Ordering::SeqCst);
         telegram.push_update(2, 777, "fail send");
-        let _ = Box::pin(poll_once(&state, &client)).await;
+        Box::pin(poll_once(&state, &client)).await.unwrap();
+        let deliveries = wait_for_delivery(&storage).await;
+        assert_eq!(
+            deliveries[0].status, "failed",
+            "the send-failure path must actually have run"
+        );
 
         let bad_client = Arc::new(TelegramClient {
             http: reqwest::Client::builder()
@@ -1550,10 +1709,24 @@ mod tests {
         let handle = tokio::spawn(async move {
             Box::pin(run_poll_loop(poll_state, poll_client, shutdown.clone())).await;
         });
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if storage
+                    .list_audit_events()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|event| event.event_kind == "polling_failed")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the poll-failure path must actually have run");
         handle.abort();
 
-        let deliveries = storage.list_delivery_records().await.unwrap();
         let audits = storage.list_audit_events().await.unwrap();
         let session = storage
             .find_session_by_channel_origin("telegram", client.bot_id().unwrap(), "777")
