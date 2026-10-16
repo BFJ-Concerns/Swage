@@ -1428,22 +1428,23 @@ pub trait WorkflowStore: Send + Sync {
         dispatch: serde_json::Value,
     ) -> Result<(), StorageError>;
     /// Append an attempt to the call's record before its turn starts: the
-    /// attempt's cause and opening time, with no resolution yet.
+    /// attempt's cause and opening time, with no resolution yet. Returns
+    /// the earlier attempts it supersedes, oldest first, so what they left
+    /// outstanding can end the moment nothing can answer it any more.
     async fn open_workflow_call_attempt(
         &self,
         id: Uuid,
         attempt: serde_json::Value,
-    ) -> Result<(), StorageError>;
+    ) -> Result<Vec<serde_json::Value>, StorageError>;
     /// Resolve the call's open attempt — the latest one with no turn — with
-    /// what its turn resolved, merged over the opened record. Returns the
-    /// earlier attempts it supersedes, oldest first, so their outstanding
-    /// rounds can end. An entry with no open attempt is an error: a turn
-    /// nobody opened an attempt for must not run.
+    /// what its turn resolved, merged over the opened record. An entry with
+    /// no open attempt is an error: a turn nobody opened an attempt for
+    /// must not run.
     async fn resolve_workflow_call_attempt(
         &self,
         id: Uuid,
         resolution: serde_json::Value,
-    ) -> Result<Vec<serde_json::Value>, StorageError>;
+    ) -> Result<(), StorageError>;
     async fn cut_short_workflow_journal_entry(
         &self,
         id: Uuid,
@@ -3268,14 +3269,14 @@ mod tests {
             &self,
             _: Uuid,
             _: serde_json::Value,
-        ) -> Result<(), StorageError> {
+        ) -> Result<Vec<serde_json::Value>, StorageError> {
             unimplemented!()
         }
         async fn resolve_workflow_call_attempt(
             &self,
             _: Uuid,
             _: serde_json::Value,
-        ) -> Result<Vec<serde_json::Value>, StorageError> {
+        ) -> Result<(), StorageError> {
             unimplemented!()
         }
         async fn cut_short_workflow_journal_entry(

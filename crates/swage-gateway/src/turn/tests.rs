@@ -2369,21 +2369,21 @@ impl swage_storage::WorkflowStore for MockStorage {
         &self,
         _: Uuid,
         _: serde_json::Value,
-    ) -> Result<(), StorageError> {
-        Ok(())
+    ) -> Result<Vec<serde_json::Value>, StorageError> {
+        // The mock keeps no journal, so no attempt precedes this one.
+        Ok(Vec::new())
     }
     async fn resolve_workflow_call_attempt(
         &self,
         _: Uuid,
         _: serde_json::Value,
-    ) -> Result<Vec<serde_json::Value>, StorageError> {
+    ) -> Result<(), StorageError> {
         if self.fail_workflow_attempt_writes.load(Ordering::SeqCst) {
             return Err(StorageError::QueryFailed(
                 "injected workflow attempt write failure".into(),
             ));
         }
-        // The mock keeps no journal, so no attempt precedes this one.
-        Ok(Vec::new())
+        Ok(())
     }
     async fn cut_short_workflow_journal_entry(
         &self,

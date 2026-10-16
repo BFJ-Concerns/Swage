@@ -212,7 +212,8 @@ describe("WorkflowRunView", () => {
     const text = document.body.textContent ?? "";
     expect(text).toContain("Interruptions");
     expect(text).toContain("the gateway stopped while this run was parked");
-    expect(text).toContain("the gateway stopped while this run was executing");
+    expect(text).toContain("the gateway stopped while this run was executing; the calls it had in flight were cut off");
+    expect(text).not.toContain("dispatched again");
     expect(text).toContain("Workers redispatched after an interruption may have repeated their effects.");
     const done = Array.from(document.querySelectorAll(".standing li"));
     const appender = done.find((item) => item.textContent?.includes("appender"))!;

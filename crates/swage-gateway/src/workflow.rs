@@ -500,6 +500,14 @@ impl AppState {
 /// it before any provider work (`resolve_agent_call_attempt`); an attempt
 /// the gateway dies between the two writes of stays in the record with its
 /// cause and no resolution.
+///
+/// Opening also settles what the attempts it supersedes left outstanding.
+/// Replay re-dispatches an unfinished call under a new turn; the attempts
+/// it follows can no longer receive a provider response, so their open
+/// rounds end as interrupted here, the moment that becomes true — not when
+/// the new turn resolves, which a dispatcher that cannot be built never
+/// reaches. Leaving them outstanding would say a request might still come
+/// back when nothing can answer it.
 pub(crate) async fn open_agent_call_attempt(
     storage: &dyn Storage,
     journal_entry_id: Uuid,
@@ -516,28 +524,10 @@ pub(crate) async fn open_agent_call_attempt(
     };
     let opened = serde_json::to_value(opened)
         .map_err(|error| swage_core::StorageError::QueryFailed(error.to_string()))?;
-    storage
-        .open_workflow_call_attempt(journal_entry_id, opened)
-        .await
-}
-
-/// Resolve the open attempt of an agent call with what its turn resolved,
-/// and settle what the attempts it supersedes left outstanding.
-///
-/// Replay re-dispatches an unfinished call under a new turn. The attempts it
-/// follows can no longer receive a provider response, so their open rounds
-/// are ended as interrupted at the moment that becomes true — leaving them
-/// reading as outstanding would say a request might still come back when
-/// nothing can answer it.
-pub(crate) async fn resolve_agent_call_attempt(
-    storage: &dyn Storage,
-    journal_entry_id: Uuid,
-    resolution: Value,
-) -> Result<(), swage_core::StorageError> {
     let superseded = storage
-        .resolve_workflow_call_attempt(journal_entry_id, resolution)
+        .open_workflow_call_attempt(journal_entry_id, opened)
         .await?;
-    let superseded: Vec<swage_protocol::client::workflow::WorkflowAgentCallResolution> = superseded
+    let superseded: Vec<WorkflowAgentCallResolution> = superseded
         .into_iter()
         .map(serde_json::from_value)
         .collect::<Result<_, _>>()
@@ -552,6 +542,17 @@ pub(crate) async fn resolve_agent_call_attempt(
         superseded.into_iter().filter_map(|attempt| attempt.turn_id),
     )
     .await
+}
+
+/// Resolve the open attempt of an agent call with what its turn resolved.
+pub(crate) async fn resolve_agent_call_attempt(
+    storage: &dyn Storage,
+    journal_entry_id: Uuid,
+    resolution: Value,
+) -> Result<(), swage_core::StorageError> {
+    storage
+        .resolve_workflow_call_attempt(journal_entry_id, resolution)
+        .await
 }
 
 /// End every round still outstanding on these turns as interrupted.
@@ -584,18 +585,21 @@ async fn interrupt_outstanding_rounds(
 /// would hide the interrupted attempt's provider rounds, so the attempt
 /// records are the source and the settled result only adds a turn they did
 /// not already name.
-fn agent_call_attempt_turns(entry: &WorkflowJournalRecord) -> Result<Vec<Uuid>, String> {
-    let mut turns: Vec<Uuid> = Vec::new();
+fn agent_call_attempt_turns(entry: &WorkflowJournalRecord) -> Result<Vec<Option<Uuid>>, String> {
+    // One slot per attempt, in the record's order: an attempt opened and
+    // never resolved keeps its position with no turn, so the attempts after
+    // it number as the record numbers them.
+    let mut turns: Vec<Option<Uuid>> = Vec::new();
     if let Some(attempts) = entry.dispatch_attempts.as_ref() {
-        let attempts: Vec<swage_protocol::client::workflow::WorkflowAgentCallResolution> =
-            serde_json::from_value(attempts.clone()).map_err(|error| {
-                format!(
-                    "workflow journal entry {} carries an attempt record outside \
+        let attempts: Vec<WorkflowAgentCallResolution> = serde_json::from_value(attempts.clone())
+            .map_err(|error| {
+            format!(
+                "workflow journal entry {} carries an attempt record outside \
                      WorkflowAgentCallResolution: {error}",
-                    entry.id
-                )
-            })?;
-        turns.extend(attempts.into_iter().filter_map(|attempt| attempt.turn_id));
+                entry.id
+            )
+        })?;
+        turns.extend(attempts.into_iter().map(|attempt| attempt.turn_id));
     }
     let settled = entry
         .result
@@ -603,9 +607,9 @@ fn agent_call_attempt_turns(entry: &WorkflowJournalRecord) -> Result<Vec<Uuid>, 
         .and_then(|result| result.get("turn_id"))
         .and_then(|value| serde_json::from_value::<Uuid>(value.clone()).ok());
     if let Some(settled) = settled
-        && !turns.contains(&settled)
+        && !turns.contains(&Some(settled))
     {
-        turns.push(settled);
+        turns.push(Some(settled));
     }
     Ok(turns)
 }
@@ -3530,12 +3534,26 @@ fn worker_worktree_completion(entry: &WorkflowJournalRecord) -> Option<WorkflowW
         })
 }
 
+/// One worker's standing for the terminal account. An attempt record the
+/// contract cannot read is an error, as it is for every other reader of the
+/// column: a flag read as `false` from an unreadable record would be a
+/// positive statement the record does not make.
 fn worker_account(
     entry: &WorkflowJournalRecord,
     placements: &HashMap<u64, String>,
     termination: Option<WorkflowWorkerTermination>,
-) -> WorkflowWorkerAccount {
-    WorkflowWorkerAccount {
+) -> Result<WorkflowWorkerAccount, String> {
+    let attempts: Vec<WorkflowAgentCallResolution> = match entry.dispatch_attempts.as_ref() {
+        Some(attempts) => serde_json::from_value(attempts.clone()).map_err(|error| {
+            format!(
+                "workflow journal entry {} carries an attempt record outside \
+                 WorkflowAgentCallResolution: {error}",
+                entry.id
+            )
+        })?,
+        None => Vec::new(),
+    };
+    Ok(WorkflowWorkerAccount {
         journal_entry_id: entry.id,
         seq: entry.seq,
         label: entry
@@ -3551,18 +3569,10 @@ fn worker_account(
         placement: worker_placement_of(entry, placements),
         worktree: worker_worktree_completion(entry),
         termination,
-        redispatched_after_interruption: entry
-            .dispatch_attempts
-            .clone()
-            .and_then(|attempts| {
-                serde_json::from_value::<Vec<WorkflowAgentCallResolution>>(attempts).ok()
-            })
-            .is_some_and(|attempts| {
-                attempts
-                    .iter()
-                    .any(|attempt| attempt.cause == WorkflowAttemptCause::AfterInterruption)
-            }),
-    }
+        redispatched_after_interruption: attempts
+            .iter()
+            .any(|attempt| attempt.cause == WorkflowAttemptCause::AfterInterruption),
+    })
 }
 
 /// Account for every worker the run dispatched, at the instant it ends.
@@ -3592,7 +3602,13 @@ async fn account_for_run_end(
     };
     let ending = refine_ending(ending, &journal);
     let cut_short = cut_short_termination(&ending);
-    let account = terminal_account_from_journal(&journal, ending.clone(), cut_short.clone());
+    let account = match terminal_account_from_journal(&journal, ending.clone(), cut_short.clone()) {
+        Ok(account) => account,
+        Err(problem) => {
+            tracing::warn!(%run_id, %problem, "could not account for the run's end");
+            return None;
+        }
+    };
     if matches!(ending, WorkflowRunEnding::Cancelled) {
         interrupt_cut_short_worker_rounds(storage, run_id, &journal).await;
         let termination =
@@ -3630,7 +3646,9 @@ async fn interrupt_cut_short_worker_rounds(
     for entry in journal.iter().filter(|entry| entry.status == "started") {
         match agent_call_attempt_turns(entry) {
             Ok(turns) => {
-                if let Err(error) = interrupt_outstanding_rounds(storage, turns).await {
+                if let Err(error) =
+                    interrupt_outstanding_rounds(storage, turns.into_iter().flatten()).await
+                {
                     tracing::warn!(
                         %run_id,
                         journal_entry_id = %entry.id,
@@ -3653,7 +3671,7 @@ fn terminal_account_from_journal(
     journal: &[WorkflowJournalRecord],
     ending: WorkflowRunEnding,
     cut_short_termination: Option<WorkflowWorkerTermination>,
-) -> WorkflowRunTerminalAccount {
+) -> Result<WorkflowRunTerminalAccount, String> {
     let placements = provisioned_placements(journal);
     let mut workers = WorkflowWorkerPartition::default();
     let mut recovered = Vec::new();
@@ -3665,12 +3683,12 @@ fn terminal_account_from_journal(
                 entry,
                 &placements,
                 cut_short_termination.clone(),
-            ));
+            )?);
             continue;
         }
         match entry.status.as_str() {
             "completed" => {
-                workers.done.push(worker_account(entry, &placements, None));
+                workers.done.push(worker_account(entry, &placements, None)?);
                 if let Some(WorkflowJournalResult::AgentCall { output, .. }) =
                     entry.result.as_ref().and_then(|result| {
                         journal_result_from_storage(WorkflowJournalEntryKind::AgentCall, result)
@@ -3699,12 +3717,12 @@ fn terminal_account_from_journal(
                         .clone()
                         .unwrap_or_else(|| "the worker failed without a recorded error".into()),
                 }),
-            )),
+            )?),
             _ => workers.unsettled.push(worker_account(
                 entry,
                 &placements,
                 Some(WorkflowWorkerTermination::Unsettled),
-            )),
+            )?),
         }
     }
     // A run that returned has a result of its own; its completed workers are
@@ -3714,12 +3732,12 @@ fn terminal_account_from_journal(
             reason: partial_reason(&ending),
             results: recovered,
         });
-    WorkflowRunTerminalAccount {
+    Ok(WorkflowRunTerminalAccount {
         ending,
         workers,
         partial_results,
         settled_at: chrono::Utc::now(),
-    }
+    })
 }
 
 /// Why the run's completed work is partial rather than a result.
@@ -9080,6 +9098,9 @@ pub async fn get_run(
                 let mut rounds = Vec::new();
                 for (index, turn_id) in turns.into_iter().enumerate() {
                     let attempt = index as u32 + 1;
+                    let Some(turn_id) = turn_id else {
+                        continue;
+                    };
                     for round in state
                         .storage
                         .list_provider_rounds_by_turn(turn_id)
@@ -9239,7 +9260,8 @@ pub async fn cancel_run(
         let journal_termination = cut_short
             .clone()
             .map(|termination| serde_json::to_value(termination).expect("termination serialises"));
-        let account = terminal_account_from_journal(&journal, ending, cut_short);
+        let account =
+            terminal_account_from_journal(&journal, ending, cut_short).map_err(internal)?;
         let placements = retained_placements(&account);
         let claim = state.worktree_host.retain(id, &placements).await;
         #[cfg(test)]

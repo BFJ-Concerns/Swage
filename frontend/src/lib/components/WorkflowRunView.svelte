@@ -90,7 +90,7 @@
     const when = new Date(interruption.detected_at).toLocaleString();
     return interruption.run_state === "parked"
       ? `${when} — the gateway stopped while this run was parked; its wait outlived the gateway`
-      : `${when} — the gateway stopped while this run was executing; its unsettled calls were dispatched again`;
+      : `${when} — the gateway stopped while this run was executing; the calls it had in flight were cut off`;
   }
 
   function renderOutput(output: unknown): string {

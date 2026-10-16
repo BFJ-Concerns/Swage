@@ -685,11 +685,13 @@ pub struct WorkflowAgentCallDispatch {
     /// The call-scoped tool grants after intersection with the dispatching
     /// context's own authority. `None` means the call narrowed nothing.
     pub grants: Option<Vec<String>>,
-    /// Every attempt the call ran, oldest first, each stamped once its turn
-    /// resolved the options it actually ran with. A call interrupted and
-    /// re-dispatched by replay has more than one, and each names its own
-    /// turn — so the record keeps the interrupted attempt rather than only
-    /// the one that settled. Empty until the first turn resolves.
+    /// Every attempt the call was dispatched for, oldest first: opened by
+    /// the run with its cause before the turn starts, and resolved by the
+    /// turn with the options it actually ran with. A call interrupted and
+    /// re-dispatched by replay, or served by its declared fallback, has more
+    /// than one, each naming its own turn — so the record keeps the attempt
+    /// that was cut off beside the one that followed. An attempt with no
+    /// turn was opened and never resolved.
     pub attempts: Vec<WorkflowAgentCallResolution>,
 }
 

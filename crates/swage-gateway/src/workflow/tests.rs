@@ -16625,6 +16625,24 @@ async fn declared_fallback_model_retries_only_before_output_and_records_the_serv
         serde_json::from_value(run.terminal_account.clone().expect("terminal account"))
             .expect("account");
     assert!(!account.workers.done[0].redispatched_after_interruption);
+    // The rounds of the fallback's turn number as the record numbers the
+    // attempts — the second — even when the primary's attempt never
+    // resolved a turn.
+    let Json(detail) = get_run(State(state.clone()), Path(run_id))
+        .await
+        .expect("workflow detail");
+    let rounds = detail
+        .journal
+        .iter()
+        .find(|entry| entry.agent_call.is_some())
+        .and_then(|entry| entry.agent_call.as_ref())
+        .and_then(|call| call.provider_rounds.clone())
+        .expect("rounds");
+    assert_eq!(
+        rounds.iter().map(|round| round.attempt).collect::<Vec<_>>(),
+        vec![1, 2],
+        "the primary's round is attempt 1, the fallback's attempt 2"
+    );
     let requests = provider.requests.lock().expect("requests");
     assert_eq!(
         requests

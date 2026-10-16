@@ -106,10 +106,13 @@
   }
 
   // The last attempt is the one the call ended on; the earlier ones are the
-  // attempts a fallback or an interruption superseded.
+  // attempts a fallback or an interruption superseded. An attempt the run
+  // opened that no turn has resolved yet has no turn, and says so rather
+  // than reading as defaults.
   function resolvedLabel(call: WorkflowAgentCallDetail): string {
     const resolved = call.dispatch?.attempts.at(-1);
     if (!resolved) return "not yet resolved";
+    if (resolved.turn_id === null) return "opened, not yet resolved by a turn";
     return [resolved.model ?? "default model", resolved.effort ?? "default effort"].join(
       ", ",
     );

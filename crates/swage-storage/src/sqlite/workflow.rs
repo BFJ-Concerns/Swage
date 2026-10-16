@@ -1242,17 +1242,17 @@ impl WorkflowStore for SqliteStorage {
         &self,
         id: Uuid,
         attempt: serde_json::Value,
-    ) -> Result<(), StorageError> {
+    ) -> Result<Vec<serde_json::Value>, StorageError> {
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
             let Some(earlier) = read_call_attempts(&tx, id)? else {
                 return Ok(None);
             };
-            let mut attempts = earlier;
+            let mut attempts = earlier.clone();
             attempts.push(attempt);
             write_call_attempts(&tx, id, &attempts)?;
             tx.commit()?;
-            Ok(Some(()))
+            Ok(Some(earlier))
         })
         .await?
         .ok_or_else(|| StorageError::NotFound {
@@ -1265,7 +1265,7 @@ impl WorkflowStore for SqliteStorage {
         &self,
         id: Uuid,
         resolution: serde_json::Value,
-    ) -> Result<Vec<serde_json::Value>, StorageError> {
+    ) -> Result<(), StorageError> {
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
             let Some(mut attempts) = read_call_attempts(&tx, id)? else {
@@ -1273,8 +1273,7 @@ impl WorkflowStore for SqliteStorage {
             };
             // The open attempt is the latest one no turn has resolved. The
             // resolution merges over it, so the cause and opening time the
-            // run wrote stay beside what the turn resolved; the attempts
-            // before it are the ones this one supersedes.
+            // run wrote stay beside what the turn resolved.
             let Some(open) = attempts.iter().rposition(|attempt| {
                 attempt
                     .get("turn_id")
@@ -1289,10 +1288,9 @@ impl WorkflowStore for SqliteStorage {
             {
                 target.extend(fields);
             }
-            let superseded = attempts[..open].to_vec();
             write_call_attempts(&tx, id, &attempts)?;
             tx.commit()?;
-            Ok(Some(Ok(superseded)))
+            Ok(Some(Ok(())))
         })
         .await?
         .ok_or_else(|| StorageError::NotFound {
@@ -2004,7 +2002,10 @@ mod tests {
         );
 
         let error = storage
-            .open_workflow_call_attempt(Uuid::new_v4(), serde_json::json!({"cause": "first"}))
+            .open_workflow_call_attempt(
+                Uuid::new_v4(),
+                serde_json::json!({"cause": {"cause": "first"}, "opened_at": "2026-10-17T00:00:00Z"}),
+            )
             .await
             .expect_err("an attempt record with no entry to attach to must fail");
         assert!(
@@ -2100,42 +2101,71 @@ mod tests {
 
         // An attempt is opened with its cause and resolved by its turn; a
         // resolution with nothing open is refused, since no run opened it.
+        // The records are shaped as the gateway writes them
+        // (`swage_protocol::client::workflow::WorkflowAgentCallResolution`):
+        // the store keeps them opaque, and a sibling test reading them back
+        // through the contract needs that shape.
+        let turn_one = Uuid::new_v4();
+        let turn_two = Uuid::new_v4();
+        let opened = |cause: &str, opened_at: &str| {
+            serde_json::json!({
+                "cause": { "cause": cause },
+                "opened_at": opened_at,
+                "model": null,
+                "effort": null,
+                "session_id": null,
+                "thread_id": null,
+                "turn_id": null,
+            })
+        };
+        let resolved = |turn: Uuid| {
+            serde_json::json!({
+                "model": "m",
+                "effort": null,
+                "session_id": null,
+                "thread_id": null,
+                "turn_id": turn,
+            })
+        };
         let unopened = storage
-            .resolve_workflow_call_attempt(entry.id, serde_json::json!({"turn_id": "zero"}))
+            .resolve_workflow_call_attempt(entry.id, resolved(Uuid::new_v4()))
             .await
             .expect_err("nothing open");
         assert!(
             unopened.to_string().contains("no open attempt"),
             "{unopened}"
         );
-        storage
-            .open_workflow_call_attempt(entry.id, serde_json::json!({"cause": "first"}))
+        let before_first = storage
+            .open_workflow_call_attempt(entry.id, opened("first", "2026-10-17T00:00:00Z"))
             .await
             .expect("open first");
-        let before_first = storage
-            .resolve_workflow_call_attempt(entry.id, serde_json::json!({"turn_id": "one"}))
-            .await
-            .expect("first attempt");
         assert!(
             before_first.is_empty(),
             "the first attempt had none before it"
         );
         storage
+            .resolve_workflow_call_attempt(entry.id, resolved(turn_one))
+            .await
+            .expect("first attempt");
+        let before_second = storage
             .open_workflow_call_attempt(
                 entry.id,
-                serde_json::json!({"cause": "after_interruption"}),
+                opened("after_interruption", "2026-10-17T00:01:00Z"),
             )
             .await
             .expect("open second");
-        let before_second = storage
-            .resolve_workflow_call_attempt(entry.id, serde_json::json!({"turn_id": "two"}))
-            .await
-            .expect("second attempt");
+        let mut first_resolved = opened("first", "2026-10-17T00:00:00Z");
+        first_resolved["model"] = serde_json::json!("m");
+        first_resolved["turn_id"] = serde_json::json!(turn_one);
         assert_eq!(
             before_second,
-            vec![serde_json::json!({"cause": "first", "turn_id": "one"})],
-            "the re-dispatch is told which attempts it superseded"
+            vec![first_resolved.clone()],
+            "the re-dispatch is told which attempts it supersedes as it opens"
         );
+        storage
+            .resolve_workflow_call_attempt(entry.id, resolved(turn_two))
+            .await
+            .expect("second attempt");
 
         let stored = storage
             .list_workflow_journal(run.id)
@@ -2146,12 +2176,12 @@ mod tests {
             .expect("entry")
             .dispatch_attempts
             .expect("attempts");
+        let mut second_resolved = opened("after_interruption", "2026-10-17T00:01:00Z");
+        second_resolved["model"] = serde_json::json!("m");
+        second_resolved["turn_id"] = serde_json::json!(turn_two);
         assert_eq!(
             stored,
-            serde_json::json!([
-                {"cause": "first", "turn_id": "one"},
-                {"cause": "after_interruption", "turn_id": "two"}
-            ]),
+            serde_json::json!([first_resolved, second_resolved]),
             "both attempts stay in the record, oldest first, each with its cause"
         );
     }

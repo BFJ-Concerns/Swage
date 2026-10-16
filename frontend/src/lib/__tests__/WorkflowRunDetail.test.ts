@@ -91,7 +91,7 @@ const baseCall: WorkflowAgentCallDetail = {
         effort: "low",
         session_id: null,
         thread_id: null,
-        turn_id: null,
+        turn_id: "turn-1",
       },
     ],
   },
@@ -220,6 +220,23 @@ describe("WorkflowRunDetail", () => {
     expect(termination).not.toContain("Failed");
   });
 
+  it("names an opened attempt no turn has resolved as such, never as defaults", async () => {
+    const first = baseCall.dispatch!.attempts[0];
+    await render(
+      runWith({
+        ...baseCall,
+        termination: { termination: "outstanding" },
+        dispatch: {
+          ...baseCall.dispatch!,
+          attempts: [{ ...first, model: null, effort: null, turn_id: null }],
+        },
+      } as unknown as WorkflowAgentCallDetail),
+    );
+    const call = document.querySelector(".call")!.textContent!;
+    expect(call).toContain("opened, not yet resolved by a turn");
+    expect(call).not.toContain("default model");
+  });
+
   it("words a redispatch after an interruption apart from a fallback", async () => {
     const first = baseCall.dispatch!.attempts[0];
     await render(
@@ -336,7 +353,7 @@ describe("WorkflowRunDetail", () => {
               effort: "low",
               session_id: null,
               thread_id: null,
-              turn_id: null,
+              turn_id: "turn-1",
             },
             {
               cause: { cause: "after_interruption" },
@@ -345,7 +362,7 @@ describe("WorkflowRunDetail", () => {
               effort: "low",
               session_id: null,
               thread_id: null,
-              turn_id: null,
+              turn_id: "turn-2",
             },
           ],
         },
