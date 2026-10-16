@@ -635,7 +635,8 @@ pub(crate) async fn build_gateway_dispatcher(
         turn_id,
     )?;
     let python_config = if config.tools.python_execute.enabled
-        && (config.sandbox.enabled || config.tools.python_execute.require_sandbox)
+        && (config.tools.python_execute.require_sandbox
+            || (config.sandbox.enabled && state.declared_execution_boundary.is_none()))
     {
         let roots = PolicyRoots::from_environment(&state.config_root)?;
         let mut policy = build_sandbox_config(agent_config, workspace_policy.as_ref(), &roots)
@@ -915,6 +916,27 @@ mod tests {
                 config.dangerously_skip_permissions = true;
                 environment_case_dispatcher(config, false).await;
             }
+        });
+    }
+
+    #[test]
+    fn declared_boundary_python_runs_without_bubblewrap() {
+        if !run_dispatcher_environment_case(
+            "turn::dispatcher::tests::declared_boundary_python_runs_without_bubblewrap",
+            false,
+        ) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let mut config = swage_config::ResolvedConfig::default();
+            config.tools.python_execute.require_sandbox = false;
+            config.tools.python_execute.enabled = true;
+            config.tools.python_execute.warm_target = 0;
+            config.tools.python_execute.runtime_path =
+                Some(std::env::var("SWAGE_TEST_PYTHON").unwrap());
+            config.dangerously_skip_permissions = true;
+            assert!(config.sandbox.enabled);
+            environment_case_dispatcher(config, true).await;
         });
     }
 
