@@ -25,10 +25,10 @@ use swage_core::{GatewayError, StorageError};
 use swage_protocol::client::surface::{
     CreateSurfaceAnnotationRequest, CreateSurfaceRequest, DeleteSurfaceAnnotationResponse,
     DeleteSurfaceModuleResponse, LibraryEntryModuleView, LibraryEntryResponse, LibraryEntrySummary,
-    LibraryListResponse, MoveSurfaceModuleRequest, SaveSurfaceToLibraryRequest,
-    SurfaceAnnotationView, SurfaceListResponse, SurfaceModuleView, SurfaceResponse, SurfaceSummary,
-    TopicDefaultSurfaceRequest, UpdateSurfaceAnnotationRequest, WriteSurfaceModuleRequest,
-    WriteSurfaceModuleResponse,
+    LibraryListResponse, MoveSurfaceModuleRequest, RenameSurfaceRequest,
+    SaveSurfaceToLibraryRequest, SurfaceAnnotationView, SurfaceListResponse, SurfaceModuleView,
+    SurfaceResponse, SurfaceSummary, TopicDefaultSurfaceRequest, UpdateSurfaceAnnotationRequest,
+    WriteSurfaceModuleRequest, WriteSurfaceModuleResponse,
 };
 use swage_protocol::client::websocket::ServerEvent;
 use swage_storage::{
@@ -514,6 +514,107 @@ async fn module_on_surface(
                 surface.id
             ))
         })
+}
+
+/// Rename a session's surface and record the title it replaces.
+pub async fn rename_surface(
+    state: &AppState,
+    id: Uuid,
+    request: RenameSurfaceRequest,
+    author: &str,
+) -> Result<SurfaceResponse, GatewayError> {
+    let surface = surface_or_invalid(state, id).await?;
+    let title = request.title.trim();
+    if title.is_empty() {
+        return Err(GatewayError::ValidationError(
+            "a surface needs a non-empty title".into(),
+        ));
+    }
+    let prior = state
+        .storage
+        .rename_surface(id, title)
+        .await?
+        .ok_or_else(|| {
+            GatewayError::ValidationError("the surface disappeared during rename".into())
+        })?;
+    state
+        .storage
+        .create_audit_event(NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: Some(surface.session_id),
+            entity_kind: "surface".into(),
+            entity_id: id.to_string(),
+            event_kind: "surface_renamed".into(),
+            summary: format!("surface renamed: {title}"),
+            metadata: json!({"prior_title": prior, "title": title, "author": author}),
+        })
+        .await?;
+    let _ = state.broadcast.send(ServerEvent::SurfaceUpdated {
+        surface_id: id,
+        module_id: None,
+    });
+    surface_response(state, id).await
+}
+
+/// Resolve a note without removing it from the surface's record.
+pub async fn resolve_surface_annotation(
+    state: &AppState,
+    surface_id: Uuid,
+    annotation_id: Uuid,
+    author: &str,
+) -> Result<SurfaceAnnotationView, GatewayError> {
+    let surface = surface_or_invalid(state, surface_id).await?;
+    let prior = state
+        .storage
+        .get_surface_annotation(annotation_id)
+        .await?
+        .filter(|note| note.surface_id == surface_id)
+        .ok_or_else(|| GatewayError::ValidationError("no such note on this surface".into()))?;
+    module_on_surface(state, &surface, prior.module_id).await?;
+    if state
+        .storage
+        .resolve_surface_annotation(annotation_id)
+        .await?
+    {
+        let current = state
+            .storage
+            .get_surface_annotation(annotation_id)
+            .await?
+            .ok_or_else(|| {
+                GatewayError::ValidationError("the note disappeared during resolution".into())
+            })?;
+        state.storage.create_audit_event(NewAuditEvent {
+            id: Uuid::new_v4().to_string(), session_id: Some(surface.session_id), entity_kind: "surface".into(), entity_id: surface_id.to_string(), event_kind: "surface_annotation_resolved".into(), summary: format!("note resolved on {}", surface.title), metadata: json!({"annotation_id": annotation_id, "module_id": prior.module_id, "author": author, "resolved_at": current.resolved_at, "body": current.body}),
+        }).await?;
+        let _ = state.broadcast.send(ServerEvent::SurfaceUpdated {
+            surface_id,
+            module_id: Some(prior.module_id),
+        });
+        return Ok(annotation_view(current));
+    }
+    if prior.resolved_at.is_none() {
+        return Err(GatewayError::ValidationError(
+            "the note changed during resolution; read it again".into(),
+        ));
+    }
+    Ok(annotation_view(prior))
+}
+
+pub async fn rename_surface_handler(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<RenameSurfaceRequest>,
+) -> Result<Json<SurfaceResponse>, ApiError> {
+    Ok(Json(rename_surface(&state, id, request, "user").await?))
+}
+
+pub async fn resolve_surface_annotation_handler(
+    State(state): State<AppState>,
+    Path((surface_id, annotation_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<SurfaceAnnotationView>, ApiError> {
+    Ok(Json(
+        resolve_surface_annotation(&state, surface_id, annotation_id, "user").await?,
+    ))
 }
 
 /// Write a module: append a new instance, or replace an existing one's source
@@ -1002,6 +1103,7 @@ pub async fn surface_response(
     // Each note travels with the module it hangs on, so the reader finds it
     // where the location is rather than having to match ids by hand.
     Ok(SurfaceResponse {
+        shape_only: surface.shape_only,
         id: surface.id,
         session_id: surface.session_id,
         title: surface.title,
@@ -1042,6 +1144,7 @@ fn module_view(
 
 fn annotation_view(annotation: SurfaceAnnotation) -> SurfaceAnnotationView {
     SurfaceAnnotationView {
+        resolved_at: annotation.resolved_at,
         id: annotation.id,
         module_id: annotation.module_id,
         body: annotation.body,

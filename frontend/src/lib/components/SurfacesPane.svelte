@@ -12,7 +12,7 @@
 -->
 <script lang="ts">
   import DOMPurify from "dompurify";
-  import { marked } from "marked";
+  import { marked, Marked } from "marked";
   import type { SurfacesStore } from "../stores/surfaces";
   import type { SurfaceModuleView } from "../protocol/SurfaceModuleView";
 
@@ -29,6 +29,9 @@
   let { store, sessionId, routedSurfaceId = null, onOpenSurface, onOpenLibrary }: Props = $props();
 
   let newTitle = $state("");
+  let renamingSurfaceId = $state<string | null>(null);
+  let renamedTitle = $state("");
+  let ticking = $state(false);
   // The library entry a new surface is seeded from, "" for a blank surface.
   // The picker reads the catalogue; it never mutates it.
   let newEntryId = $state("");
@@ -48,9 +51,13 @@
   let moduleError = $state<string | null>(null);
 
   async function refetchAfterFailure(error: unknown, surfaceId: string): Promise<void> {
-    moduleError = error instanceof Error ? error.message : "The change was not applied.";
     stopEditing();
     annotatingModuleId = null;
+    await reportAndRefreshFailure(error, surfaceId);
+  }
+
+  async function reportAndRefreshFailure(error: unknown, surfaceId: string): Promise<void> {
+    moduleError = error instanceof Error ? error.message : "The change was not applied.";
     try {
       await store.openSurface(surfaceId);
     } catch {
@@ -74,6 +81,7 @@
     // A picker selection belongs to one session's view: switching sessions
     // must not carry a selection into the next create.
     newEntryId = "";
+    renamingSurfaceId = null;
     savingToLibrary = false;
     saveNotice = null;
     void store.loadSurfaces(sessionId);
@@ -99,6 +107,105 @@
     // module source is shared work product and may quote anything.
     const raw = marked.parse(source) as string;
     return DOMPurify.sanitize(raw);
+  }
+
+  async function renameSurface(): Promise<void> {
+    const surface = store.activeSurface;
+    if (!surface || surface.id !== renamingSurfaceId || !renamedTitle.trim()) return;
+    try {
+      await store.renameSurface(surface.id, renamedTitle.trim());
+      renamingSurfaceId = null;
+    } catch (error) { await reportAndRefreshFailure(error, surface.id); }
+  }
+
+  async function resolveNote(annotationId: string): Promise<void> {
+    const surface = store.activeSurface;
+    if (!surface) return;
+    try { await store.resolveAnnotation(surface.id, annotationId); }
+    catch (error) { await reportAndRefreshFailure(error, surface.id); }
+  }
+
+  // Block tokens keep code examples separate from lists. Each descent maps
+  // the lexer's de-indented item text back to the saved source characters.
+  function taskOffsets(source: string): number[] {
+    const offsets: number[] = [];
+    function mappedLines(raw: string, body: string, start: number, positions: number[]): number[] | null {
+      const rawLines = raw.split("\n");
+      const bodyLines = body.split("\n");
+      const mapped: number[] = [];
+      let rawOffset = start;
+      for (let i = 0; i < bodyLines.length; i++) {
+        const rawLine = rawLines[i];
+        const line = bodyLines[i];
+        const at = rawLine?.indexOf(line) ?? -1;
+        if (at < 0) return null;
+        for (let j = 0; j < line.length; j++) mapped.push(positions[rawOffset + at + j]);
+        if (i < bodyLines.length - 1) mapped.push(positions[rawOffset + rawLine.length]);
+        rawOffset += rawLine.length + 1;
+      }
+      return mapped;
+    }
+    function visit(tokens: ReturnType<typeof marked.lexer> | import("marked").Token[], text: string, positions: number[]): void {
+      let cursor = 0;
+      for (const token of tokens) {
+        const start = text.indexOf(token.raw, cursor);
+        if (start < 0) continue;
+        cursor = start + token.raw.length;
+        if (token.type === "blockquote") {
+          const mapped = mappedLines(token.raw, token.text, start, positions);
+          if (mapped) visit(token.tokens, token.text, mapped);
+        }
+        if (token.type !== "list") continue;
+        let itemCursor = start;
+        for (const item of token.items) {
+          const itemStart = text.indexOf(item.raw, itemCursor);
+          if (itemStart < 0) continue;
+          itemCursor = itemStart + item.raw.length;
+          const marker = /^[ \t]*(?:[-+*]|\d+[.)]) +\[([ xX])\]/.exec(item.raw);
+          if (item.task && marker) offsets.push(positions[itemStart + marker[0].lastIndexOf("[") + 1]);
+          const mapped = mappedLines(item.raw, item.text, itemStart, positions);
+          if (mapped) visit(item.tokens, item.text, mapped);
+        }
+      }
+    }
+    const normalised = source.replace(/\r\n?/g, "\n");
+    const positions: number[] = [];
+    for (let i = 0; i < source.length; i++) {
+      positions.push(i);
+      if (source[i] === "\r" && source[i + 1] === "\n") i++;
+    }
+    visit(marked.lexer(normalised), normalised, positions);
+    return offsets;
+  }
+
+  function renderChecklist(source: string): string {
+    const offsets = taskOffsets(source);
+    let index = 0;
+    const raw = new Marked({ renderer: {
+      checkbox({ checked }) {
+        const offset = offsets[index++];
+        const label = (offset === undefined ? "Task" : source.slice(offset + 2).split(/\r?\n/, 1)[0].trim())
+          .replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
+        return `<input type="checkbox" aria-label="${label}" ${checked ? "checked" : ""} ${offset === undefined ? "disabled" : `data-task-offset="${offset}"`} />`;
+      },
+    } }).parse(source) as string;
+    return DOMPurify.sanitize(raw);
+  }
+
+  async function toggleChecklist(event: Event, module: SurfaceModuleView): Promise<void> {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) || target.type !== "checkbox") return;
+    const offset = Number(target.dataset.taskOffset);
+    target.checked = module.source[offset]?.toLowerCase() === "x";
+    if (target.dataset.taskOffset === undefined || !taskOffsets(module.source).includes(offset) || ticking || editingModuleId !== null) return;
+    const surface = store.activeSurface;
+    if (!surface) return;
+    const source = module.source.slice(0, offset) + (target.checked ? " " : "x") + module.source.slice(offset + 1);
+    ticking = true;
+    editingModuleId = module.id;
+    editingSource = source;
+    editingRevision = module.revision;
+    try { await saveEdit(); } finally { ticking = false; }
   }
 
   async function createSurface(): Promise<void> {
@@ -127,9 +234,12 @@
     const description = saveDescription.trim();
     if (!surface || !name || !description) return;
     const tags = saveTags.split(",").map((tag) => tag.trim()).filter(Boolean);
+    const duplicate = store.library.some((entry) => entry.name === name);
     await store.saveToLibrary(surface.id, name, description, tags);
     savingToLibrary = false;
-    saveNotice = `Saved to the library as “${name}”.`;
+    saveNotice = duplicate
+      ? `Saved to the library as “${name}”, creating a separate entry with its own save time.`
+      : `Saved to the library as “${name}”.`;
   }
 
   function startEditing(module: SurfaceModuleView): void {
@@ -293,6 +403,18 @@
   <section aria-label="Surface">
     {#if store.activeSurface}
       <h2>{store.activeSurface.title}</h2>
+      {#if renamingSurfaceId === store.activeSurface.id}
+        <form onsubmit={(event) => { event.preventDefault(); void renameSurface(); }}>
+          <label>Surface title<input aria-label="Surface title" bind:value={renamedTitle} /></label>
+          <button type="submit" disabled={!renamedTitle.trim()}>Save title</button>
+          <button type="button" onclick={() => (renamingSurfaceId = null)}>Cancel</button>
+        </form>
+      {:else}
+        <button onclick={() => { renamedTitle = store.activeSurface!.title; renamingSurfaceId = store.activeSurface!.id; }}>Rename surface</button>
+      {/if}
+      {#if store.activeSurface.shape_only}
+        <p class="lineage">This copy keeps the saved shape. The saved content stays in its origin scope; these modules start empty for this session’s own data.</p>
+      {/if}
       {#if store.activeSurface.seeded_from_name}
         <p class="lineage">
           Added from the library entry <strong
@@ -311,13 +433,10 @@
               void saveToLibrary();
             }}
           >
-            <input aria-label="Library name" placeholder="Name" bind:value={saveName} />
-            <input
-              aria-label="Library description"
-              placeholder="What it does and when to use it"
-              bind:value={saveDescription}
-            />
-            <input aria-label="Library tags" placeholder="Tags, comma separated" bind:value={saveTags} />
+            <label>Library name<input aria-label="Library name" bind:value={saveName} /></label>
+            <label>Library description<textarea aria-label="Library description" rows="4" bind:value={saveDescription}></textarea></label>
+            <label>Library tags<textarea aria-label="Library tags" rows="2" bind:value={saveTags}></textarea></label>
+            <p>Content is preserved within its origin scope; other scopes receive the shape with empty modules. Notes stay with this session.</p>
             <button type="submit" disabled={!saveName.trim() || !saveDescription.trim()}>Save</button>
             <button type="button" onclick={() => (savingToLibrary = false)}>Cancel</button>
           </form>
@@ -340,6 +459,7 @@
         </article>
       {/if}
       {#each store.activeSurface.modules as module, index (module.id)}
+        {@const openNotes = module.annotations.filter((note) => !note.resolved_at)}
         <article class="module" data-kind={module.kind}>
           {#if editingModuleId === module.id}
             {#if staleModule}
@@ -362,7 +482,8 @@
             </div>
           {:else if module.kind === "document"}
             <!-- eslint-disable-next-line svelte/no-at-html-tags — sanitised above -->
-            <div class="module-content">{@html renderDocument(module.source)}</div>
+            <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events — native checkboxes supply keyboard activation -->
+            <div class="module-content" onclick={(event) => void toggleChecklist(event, module)}>{@html renderChecklist(module.source)}</div>
             <div class="module-actions">
               <button onclick={() => startEditing(module)}>
                 Edit
@@ -390,9 +511,9 @@
             </div>
           {/if}
 
-          {#if module.annotations.length > 0}
+          {#if openNotes.length > 0}
             <ul class="annotations" aria-label="Notes on this module">
-              {#each module.annotations as annotation (annotation.id)}
+              {#each openNotes as annotation (annotation.id)}
                 <li data-annotation-id={annotation.id}>
                   <span class="annotation-author">{annotation.author}</span>
                   {#if editingAnnotationId === annotation.id}
@@ -424,6 +545,7 @@
                     >
                       Edit
                     </button>
+                    <button onclick={() => void resolveNote(annotation.id)}>Resolve</button>
                     <button
                       class="annotation-remove"
                       onclick={() =>
@@ -470,6 +592,25 @@
 </div>
 
 <style>
+  .save-form label {
+    display: flex;
+    flex: 1 1 16rem;
+    min-width: 0;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .save-form input,
+  .save-form textarea {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid var(--rule-soft);
+    background: var(--paper);
+    color: var(--ink);
+    padding: 6px 8px;
+    font: inherit;
+  }
+
   .surfaces {
     display: grid;
     grid-template-columns: 220px 1fr;

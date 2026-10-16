@@ -1311,6 +1311,8 @@ pub struct Turn {
 /// The database is authoritative for surface content; renderings are derived.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Surface {
+    /// True when this surface was seeded without the origin scope's content.
+    pub shape_only: bool,
     pub id: Uuid,
     /// The session this surface belongs to. A surface is the session's own:
     /// it opens with the session, stays with the session's record, and is
@@ -1395,6 +1397,8 @@ pub struct RemovedSurfaceModule {
 /// addresses a position inside a module's content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SurfaceAnnotation {
+    /// Resolution keeps the note in the record.
+    pub resolved_at: Option<DateTime<Utc>>,
     pub id: Uuid,
     pub surface_id: Uuid,
     pub module_id: Uuid,

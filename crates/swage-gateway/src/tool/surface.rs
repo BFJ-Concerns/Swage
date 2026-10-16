@@ -24,7 +24,7 @@ use uuid::Uuid;
 use swage_core::ToolError;
 use swage_protocol::client::surface::{
     CreateSurfaceAnnotationRequest, CreateSurfaceRequest, MoveSurfaceModuleRequest,
-    SaveSurfaceToLibraryRequest, WriteSurfaceModuleRequest,
+    RenameSurfaceRequest, SaveSurfaceToLibraryRequest, WriteSurfaceModuleRequest,
 };
 use swage_storage::Session;
 use swage_tool::context::ToolContext;
@@ -88,8 +88,36 @@ async fn surface_in_session(
     ctx: &dyn ToolContext,
     params: &Value,
 ) -> Result<Uuid, ToolError> {
-    let surface_id = parse_surface_id(tool, params)?;
     let session = calling_session(tool, state, ctx).await?;
+    let surface_id = match (params.get("surface_id"), params.get("surface_name")) {
+        (Some(_), None) => parse_surface_id(tool, params)?,
+        (None, Some(name)) => {
+            let name = name
+                .as_str()
+                .ok_or_else(|| invalid(tool, "surface_name must be a title"))?;
+            let matches = state
+                .storage
+                .list_surfaces_by_session(session.id)
+                .await
+                .map_err(|e| failed(tool, e))?
+                .into_iter()
+                .filter(|s| s.title == name)
+                .collect::<Vec<_>>();
+            if matches.len() != 1 {
+                return Err(invalid(
+                    tool,
+                    "the title does not identify exactly one surface; use its id",
+                ));
+            }
+            matches[0].id
+        }
+        _ => {
+            return Err(invalid(
+                tool,
+                "pass exactly one of surface_id or surface_name",
+            ));
+        }
+    };
     let surface = state
         .storage
         .get_page(surface_id)
@@ -103,6 +131,58 @@ async fn surface_in_session(
         ));
     }
     Ok(surface_id)
+}
+
+async fn session_surface_result(
+    tool: &str,
+    state: &AppState,
+    ctx: &dyn ToolContext,
+    result: Result<Value, ToolError>,
+) -> Result<Value, ToolError> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error @ ToolError::InvalidParameters { .. }) => {
+            let session = calling_session(tool, state, ctx).await?;
+            let surfaces = state
+                .storage
+                .list_surfaces_by_session(session.id)
+                .await
+                .map_err(|e| failed(tool, e))?;
+            let list = surfaces
+                .iter()
+                .map(|s| format!("{}: {}", s.id, s.title))
+                .collect::<Vec<_>>()
+                .join("; ");
+            Err(invalid(
+                tool,
+                format!("{error}. This session's surfaces: {list}"),
+            ))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn validate_arguments(tool: &str, params: &Value, schema: &Value) -> Result<(), ToolError> {
+    let object = params
+        .as_object()
+        .ok_or_else(|| invalid(tool, "arguments must be an object"))?;
+    for (key, value) in object {
+        let property = &schema["properties"][key];
+        let valid = match property["type"].as_str() {
+            Some("string") => value.is_string(),
+            Some("integer") => value.as_i64().is_some(),
+            Some("boolean") => value.is_boolean(),
+            Some("array") => value
+                .as_array()
+                .is_some_and(|a| a.iter().all(Value::is_string)),
+            Some("object") => value.is_object(),
+            _ => return Err(invalid(tool, format!("unrecognised argument {key}"))),
+        };
+        if !valid {
+            return Err(invalid(tool, format!("invalid value for {key}")));
+        }
+    }
+    Ok(())
 }
 
 fn parse_module_id(params: &Value) -> Result<Option<Uuid>, ToolError> {
@@ -158,6 +238,7 @@ impl Tool for SurfaceReadTool {
         json!({
             "type": "object",
             "properties": {
+                "surface_name": { "type": "string", "description": "The exact title of a surface in this session; use instead of surface_id." },
                 "surface_id": {
                     "type": "string",
                     "description": "Read this surface's modules. Omit to list the session's surfaces."
@@ -172,7 +253,23 @@ impl Tool for SurfaceReadTool {
 
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let state = gateway_state(READ_TOOL, ctx)?;
-        if params.get("surface_id").is_some() {
+        let result = async {
+            validate_arguments(READ_TOOL, &params, &self.parameters())?;
+            self.execute_inner(params, ctx).await
+        }
+        .await;
+        session_surface_result(READ_TOOL, state, ctx, result).await
+    }
+}
+
+impl SurfaceReadTool {
+    async fn execute_inner(
+        &self,
+        params: Value,
+        ctx: &dyn ToolContext,
+    ) -> Result<Value, ToolError> {
+        let state = gateway_state(READ_TOOL, ctx)?;
+        if params.get("surface_id").is_some() || params.get("surface_name").is_some() {
             let surface_id = surface_in_session(READ_TOOL, state, ctx, &params).await?;
             let response = surface::surface_response(state, surface_id)
                 .await
@@ -218,10 +315,17 @@ impl Tool for SurfaceWriteTool {
         json!({
             "type": "object",
             "properties": {
+                "rename": { "type": "string", "description": "Rename this session's surface." },
+                "resolve_annotation": { "type": "string", "description": "Resolve the note with this id, keeping it in the record." },
+                "replace": { "type": "object", "description": "Replace a uniquely matched passage at the module revision you read.", "additionalProperties": false, "required": ["old", "new"], "properties": {
+                    "old": { "type": "string", "description": "The exact, uniquely occurring passage to change." },
+                    "new": { "type": "string", "description": "The replacement passage; empty removes it." }
+                } },
                 "title": {
                     "type": "string",
                     "description": "Create a new surface with this title (use alone)."
                 },
+                "surface_name": { "type": "string", "description": "The exact title of a surface in this session; use instead of surface_id." },
                 "surface_id": {
                     "type": "string",
                     "description": "The surface to write on or save (from surface_read)."
@@ -283,27 +387,80 @@ impl Tool for SurfaceWriteTool {
 
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let state = gateway_state(WRITE_TOOL, ctx)?;
-        let author = ctx.agent_id().to_string();
+        let result = async {
+            validate_arguments(WRITE_TOOL, &params, &self.parameters())?;
+            self.execute_inner(params, ctx).await
+        }
+        .await;
+        session_surface_result(WRITE_TOOL, state, ctx, result).await
+    }
+}
 
-        if let Some(title) = params.get("title").and_then(Value::as_str) {
-            if [
-                "surface_id",
-                "module_id",
-                "kind",
-                "source",
-                "annotation",
-                "save_as",
-                "description",
-                "tags",
-            ]
-            .iter()
-            .any(|other| params.get(other).is_some())
-            {
+impl SurfaceWriteTool {
+    async fn execute_inner(
+        &self,
+        params: Value,
+        ctx: &dyn ToolContext,
+    ) -> Result<Value, ToolError> {
+        let state = gateway_state(WRITE_TOOL, ctx)?;
+        let author = ctx.agent_id().to_string();
+        let operations = [
+            "title",
+            "rename",
+            "resolve_annotation",
+            "replace",
+            "source",
+            "save_as",
+            "annotation",
+            "move_to",
+            "remove",
+        ];
+        let selected = operations
+            .into_iter()
+            .filter(|key| params.get(*key).is_some())
+            .collect::<Vec<_>>();
+        let [operation] = selected.as_slice() else {
+            return Err(invalid(
+                WRITE_TOOL,
+                format!(
+                    "pass exactly one write operation; received: {}",
+                    selected.join(", ")
+                ),
+            ));
+        };
+        let fields: &[&str] = match *operation {
+            "title" => &["title"],
+            "rename" => &["rename"],
+            "resolve_annotation" => &["resolve_annotation"],
+            "save_as" => &["save_as", "description", "tags"],
+            "annotation" => &["annotation", "module_id", "tags"],
+            "remove" => &["remove", "module_id"],
+            "move_to" => &["move_to", "module_id"],
+            "replace" => &["replace", "module_id", "expected_revision"],
+            _ => &["source", "module_id", "kind", "expected_revision"],
+        };
+        for key in params
+            .as_object()
+            .ok_or_else(|| invalid(WRITE_TOOL, "arguments must be an object"))?
+            .keys()
+        {
+            let is_reference =
+                *operation != "title" && ["surface_id", "surface_name"].contains(&key.as_str());
+            if !(fields.contains(&key.as_str()) || is_reference) {
                 return Err(invalid(
                     WRITE_TOOL,
-                    "pass title alone to create a surface, or surface_id with source, annotation or save_as",
+                    format!("{key} does not apply to {operation}"),
                 ));
             }
+        }
+        if params
+            .get("remove")
+            .is_some_and(|v| v != &Value::Bool(true))
+        {
+            return Err(invalid(WRITE_TOOL, "remove must be true"));
+        }
+
+        if let Some(title) = params.get("title").and_then(Value::as_str) {
             let session = calling_session(WRITE_TOOL, state, ctx).await?;
             let response = surface::create_surface(
                 state,
@@ -322,13 +479,30 @@ impl Tool for SurfaceWriteTool {
 
         let surface_id = surface_in_session(WRITE_TOOL, state, ctx, &params).await?;
 
+        if let Some(title) = params.get("rename").and_then(Value::as_str) {
+            let response = surface::rename_surface(
+                state,
+                surface_id,
+                RenameSurfaceRequest {
+                    title: title.to_owned(),
+                },
+                &author,
+            )
+            .await
+            .map_err(|e| failed(WRITE_TOOL, e))?;
+            return serde_json::to_value(response).map_err(|e| failed(WRITE_TOOL, e));
+        }
+        if let Some(id) = params.get("resolve_annotation").and_then(Value::as_str) {
+            let id = id
+                .parse::<Uuid>()
+                .map_err(|_| invalid(WRITE_TOOL, "resolve_annotation must be a note id"))?;
+            let response = surface::resolve_surface_annotation(state, surface_id, id, &author)
+                .await
+                .map_err(|e| failed(WRITE_TOOL, e))?;
+            return serde_json::to_value(response).map_err(|e| failed(WRITE_TOOL, e));
+        }
+
         if let Some(save_as) = params.get("save_as").and_then(Value::as_str) {
-            if params.get("source").is_some() || params.get("annotation").is_some() {
-                return Err(invalid(
-                    WRITE_TOOL,
-                    "pass save_as with description to save — not with source or annotation",
-                ));
-            }
             let description = params
                 .get("description")
                 .and_then(Value::as_str)
@@ -356,15 +530,6 @@ impl Tool for SurfaceWriteTool {
         let module_id = parse_module_id(&params)?;
 
         if params.get("remove").and_then(Value::as_bool) == Some(true) {
-            if ["source", "annotation", "move_to"]
-                .iter()
-                .any(|other| params.get(other).is_some())
-            {
-                return Err(invalid(
-                    WRITE_TOOL,
-                    "pass remove with module_id alone — not with source, annotation or move_to",
-                ));
-            }
             let module_id = module_id.ok_or_else(|| {
                 invalid(WRITE_TOOL, "module_id is required when removing a module")
             })?;
@@ -375,12 +540,6 @@ impl Tool for SurfaceWriteTool {
         }
 
         if let Some(move_to) = params.get("move_to") {
-            if params.get("source").is_some() || params.get("annotation").is_some() {
-                return Err(invalid(
-                    WRITE_TOOL,
-                    "pass move_to with module_id alone — not with source or annotation",
-                ));
-            }
             let position = move_to
                 .as_i64()
                 .and_then(|value| i32::try_from(value).ok())
@@ -405,12 +564,6 @@ impl Tool for SurfaceWriteTool {
         }
 
         if let Some(annotation) = params.get("annotation").and_then(Value::as_str) {
-            if params.get("source").is_some() {
-                return Err(invalid(
-                    WRITE_TOOL,
-                    "pass source to write module content, or annotation to leave a note — not both",
-                ));
-            }
             let module_id = module_id.ok_or_else(|| {
                 invalid(
                     WRITE_TOOL,
@@ -432,10 +585,63 @@ impl Tool for SurfaceWriteTool {
             return serde_json::to_value(&view).map_err(|error| failed(WRITE_TOOL, error));
         }
 
-        let source = params
-            .get("source")
-            .and_then(Value::as_str)
-            .ok_or_else(|| invalid(WRITE_TOOL, "source is required when writing a module"))?;
+        let expected_revision = params.get("expected_revision").and_then(Value::as_i64);
+        let existing = if let Some(id) = module_id {
+            Some(
+                state
+                    .storage
+                    .get_surface_module(id)
+                    .await
+                    .map_err(|e| failed(WRITE_TOOL, e))?
+                    .filter(|m| m.surface_id == surface_id)
+                    .ok_or_else(|| invalid(WRITE_TOOL, "no such module on this surface"))?,
+            )
+        } else {
+            None
+        };
+        let source = if let Some(replace) = params.get("replace") {
+            let existing = existing
+                .as_ref()
+                .ok_or_else(|| invalid(WRITE_TOOL, "module_id is required for a targeted edit"))?;
+            let object = replace
+                .as_object()
+                .ok_or_else(|| invalid(WRITE_TOOL, "replace must contain old and new"))?;
+            if object.len() != 2 {
+                return Err(invalid(WRITE_TOOL, "replace must contain only old and new"));
+            }
+            let old = replace["old"]
+                .as_str()
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| invalid(WRITE_TOOL, "replace.old must be non-empty text"))?;
+            let new = replace["new"]
+                .as_str()
+                .ok_or_else(|| invalid(WRITE_TOOL, "replace.new must be text"))?;
+            if Some(existing.revision) != expected_revision {
+                // The guarded write below returns the newer source without a mutation.
+                existing.source.clone()
+            } else {
+                if existing
+                    .source
+                    .as_bytes()
+                    .windows(old.len())
+                    .filter(|part| *part == old.as_bytes())
+                    .count()
+                    != 1
+                {
+                    return Err(invalid(
+                        WRITE_TOOL,
+                        "replace.old must match exactly once; read the module again",
+                    ));
+                }
+                existing.source.replacen(old, new, 1)
+            }
+        } else {
+            params
+                .get("source")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid(WRITE_TOOL, "source is required when writing a module"))?
+                .to_owned()
+        };
         let kind = params
             .get("kind")
             .and_then(Value::as_str)
@@ -454,14 +660,25 @@ impl Tool for SurfaceWriteTool {
             WriteSurfaceModuleRequest {
                 module_id,
                 kind,
-                source: source.to_string(),
+                source: source.clone(),
                 expected_revision,
             },
             &author,
         )
         .await
         .map_err(|error| failed(WRITE_TOOL, error))?;
-        serde_json::to_value(&response).map_err(|error| failed(WRITE_TOOL, error))
+        let mut result =
+            serde_json::to_value(&response).map_err(|error| failed(WRITE_TOOL, error))?;
+        if result["outcome"] == "written"
+            && let Some(prior) = existing
+        {
+            let before = prior.source.chars().count();
+            let after = source.chars().count();
+            if after < before / 2 {
+                result["removed_extent"] = json!({"prior_characters": before, "new_characters": after, "net_characters_removed": before - after});
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -578,6 +795,7 @@ impl Tool for SurfaceLibraryTool {
                 "tags": entry.tags,
                 "origin_topic_id": entry.origin_topic_id,
                 "origin_topic_deleted": entry.origin_topic_deleted,
+                "updated_at": entry.updated_at,
             })).collect::<Vec<_>>(),
         }))
     }
@@ -786,5 +1004,249 @@ mod tests {
         let malformed =
             parse_surface_id(READ_TOOL, &json!({"surface_id": "not-a-uuid"})).unwrap_err();
         assert!(malformed.to_string().contains("surface_read"));
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_read_resolves_a_title_and_preserves_annotations() {
+        let (ctx, _, _) = session_ctx().await;
+        let (id, modules) = surface_with(&ctx, &["# Content"]).await;
+        SurfaceWriteTool.execute(json!({"surface_id": id, "module_id": modules[0], "annotation": "Remember the gate"}), &ctx).await.unwrap();
+        let read = SurfaceReadTool
+            .execute(json!({"surface_name": "Plan"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(read["id"], id.to_string());
+        assert_eq!(
+            read["modules"][0]["annotations"][0]["body"],
+            "Remember the gate"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_bad_references_and_unknown_arguments_name_real_surfaces() {
+        let (ctx, _, _) = session_ctx().await;
+        let (id, _) = surface_with(&ctx, &["# Content"]).await;
+        for params in [
+            json!({"surfac_name": "Plan"}),
+            json!({"surface_id": Uuid::new_v4()}),
+        ] {
+            let result = SurfaceReadTool.execute(params, &ctx).await;
+            assert!(
+                result.is_err(),
+                "an invalid request must never silently list surfaces"
+            );
+            let error = result.unwrap_err().to_string();
+            assert!(
+                error.contains(&id.to_string()) && error.contains("Plan"),
+                "{error}"
+            );
+        }
+        let error = SurfaceWriteTool
+            .execute(
+                json!({"surface_id": Uuid::new_v4(), "source": "wrong"}),
+                &ctx,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&id.to_string()) && error.contains("Plan"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_name_resolution_refuses_foreign_and_ambiguous_titles() {
+        let (ctx, state, session_id) = session_ctx().await;
+        let session = state
+            .storage
+            .get_session(session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let other = state
+            .storage
+            .create_session(NewSession {
+                topic_id: session.topic_id,
+                agent_id: "gateway".into(),
+                origin: SessionOrigin::Direct,
+                metadata: None,
+                active_workspace_attachment_id: None,
+            })
+            .await
+            .unwrap();
+        surface::create_surface(
+            &state,
+            other.id,
+            CreateSurfaceRequest {
+                title: "Foreign".into(),
+                library_entry_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        let foreign = SurfaceReadTool
+            .execute(json!({"surface_name": "Foreign"}), &ctx)
+            .await;
+        assert!(
+            foreign.is_err(),
+            "a foreign title must not resolve or return an index"
+        );
+        surface_with(&ctx, &[]).await;
+        surface_with(&ctx, &[]).await;
+        assert!(
+            SurfaceReadTool
+                .execute(json!({"surface_name": "Plan"}), &ctx)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_library_result_carries_distinct_save_times() {
+        let (ctx, _, _) = session_ctx().await;
+        let (id, _) = surface_with(&ctx, &["# Content"]).await;
+        let mut saved = Vec::new();
+        for _ in 0..2 {
+            saved.push(
+                SurfaceWriteTool
+                    .execute(
+                        json!({"surface_id": id, "save_as": "Plan", "description": "A plan"}),
+                        &ctx,
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        let catalogue = SurfaceLibraryTool.execute(json!({}), &ctx).await.unwrap();
+        assert_eq!(catalogue["entries"].as_array().unwrap().len(), 2);
+        for entry in catalogue["entries"].as_array().unwrap() {
+            let original = saved.iter().find(|e| e["id"] == entry["id"]).unwrap();
+            assert_eq!(entry["updated_at"], original["updated_at"]);
+            assert!(entry.get("origin_topic_id").is_some());
+        }
+        assert_ne!(saved[0]["updated_at"], saved[1]["updated_at"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_targeted_edits_preserve_unrelated_rows_and_refuse_bad_matches() {
+        let (ctx, _, _) = session_ctx().await;
+        let source = (1..=21)
+            .map(|n| format!("Risk {n}: open\n"))
+            .collect::<String>();
+        let (id, modules) = surface_with(&ctx, &[&source]).await;
+        let result = SurfaceWriteTool.execute(json!({"surface_id": id, "module_id": modules[0], "expected_revision": 0, "replace": {"old": "Risk 13: open", "new": "Risk 13: accepted"}}), &ctx).await;
+        assert!(result.is_ok(), "targeted edit should succeed: {result:?}");
+        let read = SurfaceReadTool
+            .execute(json!({"surface_id": id}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            read["modules"][0]["source"],
+            source.replace("Risk 13: open", "Risk 13: accepted")
+        );
+        for old in ["missing", "open", ""] {
+            assert!(SurfaceWriteTool.execute(json!({"surface_id": id, "module_id": modules[0], "expected_revision": 1, "replace": {"old": old, "new": "changed"}}), &ctx).await.is_err());
+        }
+        let stale = SurfaceWriteTool.execute(json!({"surface_id": id, "module_id": modules[0], "expected_revision": 0, "replace": {"old": "accepted", "new": "closed"}}), &ctx).await.unwrap();
+        assert_eq!(stale["outcome"], "stale");
+        assert_eq!(stale["current"]["source"], read["modules"][0]["source"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_whole_replacement_reports_removed_extent() {
+        let (ctx, _, _) = session_ctx().await;
+        for (prior, source, destructive) in [
+            ("é🌿x", "é", true),
+            ("A long register with many unrelated risks and decisions", "Risk 13", true),
+            ("abcd", "ab", false),
+        ] {
+            let (id, modules) = surface_with(&ctx, &[prior]).await;
+            let result = SurfaceWriteTool.execute(json!({"surface_id": id, "module_id": modules[0], "expected_revision": 0, "source": source}), &ctx).await.unwrap();
+            assert_eq!(result["outcome"], "written");
+            assert_eq!(result.get("removed_extent").is_some(), destructive, "{result}");
+            if destructive {
+                assert_eq!(result["removed_extent"]["prior_characters"], prior.chars().count());
+                assert_eq!(result["removed_extent"]["new_characters"], source.chars().count());
+                assert_eq!(result["removed_extent"]["net_characters_removed"], prior.chars().count() - source.chars().count());
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_rename_leaves_library_and_origin_untouched() {
+        let (ctx, _, _) = session_ctx().await;
+        let (id, _) = surface_with(&ctx, &["# Keep content"]).await;
+        let entry = SurfaceWriteTool
+            .execute(
+                json!({"surface_id": id, "save_as": "Atlas", "description": "A plan"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let copy = SurfaceLibraryTool
+            .execute(json!({"add": entry["id"]}), &ctx)
+            .await
+            .unwrap();
+        let renamed = SurfaceWriteTool
+            .execute(
+                json!({"surface_id": copy["id"], "rename": "Boreal plan"}),
+                &ctx,
+            )
+            .await;
+        assert!(renamed.is_ok(), "rename should succeed: {renamed:?}");
+        let read = SurfaceReadTool
+            .execute(json!({"surface_id": copy["id"]}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(read["title"], "Boreal plan");
+        assert_eq!(
+            SurfaceReadTool
+                .execute(json!({"surface_id": id}), &ctx)
+                .await
+                .unwrap()["title"],
+            "Plan"
+        );
+        assert_eq!(
+            SurfaceLibraryTool.execute(json!({}), &ctx).await.unwrap()["entries"][0]["name"],
+            "Atlas"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_resolved_notes_remain_in_read_and_record_the_actor() {
+        let (ctx, state, _) = session_ctx().await;
+        let (id, modules) = surface_with(&ctx, &["# Content"]).await;
+        let note = SurfaceWriteTool
+            .execute(
+                json!({"surface_id": id, "module_id": modules[0], "annotation": "Do this"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let mut signals = state.broadcast.subscribe();
+        let result = SurfaceWriteTool
+            .execute(
+                json!({"surface_id": id, "resolve_annotation": note["id"]}),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_ok(), "resolution should succeed: {result:?}");
+        let read = SurfaceReadTool
+            .execute(json!({"surface_id": id}), &ctx)
+            .await
+            .unwrap();
+        assert!(read["modules"][0]["annotations"][0]["resolved_at"].is_string());
+        assert_eq!(read["modules"][0]["annotations"][0]["body"], "Do this");
+        assert!(
+            signals.try_recv().is_ok(),
+            "resolving must refresh open surfaces"
+        );
+        let events = state.storage.list_audit_events().await.unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.event_kind == "surface_annotation_resolved"
+                    && e.metadata["author"] == "gateway")
+        );
     }
 }

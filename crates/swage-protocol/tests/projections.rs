@@ -43,6 +43,7 @@ fn typescript_bindings_are_regenerated() {
         .expect("export memory instruction request");
     client::memory::MemoryInstructionResponse::export_all(&cfg)
         .expect("export memory instruction response");
+    client::surface::RenameSurfaceRequest::export_all(&cfg).expect("export surface rename");
     client::surface::CreateSurfaceRequest::export_all(&cfg).expect("export create surface");
     client::surface::WriteSurfaceModuleResponse::export_all(&cfg)
         .expect("export write surface module response");
