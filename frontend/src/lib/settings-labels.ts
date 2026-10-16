@@ -2,6 +2,7 @@
 const API_KEY_LABEL = "API key";
 
 export const SETTINGS_LABELS: Readonly<Record<string, string>> = {
+  "attachments.accepted_schemes": "Image reference schemes",
   "default_model": "Default model",
   "memory.curator_idle_minutes": "Memory curation",
   "sessions.archive_after_days": "Session archiving",

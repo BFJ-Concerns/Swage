@@ -155,6 +155,12 @@ describe("OperatorHistoryPane", () => {
       rows: [["Memory curation", "10", "unset"], ["Session archiving", "7", "unset"]],
     },
     {
+      name: "image reference schemes",
+      prior: { attachments: { accepted_schemes: ["https", "data"] } },
+      next: { attachments: { accepted_schemes: ["https"] } },
+      rows: [["Image reference schemes", '["https","data"]', '["https"]']],
+    },
+    {
       name: "array change",
       prior: { tool_permissions: { allow: ["file_read"], deny: ["shell"] } },
       next: { tool_permissions: { allow: ["file_read", "file_write"], deny: ["shell"] } },
