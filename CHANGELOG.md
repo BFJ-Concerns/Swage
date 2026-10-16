@@ -51,6 +51,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Give session surfaces bordered controls and edge spacing, wider modules, a surface list above creation, and direct module navigation.
+
 - Surface renames and note resolutions commit with their audit event; a failed audit write leaves the surface unchanged.
 
 - Surface reads by the agent omit resolved notes while the HTTP response and stored record retain them.

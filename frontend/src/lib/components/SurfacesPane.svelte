@@ -102,6 +102,11 @@
     onOpenSurface?.(surfaceId);
   }
 
+  function moduleLabel(module: SurfaceModuleView, index: number): string {
+    const heading = module.source.match(/^#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/m)?.[1];
+    return heading ? `${index + 1}. ${heading}` : `Module ${index + 1}`;
+  }
+
   function renderDocument(source: string): string {
     // Same discipline as conversation markdown: parse, then sanitise —
     // module source is shared work product and may quote anything.
@@ -366,23 +371,6 @@
 
 <div class="surfaces">
   <aside aria-label="Surfaces">
-    <form
-      onsubmit={(event) => {
-        event.preventDefault();
-        void createSurface();
-      }}
-    >
-      <input placeholder="New surface title" bind:value={newTitle} />
-      {#if store.library.length > 0}
-        <select aria-label="From the library" bind:value={newEntryId}>
-          <option value="">Blank surface</option>
-          {#each store.library as entry (entry.id)}
-            <option value={entry.id} title={entry.description}>{entry.name}</option>
-          {/each}
-        </select>
-      {/if}
-      <button type="submit">Create</button>
-    </form>
     <ul>
       {#each store.surfaces as surface (surface.id)}
         <li>
@@ -398,6 +386,23 @@
         <li class="none">No surfaces yet.</li>
       {/each}
     </ul>
+    <form
+      onsubmit={(event) => {
+        event.preventDefault();
+        void createSurface();
+      }}
+    >
+      <label>New surface title<input placeholder="New surface title" bind:value={newTitle} /></label>
+      {#if store.library.length > 0}
+        <label>From the library<select aria-label="From the library" bind:value={newEntryId}>
+          <option value="">Blank surface</option>
+          {#each store.library as entry (entry.id)}
+            <option value={entry.id} title={entry.description}>{entry.name}</option>
+          {/each}
+        </select></label>
+      {/if}
+      <button type="submit">Create</button>
+    </form>
     {#if onOpenLibrary}
       <button type="button" class="library-link" onclick={onOpenLibrary}>Browse the library</button>
     {/if}
@@ -451,6 +456,14 @@
       {#if moduleError}
         <p class="module-error" role="alert">{moduleError}</p>
       {/if}
+      {#if store.activeSurface.modules.length > 0}
+        <nav class="module-nav" aria-label="Modules">
+          <span class="nav-label">Modules</span>
+          {#each store.activeSurface.modules as module, index (module.id)}
+            <a href={`#surface-module-${module.id}`}>{moduleLabel(module, index)}</a>
+          {/each}
+        </nav>
+      {/if}
       {#if editingModuleId !== null && !store.activeSurface.modules.some((candidate) => candidate.id === editingModuleId)}
         <article class="module orphaned-draft" aria-label="Draft of a removed module">
           <p>The module you were editing was removed. Your draft:</p>
@@ -463,7 +476,7 @@
       {/if}
       {#each store.activeSurface.modules as module, index (module.id)}
         {@const openNotes = module.annotations.filter((note) => !note.resolved_at)}
-        <article class="module" data-kind={module.kind}>
+        <article class="module" id={`surface-module-${module.id}`} data-kind={module.kind}>
           {#if editingModuleId === module.id}
             {#if staleModule}
               <div class="stale-notice" role="alert">
@@ -596,37 +609,23 @@
 
 <style>
   .save-form label {
-    display: flex;
     flex: 1 1 16rem;
-    min-width: 0;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .save-form input,
-  .save-form textarea {
-    width: 100%;
-    box-sizing: border-box;
-    border: 1px solid var(--rule-soft);
-    background: var(--paper);
-    color: var(--ink);
-    padding: 6px 8px;
-    font: inherit;
   }
 
   .surfaces {
     display: grid;
-    grid-template-columns: 220px 1fr;
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    padding: var(--topic-4);
     gap: 16px;
     min-width: 0;
     height: 100%;
     overflow: auto;
   }
 
-  /* Phone-sized: the surface list sits above the open surface. */
+  /* Phone-sized panes grow with their content in the stacked workspace. */
   @media (max-width: 720px) {
     .surfaces {
-      grid-template-columns: 1fr;
       height: auto;
     }
   }
@@ -636,11 +635,13 @@
     padding: 0;
     margin: 8px 0;
     display: flex;
-    flex-direction: column;
-    gap: 4px;
+    flex-wrap: wrap;
+    gap: var(--topic-2);
   }
 
   aside button.active {
+    background: var(--ink);
+    color: var(--paper);
     font-weight: 600;
   }
 
@@ -650,24 +651,100 @@
   }
 
   .library-link {
-    margin-top: 8px;
-    background: none;
-    border: none;
-    padding: 0;
-    color: var(--ink-soft);
-    font-family: var(--font-mono);
-    font-size: var(--font-label-sm);
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    text-decoration: underline dotted;
-    cursor: pointer;
+    margin-top: var(--topic-2);
   }
 
-  .library-link:hover {
-    color: var(--ink-orange);
+  section,
+  aside {
+    min-width: 0;
+  }
+
+  aside form,
+  section > form {
+    display: flex;
+    align-items: end;
+    flex-wrap: wrap;
+    gap: var(--topic-2);
+  }
+
+  label {
+    display: flex;
+    flex-direction: column;
+    gap: var(--topic-1);
+    min-width: 0;
+    font-size: var(--font-body-sm);
+  }
+
+  button {
+    border: var(--border);
+    background: var(--paper);
+    color: var(--ink);
+    padding: 6px 12px;
+    font-family: var(--font-display);
+    font-size: var(--font-body-md);
+    text-transform: uppercase;
+  }
+
+  button:hover:not(:disabled) {
+    background: var(--ink);
+    color: var(--paper);
+  }
+
+  button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  input,
+  select,
+  textarea {
+    max-width: 100%;
+    min-width: 0;
+    border: var(--border);
+    background: var(--paper);
+    color: var(--ink);
+    padding: 6px 8px;
+    font: inherit;
+  }
+
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  .module-nav a:focus-visible {
+    outline: 2px solid var(--ink);
+    outline-offset: 2px;
+  }
+
+  .module-nav {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: var(--topic-2) var(--topic-3);
+    padding: var(--topic-2) 0;
+    border-block: var(--rule);
+    background: var(--paper);
+  }
+
+  .nav-label {
+    font-family: var(--font-mono);
+    font-size: var(--font-label-sm);
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+
+  .module-nav a {
+    color: var(--ink);
+    overflow-wrap: anywhere;
   }
 
   .module {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    scroll-margin-top: 6rem;
     border-left: 3px solid var(--ink);
     padding: 8px 0 8px 12px;
     margin: 12px 0;
@@ -706,6 +783,7 @@
 
   .module-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     margin-top: 4px;
   }
@@ -735,6 +813,7 @@
 
   .annotations li {
     display: flex;
+    flex-wrap: wrap;
     align-items: baseline;
     gap: 8px;
     border-left: 2px solid var(--ink-soft);
@@ -753,6 +832,7 @@
 
   .annotation-form {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     margin-top: 8px;
   }
@@ -765,9 +845,10 @@
 
   .surface-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     align-items: baseline;
-    margin: 0 0 12px;
+    margin: var(--topic-2) 0 var(--topic-3);
   }
 
   .save-form {
