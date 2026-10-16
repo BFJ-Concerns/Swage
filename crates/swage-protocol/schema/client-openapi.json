@@ -4509,6 +4509,10 @@
                 "format": "uuid",
                 "type": "string"
               },
+              "thread_id": {
+                "format": "uuid",
+                "type": "string"
+              },
               "turn_id": {
                 "format": "uuid",
                 "type": "string"
@@ -4522,6 +4526,7 @@
               "type",
               "session_id",
               "turn_id",
+              "thread_id",
               "queued_ids"
             ],
             "type": "object"
