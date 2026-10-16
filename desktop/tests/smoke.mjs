@@ -406,8 +406,8 @@ async function runBrowserSmoke(baseUrl) {
     await createConversationAndWaitForReply(page, null);
   } finally {
     await browser.close();
-    console.log("browser smoke: done");
   }
+  console.log("browser smoke: done");
 }
 
 async function runElectronSmoke(baseUrl) {
@@ -418,7 +418,14 @@ async function runElectronSmoke(baseUrl) {
 
   console.log("electron smoke: start");
   const electronApp = await electron.launch({
-    args: [desktopMain],
+    // An X11-only display (including xvfb) must not inherit a Wayland
+    // platform choice from the shell running the suite.
+    args: [
+      ...(process.env.DISPLAY && !process.env.WAYLAND_DISPLAY
+        ? ["--ozone-platform=x11"]
+        : []),
+      desktopMain,
+    ],
     cwd: repoRoot,
     env: {
       ...process.env,
@@ -445,8 +452,8 @@ async function runElectronSmoke(baseUrl) {
     await createConversationAndWaitForReply(window, "REMOTE");
   } finally {
     await electronApp.close();
-    console.log("electron smoke: done");
   }
+  console.log("electron smoke: done");
 }
 
 const gateway = createMockGateway();
