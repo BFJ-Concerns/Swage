@@ -7,6 +7,11 @@ All notable changes to Swage are documented in this file.
 ### Added
 
 - `file_write` can append content without rewriting or replacing the existing file.
+- The turn context inspector opens complete recorded provider requests and element text, and shows effective model, provider, effort, budgets and request divergences.
+- Session surfaces can be renamed from their header or by the agent without changing the library entry or original surface.
+- Either party can resolve a surface note; it leaves the working view and remains in the surface record.
+- Agents can replace or remove a uniquely matched passage of a module without resubmitting unrelated content.
+
 - Settings has a Memory tab listing every memory page, general and per topic, to read; a chat box there changes memory by instructing the curator, showing its reply and each page it changed. The curator's notice links open the page they name.
 - Settings edits the web search provider and applies saved changes to new turns.
 - The compaction threshold is configurable: `[context] compaction_threshold = { messages = N }` or `{ tokens = N }`, resolved through the configuration cascade (default: 100 messages). A session that keeps hitting walls — the same tool call failing again and again, or failed tool calls and failed turns piling up across its recent turns, provider timeouts and rate limits excluded — continues on a successor built from a blind diagnosis: separate readers each locate what went wrong in part of the history, a synthesis names the problems, and the successor starts from those notes with only the newest message kept verbatim. Every turn runs on such a successor while the walls remain among the recent turns: a turn whose recent walls are the ones the previous diagnosis answered starts from that diagnosis again, with every message since its split kept verbatim, new walls get a fresh diagnosis, and a turn with no wall left in view gets its full history back. The readers and the synthesis run on the session's model unless `[context] diagnosis_reader_model` or `diagnosis_synthesis_model` names a model entry or alias. The turn-context inspector shows the pass as a compaction with requested strategy `succession-degradation`, its diagnosis recording the walls answered and each model call's model, usage and report. It retains compaction decisions from the first assembly and the successor in pass order, even when their names match. Transient provider failures, including HTTP 5xx responses and malformed streams, do not trigger wall succession; provider refusals of the agent’s request still count as walls. If any diagnosis reader or the synthesis fails or returns an empty report, the turn falls back to the threshold path and compacts only when its context exceeds the threshold, retaining the failed diagnosis and call in its context record. Settings saves reject invalid compaction thresholds and diagnosis model names, including retained references to a removed model, before writing the configuration.
@@ -21,6 +26,9 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- Browser clicks, typing, selections and scrolling no longer ask for approval by default.
+- Image references accept only `https:` and `data:` schemes by default; the accepted set is configurable through `[attachments]` and Settings, with explained refusals recorded in the audit trail.
+
 - Swage is licensed under the GNU Affero General Public License, version 3 or any later version (`AGPL-3.0-or-later`), with the full text in `LICENSE` and the licence recorded in every crate and npm package manifest. Pull requests are welcome, contributed under the same licence.
 - A continuation schedule firing during a running turn queues its brief for the next turn, and channel messages for a busy session wait in the same durable queue. The web UI shows queued inputs once, labels them queued, and displays recorded inputs and the drained reply live.
 - A message, channel message or continuation brief reaching an idle session that still has queued messages, as a Stop leaves them, joins the queue and runs after them in the same turn.
@@ -28,7 +36,7 @@ All notable changes to Swage are documented in this file.
 - CI runs the full verification gate (`just verify`) on GitHub Actions hosted runners and names any test that passed only on retry.
 - The operator history names each changed configuration field with its prior and new value — nested settings by their path, such as Context › Assembly — and keeps the whole prior and new objects collapsed one click away, so variant selections and assembly decisions sit close below.
 - Per-turn sandboxing is on by default, so bubblewrap is a required install prerequisite; a topic opts out with `[sandbox] enabled = false`, and its local gateway turns then record a degraded execution boundary unless the install declares its own boundary.
-- In attended sessions, `shell`, `file_edit`, `file_write`, `python_execute`, `browser_click`, `browser_type`, `browser_select` and `browser_scroll` ask for approval before each call by default; a `require_approval` list in configuration replaces that default. Unattended sessions still run on their grants alone.
+- In attended sessions, `shell`, `file_edit`, `file_write` and `python_execute` ask for approval before each call by default; a `require_approval` list in configuration replaces that default. Unattended sessions still run on their grants alone.
 - The built-in Codex app server (`protocol = "codex"`) is temporarily disabled: configuration naming it does not load, and Settings does not offer it as a provider kind, until Swage can ask the operator to approve the commands and file changes it makes. Codex models stay reachable through any OpenAI-protocol provider.
 - Unused keys in `[tools.search]` are refused at configuration load.
 - Voice transcription and speech synthesis request the models set in `[voice]` (`transcription_model`, `speech_model`), editable under Settings → Voice (the Voice entry in the settings navigation, which states the prerequisite: an OpenAI-protocol default provider plus the two model ids), from the default provider's endpoint; they never use the chat model. With a model unset, that capability reports itself unavailable, and the voice capabilities route (`unavailable_reason`) says what to configure.
@@ -37,6 +45,7 @@ All notable changes to Swage are documented in this file.
 - The client OpenAPI document declares the recent-sessions `archived` query parameter as a boolean, matching the generated TypeScript client and gateway.
 - Topic-local surface templates are replaced by the shared surface library; surfaces are listed and created per session (`/api/sessions/{id}/surfaces`) rather than per topic, and a schedule may deliver to a surface only when it continues the session that owns it.
 - The container is now called a topic and the shared work view a surface everywhere — storage, API routes, tools, events, config directories (`~/.swage/topics/`), UI, and documentation. No aliases are retained, so stores and config directories from before this change are not read; private alpha starts from a fresh rebuild.
+- Swage refuses to open a database whose schema differs from its own, including an older store it previously upgraded in place, and names the data root to rebuild; data migration is not supported during the private alpha.
 
 ### Removed
 
@@ -53,6 +62,45 @@ All notable changes to Swage are documented in this file.
 - File path checks preserve non-UTF-8 roots and accept canonical paths through approved symlink aliases. An untrusted child workspace cannot release a read-only parent's restriction, and device-owned paths outside gateway attachments are checked on the device.
 - Replacing a non-empty file with `file_write` reports the prior byte count.
 - Local gateway tool-output artefacts use managed session scratch storage, so read-only workspaces remain untouched and shell inspection returns its output.
+- Cancelling a turn while its initial provider attempt is queued retains that attempt as interrupted in the turn record.
+
+- The turn inspector shows the final provider attempt’s full request for each round and keeps failed attempts’ requests beside their entries, including cross-protocol failover.
+
+- Provider attempt records and the turn inspector identify each attempt’s provider adapter, model and stable route through failover, so separate providers’ first attempts are distinguishable.
+
+- Turn inspector instruction summaries count each configured file at its original hierarchy level, including topic instructions.
+
+- Turn records retain every provider stream attempt, including the initial request and retries, with start and end times and redacted failure details.
+- Surface renames and note resolutions commit with their audit event; a failed audit write leaves the surface unchanged.
+
+- Surface reads by the agent omit resolved notes while the HTTP response and stored record retain them.
+
+- Retrying a surface rename or note resolution clears the previous failure notice.
+
+- Failed checklist saves keep an open surface note and its unsaved text.
+
+- Shared-session channel arrivals keep their order across chats, and queued branch replies stay on their own thread in the live conversation.
+
+- Developer channel messages join the durable session queue during a turn. Telegram polling continues while the assistant answers; queued inputs retain their thread destinations, replies are delivered once per target, and deleting a session settles its waiting scheduled work. Delayed queue acknowledgements cannot restore drained messages.
+- Telegram linking codes last 24 hours, survive application-state reconstruction, and remain readable through the channel onboarding API until successful single-use redemption. Invalid destinations leave their codes available.
+
+- Supervised gateway restart bounds complete health probes by its readiness deadline while preserving service-manager ownership.
+- Gateway start reports the daemon’s startup error promptly, and CLI help lists commands with one product summary.
+- Saving an agent definition refuses `require_approval` in its tool-permission overlay instead of accepting an ignored approval requirement.
+- The web UI serves Bebas Neue, Hanken Grotesk and DM Mono from bundled font files without contacting Google Fonts.
+- LAN installation accepts a host and port, saves valid gateway defaults, and finds release artefacts under a custom Cargo target directory.
+- Failed surface renames and note resolutions preserve unsaved module edits and note drafts.
+
+- Library cards and topic-default choices distinguish same-name saves by time and origin.
+- Agent catalogue results include save times; saving an existing name explains that it creates a separate entry.
+- The save-to-library form has persistent visible labels, reviewable descriptions and tags, and explains what is preserved.
+- Shape-only surface copies explain why their modules start empty.
+- Surface tools resolve session surfaces by title and return useful surface listings for invalid references and unknown arguments.
+- Rendered checklist boxes save their changes to Markdown with the same revision checks and conflict choice as a module edit.
+- Whole-module replacements report when they discard most of the previous source.
+- Browser navigation keeps working after settings or grant changes, retaining the logged-in profile; startup timeouts explain how to recover.
+
+- Oversized browser snapshots retain the article’s opening paragraph through ignored accessibility wrappers and preceding infobox tables instead of eliding it.
 
 - Session previews in the recent list, sidebar, conversation selector, delete controls and Operator deck show plain text without Markdown formatting or link destinations. Operator session summaries are limited to three lines.
 - The workflow-authoring skill states event-kind names as the gateway accepts them: segments are joined by `.`, `:` or `/` only, with `_` and `-` allowed inside a segment but never separating one.

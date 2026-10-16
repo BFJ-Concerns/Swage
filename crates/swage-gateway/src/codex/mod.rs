@@ -1931,12 +1931,12 @@ mod tests {
         ]});
         let dispatcher = ToolDispatcher::allow_all(Vec::<Arc<dyn Tool>>::new());
 
-        let (result, _, _, _) = run_scripted_turn_with_audit_failure(
+        let (result, _, _, _) = Box::pin(run_scripted_turn_with_audit_failure(
             scenario,
             dispatcher,
             permissions(&["shell"], &[]),
             true,
-        )
+        ))
         .await;
         assert_eq!(
             result

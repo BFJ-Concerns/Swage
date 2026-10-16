@@ -138,8 +138,9 @@ global ones.
 With a conversation open, start a turn. If a trusted workspace is
 attached, the agent will have access to the workspace's files and will
 follow whatever guidance its `AGENTS.md` provides.
-Shell commands run inside the sandbox, and a tool call that runs commands,
-writes files or operates the browser asks for your approval first. The
+Shell commands run inside the sandbox. By default, `shell`, `file_edit`,
+`file_write` and `python_execute` ask for your approval first; browser
+actions do not. The
 [README's sandboxing and approvals section](../README.md#sandboxing-and-approvals)
 explains what happens if sandbox setup fails and how to change either
 default for a topic.

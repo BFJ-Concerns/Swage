@@ -180,6 +180,10 @@ pub struct DeleteSurfaceAnnotationResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct SurfaceAnnotationView {
+    /// Resolution time; the note remains in the record after leaving the working view.
+    #[serde(default)]
+    #[ts(optional)]
+    pub resolved_at: Option<DateTime<Utc>>,
     pub id: Uuid,
     pub module_id: Uuid,
     pub body: String,
@@ -209,6 +213,8 @@ pub struct SurfaceModuleView {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct SurfaceResponse {
+    /// True when the copy starts with shape alone, without its origin's content.
+    pub shape_only: bool,
     pub id: Uuid,
     /// The session this surface belongs to.
     pub session_id: Uuid,
@@ -242,4 +248,10 @@ pub struct SurfaceSummary {
 #[ts(optional_fields = nullable)]
 pub struct SurfaceListResponse {
     pub surfaces: Vec<SurfaceSummary>,
+}
+
+/// Rename only this session's surface, leaving its saved origin untouched.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+pub struct RenameSurfaceRequest {
+    pub title: String,
 }

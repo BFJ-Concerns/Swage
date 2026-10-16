@@ -555,7 +555,7 @@ describe("queued input transport", () => {
     });
     expect(conversations.activeConversation?.messages.map((item) => item.content)).toEqual(["follow up"]);
     latestWs().simulateMessage({
-      type: "queue_drained", session_id: "conv-1", turn_id: "turn-1", queued_ids: ["queued-1"],
+      type: "queue_drained", thread_id: "thread-1", session_id: "conv-1", turn_id: "turn-1", queued_ids: ["queued-1"],
     });
     expect(conversations.activeConversation?.queued).toEqual([]);
     expect(streaming.isStreaming).toBe(true);

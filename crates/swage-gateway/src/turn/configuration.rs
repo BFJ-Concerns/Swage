@@ -2,7 +2,7 @@ use super::{
     AgentConfig, AppState, GatewayError, Path, PathBuf, TrustedWorkspacePolicy, Uuid,
     load_trusted_workspace_policy,
 };
-use swage_config::RESERVED_WORKFLOW_AGENT_ID;
+use swage_config::{HierarchyLevel, RESERVED_WORKFLOW_AGENT_ID};
 use swage_core::ScopeLocation;
 
 /// Host-only session metadata carrying every agent context whose effective
@@ -540,6 +540,10 @@ pub(crate) fn apply_agent_definition(
     definition: &swage_storage::NewAgentDefinition,
 ) -> swage_config::ResolvedConfig {
     if !definition.instructions.trim().is_empty() {
+        if !config.instructions.is_empty() && config.instruction_sources.is_empty() {
+            config.instruction_sources.push(HierarchyLevel::Global);
+        }
+        config.instruction_sources.push(HierarchyLevel::Agent);
         if config.instructions.is_empty() {
             config.instructions = definition.instructions.clone();
         } else {
@@ -602,6 +606,10 @@ pub(crate) fn apply_task_definition(
     definition: &swage_storage::TaskDefinition,
 ) -> Result<swage_config::ResolvedConfig, GatewayError> {
     if !definition.instructions.trim().is_empty() {
+        if !config.instructions.is_empty() && config.instruction_sources.is_empty() {
+            config.instruction_sources.push(HierarchyLevel::Global);
+        }
+        config.instruction_sources.push(HierarchyLevel::Agent);
         config.instructions = if config.instructions.is_empty() {
             definition.instructions.clone()
         } else {

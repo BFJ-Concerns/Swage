@@ -49,6 +49,7 @@ pub struct ClientSurface {
     create_channel_link_code_request: channel::CreateChannelLinkCodeRequest,
     create_topic_request: topic::CreateTopicRequest,
     create_surface_request: surface::CreateSurfaceRequest,
+    rename_surface_request: surface::RenameSurfaceRequest,
     memory_page_list: memory::MemoryPageListResponse,
     memory_page: memory::MemoryPageResponse,
     memory_instruction_request: memory::MemoryInstructionRequest,

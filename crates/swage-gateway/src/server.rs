@@ -199,7 +199,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/onboarding/channels/link-codes",
-            post(handlers::create_channel_link_code),
+            get(handlers::list_channel_link_codes).post(handlers::create_channel_link_code),
         )
         .route(
             "/api/onboarding/devices/pairing-codes",
@@ -264,7 +264,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/surfaces/{surface_id}",
-            get(surface::get_surface_handler),
+            get(surface::get_surface_handler).post(surface::rename_surface_handler),
         )
         .route(
             "/api/surfaces/{surface_id}/modules",
@@ -277,6 +277,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/surfaces/{surface_id}/modules/{module_id}/position",
             post(surface::move_surface_module_handler),
+        )
+        .route(
+            "/api/surfaces/{surface_id}/annotations/{annotation_id}/resolve",
+            post(surface::resolve_surface_annotation_handler),
         )
         .route(
             "/api/surfaces/{surface_id}/annotations",

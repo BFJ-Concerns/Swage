@@ -119,6 +119,13 @@
             },
             "type": "array"
           },
+          "provider_attempts": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProviderAttemptRecord"
+            },
+            "type": "array"
+          },
           "provider_visible": true,
           "tool_scope": true,
           "total_tokens": {
@@ -222,6 +229,23 @@
           "byte_count",
           "created_at",
           "updated_at"
+        ],
+        "type": "object"
+      },
+      "AttachmentsConfig": {
+        "additionalProperties": false,
+        "description": "Admission policy for image references submitted with a turn.",
+        "properties": {
+          "accepted_schemes": {
+            "description": "URI schemes accepted before checking the selected provider's capabilities.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "accepted_schemes"
         ],
         "type": "object"
       },
@@ -1813,6 +1837,13 @@
       },
       "ElementReport": {
         "properties": {
+          "full_text": {
+            "description": "The element's rendered text after substitution and assembly compaction.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "name": {
             "type": "string"
           },
@@ -2981,6 +3012,80 @@
         },
         "type": "object"
       },
+      "ProviderAttemptOutcome": {
+        "enum": [
+          "outstanding",
+          "succeeded",
+          "failed",
+          "interrupted"
+        ],
+        "type": "string"
+      },
+      "ProviderAttemptRecord": {
+        "description": "One actual stream attempt, including the initial request and any retries.",
+        "properties": {
+          "attempt": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "ended_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "model_id": {
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ProviderAttemptOutcome"
+          },
+          "provider": {
+            "description": "Provider adapter that opened this attempt (for example, `anthropic`).",
+            "type": "string"
+          },
+          "request": {
+            "description": "Concrete provider-visible request for this attempt, omitted if secret\nredaction could not be completed."
+          },
+          "round": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "route_id": {
+            "description": "Stable position in the provider chain, independent of retry number and\ncooldown order. A standalone provider uses `direct`.",
+            "type": "string"
+          },
+          "started_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "round",
+          "attempt",
+          "provider",
+          "model_id",
+          "route_id",
+          "started_at_ms",
+          "outcome"
+        ],
+        "type": "object"
+      },
       "ProviderProtocol": {
         "oneOf": [
           {
@@ -3466,6 +3571,18 @@
         ],
         "type": "object"
       },
+      "RenameSurfaceRequest": {
+        "description": "Rename only this session's surface, leaving its saved origin untouched.",
+        "properties": {
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "type": "object"
+      },
       "RequireApprovalEntry": {
         "anyOf": [
           {
@@ -3602,6 +3719,17 @@
       },
       "SaveSettingsRequest": {
         "properties": {
+          "attachments": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AttachmentsConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "communication": {
             "anyOf": [
               {
@@ -4469,6 +4597,10 @@
                 "format": "uuid",
                 "type": "string"
               },
+              "thread_id": {
+                "format": "uuid",
+                "type": "string"
+              },
               "turn_id": {
                 "format": "uuid",
                 "type": "string"
@@ -4482,6 +4614,7 @@
               "type",
               "session_id",
               "turn_id",
+              "thread_id",
               "queued_ids"
             ],
             "type": "object"
@@ -5289,6 +5422,9 @@
       },
       "SettingsResponse": {
         "properties": {
+          "attachments": {
+            "$ref": "#/components/schemas/AttachmentsConfig"
+          },
           "can_restart": {
             "type": "boolean"
           },
@@ -5369,6 +5505,7 @@
           "communication",
           "sessions",
           "memory",
+          "attachments",
           "voice",
           "restart_required",
           "can_restart"
@@ -5657,6 +5794,15 @@
             "format": "uuid",
             "type": "string"
           },
+          "resolved_at": {
+            "default": null,
+            "description": "Resolution time; the note remains in the record after leaving the working view.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "tags": {
             "items": {
               "type": "string"
@@ -5783,6 +5929,10 @@
             "format": "uuid",
             "type": "string"
           },
+          "shape_only": {
+            "description": "True when the copy starts with shape alone, without its origin's content.",
+            "type": "boolean"
+          },
           "title": {
             "type": "string"
           },
@@ -5792,6 +5942,7 @@
           }
         },
         "required": [
+          "shape_only",
           "id",
           "session_id",
           "title",
@@ -9989,6 +10140,46 @@
           }
         },
         "summary": "Read a surface."
+      },
+      "post": {
+        "operationId": "rename_surface",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "surface_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameSurfaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurfaceResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Rename this session's surface."
       }
     },
     "/api/surfaces/{surface_id}/annotations": {
@@ -10031,6 +10222,47 @@
           }
         },
         "summary": "Create a surface annotation."
+      }
+    },
+    "/api/surfaces/{surface_id}/annotations/{annotation_id}/resolve": {
+      "post": {
+        "operationId": "resolve_surface_annotation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "surface_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "annotation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurfaceAnnotationView"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Resolve a note while keeping it in the record."
       }
     },
     "/api/surfaces/{surface_id}/modules": {

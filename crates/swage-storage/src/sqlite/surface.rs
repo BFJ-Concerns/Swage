@@ -23,8 +23,7 @@ use crate::sqlite::topic::{decode_tags, encode_tags};
 use crate::store::SurfaceStore;
 
 /// Every surface read selects the same column list, lineage included.
-const SURFACE_COLUMNS: &str =
-    "id, session_id, title, created_at, updated_at, library_entry_id, seeded_at, seeded_from_name";
+const SURFACE_COLUMNS: &str = "id, session_id, title, created_at, updated_at, library_entry_id, seeded_at, seeded_from_name, shape_only";
 const ENTRY_COLUMNS: &str = "id, name, description, tags, origin_topic_id, saved_from_surface_id, \
     created_at, updated_at";
 const MODULE_COLUMNS: &str =
@@ -39,6 +38,7 @@ fn row_to_surface(row: &rusqlite::Row<'_>) -> rusqlite::Result<Surface> {
     let entry: Option<String> = row.get(5)?;
     let seeded_at: Option<String> = row.get(6)?;
     Ok(Surface {
+        shape_only: row.get(8)?,
         id: parse_uuid(&id)?,
         session_id: parse_uuid(&session_id)?,
         title: row.get(2)?,
@@ -182,6 +182,7 @@ impl SurfaceStore for SqliteStorage {
                 ],
             )?;
             Ok(Surface {
+                shape_only: false,
                 id,
                 session_id: surface.session_id,
                 title: surface.title,
@@ -191,6 +192,36 @@ impl SurfaceStore for SqliteStorage {
                 seeded_from_name: None,
                 seeded_at: None,
             })
+        })
+        .await
+    }
+
+    async fn rename_surface(
+        &self,
+        id: Uuid,
+        title: &str,
+        mut audit_event: NewAuditEvent,
+    ) -> Result<Option<String>, StorageError> {
+        let title = title.to_owned();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let prior: Option<String> = tx
+                .query_row(
+                    "SELECT title FROM surfaces WHERE id = ?1",
+                    [id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(prior_title) = &prior {
+                tx.execute(
+                    "UPDATE surfaces SET title = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![title, Utc::now().to_rfc3339(), id.to_string()],
+                )?;
+                audit_event.metadata["prior_title"] = serde_json::json!(prior_title);
+                super::audit::insert_audit_event(&tx, audit_event)?;
+            }
+            tx.commit()?;
+            Ok(prior)
         })
         .await
     }
@@ -535,14 +566,15 @@ impl SurfaceStore for SqliteStorage {
             let tx = conn.unchecked_transaction()?;
             tx.execute(
                 "INSERT INTO surfaces
-                     (id, session_id, title, created_at, updated_at, library_entry_id, seeded_at, seeded_from_name)
-                 VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?4, (SELECT name FROM surface_library_entries WHERE id = ?5))",
+                     (id, session_id, title, created_at, updated_at, library_entry_id, seeded_at, seeded_from_name, shape_only)
+                 VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?4, (SELECT name FROM surface_library_entries WHERE id = ?5), ?6)",
                 params![
                     id.to_string(),
                     surface.session_id.to_string(),
                     &surface.title,
                     &now_str,
                     entry_id.to_string(),
+                    seeding == LibrarySeeding::ShapeOnly,
                 ],
             )?;
             let seeds: Vec<LibraryEntryModule> = {
@@ -588,6 +620,7 @@ impl SurfaceStore for SqliteStorage {
                 title: surface.title,
                 created_at: now,
                 updated_at: now,
+                shape_only: seeding == LibrarySeeding::ShapeOnly,
                 library_entry_id: Some(entry_id),
                 seeded_from_name: Some(seeded_from_name),
                 seeded_at: Some(now),

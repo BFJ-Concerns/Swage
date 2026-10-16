@@ -199,6 +199,20 @@ pub trait DeviceStore: Send + Sync {
 
 #[async_trait]
 pub trait ChannelLinkStore: Send + Sync {
+    async fn save_channel_link_code(
+        &self,
+        code: crate::model::ChannelLinkCode,
+    ) -> Result<(), StorageError>;
+    async fn list_channel_link_codes(
+        &self,
+    ) -> Result<Vec<crate::model::ChannelLinkCode>, StorageError>;
+    /// Atomically redeem a still-valid code and save its validated link.
+    async fn redeem_channel_link_code(
+        &self,
+        code: &str,
+        link: NewChannelLink,
+    ) -> Result<Option<ChannelLink>, StorageError>;
+
     async fn upsert_channel_link(&self, link: NewChannelLink) -> Result<ChannelLink, StorageError>;
     async fn get_channel_link(
         &self,
@@ -292,6 +306,11 @@ pub trait TaskDefinitionStore: Send + Sync {
 /// as one batch by the drain that starts the next turn.
 #[async_trait]
 pub trait TurnQueueStore: Send + Sync {
+    /// Enqueue one arrival batch atomically, retaining a row per input.
+    async fn enqueue_turn_inputs(
+        &self,
+        inputs: Vec<NewQueuedTurnInput>,
+    ) -> Result<Vec<QueuedTurnInput>, StorageError>;
     async fn enqueue_turn_input(
         &self,
         input: NewQueuedTurnInput,
@@ -301,9 +320,9 @@ pub trait TurnQueueStore: Send + Sync {
         &self,
         session_id: Uuid,
     ) -> Result<Vec<QueuedTurnInput>, StorageError>;
-    /// Run the session's queue as one turn, atomically: the turn row created
+    /// Run the first consecutive thread group as one turn, atomically: the turn row created
     /// (its input the queued texts joined by a blank line), one message row per
-    /// queued input in arrival order with its origin, and the queue rows
+    /// input in that group in arrival order with its origin, and those queue rows
     /// removed — all or nothing. `None` when nothing was queued, or when the
     /// thread already holds a live turn and the one-live-turn index refused the
     /// claim; the queue is then untouched.
@@ -1109,6 +1128,11 @@ pub trait ChannelQueueStore: Send + Sync {
         account: &str,
     ) -> Result<Option<String>, StorageError>;
 
+    /// Pending inbox rows not yet transferred, in global arrival order.
+    async fn list_pending_channel_messages(
+        &self,
+    ) -> Result<Vec<ChannelInboundMessage>, StorageError>;
+
     async fn list_pending_channel_origins(&self)
     -> Result<Vec<PendingChannelOrigin>, StorageError>;
 
@@ -1448,6 +1472,13 @@ pub trait ProviderRoundStore: Send + Sync {
 
 #[async_trait]
 pub trait SurfaceStore: Send + Sync {
+    /// Rename and audit one surface atomically, returning the displaced title.
+    async fn rename_surface(
+        &self,
+        id: Uuid,
+        title: &str,
+        audit_event: NewAuditEvent,
+    ) -> Result<Option<String>, StorageError>;
     async fn create_page(&self, surface: NewSurface) -> Result<Surface, StorageError>;
     async fn get_page(&self, id: Uuid) -> Result<Option<Surface>, StorageError>;
     /// A session's surfaces, oldest first — the surfaces open with it.
@@ -1560,6 +1591,12 @@ pub trait SurfaceStore: Send + Sync {
 /// a superseded body survives in the audit trail, not in a version row.
 #[async_trait]
 pub trait SurfaceAnnotationStore: Send + Sync {
+    /// Resolve and audit a note and stamp its surface atomically. False if already resolved or absent.
+    async fn resolve_surface_annotation(
+        &self,
+        id: Uuid,
+        audit_event: NewAuditEvent,
+    ) -> Result<bool, StorageError>;
     async fn create_surface_annotation(
         &self,
         annotation: NewSurfaceAnnotation,
@@ -1828,6 +1865,25 @@ mod tests {
 
     #[async_trait]
     impl ChannelLinkStore for StubStorage {
+        async fn save_channel_link_code(
+            &self,
+            _: crate::model::ChannelLinkCode,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn list_channel_link_codes(
+            &self,
+        ) -> Result<Vec<crate::model::ChannelLinkCode>, StorageError> {
+            unimplemented!()
+        }
+        async fn redeem_channel_link_code(
+            &self,
+            _: &str,
+            _: NewChannelLink,
+        ) -> Result<Option<ChannelLink>, StorageError> {
+            unimplemented!()
+        }
+
         async fn upsert_channel_link(
             &self,
             _: NewChannelLink,
@@ -1891,6 +1947,12 @@ mod tests {
             _: &str,
             _: &str,
         ) -> Result<Option<String>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_pending_channel_messages(
+            &self,
+        ) -> Result<Vec<ChannelInboundMessage>, StorageError> {
             unimplemented!()
         }
 
@@ -2009,6 +2071,12 @@ mod tests {
 
     #[async_trait]
     impl TurnQueueStore for StubStorage {
+        async fn enqueue_turn_inputs(
+            &self,
+            _: Vec<NewQueuedTurnInput>,
+        ) -> Result<Vec<QueuedTurnInput>, StorageError> {
+            unimplemented!()
+        }
         async fn enqueue_turn_input(
             &self,
             _: NewQueuedTurnInput,
@@ -2421,6 +2489,14 @@ mod tests {
 
     #[async_trait]
     impl SurfaceStore for StubStorage {
+        async fn rename_surface(
+            &self,
+            _id: Uuid,
+            _title: &str,
+            _audit_event: NewAuditEvent,
+        ) -> Result<Option<String>, StorageError> {
+            unimplemented!()
+        }
         async fn create_page(&self, _: NewSurface) -> Result<Surface, StorageError> {
             unimplemented!()
         }
@@ -2518,6 +2594,13 @@ mod tests {
 
     #[async_trait]
     impl SurfaceAnnotationStore for StubStorage {
+        async fn resolve_surface_annotation(
+            &self,
+            _id: Uuid,
+            _audit_event: NewAuditEvent,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
         async fn create_surface_annotation(
             &self,
             _: NewSurfaceAnnotation,

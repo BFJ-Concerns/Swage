@@ -145,6 +145,9 @@
     "relink_workspace_attachment_request": {
       "$ref": "#/$defs/RelinkWorkspaceAttachmentRequest"
     },
+    "rename_surface_request": {
+      "$ref": "#/$defs/RenameSurfaceRequest"
+    },
     "restart_status": {
       "$ref": "#/$defs/RestartStatusResponse"
     },
@@ -299,6 +302,7 @@
     "create_channel_link_code_request",
     "create_topic_request",
     "create_surface_request",
+    "rename_surface_request",
     "memory_page_list",
     "memory_page",
     "memory_instruction_request",
@@ -491,6 +495,13 @@
             "$ref": "#/$defs/AssemblyError"
           }
         },
+        "provider_attempts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ProviderAttemptRecord"
+          }
+        },
         "provider_visible": true,
         "tool_scope": true,
         "total_tokens": {
@@ -594,6 +605,23 @@
         "byte_count",
         "created_at",
         "updated_at"
+      ]
+    },
+    "AttachmentsConfig": {
+      "description": "Admission policy for image references submitted with a turn.",
+      "type": "object",
+      "properties": {
+        "accepted_schemes": {
+          "description": "URI schemes accepted before checking the selected provider's capabilities.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "accepted_schemes"
       ]
     },
     "BackgroundJobResponse": {
@@ -2185,6 +2213,13 @@
     "ElementReport": {
       "type": "object",
       "properties": {
+        "full_text": {
+          "description": "The element's rendered text after substitution and assembly compaction.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "type": "string"
         },
@@ -3352,6 +3387,80 @@
         }
       }
     },
+    "ProviderAttemptOutcome": {
+      "type": "string",
+      "enum": [
+        "outstanding",
+        "succeeded",
+        "failed",
+        "interrupted"
+      ]
+    },
+    "ProviderAttemptRecord": {
+      "description": "One actual stream attempt, including the initial request and any retries.",
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "ended_at_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "model_id": {
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ProviderAttemptOutcome"
+        },
+        "provider": {
+          "description": "Provider adapter that opened this attempt (for example, `anthropic`).",
+          "type": "string"
+        },
+        "request": {
+          "description": "Concrete provider-visible request for this attempt, omitted if secret\nredaction could not be completed."
+        },
+        "round": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "route_id": {
+          "description": "Stable position in the provider chain, independent of retry number and\ncooldown order. A standalone provider uses `direct`.",
+          "type": "string"
+        },
+        "started_at_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "round",
+        "attempt",
+        "provider",
+        "model_id",
+        "route_id",
+        "started_at_ms",
+        "outcome"
+      ]
+    },
     "ProviderProtocol": {
       "oneOf": [
         {
@@ -3837,6 +3946,18 @@
         "path"
       ]
     },
+    "RenameSurfaceRequest": {
+      "description": "Rename only this session's surface, leaving its saved origin untouched.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ]
+    },
     "RequireApprovalEntry": {
       "anyOf": [
         {
@@ -3974,6 +4095,17 @@
     "SaveSettingsRequest": {
       "type": "object",
       "properties": {
+        "attachments": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AttachmentsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "communication": {
           "anyOf": [
             {
@@ -4841,6 +4973,10 @@
               "type": "string",
               "format": "uuid"
             },
+            "thread_id": {
+              "type": "string",
+              "format": "uuid"
+            },
             "turn_id": {
               "type": "string",
               "format": "uuid"
@@ -4854,6 +4990,7 @@
             "type",
             "session_id",
             "turn_id",
+            "thread_id",
             "queued_ids"
           ]
         },
@@ -5661,6 +5798,9 @@
     "SettingsResponse": {
       "type": "object",
       "properties": {
+        "attachments": {
+          "$ref": "#/$defs/AttachmentsConfig"
+        },
         "can_restart": {
           "type": "boolean"
         },
@@ -5741,6 +5881,7 @@
         "communication",
         "sessions",
         "memory",
+        "attachments",
         "voice",
         "restart_required",
         "can_restart"
@@ -6029,6 +6170,15 @@
           "type": "string",
           "format": "uuid"
         },
+        "resolved_at": {
+          "description": "Resolution time; the note remains in the record after leaving the working view.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "default": null
+        },
         "tags": {
           "type": "array",
           "items": {
@@ -6155,6 +6305,10 @@
           "type": "string",
           "format": "uuid"
         },
+        "shape_only": {
+          "description": "True when the copy starts with shape alone, without its origin's content.",
+          "type": "boolean"
+        },
         "title": {
           "type": "string"
         },
@@ -6164,6 +6318,7 @@
         }
       },
       "required": [
+        "shape_only",
         "id",
         "session_id",
         "title",

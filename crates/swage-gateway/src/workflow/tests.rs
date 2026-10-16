@@ -2020,7 +2020,12 @@ async fn workflow_journal_preserves_and_recomposes_call_scoped_context() {
                 .iter_mut()
                 .find(|element| element["name"] == "orientation")
         }) {
-            orientation.as_object_mut().unwrap().remove("token_count");
+            let orientation = orientation.as_object_mut().unwrap();
+            orientation.remove("token_count");
+            let root = tool_roots.last().expect("effective tool root");
+            if let Some(Value::String(text)) = orientation.get_mut("full_text") {
+                *text = text.replace(root.as_str(), "<call tool root>");
+            }
         }
         reports.push(report);
     }
