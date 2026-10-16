@@ -107,6 +107,7 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("064_turn_queue", CREATE_TURN_QUEUE),
         ("065_turn_execution_isolation", ADD_TURN_EXECUTION_ISOLATION),
         ("066_turn_failure_message", ADD_TURN_FAILURE_MESSAGE),
+        ("067_plugins", CREATE_PLUGIN_TABLES),
     ]
 }
 
@@ -119,6 +120,33 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
 const ADD_TURN_EXECUTION_ISOLATION: &str = "
     ALTER TABLE turns ADD COLUMN isolation_kind TEXT;
     ALTER TABLE turns ADD COLUMN isolation_detail TEXT;
+";
+
+/// Installed plugins: one row per installed revision, at most one active per
+/// plugin, and one enablement row per scope — `install`, or a topic's id.
+const CREATE_PLUGIN_TABLES: &str = "
+    CREATE TABLE plugin_revisions (
+        id             TEXT    NOT NULL PRIMARY KEY,
+        plugin_name    TEXT    NOT NULL,
+        revision       INTEGER NOT NULL,
+        version        TEXT    NOT NULL,
+        description    TEXT    NOT NULL,
+        manifest       TEXT    NOT NULL,
+        installed_from TEXT    NOT NULL,
+        install_dir    TEXT    NOT NULL,
+        installed_at   TEXT    NOT NULL,
+        active         INTEGER NOT NULL CHECK (active IN (0, 1)),
+        UNIQUE (plugin_name, revision)
+    );
+    CREATE UNIQUE INDEX plugin_revisions_one_active
+        ON plugin_revisions(plugin_name) WHERE active = 1;
+    CREATE TABLE plugin_enablement (
+        plugin_name TEXT    NOT NULL,
+        scope       TEXT    NOT NULL,
+        enabled     INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+        changed_at  TEXT    NOT NULL,
+        PRIMARY KEY (plugin_name, scope)
+    );
 ";
 
 /// The explanation a turn that ended without a reply carried to the person

@@ -487,10 +487,18 @@ pub(crate) async fn build_gateway_dispatcher(
 
     // A tool a platform agent holds is withheld from every other agent here,
     // before permissions are consulted: no grant, not even `*`, offers it.
+    // A plugin's tools are withheld the same way from a scope that does not
+    // enable the plugin.
     let base_dispatcher = state.active_tool_dispatcher();
+    let registry = Arc::new(
+        base_dispatcher
+            .registry()
+            .for_agent(&agent_config.agent_id)
+            .withholding(&state.plugins.withheld_tool_names(topic_id)),
+    );
     let dispatcher = ToolDispatcher::new(
-        Arc::new(base_dispatcher.registry().for_agent(&agent_config.agent_id)),
-        permissions,
+        Arc::clone(&registry),
+        permissions.clone(),
         Arc::new(RateLimiter::new()),
         RateLimitConfig::default(),
         Arc::new(LeakDetector::default()),
@@ -517,15 +525,41 @@ pub(crate) async fn build_gateway_dispatcher(
         None => dispatcher,
     };
 
-    Ok(GatewayDispatcherBuild {
-        dispatcher: dispatcher.with_execution_strategy(Arc::new(GatewayExecutionStrategy::new(
-            inner_strategy,
-            ws_tx,
-            device,
+    // Calls a host-side tool makes on the session's behalf — a plugin's
+    // `callTool` — run through a dispatcher of the same registry and
+    // permissions over a strategy of the same shape, so they meet the gates
+    // the model's own calls meet. It carries no session dispatcher of its
+    // own: a nested call does not nest further.
+    let session_dispatcher = Arc::new(
+        ToolDispatcher::new(
+            registry,
+            permissions,
+            Arc::new(RateLimiter::new()),
+            RateLimitConfig::default(),
+            Arc::new(LeakDetector::default()),
+            false,
+        )
+        .with_execution_strategy(Arc::new(GatewayExecutionStrategy::new(
+            inner_strategy.clone(),
+            ws_tx.clone(),
+            device.clone(),
             state.secret_manager.clone(),
             state.storage.clone(),
             Some(state.clone()),
         ))),
+    );
+    Ok(GatewayDispatcherBuild {
+        dispatcher: dispatcher.with_execution_strategy(Arc::new(
+            GatewayExecutionStrategy::new(
+                inner_strategy,
+                ws_tx,
+                device,
+                state.secret_manager.clone(),
+                state.storage.clone(),
+                Some(state.clone()),
+            )
+            .with_session_dispatcher(session_dispatcher),
+        )),
         sandbox_guard,
         isolation: sandbox_build.isolation,
     })

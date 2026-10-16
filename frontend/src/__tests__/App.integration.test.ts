@@ -228,7 +228,6 @@ function makeSettings(
         require_sandbox: true,
       },
       max_output_bytes: 100_000,
-      plugin_directory: null,
       search: null,
     },
     tool_permissions: {

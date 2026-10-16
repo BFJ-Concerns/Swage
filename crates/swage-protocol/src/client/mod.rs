@@ -12,6 +12,7 @@ pub mod knowledge;
 pub mod material;
 pub mod memory;
 pub mod openapi;
+pub mod plugin;
 pub mod provider_signin;
 pub mod recovery;
 pub mod routes;
@@ -94,6 +95,9 @@ pub struct ClientSurface {
     settings: settings::SettingsResponse,
     effort_capability: settings::EffortCapability,
     skills: skill::SkillListResponse,
+    plugin_list: plugin::PluginListResponse,
+    install_plugin_request: plugin::InstallPluginRequest,
+    plugin_enablement_request: plugin::PluginEnablementRequest,
     save_settings: settings::SaveSettingsRequest,
     model_discovery: settings::ModelDiscoveryResponse,
     save_provider_settings: settings::SaveProviderSettings,

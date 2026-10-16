@@ -3539,6 +3539,7 @@ dependencies = [
  "swage-core",
  "swage-device",
  "swage-hook",
+ "swage-plugin",
  "swage-protocol",
  "swage-provider",
  "swage-python",
@@ -3584,6 +3585,20 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "swage-plugin"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "swage-isolate",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
 ]
 
 [[package]]

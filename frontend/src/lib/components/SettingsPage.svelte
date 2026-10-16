@@ -21,6 +21,7 @@
   import ProviderSettingsPanel from "./settings/ProviderSettingsPanel.svelte";
   import RecoverySettingsPanel from "./settings/RecoverySettingsPanel.svelte";
   import MemoryPanel from "./MemoryPanel.svelte";
+  import PluginsPanel from "./PluginsPanel.svelte";
   import type { MemoryPageAddress } from "../router";
   import SkillsPanel from "./SkillsPanel.svelte";
   import VoiceSettingsPanel from "./settings/VoiceSettingsPanel.svelte";
@@ -245,7 +246,7 @@
     },
     plugins: {
       title: "Plugins",
-      sub: "Managed and workspace plugin bundles. Plugins extend tools and skills available to agents.",
+      sub: "Installed plugins: what each provides, the grants and secrets it holds, its revisions, and where it is enabled — for the install, or for the selected topic.",
     },
     channels: {
       title: "Channels",
@@ -293,7 +294,6 @@
     "account",
   ]);
   const NON_FUNCTIONAL_TABS: ReadonlySet<SettingsTabId> = new Set([
-    "plugins",
     "channels",
     "devices",
     "account",
@@ -366,10 +366,7 @@
     {:else if tab === "memory"}
       <MemoryPanel {topics} page={memoryPage} />
     {:else if tab === "plugins"}
-      <!--
-        Swage has no plugin registry yet, so this page only describes the capability.
-      -->
-      <InformationalSettingsPanel {tab} />
+      <PluginsPanel {topicId} />
     {:else if tab === "channels"}
       <!--
         The operator overview lists channels read-only; there is no channel

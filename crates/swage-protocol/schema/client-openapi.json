@@ -2078,6 +2078,19 @@
         ],
         "type": "object"
       },
+      "InstallPluginRequest": {
+        "description": "Install a plugin package from a directory on the gateway's host. A\npackage already installed under its name becomes a new revision.",
+        "properties": {
+          "source_path": {
+            "description": "The package directory: the one holding `plugin.toml`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_path"
+        ],
+        "type": "object"
+      },
       "KnowledgeSearchResponse": {
         "properties": {
           "guidance": {
@@ -2892,6 +2905,243 @@
         ],
         "type": "object"
       },
+      "PluginEnablementRequest": {
+        "description": "Enable or disable a plugin for the install, or for one topic.",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "topic_id": {
+            "description": "The topic whose answer this is; absent means the install's.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "PluginListResponse": {
+        "properties": {
+          "plugins": {
+            "items": {
+              "$ref": "#/components/schemas/PluginSummary"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "plugins"
+        ],
+        "type": "object"
+      },
+      "PluginProvides": {
+        "description": "What a plugin provides, by kind.",
+        "properties": {
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/ProvidedTool"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "tools"
+        ],
+        "type": "object"
+      },
+      "PluginRevision": {
+        "description": "One installed revision of a plugin.",
+        "properties": {
+          "active": {
+            "description": "Whether this is the revision serving now.",
+            "type": "boolean"
+          },
+          "installed_at": {
+            "type": "string"
+          },
+          "installed_from": {
+            "description": "Where the package was installed from.",
+            "type": "string"
+          },
+          "revision": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "revision",
+          "version",
+          "installed_from",
+          "installed_at",
+          "active"
+        ],
+        "type": "object"
+      },
+      "PluginSecret": {
+        "description": "A secret a plugin declares it holds.",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description"
+        ],
+        "type": "object"
+      },
+      "PluginServiceState": {
+        "description": "Whether the plugin's isolate is up.",
+        "oneOf": [
+          {
+            "description": "The isolate serves calls.",
+            "properties": {
+              "state": {
+                "const": "serving",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The last call ended the isolate at a limit; the next call rebuilds it.",
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "state": {
+                "const": "terminated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The script could not be loaded; nothing serves until a revision that\nloads is installed.",
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "state": {
+                "const": "failed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "PluginSummary": {
+        "description": "An installed plugin with everything the settings surface shows.",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "disabled_topics": {
+            "description": "Topics that disable it on their own, over the install's answer.",
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "enabled_for_install": {
+            "description": "Whether the install enables it everywhere.",
+            "type": "boolean"
+          },
+          "enabled_topics": {
+            "description": "Topics that enable it on their own.",
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "grants": {
+            "description": "The host grants the plugin asks for.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "provides": {
+            "$ref": "#/components/schemas/PluginProvides"
+          },
+          "revision": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "revisions": {
+            "description": "Every recorded revision, oldest first.",
+            "items": {
+              "$ref": "#/components/schemas/PluginRevision"
+            },
+            "type": "array"
+          },
+          "secrets": {
+            "items": {
+              "$ref": "#/components/schemas/PluginSecret"
+            },
+            "type": "array"
+          },
+          "service": {
+            "$ref": "#/components/schemas/PluginServiceState"
+          },
+          "variant_of": {
+            "description": "The function this plugin is a variant of, when it declares one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "description": "The active revision's version.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "version",
+          "revision",
+          "provides",
+          "grants",
+          "secrets",
+          "revisions",
+          "enabled_for_install",
+          "enabled_topics",
+          "disabled_topics",
+          "service"
+        ],
+        "type": "object"
+      },
       "PostWorkflowRunEventRequest": {
         "properties": {
           "kind": {
@@ -2961,6 +3211,22 @@
         "required": [
           "scope_kind",
           "relative_path"
+        ],
+        "type": "object"
+      },
+      "ProvidedTool": {
+        "description": "A tool a plugin provides, as the model sees it.",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description"
         ],
         "type": "object"
       },
@@ -5974,12 +6240,6 @@
             "format": "uint",
             "minimum": 0,
             "type": "integer"
-          },
-          "plugin_directory": {
-            "type": [
-              "string",
-              "null"
-            ]
           },
           "python_execute": {
             "$ref": "#/components/schemas/PythonExecuteToolConfig"
@@ -9406,6 +9666,99 @@
           }
         },
         "summary": "List every memory page of one scope — general memory, or a topic's."
+      }
+    },
+    "/api/plugins": {
+      "get": {
+        "operationId": "list_plugins",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginListResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List the installed plugins: what each provides, its grants, secrets, revisions and where it is enabled."
+      },
+      "post": {
+        "operationId": "install_plugin",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstallPluginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginSummary"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Install a plugin package from a directory on the gateway's host; an installed name takes a new revision."
+      }
+    },
+    "/api/plugins/{name}/enablement": {
+      "put": {
+        "operationId": "set_plugin_enablement",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PluginEnablementRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginSummary"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Enable or disable a plugin for the install, or for one topic."
       }
     },
     "/api/sessions": {

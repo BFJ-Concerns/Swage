@@ -75,6 +75,20 @@ impl ToolRegistry {
         }
     }
 
+    /// The registry without the named tools: what a scope that does not
+    /// enable them sees. A name not registered is simply absent.
+    pub fn withholding(&self, names: &[String]) -> Self {
+        Self {
+            tools: self
+                .tools
+                .iter()
+                .filter(|(name, _)| !names.iter().any(|withheld| withheld == *name))
+                .map(|(name, tool)| (name.clone(), Arc::clone(tool)))
+                .collect(),
+            protected: self.protected.clone(),
+        }
+    }
+
     /// Register a tool by its declared name.
     ///
     /// Returns `ToolError::InvalidParameters` when:

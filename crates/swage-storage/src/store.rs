@@ -13,11 +13,12 @@ use crate::model::{
     NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelInboundMessage, NewChannelLink,
     NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration, NewKnowledgeCitation,
     NewLibraryEntry, NewLibraryEntryModule, NewMaterial, NewMessage, NewOrientationCard,
-    NewSchedule, NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation, NewSurface,
-    NewSurfaceAnnotation, NewSurfaceModule, NewTaskDefinition, NewThread, NewToolCall, NewTopic,
-    NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowRunHold,
-    NewWorkflowRunHoldRejection, NewWorkflowScript, NewWorkspaceAttachment, OrientationCard,
-    OrientationCardLifecycle, PendingChannelOrigin, ProviderRoundRecord, RemovedSurfaceModule,
+    NewPluginRevision, NewSchedule, NewScheduleRun, NewSecretRecord, NewSession,
+    NewSourceObservation, NewSurface, NewSurfaceAnnotation, NewSurfaceModule, NewTaskDefinition,
+    NewThread, NewToolCall, NewTopic, NewTurn, NewWorkflowJournalIntent, NewWorkflowRun,
+    NewWorkflowRunEvent, NewWorkflowRunHold, NewWorkflowRunHoldRejection, NewWorkflowScript,
+    NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle, PendingChannelOrigin,
+    PluginEnablementRecord, PluginRevisionRecord, ProviderRoundRecord, RemovedSurfaceModule,
     Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SessionActivity,
     SessionListing, SessionVariable, SourceCapture, SourceObservation, Surface, SurfaceAnnotation,
     SurfaceModule, TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord, Topic,
@@ -892,6 +893,37 @@ pub trait SkillActivationStore: Send + Sync {
     async fn clear_active_skills(&self, session_id: Uuid) -> Result<(), StorageError>;
 }
 
+/// Store for installed plugins: their revisions and where each is enabled.
+///
+/// The package files live under the install root; these rows are the record
+/// of what was installed, when, from where, and which revision serves. A
+/// reinstall is a new revision, never an edit of the last.
+#[async_trait]
+pub trait PluginStore: Send + Sync {
+    /// Record an installed revision as the plugin's active one; the plugin's
+    /// earlier revisions become inactive in the same write. A revision number
+    /// already recorded for the plugin is refused.
+    async fn record_plugin_revision(
+        &self,
+        revision: NewPluginRevision,
+    ) -> Result<PluginRevisionRecord, StorageError>;
+
+    /// Every recorded revision of every plugin, by name then revision.
+    async fn list_plugin_revisions(&self) -> Result<Vec<PluginRevisionRecord>, StorageError>;
+
+    /// Set whether `plugin_name` is enabled for the install (`topic_id`
+    /// absent) or for one topic, replacing that scope's earlier answer.
+    async fn set_plugin_enablement(
+        &self,
+        plugin_name: &str,
+        topic_id: Option<Uuid>,
+        enabled: bool,
+    ) -> Result<PluginEnablementRecord, StorageError>;
+
+    /// Every enablement row, by plugin name.
+    async fn list_plugin_enablement(&self) -> Result<Vec<PluginEnablementRecord>, StorageError>;
+}
+
 /// Store for human-in-the-loop approval requests.
 ///
 /// Each approval request is created when an agent turn hits an approval gate
@@ -1624,6 +1656,7 @@ pub trait Storage:
     + ProviderRoundStore
     + SurfaceStore
     + SurfaceAnnotationStore
+    + PluginStore
     + Send
     + Sync
 {
@@ -1663,6 +1696,7 @@ impl<T> Storage for T where
         + ProviderRoundStore
         + SurfaceStore
         + SurfaceAnnotationStore
+        + PluginStore
         + Send
         + Sync
 {
@@ -2751,6 +2785,32 @@ mod tests {
             unimplemented!()
         }
         async fn clear_active_skills(&self, _: Uuid) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl PluginStore for StubStorage {
+        async fn record_plugin_revision(
+            &self,
+            _: NewPluginRevision,
+        ) -> Result<PluginRevisionRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn list_plugin_revisions(&self) -> Result<Vec<PluginRevisionRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn set_plugin_enablement(
+            &self,
+            _: &str,
+            _: Option<Uuid>,
+            _: bool,
+        ) -> Result<PluginEnablementRecord, StorageError> {
+            unimplemented!()
+        }
+        async fn list_plugin_enablement(
+            &self,
+        ) -> Result<Vec<PluginEnablementRecord>, StorageError> {
             unimplemented!()
         }
     }

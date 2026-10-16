@@ -17,6 +17,7 @@ import type { DeleteSurfaceAnnotationResponse } from "./DeleteSurfaceAnnotationR
 import type { DeleteSurfaceModuleResponse } from "./DeleteSurfaceModuleResponse";
 import type { DocumentListResponse } from "./DocumentListResponse";
 import type { DocumentResponse } from "./DocumentResponse";
+import type { InstallPluginRequest } from "./InstallPluginRequest";
 import type { LibraryEntryResponse } from "./LibraryEntryResponse";
 import type { LibraryListResponse } from "./LibraryListResponse";
 import type { MemoryInstructionRequest } from "./MemoryInstructionRequest";
@@ -25,6 +26,9 @@ import type { MemoryPageListResponse } from "./MemoryPageListResponse";
 import type { MemoryPageResponse } from "./MemoryPageResponse";
 import type { ModelDiscoveryResponse } from "./ModelDiscoveryResponse";
 import type { MoveSurfaceModuleRequest } from "./MoveSurfaceModuleRequest";
+import type { PluginEnablementRequest } from "./PluginEnablementRequest";
+import type { PluginListResponse } from "./PluginListResponse";
+import type { PluginSummary } from "./PluginSummary";
 import type { ProviderSignInState } from "./ProviderSignInState";
 import type { RecentSessionsResponse } from "./RecentSessionsResponse";
 import type { RelinkWorkspaceAttachmentRequest } from "./RelinkWorkspaceAttachmentRequest";
@@ -190,6 +194,21 @@ export async function getMemoryPage(reference: string, topicId?: string): Promis
 /** Change memory by instructing the platform's curator; the reply shows every page it changed. */
 export async function applyMemoryInstruction(body: MemoryInstructionRequest): Promise<MemoryInstructionResponse> {
   return request<MemoryInstructionResponse>("POST", `/api/memory/instructions`, body);
+}
+
+/** List the installed plugins: what each provides, its grants, secrets, revisions and where it is enabled. */
+export async function listPlugins(): Promise<PluginListResponse> {
+  return request<PluginListResponse>("GET", `/api/plugins`);
+}
+
+/** Install a plugin package from a directory on the gateway's host; an installed name takes a new revision. */
+export async function installPlugin(body: InstallPluginRequest): Promise<PluginSummary> {
+  return request<PluginSummary>("POST", `/api/plugins`, body);
+}
+
+/** Enable or disable a plugin for the install, or for one topic. */
+export async function setPluginEnablement(name: string, body: PluginEnablementRequest): Promise<PluginSummary> {
+  return request<PluginSummary>("PUT", `/api/plugins/${encodeURIComponent(name)}/enablement`, body);
 }
 
 /** List a session's surfaces — the work surfaces open with it. */

@@ -15,7 +15,6 @@ pub mod hold;
 pub mod knowledge;
 pub mod memory;
 pub mod nested_tool_runtime;
-pub mod plugin;
 pub mod python_execute;
 pub mod run_event;
 pub mod schedule;

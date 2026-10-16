@@ -1,5 +1,5 @@
 <script lang="ts">
-  type InformationalTab = "plugins" | "channels" | "devices" | "account";
+  type InformationalTab = "channels" | "devices" | "account";
 
   interface Props {
     tab: InformationalTab;
@@ -8,10 +8,6 @@
   let { tab }: Props = $props();
 
   const CONTENT: Record<InformationalTab, { title: string; body: string }> = {
-    plugins: {
-      title: "Installed plugins",
-      body: "Swage has no plugin system yet. Tools are built in, and skills are added under Skills.",
-    },
     channels: {
       title: "Delivery channels",
       body: "Channels are configured in config.toml — the Telegram channel under [channels.telegram] — and cannot be managed from here yet.",

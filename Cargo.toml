@@ -20,6 +20,7 @@ members = [
     "crates/swage-python",
     "crates/swage-workflow",
     "crates/swage-isolate",
+    "crates/swage-plugin",
     "crates/swage-client",
     "crates/swage-device",
 ]

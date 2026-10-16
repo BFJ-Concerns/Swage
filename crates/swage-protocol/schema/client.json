@@ -82,6 +82,9 @@
     "effort_capability": {
       "$ref": "#/$defs/EffortCapability"
     },
+    "install_plugin_request": {
+      "$ref": "#/$defs/InstallPluginRequest"
+    },
     "knowledge_search": {
       "$ref": "#/$defs/KnowledgeSearchResponse"
     },
@@ -120,6 +123,12 @@
     },
     "orientation_find": {
       "$ref": "#/$defs/OrientationFindResponse"
+    },
+    "plugin_enablement_request": {
+      "$ref": "#/$defs/PluginEnablementRequest"
+    },
+    "plugin_list": {
+      "$ref": "#/$defs/PluginListResponse"
     },
     "post_workflow_run_event_request": {
       "$ref": "#/$defs/PostWorkflowRunEventRequest"
@@ -344,6 +353,9 @@
     "settings",
     "effort_capability",
     "skills",
+    "plugin_list",
+    "install_plugin_request",
+    "plugin_enablement_request",
     "save_settings",
     "model_discovery",
     "save_provider_settings",
@@ -2449,6 +2461,19 @@
         "timeout_policy"
       ]
     },
+    "InstallPluginRequest": {
+      "description": "Install a plugin package from a directory on the gateway's host. A\npackage already installed under its name becomes a new revision.",
+      "type": "object",
+      "properties": {
+        "source_path": {
+          "description": "The package directory: the one holding `plugin.toml`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_path"
+      ]
+    },
     "KnowledgeSearchResponse": {
       "type": "object",
       "properties": {
@@ -3263,6 +3288,243 @@
         "guidance"
       ]
     },
+    "PluginEnablementRequest": {
+      "description": "Enable or disable a plugin for the install, or for one topic.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "topic_id": {
+          "description": "The topic whose answer this is; absent means the install's.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "enabled"
+      ]
+    },
+    "PluginListResponse": {
+      "type": "object",
+      "properties": {
+        "plugins": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PluginSummary"
+          }
+        }
+      },
+      "required": [
+        "plugins"
+      ]
+    },
+    "PluginProvides": {
+      "description": "What a plugin provides, by kind.",
+      "type": "object",
+      "properties": {
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProvidedTool"
+          }
+        }
+      },
+      "required": [
+        "tools"
+      ]
+    },
+    "PluginRevision": {
+      "description": "One installed revision of a plugin.",
+      "type": "object",
+      "properties": {
+        "active": {
+          "description": "Whether this is the revision serving now.",
+          "type": "boolean"
+        },
+        "installed_at": {
+          "type": "string"
+        },
+        "installed_from": {
+          "description": "Where the package was installed from.",
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "revision",
+        "version",
+        "installed_from",
+        "installed_at",
+        "active"
+      ]
+    },
+    "PluginSecret": {
+      "description": "A secret a plugin declares it holds.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description"
+      ]
+    },
+    "PluginServiceState": {
+      "description": "Whether the plugin's isolate is up.",
+      "oneOf": [
+        {
+          "description": "The isolate serves calls.",
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "serving"
+            }
+          },
+          "required": [
+            "state"
+          ]
+        },
+        {
+          "description": "The last call ended the isolate at a limit; the next call rebuilds it.",
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string",
+              "const": "terminated"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ]
+        },
+        {
+          "description": "The script could not be loaded; nothing serves until a revision that\nloads is installed.",
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string",
+              "const": "failed"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ]
+        }
+      ]
+    },
+    "PluginSummary": {
+      "description": "An installed plugin with everything the settings surface shows.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "disabled_topics": {
+          "description": "Topics that disable it on their own, over the install's answer.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "enabled_for_install": {
+          "description": "Whether the install enables it everywhere.",
+          "type": "boolean"
+        },
+        "enabled_topics": {
+          "description": "Topics that enable it on their own.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "grants": {
+          "description": "The host grants the plugin asks for.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "provides": {
+          "$ref": "#/$defs/PluginProvides"
+        },
+        "revision": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "revisions": {
+          "description": "Every recorded revision, oldest first.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PluginRevision"
+          }
+        },
+        "secrets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PluginSecret"
+          }
+        },
+        "service": {
+          "$ref": "#/$defs/PluginServiceState"
+        },
+        "variant_of": {
+          "description": "The function this plugin is a variant of, when it declares one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "description": "The active revision's version.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "version",
+        "revision",
+        "provides",
+        "grants",
+        "secrets",
+        "revisions",
+        "enabled_for_install",
+        "enabled_topics",
+        "disabled_topics",
+        "service"
+      ]
+    },
     "PostWorkflowRunEventRequest": {
       "type": "object",
       "properties": {
@@ -3333,6 +3595,22 @@
       "required": [
         "scope_kind",
         "relative_path"
+      ]
+    },
+    "ProvidedTool": {
+      "description": "A tool a plugin provides, as the model sees it.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description"
       ]
     },
     "ProviderAccount": {
@@ -6346,12 +6624,6 @@
           "type": "integer",
           "format": "uint",
           "minimum": 0
-        },
-        "plugin_directory": {
-          "type": [
-            "string",
-            "null"
-          ]
         },
         "python_execute": {
           "$ref": "#/$defs/PythonExecuteToolConfig"

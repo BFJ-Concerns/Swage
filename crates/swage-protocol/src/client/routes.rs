@@ -25,6 +25,7 @@ use super::{
         MemoryInstructionRequest, MemoryInstructionResponse, MemoryPageListResponse,
         MemoryPageResponse,
     },
+    plugin::{InstallPluginRequest, PluginEnablementRequest, PluginListResponse, PluginSummary},
     provider_signin::{
         ProviderSignInState, StartProviderSignInRequest, StartProviderSignInResponse,
     },
@@ -551,6 +552,54 @@ pub fn routes() -> Vec<Route> {
             response: Response {
                 status: 200,
                 body: schema::<MemoryInstructionResponse>(),
+            },
+        },
+        Route {
+            operation_id: "list_plugins",
+            method: Method::Get,
+            path: "/api/plugins",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "List the installed plugins: what each provides, its grants, secrets, revisions and where it is enabled.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<PluginListResponse>(),
+            },
+        },
+        Route {
+            operation_id: "install_plugin",
+            method: Method::Post,
+            path: "/api/plugins",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "Install a plugin package from a directory on the gateway's host; an installed name takes a new revision.",
+            request_optional: false,
+
+            request: schema::<InstallPluginRequest>(),
+            response: Response {
+                status: 200,
+                body: schema::<PluginSummary>(),
+            },
+        },
+        Route {
+            operation_id: "set_plugin_enablement",
+            method: Method::Put,
+            path: "/api/plugins/{name}/enablement",
+            path_parameters: vec![Parameter {
+                name: "name",
+                kind: ParameterType::String,
+            }],
+            query_parameters: vec![],
+            summary: "Enable or disable a plugin for the install, or for one topic.",
+            request_optional: false,
+
+            request: schema::<PluginEnablementRequest>(),
+            response: Response {
+                status: 200,
+                body: schema::<PluginSummary>(),
             },
         },
         Route {

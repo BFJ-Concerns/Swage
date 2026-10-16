@@ -67,7 +67,6 @@ fn tool_runtime_from_config(
         shell_timeout_secs: config.shell_timeout_secs,
         python_execute: try_wire_from_config(config.python_execute.clone())?,
         max_output_bytes: config.max_output_bytes,
-        plugin_directory: config.plugin_directory.clone(),
         search: try_wire_from_config(config.search.clone())?,
     })
 }
@@ -321,6 +320,7 @@ pub async fn save_settings(
         &runtime_config,
         state.storage.clone(),
         &state.config_root,
+        state.plugins.tools(),
     );
     let voice_provider =
         crate::startup::create_voice_provider(&runtime_config, &state.secret_manager).await;
@@ -903,7 +903,6 @@ fn apply_runtime_settings_to_partial(
             require_sandbox: Some(tool_runtime.python_execute.require_sandbox),
         });
         tools.max_output_bytes = Some(tool_runtime.max_output_bytes);
-        tools.plugin_directory = Some(tool_runtime.plugin_directory);
         tools.search = Some(config_from_wire(tool_runtime.search)?);
     }
     if let Some(tool_permissions) = tool_permissions {
@@ -988,7 +987,6 @@ fn apply_tool_runtime_settings(
     config.shell_timeout_secs = runtime.shell_timeout_secs;
     config.python_execute = config_from_wire(runtime.python_execute)?;
     config.max_output_bytes = runtime.max_output_bytes;
-    config.plugin_directory = runtime.plugin_directory;
     config.search = config_from_wire(runtime.search)?;
     Ok(())
 }
@@ -1002,13 +1000,6 @@ fn validate_tool_runtime_settings(runtime: &ToolRuntimeSettings) -> Result<(), A
     if runtime.max_output_bytes == 0 {
         return Err(ApiError::validation(
             "tool max output bytes must be positive".to_string(),
-        ));
-    }
-    if let Some(directory) = runtime.plugin_directory.as_deref()
-        && directory.trim().is_empty()
-    {
-        return Err(ApiError::validation(
-            "tool plugin directory must not be empty".to_string(),
         ));
     }
     if let Some(search) = &runtime.search
@@ -1643,7 +1634,6 @@ mod tests {
             shell_timeout_secs: 30,
             python_execute: wire_from_config(swage_config::PythonExecuteToolConfig::default()),
             max_output_bytes: 100_000,
-            plugin_directory: None,
             search: Some(
                 serde_json::from_value(json!({
                     "provider_type": "brave", "base_url": "http://search.invalid"
@@ -2286,38 +2276,6 @@ mod tests {
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let plugin_dir = swage_home.path().join("plugins").join("echo-plugin");
-        std::fs::create_dir_all(&plugin_dir).expect("plugin directory");
-        std::fs::write(
-            plugin_dir.join("capability.json"),
-            serde_json::json!({
-                "description": "Echo plugin",
-                "tool": {
-                    "name": "echo_plugin",
-                    "description": "Echo plugin",
-                    "parameters": {"type": "object", "properties": {"text": {"type": "string"}}},
-                    "executable": "run.py"
-                }
-            })
-            .to_string(),
-        )
-        .expect("plugin manifest");
-        std::fs::write(
-            plugin_dir.join("run.py"),
-            "#!/usr/bin/env python3\nprint('{}')\n",
-        )
-        .expect("plugin executable");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = std::fs::metadata(plugin_dir.join("run.py"))
-                .expect("plugin metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(plugin_dir.join("run.py"), permissions)
-                .expect("plugin executable permissions");
-        }
-
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
         let mut config = swage_config::ResolvedConfig::default();
         config.tools.search = Some(swage_config::SearchProviderConfig {
@@ -2333,18 +2291,9 @@ mod tests {
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
-        assert!(
-            state
-                .active_tool_dispatcher()
-                .registry()
-                .get("echo_plugin")
-                .is_none()
-        );
-
         let mut python_execute: swage_protocol::client::settings::PythonExecuteToolConfig =
             wire_from_config(swage_config::PythonExecuteToolConfig::default());
         python_execute.enabled = false;
-        let plugin_root = swage_home.path().join("plugins").display().to_string();
         let request = SaveSettingsRequest {
             default_provider: "local".to_string(),
             providers: [(
@@ -2383,7 +2332,6 @@ mod tests {
                 shell_timeout_secs: 2,
                 python_execute,
                 max_output_bytes: 12_345,
-                plugin_directory: Some(plugin_root.clone()),
                 search: Some(swage_protocol::client::settings::SearchProviderConfig {
                     provider_type: "searxng".to_string(),
                     base_url: search_url.clone(),
@@ -2409,18 +2357,6 @@ mod tests {
         assert_eq!(response.tool_runtime.shell_timeout_secs, 2);
         assert_eq!(state.active_config().tools.shell_timeout_secs, 2);
         assert_eq!(state.active_config().tools.max_output_bytes, 12_345);
-        assert_eq!(
-            state.active_config().tools.plugin_directory.as_deref(),
-            Some(plugin_root.as_str())
-        );
-        assert!(
-            state
-                .active_tool_dispatcher()
-                .registry()
-                .get("echo_plugin")
-                .is_some(),
-            "hot-rebuilt dispatcher should include tools from the saved plugin directory"
-        );
         assert!(!state.restart_required());
         let dispatcher = state.active_tool_dispatcher();
         let search = dispatcher
@@ -2652,7 +2588,6 @@ mod tests {
             shell_timeout_secs: 0,
             python_execute: wire_from_config(swage_config::PythonExecuteToolConfig::default()),
             max_output_bytes: 100_000,
-            plugin_directory: None,
             search: None,
         });
         let error = validate_settings_request(&request).expect_err("zero shell timeout is invalid");
@@ -2665,22 +2600,11 @@ mod tests {
             shell_timeout_secs: 30,
             python_execute,
             max_output_bytes: 100_000,
-            plugin_directory: None,
             search: None,
         });
         let error =
             validate_settings_request(&request).expect_err("missing python runtime is invalid");
         assert!(error.message().contains("runtime path does not exist"));
-
-        request.tool_runtime = Some(ToolRuntimeSettings {
-            shell_timeout_secs: 30,
-            python_execute: wire_from_config(swage_config::PythonExecuteToolConfig::default()),
-            max_output_bytes: 100_000,
-            plugin_directory: Some("/definitely/missing/plugins".to_string()),
-            search: None,
-        });
-        validate_settings_request(&request)
-            .expect("missing plugin directory should not block unrelated settings saves");
     }
 
     #[test]

@@ -910,5 +910,48 @@ artefacts never appear as untracked files in the workspace's repository.
 Sessions without an attached workspace write their tool output into the
 session's scratch directory instead.
 
-Operators can register additional tools through plugins; plugin tool names come
-from the plugin manifest rather than the gateway's built-in set.
+### Plugins
+
+A plugin is a package — a directory holding a `plugin.toml` manifest and the
+script it names — installed from Settings → Plugins by its path on the
+gateway's host, or through `POST /api/plugins`. The manifest declares the
+tools the plugin provides, the host grants it needs (`tools`, to call the
+session's tools), the secrets it holds and, optionally, the function it is a
+variant of. Each install is a new revision under the data root's `plugins/`
+directory; the revision serving now, every earlier one, and the install and
+enablement events are in the audit trail.
+
+The plugin's script runs in a V8 isolate of its own inside the gateway,
+with its own heap and execution-time limits and no ambient access: it
+registers a handler per tool with `swage.provide.tool(name, handler)`, and
+reaches the session only through the host API — `swage.callTool(name,
+arguments)` under the `tools` grant, which runs the named tool through the
+session's own dispatcher with the session's grants, approvals and record, and
+`swage.log(message)`. A handler's parameters are the model's arguments; its
+second argument carries the session, agent, call id and working directory.
+An isolate that crosses a limit is terminated, the termination recorded, and
+the plugin starts afresh on its next call.
+
+A plugin is enabled for the whole install or for one topic (`PUT
+/api/plugins/{name}/enablement`); a session in a scope that does not enable
+it does not see its tools.
+
+```toml
+name = "echo"
+version = "1.0.0"
+description = "Echoes its input."
+script = "plugin.js"
+grants = ["tools"]
+
+[[provides.tools]]
+name = "echo"
+description = "Echo the text back."
+parameters = { type = "object", properties = { text = { type = "string" } }, required = ["text"] }
+```
+
+```js
+swage.provide.tool("echo", async (params, context) => {
+  swage.log(`echoing for session ${context.sessionId}`);
+  return { echoed: params.text };
+});
+```

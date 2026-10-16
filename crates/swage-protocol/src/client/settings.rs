@@ -274,7 +274,6 @@ pub struct ToolRuntimeSettings {
     pub python_execute: PythonExecuteToolConfig,
     #[ts(type = "number")]
     pub max_output_bytes: usize,
-    pub plugin_directory: Option<String>,
     pub search: Option<SearchProviderConfig>,
 }
 

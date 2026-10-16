@@ -369,8 +369,6 @@ pub struct ToolConfig {
     pub python_execute: PythonExecuteToolConfig,
     /// Output truncation threshold (bytes) applied to all tool results.
     pub max_output_bytes: usize,
-    /// Optional plugin directory scanned at gateway startup.
-    pub plugin_directory: Option<String>,
     /// Web search provider configuration. None means web search is disabled.
     pub search: Option<SearchProviderConfig>,
     /// Gateway-hosted browser settings.
@@ -388,7 +386,6 @@ impl Default for ToolConfig {
             shell_timeout_secs: 30,
             python_execute: PythonExecuteToolConfig::default(),
             max_output_bytes: 100_000,
-            plugin_directory: None,
             search: None,
             browser: BrowserToolConfig::default(),
             permissions: ToolPermissionConfig::default(),
@@ -1081,7 +1078,6 @@ mod tests {
         let cfg = ToolConfig::default();
         assert_eq!(cfg.shell_timeout_secs, 30);
         assert_eq!(cfg.max_output_bytes, 100_000);
-        assert_eq!(cfg.plugin_directory, None);
         assert_eq!(cfg.search, None);
     }
 
@@ -1105,7 +1101,6 @@ mod tests {
         let cfg = ResolvedConfig::default();
         assert_eq!(cfg.tools.shell_timeout_secs, 30);
         assert_eq!(cfg.tools.max_output_bytes, 100_000);
-        assert_eq!(cfg.tools.plugin_directory, None);
         assert_eq!(cfg.tools.search, None);
     }
 
@@ -1522,7 +1517,6 @@ timeout_policy = "reject"
             shell_timeout_secs: 60,
             python_execute: PythonExecuteToolConfig::default(),
             max_output_bytes: 50_000,
-            plugin_directory: Some("plugins".into()),
             search: None,
             browser: BrowserToolConfig::default(),
             permissions: ToolPermissionConfig {

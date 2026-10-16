@@ -14,7 +14,11 @@ use swage_agent::approval::ApprovalDecisionValue;
 use swage_core::GatewayError;
 use swage_protocol::{
     client::{
-        channel as channel_wire, schedule as schedule_wire,
+        channel as channel_wire,
+        plugin::{
+            InstallPluginRequest, PluginEnablementRequest, PluginListResponse, PluginSummary,
+        },
+        schedule as schedule_wire,
         skill::{SkillItem, SkillListResponse},
     },
     hosting::{
@@ -82,6 +86,76 @@ use crate::{
 /// is up and accepting connections before routing traffic to it.
 pub async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok"}))
+}
+
+/// `GET /api/plugins` — the installed plugins with what each provides,
+/// its grants, secrets, revisions and where it is enabled.
+pub async fn list_plugins(State(state): State<AppState>) -> Json<PluginListResponse> {
+    Json(state.plugins.list())
+}
+
+/// `POST /api/plugins` — install a package from a directory on this host as
+/// a new revision of its plugin, serving at once; the dispatcher is rebuilt
+/// so new sessions see the plugin's tools where it is enabled.
+pub async fn install_plugin(
+    State(state): State<AppState>,
+    Json(request): Json<InstallPluginRequest>,
+) -> Result<Json<PluginSummary>, ApiError> {
+    let source = std::path::PathBuf::from(request.source_path.trim());
+    if source.as_os_str().is_empty() {
+        return Err(ApiError::validation(
+            "source_path must name the package directory".to_string(),
+        ));
+    }
+    let reserved: Vec<String> = state
+        .active_tool_dispatcher()
+        .registry()
+        .list()
+        .into_iter()
+        .filter(|name| !state.plugins.provides_tool(name))
+        .map(str::to_owned)
+        .collect();
+    let summary = state
+        .plugins
+        .install(&source, &reserved, None)
+        .await
+        .map_err(plugin_service_error)?;
+    crate::plugin::refresh_tool_dispatcher(&state);
+    Ok(Json(summary))
+}
+
+/// `PUT /api/plugins/{name}/enablement` — enable or disable a plugin for the
+/// install or for one topic. Enablement is read at each turn, so no
+/// dispatcher rebuild is needed.
+pub async fn set_plugin_enablement(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(request): Json<PluginEnablementRequest>,
+) -> Result<Json<PluginSummary>, ApiError> {
+    if let Some(topic_id) = request.topic_id {
+        state
+            .topic_store
+            .get(topic_id)
+            .await
+            .map_err(|e| ApiError::from(GatewayError::Storage(e)))?
+            .ok_or(ApiError::from(GatewayError::TopicNotFound { id: topic_id }))?;
+    }
+    let summary = state
+        .plugins
+        .set_enablement(&name, request.topic_id, request.enabled, None)
+        .await
+        .map_err(plugin_service_error)?;
+    Ok(Json(summary))
+}
+
+fn plugin_service_error(error: crate::plugin::PluginServiceError) -> ApiError {
+    use crate::plugin::PluginServiceError;
+    match error {
+        PluginServiceError::Refused(message) => ApiError::validation(message),
+        PluginServiceError::NotFound(name) => ApiError::not_found_str("plugin", &name),
+        PluginServiceError::Storage(error) => ApiError::from(GatewayError::Storage(error)),
+        PluginServiceError::Unrecorded(message) => ApiError::internal(message),
+    }
 }
 
 /// `GET /api/capabilities` — inspect gateway workflow capability gating.

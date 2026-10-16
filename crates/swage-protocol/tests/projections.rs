@@ -68,6 +68,9 @@ fn typescript_bindings_are_regenerated() {
         .expect("export topic default surface");
     client::topic::CreateWorkspaceAttachmentRequest::export_all(&cfg)
         .expect("export attach workspace");
+    client::plugin::PluginListResponse::export_all(&cfg).expect("export plugin list");
+    client::plugin::InstallPluginRequest::export_all(&cfg).expect("export install plugin");
+    client::plugin::PluginEnablementRequest::export_all(&cfg).expect("export plugin enablement");
     client::topic::WorkspaceAttachmentListResponse::export_all(&cfg).expect("export workspaces");
     client::conversation::ConversationListResponse::export_all(&cfg).expect("export conversations");
     client::conversation::RecentSessionsResponse::export_all(&cfg).expect("export recent sessions");

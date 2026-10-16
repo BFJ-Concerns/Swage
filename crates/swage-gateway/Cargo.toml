@@ -27,6 +27,7 @@ swage-context = { path = "../swage-context" }
 swage-client = { path = "../swage-client" }
 swage-device = { path = "../swage-device" }
 swage-workflow = { path = "../swage-workflow" }
+swage-plugin = { path = "../swage-plugin" }
 swage-hook = { path = "../swage-hook" }
 swage-codex = { path = "../swage-codex" }
 axum = { workspace = true }

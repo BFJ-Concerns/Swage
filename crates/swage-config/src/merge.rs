@@ -139,7 +139,6 @@ pub struct PartialToolConfig {
     pub shell_timeout_secs: Option<u64>,
     pub python_execute: Option<PartialPythonExecuteToolConfig>,
     pub max_output_bytes: Option<usize>,
-    pub plugin_directory: Option<Option<String>>,
     pub search: Option<Option<SearchProviderConfig>>,
     pub browser: Option<PartialBrowserToolConfig>,
     pub allow: Option<Vec<String>>,
@@ -363,7 +362,6 @@ impl From<ResolvedConfig> for PartialConfig {
                     require_sandbox: Some(r.tools.python_execute.require_sandbox),
                 }),
                 max_output_bytes: Some(r.tools.max_output_bytes),
-                plugin_directory: Some(r.tools.plugin_directory),
                 search: Some(r.tools.search),
                 browser: Some(PartialBrowserToolConfig {
                     binary_path: Some(r.tools.browser.binary_path),
@@ -656,7 +654,6 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                 shell_timeout_secs: o.shell_timeout_secs.or(b.shell_timeout_secs),
                 python_execute: merge_overlay_section(b.python_execute, o.python_execute),
                 max_output_bytes: o.max_output_bytes.or(b.max_output_bytes),
-                plugin_directory: o.plugin_directory.or(b.plugin_directory),
                 search: o.search.or(b.search),
                 browser: merge_overlay_section(b.browser, o.browser),
                 allow: o.allow.or(b.allow),
@@ -824,7 +821,6 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                     require_sandbox: py.require_sandbox.unwrap_or(dpy.require_sandbox),
                 },
                 max_output_bytes: t.max_output_bytes.unwrap_or(dt.max_output_bytes),
-                plugin_directory: t.plugin_directory.unwrap_or(dt.plugin_directory),
                 // Double-option: outer None → default (None), Some(x) → use x.
                 search: t.search.unwrap_or(dt.search),
                 browser: BrowserToolConfig {
@@ -2276,7 +2272,6 @@ mod tests {
         let merged = merge_partial(
             PartialConfig {
                 tools: Some(PartialToolConfig {
-                    plugin_directory: Some(Some("/plugins".to_string())),
                     search: Some(Some(SearchProviderConfig {
                         provider_type: "searxng".to_string(),
                         base_url: "http://search.invalid".to_string(),
@@ -2294,7 +2289,6 @@ mod tests {
             },
             PartialConfig {
                 tools: Some(PartialToolConfig {
-                    plugin_directory: Some(None),
                     search: Some(None),
                     ..Default::default()
                 }),
@@ -2310,7 +2304,6 @@ mod tests {
         );
 
         let tools = merged.tools.unwrap();
-        assert_eq!(tools.plugin_directory, Some(None));
         assert_eq!(tools.search, Some(None));
         let telegram = merged.channels.unwrap().telegram.unwrap();
         assert_eq!(telegram.bot_token_secret_ref, Some(None));

@@ -28,16 +28,18 @@ use swage_storage::{
         AttachmentScopeKind, AttachmentStatus, BackgroundJob, ChannelLink, DeviceRegistration,
         Material, MaterialStatus, Message, NewAgentMessage, NewApprovalRequest, NewAttachment,
         NewAuditEvent, NewBackgroundJob, NewChannelLink, NewDeviceRegistration, NewMaterial,
-        NewMessage, NewSchedule, NewScheduleRun, NewSession, NewThread, NewToolCall, NewTopic,
-        NewTurn, NewWorkspaceAttachment, Schedule, ScheduleRun, ScheduleRunState,
-        ScheduleRunUpdate, ScheduleStatus, Session, SurfaceAnnotation, Thread, ThreadState,
-        ToolCallRecord, Topic, TopicSlug, Turn, TurnState, UpdateSchedule, WorkspaceAttachment,
+        NewMessage, NewPluginRevision, NewSchedule, NewScheduleRun, NewSession, NewThread,
+        NewToolCall, NewTopic, NewTurn, NewWorkspaceAttachment, PluginEnablementRecord,
+        PluginRevisionRecord, Schedule, ScheduleRun, ScheduleRunState, ScheduleRunUpdate,
+        ScheduleStatus, Session, SurfaceAnnotation, Thread, ThreadState, ToolCallRecord, Topic,
+        TopicSlug, Turn, TurnState, UpdateSchedule, WorkspaceAttachment,
     },
     store::{
         AgentDefinitionStore, AgentMessageStore, ApprovalStore, AttachmentStore, AuditStore,
         BackgroundJobStore, ChannelLinkStore, ContextSnapshotStore, DeviceStore, MaterialStore,
-        MessageStore, ScheduleStore, SessionStore, SkillActivationStore, TaskDefinitionStore,
-        ThreadStore, ToolCallStore, TopicStore, TurnStore, WorkspaceAttachmentStore,
+        MessageStore, PluginStore, ScheduleStore, SessionStore, SkillActivationStore,
+        TaskDefinitionStore, ThreadStore, ToolCallStore, TopicStore, TurnStore,
+        WorkspaceAttachmentStore,
     },
 };
 
@@ -4963,6 +4965,35 @@ impl ToolCallStore for MockStorage {
             .collect();
         calls.sort_by_key(|tc| tc.position);
         Ok(calls)
+    }
+}
+
+// Stub: no plugin is installed in gateway turn tests.
+#[async_trait]
+impl PluginStore for MockStorage {
+    async fn record_plugin_revision(
+        &self,
+        _revision: NewPluginRevision,
+    ) -> Result<PluginRevisionRecord, StorageError> {
+        Err(StorageError::QueryFailed(
+            "plugin installs are not exercised in turn tests".to_owned(),
+        ))
+    }
+    async fn list_plugin_revisions(&self) -> Result<Vec<PluginRevisionRecord>, StorageError> {
+        Ok(vec![])
+    }
+    async fn set_plugin_enablement(
+        &self,
+        _plugin_name: &str,
+        _topic_id: Option<Uuid>,
+        _enabled: bool,
+    ) -> Result<PluginEnablementRecord, StorageError> {
+        Err(StorageError::QueryFailed(
+            "plugin enablement is not exercised in turn tests".to_owned(),
+        ))
+    }
+    async fn list_plugin_enablement(&self) -> Result<Vec<PluginEnablementRecord>, StorageError> {
+        Ok(vec![])
     }
 }
 

@@ -1957,8 +1957,19 @@ untracked files in the workspace's Git repository.
 Sessions without an attached workspace write tool output into the session's
 scratch directory instead.
 
-Plugin tools (`plugin.rs`) are dynamically registered from operator
-configuration; their names come from the plugin manifest.
+Plugin tools come from installed plugins (`crates/swage-plugin`, the kernel;
+`crates/swage-gateway/src/plugin/`, the install records, enablement and the
+`PluginTool` wrapper). A plugin is a package directory with a `plugin.toml`
+manifest and a script; the manifest declares the tools it provides, the host
+grants it needs, the secrets it holds and the function it is a variant of.
+Installing (`POST /api/plugins`, Settings → Plugins) copies the package under
+`<data root>/plugins/<name>/<revision>/`, records the revision, loads the
+script in a V8 isolate of its own and rebuilds the tool dispatcher. A
+plugin's tools register beside the built-ins; a scope that does not enable
+the plugin (`PUT /api/plugins/{name}/enablement`, per install or topic) has
+them withheld at the turn. The script's `swage.callTool` runs through the
+turn's own dispatcher as a nested call, so a plugin's effects meet the same
+permission, approval and audit gates as the model's.
 
 
 <!-- source: agent-docs/workflow-engine.md -->
