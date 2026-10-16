@@ -224,81 +224,8 @@ pub(super) async fn process_turn_with_composition_and_focus(
     // and replace the cached write bit before assembly or sandbox creation.
     reauthorise_worker_placement_for_turn(state, &mut session).await?;
 
-    // Load topic-specific config. Missing topic config falls back to the
-    // startup config, but present invalid config fails the turn before any
-    // user message is written.
-    let config = load_session_config(state, &scope, &session.agent_id)?;
-
-    // A durable agent definition, when one exists for this agent, gives the
-    // session its character on top of the resolved file config: instructions
-    // append, the model preference fills an unselected default, and the
-    // permission overlay narrows grants. Resolution failure falls open to
-    // the file config — a broken definition must not brick the session.
-    let config = match crate::service::resolve_effective_agent_definition(
-        state.storage.as_ref(),
-        &session.agent_id,
-        topic_id,
-    )
-    .await
-    {
-        Ok(Some(definition)) => apply_agent_definition(config, &definition.definition),
-        Ok(None) => config,
-        Err(error) => {
-            tracing::warn!(
-                agent_id = %session.agent_id,
-                %error,
-                "failed to resolve the agent definition; using file config alone"
-            );
-            config
-        }
-    };
-
-    // A worker session carries the full lineage of dispatching contexts in
-    // session metadata: the worker's grants are the intersection of its own
-    // and every inherited bound, re-resolved on every turn so nested dispatch
-    // cannot expand authority and suspension cannot freeze it.
-    // Unlike the definition overlay above, resolution failure here fails the
-    // turn: falling open would run the worker wider than its dispatcher.
-    let bound_agent_ids = dispatch_bound_agent_ids(session.metadata.as_ref())?;
-    let config = apply_dispatch_bounds(
-        state,
-        &scope,
-        topic_id,
-        config,
-        &bound_agent_ids,
-        &format!("worker session {session_id}"),
-    )
-    .await?;
-    let bound_task_definition_ids = dispatch_bound_task_definition_ids(session.metadata.as_ref())?;
-    let config = apply_dispatch_task_bounds(
-        state,
-        config,
-        &bound_task_definition_ids,
-        &format!("worker session {session_id}"),
-    )
-    .await?;
-    let config = apply_workflow_call_tools(config, session.metadata.as_ref())?;
-
-    // Task names ride child-session metadata, while the definition is
-    // resolved afresh for every execution. Missing or unreadable tasks fail
-    // closed: silently running a different contract would be false success.
-    let task_definition_id = session
-        .metadata
-        .as_ref()
-        .and_then(|m| m.get("task_definition"))
-        .and_then(serde_json::Value::as_str);
-    let (config, task_defines_output_retries) = match task_definition_id {
-        Some(task_id) => {
-            let definition =
-                crate::service::resolve_task_definition(state.storage.as_ref(), task_id).await?;
-            let defines_output_retries = definition.output_max_retries.is_some();
-            (
-                apply_task_definition(config, &definition)?,
-                defines_output_retries,
-            )
-        }
-        None => (config, false),
-    };
+    let (config, task_defines_output_retries) =
+        resolve_turn_admission_config(state, &scope, &session).await?;
 
     let (config, effective_model_source, selected_model_id) = resolve_turn_model_and_attachments(
         state,
@@ -347,7 +274,12 @@ pub(super) async fn process_turn_with_composition_and_focus(
         }
     };
 
-    if task_definition_id.is_some()
+    if session
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("task_definition"))
+        .and_then(serde_json::Value::as_str)
+        .is_some()
         && let Err(error) = crate::experimentation::select_session_variant(
             state,
             &config.experimentation,
