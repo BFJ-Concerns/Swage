@@ -209,6 +209,9 @@ impl BrowserHost {
                         spawn_browser(config, true).await
                     }
                 }
+            }, || ToolError::ExecutionFailed {
+                name: "browser".to_string(),
+                message: "the gateway is stopping; no browser starts now".to_string(),
             })
             .await?;
         if !process.child.lock().await.is_running() {

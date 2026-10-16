@@ -1092,8 +1092,18 @@ pub async fn delete_conversation(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let svc = ConversationService::new(state.storage.clone(), state.topic_store.clone());
+    // The session's processes stop while the session row still exists, so
+    // each stop is recorded against it; then the row goes.
+    if state
+        .storage
+        .get_session(id)
+        .await
+        .map_err(GatewayError::from)?
+        .is_some()
+    {
+        state.plugins.stop_session(id).await;
+    }
     svc.delete_conversation(id).await?;
-    state.plugins.stop_session(id).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

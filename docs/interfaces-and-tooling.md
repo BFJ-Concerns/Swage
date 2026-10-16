@@ -942,8 +942,10 @@ plugin's tools, keeps for that session, and stops when the session closes,
 after `idle_secs` without a call (300 by default), or when the gateway
 stops — each stop announced to the process with its reason, and recorded
 as `plugin_process_started`, `plugin_process_stopped` and
-`plugin_process_exited` audit events. The process runs inside the same
-sandbox the session's turn runs its commands in, and speaks the
+`plugin_process_exited` audit events. The process runs under the same
+boundary the session's turn runs its commands under — the sandbox with its
+filesystem rules, the permitted fallback's rules alone, or none where the
+turn itself has none — with a clean environment, and speaks the
 plugin-process contract over the Unix socket named in
 `SWAGE_PLUGIN_SOCKET`: one JSON object per line — it announces its tools
 (`{"kind":"ready","tools":[…]}`), answers each `invoke` with a `result` or

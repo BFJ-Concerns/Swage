@@ -20,23 +20,31 @@ use swage_storage::store::Storage;
 use uuid::Uuid;
 
 /// Where a session's turn places the processes started on its behalf: the
-/// sandbox its commands run in, or none where the turn runs without one.
+/// boundary its own commands run under.
 #[derive(Debug, Clone)]
-pub struct ProcessPlacement {
-    pub sandbox: Option<SandboxConfig>,
+pub enum ProcessPlacement {
+    /// No boundary: the turn itself has none (a declared boundary, or the
+    /// sandbox disabled), and the process runs as the gateway does.
+    Plain,
+    /// Inside bubblewrap with the sandbox `config` — namespaces, read-only
+    /// root, mounts — and under its Landlock rules.
+    Sandboxed(SandboxConfig),
+    /// The permitted fallback the turn's commands run under: no bubblewrap,
+    /// but the sandbox's Landlock rules applied by the governor.
+    Fallback(SandboxConfig),
 }
 
 impl ProcessPlacement {
-    /// No boundary: the process runs as the gateway does.
     pub fn plain() -> Self {
-        Self { sandbox: None }
+        Self::Plain
     }
 
-    /// Inside the sandbox `config` describes.
     pub fn sandboxed(config: SandboxConfig) -> Self {
-        Self {
-            sandbox: Some(config),
-        }
+        Self::Sandboxed(config)
+    }
+
+    pub fn fallback(config: SandboxConfig) -> Self {
+        Self::Fallback(config)
     }
 }
 
@@ -57,8 +65,8 @@ impl ProcessLauncher for GatewayProcessLauncher {
         spec: &ProcessSpec,
         socket: &Path,
     ) -> Result<tokio::process::Command, PluginError> {
-        match &self.placement.sandbox {
-            Some(config) => {
+        match &*self.placement {
+            ProcessPlacement::Sandboxed(config) => {
                 let mut command = swage_sandbox::build_bwrap_command_for(
                     config,
                     socket,
@@ -72,7 +80,16 @@ impl ProcessLauncher for GatewayProcessLauncher {
                 command.stdout(std::process::Stdio::null());
                 Ok(command)
             }
-            None => PlainLauncher.command(spec, socket),
+            ProcessPlacement::Fallback(config) => {
+                let mut command =
+                    swage_sandbox::governed_command(config, &spec.command, &spec.args)
+                        .map_err(|error| PluginError::Process(error.to_string()))?;
+                command.env(PLUGIN_SOCKET_ENV, socket);
+                command.stdin(std::process::Stdio::null());
+                command.stdout(std::process::Stdio::null());
+                Ok(command)
+            }
+            ProcessPlacement::Plain => PlainLauncher.command(spec, socket),
         }
     }
 }
@@ -81,11 +98,28 @@ impl ProcessLauncher for GatewayProcessLauncher {
 /// plugin, with the session it served.
 pub struct AuditingObserver {
     storage: Arc<dyn Storage>,
+    /// The writes in flight, joined by [`Self::flush`] so a stop at gateway
+    /// stop is recorded before the runtime goes.
+    writes: std::sync::Mutex<tokio::task::JoinSet<()>>,
 }
 
 impl AuditingObserver {
     pub fn new(storage: Arc<dyn Storage>) -> Self {
-        Self { storage }
+        Self {
+            storage,
+            writes: std::sync::Mutex::new(tokio::task::JoinSet::new()),
+        }
+    }
+
+    /// Wait for every event written so far to land.
+    pub async fn flush(&self) {
+        let mut writes = std::mem::take(
+            &mut *self
+                .writes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        while writes.join_next().await.is_some() {}
     }
 
     fn record(
@@ -107,7 +141,12 @@ impl AuditingObserver {
             metadata,
         };
         let kind = kind.to_owned();
-        tokio::spawn(async move {
+        let mut writes = self
+            .writes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while writes.try_join_next().is_some() {}
+        writes.spawn(async move {
             if let Err(error) = storage.create_audit_event(event).await {
                 tracing::warn!(%error, kind, "plugin process event could not be recorded");
             }
@@ -145,5 +184,104 @@ impl ProcessObserver for AuditingObserver {
             format!("Plugin {plugin}'s process for session {session} ended on its own: {detail}"),
             serde_json::json!({ "session": session, "detail": detail }),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::time::Duration;
+    use swage_plugin::ProcessLauncher;
+
+    fn spec() -> ProcessSpec {
+        ProcessSpec {
+            plugin: "driver".into(),
+            command: PathBuf::from("/data/plugins/driver/1/driver"),
+            args: vec!["--serve".into()],
+            idle: Duration::from_secs(60),
+            grants: Vec::new(),
+            tools: vec!["open".into()],
+        }
+    }
+
+    fn config() -> SandboxConfig {
+        SandboxConfig::builder()
+            .working_directory("/tmp/turn-workspace")
+            .build()
+            .unwrap()
+    }
+
+    /// The placement decides the boundary: a sandboxed placement is the
+    /// bubblewrap command through the governor, a fallback placement the
+    /// governor alone, a plain placement the program itself.
+    #[test]
+    fn the_launcher_runs_the_program_where_the_placement_says() {
+        let socket = Path::new("/run/swage/plugin.sock");
+        let program_of =
+            |command: &tokio::process::Command| command.as_std().get_program().to_os_string();
+        let args_of = |command: &tokio::process::Command| {
+            command
+                .as_std()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+
+        let plain = GatewayProcessLauncher::new(Arc::new(ProcessPlacement::plain()))
+            .command(&spec(), socket)
+            .unwrap();
+        assert_eq!(program_of(&plain), "/data/plugins/driver/1/driver");
+        assert_eq!(args_of(&plain), vec!["--serve"]);
+
+        let fallback = GatewayProcessLauncher::new(Arc::new(ProcessPlacement::fallback(config())))
+            .command(&spec(), socket)
+            .unwrap();
+        let governor = swage_sandbox::host_binary().unwrap();
+        assert_eq!(program_of(&fallback), governor.as_os_str());
+        assert_eq!(
+            args_of(&fallback),
+            vec![
+                "--sandboxed-exec",
+                "/data/plugins/driver/1/driver",
+                "--serve"
+            ]
+        );
+        let env: Vec<(String, Option<String>)> = fallback
+            .as_std()
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert!(
+            env.iter()
+                .any(|(name, value)| name == swage_sandbox::SANDBOX_CONFIG_ENV && value.is_some()),
+            "the rules travel in the environment: {env:?}"
+        );
+        assert!(env.iter().any(|(name, value)| name == PLUGIN_SOCKET_ENV
+            && value.as_deref() == Some("/run/swage/plugin.sock")));
+
+        match GatewayProcessLauncher::new(Arc::new(ProcessPlacement::sandboxed(config())))
+            .command(&spec(), socket)
+        {
+            Ok(sandboxed) => {
+                assert!(
+                    program_of(&sandboxed).to_string_lossy().ends_with("bwrap"),
+                    "a sandboxed placement is the bubblewrap command"
+                );
+                let args = args_of(&sandboxed);
+                assert!(args.iter().any(|arg| arg == "--clearenv"));
+                assert!(args.iter().any(|arg| arg == "--sandboxed-exec"));
+                assert_eq!(args.last().map(String::as_str), Some("--serve"));
+            }
+            Err(error) => assert!(
+                error.to_string().contains("bubblewrap") || error.to_string().contains("bwrap"),
+                "without bubblewrap the placement is refused by name: {error}"
+            ),
+        }
     }
 }

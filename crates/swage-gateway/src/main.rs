@@ -105,6 +105,20 @@ async fn main() {
         return;
     }
 
+    // --sandboxed-exec: the governor of a program that is not the agent.
+    // The filesystem rules apply to this process and survive the exec, so
+    // the program runs under the agent's own boundary.
+    if let Some((program, args)) = cli.sandboxed_exec.split_first() {
+        if let Err(error) = swage_sandbox::apply_child_landlock_from_env() {
+            eprintln!("Error: {error}");
+            std::process::exit(1);
+        }
+        use std::os::unix::process::CommandExt;
+        let error = std::process::Command::new(program).args(args).exec();
+        eprintln!("Error: failed to exec {program}: {error}");
+        std::process::exit(1);
+    }
+
     // --server-mode is set when we re-exec ourselves as a background daemon.
     // Skip all CLI dispatch and run the gateway directly.
     if cli.server_mode {

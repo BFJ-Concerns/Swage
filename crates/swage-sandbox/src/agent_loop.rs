@@ -31,8 +31,13 @@ fn child_sandbox_config_from_env() -> Result<Option<crate::config::SandboxConfig
         })
 }
 
+/// Apply the Landlock filesystem rules the sandbox config in
+/// `SWAGE_SANDBOX_CONFIG_JSON` describes to this process; nothing when the
+/// variable is unset. The rules persist across `exec`, so a process that
+/// applies them and then execs another program hands that program the
+/// same filesystem the sandboxed agent gets.
 #[cfg(target_os = "linux")]
-fn apply_child_landlock_from_env() -> Result<(), SandboxError> {
+pub fn apply_child_landlock_from_env() -> Result<(), SandboxError> {
     let Some(config) = child_sandbox_config_from_env()? else {
         return Ok(());
     };
@@ -42,7 +47,7 @@ fn apply_child_landlock_from_env() -> Result<(), SandboxError> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn apply_child_landlock_from_env() -> Result<(), SandboxError> {
+pub fn apply_child_landlock_from_env() -> Result<(), SandboxError> {
     Ok(())
 }
 

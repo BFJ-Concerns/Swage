@@ -170,17 +170,21 @@ pub struct PluginService {
     /// the copy, the load and the record are one decision, and two installs
     /// deciding together would each claim the other's revision.
     install_lock: tokio::sync::Mutex<()>,
+    /// Records every process start, stop and exit; flushed at shutdown.
+    observer: Arc<process::AuditingObserver>,
 }
 
 impl PluginService {
     /// An empty service over `plugins_root`; [`Self::load`] brings the
     /// recorded installs up.
     pub fn new(storage: Arc<dyn Storage>, plugins_root: PathBuf) -> Self {
+        let observer = Arc::new(process::AuditingObserver::new(Arc::clone(&storage)));
         Self {
             plugins_root,
             storage,
             installed: RwLock::new(BTreeMap::new()),
             install_lock: tokio::sync::Mutex::new(()),
+            observer,
         }
     }
 
@@ -208,7 +212,7 @@ impl PluginService {
                     .ok_or_else(|| "the package names no process".to_owned())?;
                 Ok(Execution::Process(ProcessPlugin::new(
                     spec,
-                    Arc::new(process::AuditingObserver::new(Arc::clone(&self.storage))),
+                    Arc::clone(&self.observer) as Arc<dyn swage_plugin::ProcessObserver>,
                 )))
             }
         }
@@ -236,6 +240,7 @@ impl PluginService {
                 .stop_all(PluginProcessStopReason::GatewayStopping)
                 .await;
         }
+        self.observer.flush().await;
     }
 
     fn process_plugins(&self) -> Vec<Arc<ProcessPlugin>> {

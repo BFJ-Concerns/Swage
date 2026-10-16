@@ -48,6 +48,12 @@ pub struct Cli {
     /// binary for IPC-backed tool execution.
     #[arg(long, hide = true)]
     pub sandbox_mode: bool,
+
+    /// Internal: apply the sandbox's filesystem rules from the environment
+    /// and exec the named program with the arguments that follow — the
+    /// governor a plugin's brokered process runs under.
+    #[arg(long, hide = true, num_args = 1.., value_name = "PROGRAM", allow_hyphen_values = true)]
+    pub sandboxed_exec: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

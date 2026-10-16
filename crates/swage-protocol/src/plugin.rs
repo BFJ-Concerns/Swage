@@ -80,7 +80,8 @@ pub enum PluginProcessRequest {
     /// The answer to a host call the process made, by the call's `id`.
     Reply { id: String, reply: PluginHostReply },
     /// The process is being stopped and has the gateway's grace period to
-    /// exit; after it the process is killed.
+    /// exit on its own; after it the process is signalled, and killed a
+    /// moment later if it ignores that.
     Stop { reason: PluginProcessStopReason },
 }
 

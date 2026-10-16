@@ -110,7 +110,11 @@ async fn host_call(
     out_tx: &mpsc::UnboundedSender<PluginProcessMessage>,
     state: &Mutex<FixtureState>,
 ) -> PluginHostReply {
-    let id = format!("{invocation}:{name}:{}", std::process::id());
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let id = format!(
+        "{invocation}:{name}:{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
     let (reply_tx, reply_rx) = oneshot::channel();
     state.lock().await.calls.insert(id.clone(), reply_tx);
     let _ = out_tx.send(PluginProcessMessage::Call {

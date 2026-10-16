@@ -41,10 +41,16 @@ use crate::runtime::{InvocationContext, PluginError, PluginHost, answer_host_cal
 
 /// How long a process has to connect and announce its tools.
 const START_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long a stopped process has to exit after `stop` before it is killed.
+/// How long a stopped process has to exit after `stop` before it is
+/// signalled.
 const STOP_GRACE: Duration = Duration::from_secs(5);
-/// The longest line either side may send.
+/// How long a signalled process has before it is killed.
+const KILL_GRACE: Duration = Duration::from_secs(1);
+/// The longest message either side may send, before its newline.
 const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
+/// How long a write to the process may take before the process is taken
+/// to have stopped reading.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What a process plugin needs to start: the installed command, its
 /// arguments, the idle period after which a session's process stops, the
@@ -107,6 +113,12 @@ impl ProcessLauncher for PlainLauncher {
         if let Some(root) = spec.command.parent() {
             command.current_dir(root);
         }
+        // The process gets the socket and a path to find its interpreter,
+        // never the gateway's environment — a provider key lives there.
+        command.env_clear();
+        if let Some(path) = std::env::var_os("PATH") {
+            command.env("PATH", path);
+        }
         command.env(PLUGIN_SOCKET_ENV, socket);
         command.stdin(std::process::Stdio::null());
         command.stdout(std::process::Stdio::null());
@@ -136,6 +148,11 @@ impl ProcessObserver for SilentObserver {
 pub trait Held: Send + Sync + 'static {
     /// Tell the process why it is stopping and end it; idempotent.
     async fn stop(&self, reason: PluginProcessStopReason);
+    /// Whether the process is serving a call now: a busy process is never
+    /// idle, however long the call has run.
+    fn busy(&self) -> bool {
+        false
+    }
 }
 
 struct Kept<P> {
@@ -157,6 +174,8 @@ pub struct ProcessKeeper<P: Held> {
     /// The scopes with a process serving, kept beside the entries so a
     /// listing never waits on a start in progress.
     serving: Mutex<BTreeSet<String>>,
+    /// Set by `stop_all`: nothing starts again through a closed keeper.
+    closed: std::sync::atomic::AtomicBool,
     idle: Duration,
 }
 
@@ -165,7 +184,37 @@ impl<P: Held> ProcessKeeper<P> {
         Self {
             entries: Mutex::new(HashMap::new()),
             serving: Mutex::new(BTreeSet::new()),
+            closed: std::sync::atomic::AtomicBool::new(false),
             idle,
+        }
+    }
+
+    /// Whether `stop_all` has closed this keeper.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Drop the entry for `scope` when nothing serves it and nothing else
+    /// holds its slot, so the map holds only scopes in use.
+    fn prune(&self, scope: &str) {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = entries.get(scope)
+            && Arc::strong_count(entry) == 1
+            && entry.try_lock().is_ok_and(|slot| slot.is_none())
+        {
+            entries.remove(scope);
+        }
+    }
+
+    /// Mark `scope`'s process used now: a call that just ended restarts
+    /// its idle period.
+    pub async fn touch(&self, scope: &str) {
+        let entry = self.entry(scope);
+        if let Some(kept) = entry.lock().await.as_mut() {
+            kept.last_used = Instant::now();
         }
     }
 
@@ -198,12 +247,21 @@ impl<P: Held> ProcessKeeper<P> {
     }
 
     /// The process serving `scope`, started by `start` if none is; marks
-    /// it used.
-    pub async fn get_or_start<F, Fut, E>(&self, scope: &str, start: F) -> Result<Arc<P>, E>
+    /// it used. A closed keeper (after `stop_all`) answers with `closed`
+    /// instead of starting anything.
+    pub async fn get_or_start<F, Fut, E>(
+        &self,
+        scope: &str,
+        start: F,
+        closed: impl FnOnce() -> E,
+    ) -> Result<Arc<P>, E>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Arc<P>, E>>,
     {
+        if self.is_closed() {
+            return Err(closed());
+        }
         let entry = self.entry(scope);
         let mut slot = entry.lock().await;
         if let Some(kept) = slot.as_mut() {
@@ -211,6 +269,12 @@ impl<P: Held> ProcessKeeper<P> {
             return Ok(Arc::clone(&kept.process));
         }
         let process = start().await?;
+        if self.is_closed() {
+            // Closed while this start ran: the process is not kept.
+            drop(slot);
+            process.stop(PluginProcessStopReason::GatewayStopping).await;
+            return Err(closed());
+        }
         *slot = Some(Kept {
             process: Arc::clone(&process),
             last_used: Instant::now(),
@@ -238,15 +302,28 @@ impl<P: Held> ProcessKeeper<P> {
             *slot = None;
             self.mark(scope, false);
         }
+        drop(slot);
+        drop(entry);
+        self.prune(scope);
     }
 
     /// Stop `scope`'s process for `reason`; `false` if none was serving.
     pub async fn stop(&self, scope: &str, reason: PluginProcessStopReason) -> bool {
         let entry = self.entry(scope);
-        let kept = entry.lock().await.take();
+        // The listing changes under the slot lock, as a start changes it,
+        // so a replacement started after this stop is never unlisted by it.
+        let kept = {
+            let mut slot = entry.lock().await;
+            let kept = slot.take();
+            if kept.is_some() {
+                self.mark(scope, false);
+            }
+            kept
+        };
+        drop(entry);
+        self.prune(scope);
         match kept {
             Some(kept) => {
-                self.mark(scope, false);
                 kept.process.stop(reason).await;
                 true
             }
@@ -262,29 +339,46 @@ impl<P: Held> ProcessKeeper<P> {
             let idle = {
                 let mut slot = entry.lock().await;
                 match slot.as_ref() {
-                    Some(kept) if now.duration_since(kept.last_used) >= self.idle => slot.take(),
+                    Some(kept)
+                        if now.duration_since(kept.last_used) >= self.idle
+                            && !kept.process.busy() =>
+                    {
+                        self.mark(&scope, false);
+                        slot.take()
+                    }
                     _ => None,
                 }
             };
+            drop(entry);
             if let Some(kept) = idle {
-                self.mark(&scope, false);
                 kept.process.stop(PluginProcessStopReason::Idle).await;
-                stopped.push(scope);
+                stopped.push(scope.clone());
             }
+            self.prune(&scope);
         }
         stopped
     }
 
-    /// Stop every process for `reason`; returns the scopes stopped.
+    /// Stop every process for `reason` and close the keeper: nothing starts
+    /// through it again. Returns the scopes stopped.
     pub async fn stop_all(&self, reason: PluginProcessStopReason) -> Vec<String> {
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
         let mut stopped = Vec::new();
         for (scope, entry) in self.entries() {
-            let kept = entry.lock().await.take();
+            let kept = {
+                let mut slot = entry.lock().await;
+                let kept = slot.take();
+                if kept.is_some() {
+                    self.mark(&scope, false);
+                }
+                kept
+            };
+            drop(entry);
             if let Some(kept) = kept {
-                self.mark(&scope, false);
                 kept.process.stop(reason).await;
-                stopped.push(scope);
+                stopped.push(scope.clone());
             }
+            self.prune(&scope);
         }
         stopped
     }
@@ -344,23 +438,29 @@ impl ProcessPlugin {
         let session = context.session_id.clone();
         let process = self
             .keeper
-            .get_or_start(&session, || async {
-                let plugin = Arc::clone(self);
-                let session = session.clone();
-                let process = ServingProcess::start(&self.spec, launcher, move |detail| {
-                    plugin
-                        .observer
-                        .exited(&plugin.spec.plugin, &session, detail);
-                })
-                .await?;
-                self.observer
-                    .started(&self.spec.plugin, &context.session_id, process.pid());
-                Ok::<_, PluginError>(process)
-            })
+            .get_or_start(
+                &session,
+                || async {
+                    let plugin = Arc::clone(self);
+                    let session = session.clone();
+                    let process = ServingProcess::start(&self.spec, launcher, move |detail| {
+                        plugin
+                            .observer
+                            .exited(&plugin.spec.plugin, &session, detail);
+                    })
+                    .await?;
+                    self.observer
+                        .started(&self.spec.plugin, &context.session_id, process.pid());
+                    Ok::<_, PluginError>(process)
+                },
+                || PluginError::Stopped,
+            )
             .await?;
         let outcome = process.invoke(tool, params, context, host).await;
         if let Err(PluginError::ProcessExited(_)) = &outcome {
             self.keeper.forget(&context.session_id, &process).await;
+        } else {
+            self.keeper.touch(&context.session_id).await;
         }
         outcome
     }
@@ -393,7 +493,8 @@ impl ProcessPlugin {
     }
 
     /// Stop every process for `reason` — the gateway stopping, or a newer
-    /// revision taking over; returns the sessions stopped.
+    /// revision taking over, after which nothing starts again through this
+    /// plugin; returns the sessions stopped.
     pub async fn stop_all(&self, reason: PluginProcessStopReason) -> Vec<String> {
         let stopped = self.keeper.stop_all(reason).await;
         for session in &stopped {
@@ -422,8 +523,27 @@ pub struct ServingProcess {
     hosts: Mutex<HashMap<String, Arc<dyn PluginHost>>>,
     grants: Vec<HostGrant>,
     reader: Mutex<Option<JoinHandle<()>>>,
+    /// The host's work for each in-flight call, aborted when the process
+    /// stops: an effect never outlives the process that raised it.
+    calls: Mutex<tokio::task::JoinSet<()>>,
+    /// Why the process is no longer served, once the reader has ended.
+    ending: Mutex<Option<String>>,
     /// Keeps the socket file until the process is dropped.
     _socket: SocketManager,
+}
+
+/// An invocation's registration in the driver, removed when the invocation
+/// ends however it ends — settled, failed, or its caller gone — so no
+/// later `call` can borrow its authority.
+struct Registered<'a> {
+    process: &'a ServingProcess,
+    id: String,
+}
+
+impl Drop for Registered<'_> {
+    fn drop(&mut self) {
+        self.process.unregister(&self.id);
+    }
 }
 
 impl ServingProcess {
@@ -507,6 +627,8 @@ impl ServingProcess {
             hosts: Mutex::new(HashMap::new()),
             grants: spec.grants.clone(),
             reader: Mutex::new(None),
+            calls: Mutex::new(tokio::task::JoinSet::new()),
+            ending: Mutex::new(None),
             _socket: socket,
         });
         let reader = {
@@ -519,8 +641,17 @@ impl ServingProcess {
                         Err(error) => break error.to_string(),
                     }
                 };
-                process.fail_pending(PluginError::ProcessExited(ending.clone()));
-                on_exit(&ending);
+                // An orderly stop ended the process on purpose and said so
+                // already; only a process that ended on its own is reported.
+                let already_ended = process
+                    .ending
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_some();
+                if !already_ended {
+                    process.end(ending.clone());
+                    on_exit(&ending);
+                }
             })
         };
         *process
@@ -551,30 +682,31 @@ impl ServingProcess {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(id.clone(), reply);
-        let sent = self
-            .send(&PluginProcessRequest::Invoke {
-                id: id.clone(),
-                tool: tool.to_owned(),
-                params: params.clone(),
-                context: context.clone(),
-            })
-            .await;
-        let outcome = match sent {
-            Ok(()) => response
-                .await
-                .unwrap_or_else(|_| Err(PluginError::ProcessExited("the process ended".into()))),
-            Err(error) => {
-                self.pending
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .remove(&id);
-                Err(error)
-            }
+        let registered = Registered {
+            process: self,
+            id: id.clone(),
         };
-        self.hosts
+        // A reader that ended before this registration drained nothing of
+        // ours; the process is not serving, whatever the socket still takes.
+        if let Some(ending) = self
+            .ending
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&id);
+            .clone()
+        {
+            return Err(PluginError::ProcessExited(ending));
+        }
+        self.send(&PluginProcessRequest::Invoke {
+            id: id.clone(),
+            tool: tool.to_owned(),
+            params: params.clone(),
+            context: context.clone(),
+        })
+        .await?;
+        let outcome = response
+            .await
+            .unwrap_or_else(|_| Err(PluginError::ProcessExited("the process ended".into())));
+        drop(registered);
         outcome
     }
 
@@ -603,7 +735,13 @@ impl ServingProcess {
                     .get(&invocation)
                     .cloned();
                 let process = Arc::clone(self);
-                tokio::spawn(async move {
+                let mut calls = self
+                    .calls
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                // Finished tasks leave the set as new ones join it.
+                while calls.try_join_next().is_some() {}
+                calls.spawn(async move {
                     let reply = match host {
                         Some(host) => {
                             let envelope = answer_host_call(
@@ -633,20 +771,34 @@ impl ServingProcess {
                             }),
                         },
                     };
+                    // A reply that cannot reach the process — too large, or
+                    // the socket gone — ends the invocation that asked, so
+                    // nothing waits on an answer that never comes.
                     if let Err(error) = process
                         .send(&PluginProcessRequest::Reply { id, reply })
                         .await
                     {
-                        tracing::debug!(pid = process.pid, %error, "plugin process reply could not be sent");
+                        process.settle(
+                            &invocation,
+                            Err(PluginError::Process(format!(
+                                "the host's reply to '{name}' could not be sent: {error}"
+                            ))),
+                        );
                     }
                 });
             }
         }
     }
 
+    /// End the invocation `id` with `outcome`; its authority goes with it,
+    /// so a `call` naming it after its result is refused.
     fn settle(&self, id: &str, outcome: Result<Value, PluginError>) {
         let waiting = self
             .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(id);
+        self.hosts
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(id);
@@ -662,16 +814,42 @@ impl ServingProcess {
         }
     }
 
-    fn fail_pending(&self, error: PluginError) {
+    fn unregister(&self, id: &str) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(id);
+        self.hosts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(id);
+    }
+
+    /// The process is no longer served: every pending invocation fails,
+    /// every call's host task is abandoned, and a later registration is
+    /// refused with the reason.
+    fn end(&self, ending: String) {
+        *self
+            .ending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(ending.clone());
         let pending = std::mem::take(
             &mut *self
                 .pending
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         );
+        self.hosts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
         for (_, reply) in pending {
-            let _ = reply.send(Err(PluginError::ProcessExited(error.to_string())));
+            let _ = reply.send(Err(PluginError::ProcessExited(ending.clone())));
         }
+        self.calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .abort_all();
     }
 
     async fn send(&self, request: &PluginProcessRequest) -> Result<(), PluginError> {
@@ -684,21 +862,42 @@ impl ServingProcess {
             )));
         }
         line.push('\n');
-        let mut writer = self.writer.lock().await;
-        writer.write_all(line.as_bytes()).await.map_err(|error| {
-            PluginError::ProcessExited(format!("writing to the process failed: {error}"))
-        })?;
-        writer.flush().await.map_err(|error| {
-            PluginError::ProcessExited(format!("writing to the process failed: {error}"))
-        })
+        // A process that stops reading must not hold the writer, and with
+        // it every later request and the stop, for ever.
+        let write = async {
+            let mut writer = self.writer.lock().await;
+            writer.write_all(line.as_bytes()).await?;
+            writer.flush().await
+        };
+        match tokio::time::timeout(WRITE_TIMEOUT, write).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(PluginError::ProcessExited(format!(
+                "writing to the process failed: {error}"
+            ))),
+            Err(_) => Err(PluginError::ProcessExited(format!(
+                "the process stopped reading: a write did not complete within {}s",
+                WRITE_TIMEOUT.as_secs()
+            ))),
+        }
     }
 }
 
 #[async_trait]
 impl Held for ServingProcess {
+    fn busy(&self) -> bool {
+        !self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+    }
+
     async fn stop(&self, reason: PluginProcessStopReason) {
-        // Told why, the process has the grace period to leave on its own
-        // terms; only then is it signalled, and killed if it ignores that.
+        // Said first, so the reader that sees the socket close knows this
+        // was an orderly stop. Told why, the process has the grace period
+        // to leave on its own terms; then it is signalled, and killed a
+        // moment later if it ignores that.
+        self.end(format!("stopped: {reason:?}"));
         if let Err(error) = self.send(&PluginProcessRequest::Stop { reason }).await {
             tracing::debug!(pid = self.pid, %error, "plugin process could not be told to stop");
         }
@@ -706,7 +905,7 @@ impl Held for ServingProcess {
         if tokio::time::timeout(STOP_GRACE, child.wait_for_exit())
             .await
             .is_err()
-            && let Err(error) = child.graceful_shutdown(STOP_GRACE).await
+            && let Err(error) = child.graceful_shutdown(KILL_GRACE).await
         {
             tracing::warn!(pid = self.pid, %error, "plugin process did not stop cleanly");
         }
@@ -719,7 +918,6 @@ impl Held for ServingProcess {
         {
             reader.abort();
         }
-        self.fail_pending(PluginError::ProcessExited(format!("stopped: {reason:?}")));
     }
 }
 
@@ -729,7 +927,7 @@ async fn read_message(
 ) -> Result<Option<PluginProcessMessage>, PluginError> {
     let mut line = Vec::new();
     let bytes = (&mut *lines)
-        .take((MAX_LINE_BYTES + 1) as u64)
+        .take((MAX_LINE_BYTES + 2) as u64)
         .read_until(b'\n', &mut line)
         .await
         .map_err(|error| {
@@ -738,7 +936,7 @@ async fn read_message(
     if bytes == 0 {
         return Ok(None);
     }
-    if line.len() > MAX_LINE_BYTES || line.last() != Some(&b'\n') {
+    if line.len() > MAX_LINE_BYTES + 1 || line.last() != Some(&b'\n') {
         return Err(PluginError::ProcessExited(format!(
             "the process sent a line over the {MAX_LINE_BYTES}-byte limit"
         )));

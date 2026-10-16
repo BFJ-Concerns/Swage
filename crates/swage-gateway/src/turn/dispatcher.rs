@@ -512,16 +512,23 @@ pub(crate) async fn build_gateway_dispatcher(
     // process — runs where the turn's commands run: inside the same sandbox
     // policy under bubblewrap, plainly where the turn itself has no
     // boundary (declared, disabled, or the permitted fallback).
-    let process_placement = Arc::new(match sandbox_build.backend {
-        SandboxBackend::Bubblewrap => crate::plugin::process::ProcessPlacement::sandboxed(
-            build_sandbox_config(agent_config, workspace_policy.as_ref()).map_err(|error| {
-                swage_core::SandboxError::SpawnFailed {
-                    message: format!("failed to build the process placement: {error}"),
+    let process_placement =
+        Arc::new(match sandbox_build.backend {
+            SandboxBackend::Bubblewrap | SandboxBackend::Fallback => {
+                let config = build_sandbox_config(agent_config, workspace_policy.as_ref())
+                    .map_err(|error| swage_core::SandboxError::SpawnFailed {
+                        message: format!("failed to build the process placement: {error}"),
+                    })?;
+                if sandbox_build.backend == SandboxBackend::Bubblewrap {
+                    crate::plugin::process::ProcessPlacement::sandboxed(config)
+                } else {
+                    crate::plugin::process::ProcessPlacement::fallback(config)
                 }
-            })?,
-        ),
-        _ => crate::plugin::process::ProcessPlacement::plain(),
-    });
+            }
+            SandboxBackend::None | SandboxBackend::TestHarness => {
+                crate::plugin::process::ProcessPlacement::plain()
+            }
+        });
     let sandbox = sandbox_build.sandbox;
     let sandbox_guard = sandbox
         .as_ref()
