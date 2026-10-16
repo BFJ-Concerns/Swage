@@ -20,6 +20,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- Browser clicks, typing, selections and scrolling no longer ask for approval by default.
 - Swage is licensed under the GNU Affero General Public License, version 3 or any later version (`AGPL-3.0-or-later`), with the full text in `LICENSE` and the licence recorded in every crate and npm package manifest. Pull requests are welcome, contributed under the same licence.
 - A continuation schedule firing during a running turn queues its brief for the next turn, and channel messages for a busy session wait in the same durable queue. The web UI shows queued inputs once, labels them queued, and displays recorded inputs and the drained reply live.
 - A message, channel message or continuation brief reaching an idle session that still has queued messages, as a Stop leaves them, joins the queue and runs after them in the same turn.
@@ -27,7 +28,7 @@ All notable changes to Swage are documented in this file.
 - CI runs the full verification gate (`just verify`) on GitHub Actions hosted runners and names any test that passed only on retry.
 - The operator history names each changed configuration field with its prior and new value — nested settings by their path, such as Context › Assembly — and keeps the whole prior and new objects collapsed one click away, so variant selections and assembly decisions sit close below.
 - Per-turn sandboxing is on by default, so bubblewrap is a required install prerequisite; a topic opts out with `[sandbox] enabled = false`, and its local gateway turns then record a degraded execution boundary unless the install declares its own boundary.
-- In attended sessions, `shell`, `file_edit`, `file_write`, `python_execute`, `browser_click`, `browser_type`, `browser_select` and `browser_scroll` ask for approval before each call by default; a `require_approval` list in configuration replaces that default. Unattended sessions still run on their grants alone.
+- In attended sessions, `shell`, `file_edit`, `file_write` and `python_execute` ask for approval before each call by default; a `require_approval` list in configuration replaces that default. Unattended sessions still run on their grants alone.
 - The built-in Codex app server (`protocol = "codex"`) is temporarily disabled: configuration naming it does not load, and Settings does not offer it as a provider kind, until Swage can ask the operator to approve the commands and file changes it makes. Codex models stay reachable through any OpenAI-protocol provider.
 - Unused keys in `[tools.search]` are refused at configuration load.
 - Voice transcription and speech synthesis request the models set in `[voice]` (`transcription_model`, `speech_model`), editable under Settings → Voice (the Voice entry in the settings navigation, which states the prerequisite: an OpenAI-protocol default provider plus the two model ids), from the default provider's endpoint; they never use the chat model. With a model unset, that capability reports itself unavailable, and the voice capabilities route (`unavailable_reason`) says what to configure.

@@ -252,11 +252,11 @@ this setting is false in both configurations.
 ### Default grants
 
 A fresh configuration allows all tools (`allow: ["*"]`), denies none, and
-requires approval for the eight tools that act outside the conversation:
-`shell`, `file_edit`, `file_write`, `python_execute`, `browser_click`,
-`browser_type`, `browser_select` and `browser_scroll`. In an attended session
-each call to one of these pauses until you approve or reject it. This default
-is defined in `ToolPermissionConfig::default()` and applies unless a config
+requires approval for four tools: `shell`, `file_edit`, `file_write` and
+`python_execute`. In an attended session each call to one of these pauses
+until you approve or reject it. Browser actions do not require approval by
+default. This default is defined in `ToolPermissionConfig::default()` and
+applies unless a config
 file replaces the approval list — a `require_approval` list in a global,
 topic or agent config file replaces the default list rather than adding to
 it, so `require_approval = []` turns the prompts off. An agent definition's

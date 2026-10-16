@@ -303,10 +303,10 @@ The file-config default (`ToolPermissionConfig::default()` in
 
 - `allow: ["*"]` — all tools permitted
 - `deny: []`
-- Eight high-risk tools gated behind `require_approval`:
-  `shell`, `file_edit`, `file_write`, `python_execute`, `browser_click`,
-  `browser_type`, `browser_select`, `browser_scroll`. A `require_approval`
-  list at any configuration level replaces this list (`merge.rs`), so
+- Four high-risk tools gated behind `require_approval`:
+  `shell`, `file_edit`, `file_write`, `python_execute`. Browser actions do not
+  require approval by default. A `require_approval` list at any configuration
+  level replaces this list (`merge.rs`), so
   `require_approval = []` removes the prompts.
 - Default bundles: `browsing`, `browser_actions`, `scheduling`,
   `knowledge-read`, `knowledge-write`, `knowledge-curation`,
