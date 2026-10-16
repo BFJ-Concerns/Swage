@@ -43,6 +43,11 @@ A malformed permission overlay is logged and ignored — the config's own
 grants stand rather than the session silently running with an unintended
 permission set.
 
+A per-target context-transfer entry (`[communication.context_transfer.targets.<agent>]`)
+keeps only the fields it sets; each other field is the policy's default
+where the target is used, so a scope layer that changes the default
+changes every target under it that did not set its own.
+
 ### Creating and editing definitions
 
 Definitions can be created and edited through two surfaces.

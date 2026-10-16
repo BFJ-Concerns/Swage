@@ -638,27 +638,46 @@ pub enum ContextTransferField {
     Assistant,
 }
 
-/// Context transfer policy for a single target agent.
-///
-/// Overrides the defaults in [`ContextTransferConfig`] for a specific
-/// sender → target pair.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Context transfer policy for a single target agent: the fields the target
+/// sets for itself over the defaults in [`ContextTransferConfig`], read
+/// through [`ContextTransferConfig::policy_for`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ContextTransferTargetConfig {
-    /// Transfer mode for this specific target.
-    pub mode: ContextTransferMode,
-    /// For `Explicit` mode: which context element types to include.
+    /// Transfer mode for this specific target; unset, the policy's.
+    pub mode: Option<ContextTransferMode>,
+    /// For `Explicit` mode: which context element types to include; unset,
+    /// the policy's.
     #[serde(default)]
-    pub allowed_fields: Vec<ContextTransferField>,
-    /// For `Summary` mode: maximum token budget for the compacted summary.
+    pub allowed_fields: Option<Vec<ContextTransferField>>,
+    /// For `Summary` mode: maximum token budget for the compacted summary;
+    /// unset, the policy's.
     pub summary_budget: Option<u32>,
 }
 
-impl Default for ContextTransferTargetConfig {
-    fn default() -> Self {
-        Self {
-            mode: ContextTransferMode::None,
-            allowed_fields: vec![],
-            summary_budget: None,
+/// The transfer policy in force for one target: the target's own field
+/// where it set one, the configuration's default otherwise.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContextTransferPolicy<'a> {
+    pub mode: &'a ContextTransferMode,
+    pub allowed_fields: &'a [ContextTransferField],
+    pub summary_budget: Option<u32>,
+}
+
+impl ContextTransferConfig {
+    /// The policy in force for `target`. A target's unset field inherits
+    /// the default here, at use, so the resolved configuration keeps which
+    /// fields a target set for itself: a scope layer that changes the
+    /// default changes every inheriting target with it.
+    pub fn policy_for(&self, target: &str) -> ContextTransferPolicy<'_> {
+        let own = self.targets.get(target);
+        ContextTransferPolicy {
+            mode: own.and_then(|own| own.mode.as_ref()).unwrap_or(&self.mode),
+            allowed_fields: own
+                .and_then(|own| own.allowed_fields.as_deref())
+                .unwrap_or(&self.allowed_fields),
+            summary_budget: own
+                .and_then(|own| own.summary_budget)
+                .or(self.summary_budget),
         }
     }
 }

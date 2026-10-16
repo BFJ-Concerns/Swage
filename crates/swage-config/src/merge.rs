@@ -433,8 +433,8 @@ impl From<ResolvedConfig> for PartialConfig {
                                     (
                                         k,
                                         PartialContextTransferTargetConfig {
-                                            mode: Some(v.mode),
-                                            allowed_fields: Some(v.allowed_fields),
+                                            mode: v.mode,
+                                            allowed_fields: v.allowed_fields,
                                             summary_budget: v.summary_budget,
                                         },
                                     )
@@ -965,12 +965,14 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             let ct = c.context_transfer.unwrap_or_default();
             let dc = ContextTransferConfig::default();
 
-            // Resolve top-level defaults first — per-target overrides inherit
-            // from the resolved policy, not from T::default().
             let resolved_mode = ct.mode.unwrap_or(dc.mode);
             let resolved_fields = ct.allowed_fields.unwrap_or(dc.allowed_fields);
             let resolved_budget = ct.summary_budget.or(dc.summary_budget);
 
+            // A target keeps the fields it set for itself and nothing else:
+            // an unset field inherits the policy at use
+            // (`ContextTransferConfig::policy_for`), so a later layer's
+            // change to the default reaches every inheriting target.
             let targets = ct
                 .targets
                 .unwrap_or_default()
@@ -979,11 +981,9 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
                     (
                         k,
                         ContextTransferTargetConfig {
-                            mode: v.mode.unwrap_or_else(|| resolved_mode.clone()),
-                            allowed_fields: v
-                                .allowed_fields
-                                .unwrap_or_else(|| resolved_fields.clone()),
-                            summary_budget: v.summary_budget.or(resolved_budget),
+                            mode: v.mode,
+                            allowed_fields: v.allowed_fields,
+                            summary_budget: v.summary_budget,
                         },
                     )
                 })
@@ -1903,8 +1903,9 @@ mod tests {
     #[test]
     fn context_transfer_per_target_inherits_resolved_defaults() {
         // Top-level sets mode=Summary with a budget; per-target entry only
-        // overrides allowed_fields. The target should inherit Summary mode
-        // and the budget — not fall back to None/empty.
+        // overrides allowed_fields. The target's policy inherits Summary mode
+        // and the budget — not None/empty — and the resolved target keeps
+        // only what it set, so a later layer's default reaches it.
         let partial = PartialConfig {
             communication: Some(PartialCommunicationConfig {
                 message_ttl_secs: None,
@@ -1940,22 +1941,43 @@ mod tests {
         assert_eq!(ct.summary_budget, Some(1024));
 
         // Per-target inherits from resolved top-level, not from T::default().
-        let target = ct.targets.get("agent-b").expect("target should exist");
+        let policy = ct.policy_for("agent-b");
         assert_eq!(
-            target.mode,
+            *policy.mode,
             crate::model::ContextTransferMode::Summary,
             "per-target mode should inherit from resolved top-level"
         );
         assert_eq!(
-            target.allowed_fields,
-            vec![ContextTransferField::System],
+            policy.allowed_fields,
+            &[ContextTransferField::System],
             "per-target allowed_fields should be the override value"
         );
         assert_eq!(
-            target.summary_budget,
+            policy.summary_budget,
             Some(1024),
             "per-target budget should inherit from resolved top-level"
         );
+        let target = ct.targets.get("agent-b").expect("target should exist");
+        assert_eq!(target.mode, None, "the target set no mode of its own");
+        assert_eq!(target.summary_budget, None);
+
+        // Overlaid by a layer that changes the default, the inheriting
+        // target follows it; the partial it came from carries only what it
+        // set, so the round trip loses nothing.
+        let overlay = PartialConfig {
+            communication: Some(PartialCommunicationConfig {
+                context_transfer: Some(PartialContextTransferConfig {
+                    mode: Some(crate::model::ContextTransferMode::None),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let layered = resolve(merge_chain(vec![PartialConfig::from(resolved), overlay]));
+        let policy = layered.communication.context_transfer.policy_for("agent-b");
+        assert_eq!(*policy.mode, crate::model::ContextTransferMode::None);
+        assert_eq!(policy.allowed_fields, &[ContextTransferField::System]);
     }
 
     #[test]

@@ -964,8 +964,8 @@ fn apply_runtime_settings_to_partial(
                                 (
                                     id,
                                     swage_config::merge::PartialContextTransferTargetConfig {
-                                        mode: Some(target.mode),
-                                        allowed_fields: Some(target.allowed_fields),
+                                        mode: target.mode,
+                                        allowed_fields: target.allowed_fields,
                                         summary_budget: target.summary_budget,
                                     },
                                 )
