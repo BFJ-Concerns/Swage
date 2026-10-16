@@ -47,6 +47,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Turns with both sandbox settings disabled can run without `HOME`, including when Python is disabled.
+
 - Sandboxed Python workers can use runtime libraries beneath masked directories or `/tmp`, with the runtime mounted read-only.
 
 - Sandboxed HTTPS git commands can resolve credentials restricted to a repository path.

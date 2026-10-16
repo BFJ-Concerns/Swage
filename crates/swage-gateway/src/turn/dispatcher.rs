@@ -634,12 +634,19 @@ pub(crate) async fn build_gateway_dispatcher(
         session_id,
         turn_id,
     )?;
-    let roots = PolicyRoots::from_environment(&state.config_root)?;
-    let mut python_config = build_sandbox_config(agent_config, workspace_policy.as_ref(), &roots)
-        .map_err(|error| swage_core::SandboxError::SpawnFailed {
-        message: error.to_string(),
-    })?;
-    credentials.configure(&mut python_config)?;
+    let python_config = if config.tools.python_execute.enabled
+        && (config.sandbox.enabled || config.tools.python_execute.require_sandbox)
+    {
+        let roots = PolicyRoots::from_environment(&state.config_root)?;
+        let mut policy = build_sandbox_config(agent_config, workspace_policy.as_ref(), &roots)
+            .map_err(|error| swage_core::SandboxError::SpawnFailed {
+                message: error.to_string(),
+            })?;
+        credentials.configure(&mut policy)?;
+        Some(policy)
+    } else {
+        None
+    };
     let sandbox_build = build_turn_sandbox(
         state,
         config,
@@ -697,8 +704,7 @@ pub(crate) async fn build_gateway_dispatcher(
         Some(state.clone()),
     )));
     let python_execution = crate::tool_executor::PythonExecution {
-        sandbox: (config.sandbox.enabled || config.tools.python_execute.require_sandbox)
-            .then_some(python_config),
+        sandbox: python_config,
         egress,
         dispatcher: Arc::new(nested_dispatcher),
         credentials,
@@ -787,6 +793,130 @@ pub(crate) async fn build_gateway_dispatcher_for_unattended_execution(
 mod tests {
     use super::*;
     use crate::turn::tests::{MockStorage, make_state_with_session, make_state_with_storage};
+
+    // Environment changes are confined to a subprocess, away from other tests.
+    fn run_dispatcher_environment_case(name: &str, no_home: bool) -> bool {
+        if std::env::var_os("SWAGE_DISPATCHER_REGRESSION_CHILD").is_some() {
+            return true;
+        }
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", name, "--nocapture"])
+            .env("SWAGE_DISPATCHER_REGRESSION_CHILD", "1");
+        if no_home {
+            command
+                .env_remove("HOME")
+                .env_remove("SWAGE_EXECUTION_BOUNDARY");
+        } else {
+            let runtime = swage_python::runtime_resolver::ResolvedPythonRuntime::resolve(
+                &swage_config::model::PythonExecuteToolConfig::default(),
+            )
+            .unwrap();
+            command
+                .env("SWAGE_TEST_PYTHON", runtime.executable_path)
+                .env("PATH", "")
+                .env("SWAGE_EXECUTION_BOUNDARY", "container");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "environment case failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
+    async fn environment_case_dispatcher(config: swage_config::ResolvedConfig, python: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let (state, session_id) = crate::turn::tests::make_state_with_storage_and_root(
+            Vec::new(),
+            Arc::new(MockStorage::new()),
+            Some(root.path().to_owned()),
+        )
+        .await;
+        let tool: Arc<dyn Tool> = if python {
+            let runtime = Arc::new(
+                swage_python::PythonWorkerRuntime::new(config.tools.python_execute.clone())
+                    .unwrap(),
+            );
+            let pool = swage_python::WorkerPool::new(runtime.clone()).unwrap();
+            Arc::new(crate::tool::python_execute::PythonExecuteTool::new(
+                runtime,
+                pool,
+                state.storage.clone(),
+            ))
+        } else {
+            Arc::new(crate::tool::shell::ShellTool {
+                timeout: std::time::Duration::from_secs(5),
+                max_output_bytes: 1024,
+            })
+        };
+        *state.runtime_tool_dispatcher.write().unwrap() =
+            Arc::new(ToolDispatcher::allow_all(vec![tool]));
+        let agent_config =
+            AgentConfig::new("gateway").with_workspace(root.path(), vec![root.path().to_owned()]);
+        let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
+        let build = build_gateway_dispatcher(
+            &state,
+            GatewayDispatcherRequest {
+                config: &config,
+                agent_config: &agent_config,
+                session_metadata: None,
+                topic_id: None,
+                active_workspace_attachment_id: None,
+                ws_tx,
+                session_id: Some(session_id),
+                turn_id: Some(Uuid::new_v4()),
+            },
+        )
+        .await
+        .expect("unsandboxed dispatcher must build without HOME");
+        assert!(build.sandbox_guard.is_none());
+        let mut ctx = swage_tool::context::MockToolContext::new("gateway", session_id.to_string());
+        ctx.working_directory = root.path().to_owned();
+        ctx.allowed_paths = vec![root.path().to_owned()];
+        ctx.turn_id = Some(Uuid::new_v4());
+        ctx.call_id = Some("environment-check".into());
+        let (name, params) = if python {
+            assert!(swage_sandbox::find_bwrap().is_err());
+            (
+                "python_execute",
+                serde_json::json!({"code": "print(6 * 7)"}),
+            )
+        } else {
+            ("shell", serde_json::json!({"command": "printf 42"}))
+        };
+        let result = build
+            .dispatcher
+            .dispatch(name, params, &ctx, "gateway")
+            .await;
+        assert!(result.is_ok(), "unsandboxed tool must run: {result:?}");
+        assert_eq!(
+            result.unwrap().result["output"].as_str().unwrap().trim(),
+            "42"
+        );
+    }
+
+    #[test]
+    fn no_home_unsandboxed_dispatcher_runs_tools() {
+        if !run_dispatcher_environment_case(
+            "turn::dispatcher::tests::no_home_unsandboxed_dispatcher_runs_tools",
+            true,
+        ) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            for python_enabled in [true, false] {
+                let mut config = swage_config::ResolvedConfig::default();
+                config.sandbox.enabled = false;
+                config.tools.python_execute.require_sandbox = false;
+                config.tools.python_execute.enabled = python_enabled;
+                config.dangerously_skip_permissions = true;
+                environment_case_dispatcher(config, false).await;
+            }
+        });
+    }
 
     /// An egress setup for tests of backend selection: nothing is reachable
     /// and nothing is recorded, since no command runs.
