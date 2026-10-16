@@ -48,7 +48,7 @@ async fn run_value(state: &AppState, run: &WorkflowRunRecord) -> Result<Value, S
         .list_workflow_journal(run.id)
         .await
         .map_err(|error| error.to_string())?;
-    let workers = crate::workflow::journal_with_rounds(state, entries)
+    let workers = crate::workflow::journal_with_live_workers(state, run.id, entries)
         .await?
         .into_iter()
         .filter(|entry| entry.agent_call.is_some())

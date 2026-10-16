@@ -19649,3 +19649,151 @@ async fn review_fix_2_start_observation_includes_completion_time() {
         "a completed run observation must not precede its completion"
     );
 }
+
+struct EvidenceRoundProvider {
+    round_opened: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl swage_provider::LlmProvider for EvidenceRoundProvider {
+    fn model_id(&self) -> &str {
+        "gated-round-model"
+    }
+
+    async fn complete(
+        &self,
+        _request: swage_core::CompletionRequest,
+    ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+        unimplemented!("workflow calls use streaming")
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: swage_core::ToolCompletionRequest,
+    ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+        unimplemented!("workflow calls use streaming")
+    }
+
+    fn stream(
+        &self,
+        _request: swage_core::CompletionRequest,
+    ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>> {
+        let release = Arc::clone(&self.release);
+        self.round_opened.notify_one();
+        Box::pin(
+            futures::stream::iter(vec![swage_core::StreamChunk::Delta {
+                content: "observed output".into(),
+            }])
+            .chain(futures::stream::once(async move {
+                release.notified().await;
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                }
+            })),
+        )
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_fix_3_live_worker_liveness() {
+    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+    let topic = storage.general_scope().await.expect("topic");
+    let session = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .expect("session");
+    let opened = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let root = tempfile::tempdir().unwrap();
+    let state = AppState::new_with_config_root(
+        storage.clone(),
+        storage.clone(),
+        Arc::new(EvidenceRoundProvider {
+            round_opened: opened.clone(),
+            release: release.clone(),
+        }),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    let Json(started) = start_inline_run(
+        State(state.clone()),
+        Path(topic.id),
+        Json(StartInlineWorkflowRunRequest {
+            source: "return await agent('wait for the provider', {maxAttempts: 1});".into(),
+            args: Value::Null,
+            budget: None,
+        }),
+    )
+    .await
+    .expect("launch");
+    opened.notified().await;
+    wait_for_open_worker_round(&storage).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if state
+                .active_workflow_workers
+                .lock()
+                .await
+                .values()
+                .any(|live| live.first_evidence_at.is_some())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let detail = get_run(State(state.clone()), Path(started.id))
+        .await
+        .expect("page")
+        .0;
+    let expected = serde_json::to_value(
+        only_agent_call(&detail)
+            .provider_rounds
+            .as_ref()
+            .expect("rounds"),
+    )
+    .expect("json");
+    let status =
+        crate::tool::workflow_run_status::status_for_session(&state, session.id, Some(started.id))
+            .await
+            .expect("status");
+    let account =
+        crate::tool::workflow_run_account::account_for_run(&state, session.id, started.id)
+            .await
+            .expect("account");
+    // End the real in-flight work before assertions, including on a broken projection.
+    release.notify_one();
+    wait_for_terminal(&state, started.id).await;
+    assert_eq!(
+        status["runs"][0]["workers"][0]["agent_call"]["provider_rounds"], expected,
+        "status carries the page's round activity"
+    );
+    assert_eq!(
+        account["workers"][0]["agent_call"]["provider_rounds"], expected,
+        "open account carries the page's round activity"
+    );
+    for (surface, live) in [
+        (
+            "status",
+            &status["runs"][0]["workers"][0]["agent_call"]["liveness"],
+        ),
+        ("account", &account["workers"][0]["agent_call"]["liveness"]),
+    ] {
+        assert!(
+            live["started_at"].is_string(),
+            "{surface}: an active worker must report its observed start: {live}"
+        );
+        assert!(
+            live["first_evidence_at"].is_string(),
+            "{surface}: an active worker must report its first output: {live}"
+        );
+    }
+    assert_eq!(expected.as_array().expect("round list").len(), 1);
+    assert!(expected[0]["completed_at"].is_null());
+    assert!(expected[0]["started_at"].is_string());
+}

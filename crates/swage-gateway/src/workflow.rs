@@ -9034,6 +9034,26 @@ pub(crate) async fn journal_with_rounds(
     Ok(journal)
 }
 
+pub(crate) async fn journal_with_live_workers(
+    state: &AppState,
+    run_id: Uuid,
+    mut entries: Vec<WorkflowJournalRecord>,
+) -> Result<Vec<swage_protocol::client::workflow::WorkflowJournalEntry>, String> {
+    let live_workers = state.active_workflow_workers.lock().await.clone();
+    reconcile_workflow_worker_liveness(state, run_id, &mut entries, &live_workers)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut journal = journal_with_rounds(state, entries).await?;
+    for entry in &mut journal {
+        if let Some(liveness) = live_workers.get(&entry.id)
+            && let Some(agent_call) = entry.agent_call.as_mut()
+        {
+            agent_call.liveness = Some(workflow_worker_liveness_wire(liveness.clone())?);
+        }
+    }
+    Ok(journal)
+}
+
 pub async fn get_run(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -9044,7 +9064,7 @@ pub async fn get_run(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow run", id))?;
-    let mut entries = state
+    let entries = state
         .storage
         .list_workflow_journal(id)
         .await
@@ -9092,21 +9112,9 @@ pub async fn get_run(
     // interrupted one actually made.
     #[cfg(test)]
     workflow_test_hook::pause_once(id).await;
-    let live_workers = state.active_workflow_workers.lock().await.clone();
-    reconcile_workflow_worker_liveness(&state, id, &mut entries, &live_workers)
+    let journal = journal_with_live_workers(&state, id, entries)
         .await
         .map_err(internal)?;
-    let mut journal = journal_with_rounds(&state, entries)
-        .await
-        .map_err(internal)?;
-    for entry in &mut journal {
-        if let Some(liveness) = live_workers.get(&entry.id)
-            && let Some(agent_call) = entry.agent_call.as_mut()
-        {
-            agent_call.liveness =
-                Some(workflow_worker_liveness_wire(liveness.clone()).map_err(internal)?);
-        }
-    }
     let holds = run_hold_projections(&state, id).await?;
     // Hold economics are derived the same way the wake economics are: the
     // hold rows and their rejections are the history, and a stored counter

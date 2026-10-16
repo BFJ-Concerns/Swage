@@ -48,7 +48,7 @@ pub async fn account_for_run(
             .list_workflow_journal(run_id)
             .await
             .map_err(|error| error.to_string())?;
-        let workers = crate::workflow::journal_with_rounds(state, entries)
+        let workers = crate::workflow::journal_with_live_workers(state, run_id, entries)
             .await?
             .into_iter()
             .filter(|entry| entry.agent_call.is_some())
