@@ -499,6 +499,35 @@ settings_section! {
     }
 }
 
+settings_section! {
+    /// Admission policy for image references submitted with a turn.
+    section "attachments" as AttachmentsConfig / PartialAttachmentsConfig {
+        /// URI schemes accepted before checking the selected provider's capabilities.
+        accepted_schemes: Vec<String> = vec!["https".into(), "data".into()],
+    }
+    problems(section) {
+        let mut problems = Vec::new();
+        if section.accepted_schemes.is_empty() {
+            problems.push(SettingsProblem {
+                field: "accepted_schemes",
+                message: "at least one image reference scheme is required".into(),
+            });
+        }
+        for scheme in &section.accepted_schemes {
+            let mut bytes = scheme.bytes();
+            if !bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
+                || !bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+            {
+                problems.push(SettingsProblem {
+                    field: "accepted_schemes",
+                    message: format!("invalid URI scheme `{scheme}`: use a letter followed by letters, digits, +, - or . (without a colon)"),
+                });
+            }
+        }
+        problems
+    }
+}
+
 /// The longest idle wait before a memory curation pass, in minutes: a week.
 pub const MAX_CURATOR_IDLE_MINUTES: u64 = 10_080;
 
@@ -560,6 +589,7 @@ pub struct SettingsResponse {
     pub communication: CommunicationConfig,
     pub sessions: SessionsConfig,
     pub memory: MemoryConfig,
+    pub attachments: AttachmentsConfig,
     pub voice: VoiceConfig,
     pub restart_required: bool,
     pub can_restart: bool,
@@ -605,6 +635,9 @@ pub struct SaveSettingsRequest {
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub memory: Option<MemoryConfig>,
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub attachments: Option<AttachmentsConfig>,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub voice: Option<VoiceConfig>,

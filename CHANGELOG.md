@@ -20,6 +20,8 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- Image references accept only `https:` and `data:` schemes by default; the accepted set is configurable through `[attachments]` and Settings, with explained refusals recorded in the audit trail.
+
 - Swage is licensed under the GNU Affero General Public License, version 3 or any later version (`AGPL-3.0-or-later`), with the full text in `LICENSE` and the licence recorded in every crate and npm package manifest. Pull requests are welcome, contributed under the same licence.
 - A continuation schedule firing during a running turn queues its brief for the next turn, and channel messages for a busy session wait in the same durable queue. The web UI shows queued inputs once, labels them queued, and displays recorded inputs and the drained reply live.
 - A message, channel message or continuation brief reaching an idle session that still has queued messages, as a Stop leaves them, joins the queue and runs after them in the same turn.
@@ -44,6 +46,9 @@ All notable changes to Swage are documented in this file.
 ### Fixed
 
 - Configuration history uses Settings’ labels, including provider credentials, and shows creations, deletions, unchanged saves, arrays and single-field changes without misleading or duplicate field rows. Null and absent values both read as unset.
+- Browser navigation keeps working after settings or grant changes, retaining the logged-in profile; startup timeouts explain how to recover.
+
+- Oversized browser snapshots retain the opening paragraph of main article content instead of eliding it.
 
 - Session previews in the recent list, sidebar, conversation selector, delete controls and Operator deck show plain text without Markdown formatting or link destinations. Operator session summaries are limited to three lines.
 - The workflow-authoring skill states event-kind names as the gateway accepts them: segments are joined by `.`, `:` or `/` only, with `_` and `-` allowed inside a segment but never separating one.

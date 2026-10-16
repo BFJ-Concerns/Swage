@@ -254,6 +254,7 @@ function makeSettings(
     },
     sessions: { archive_after_days: 7 },
     memory: { curator_idle_minutes: 10 },
+    attachments: { accepted_schemes: ["https", "data"] },
     voice: {},
     restart_required: false,
     can_restart: false,
