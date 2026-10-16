@@ -172,13 +172,22 @@
   const streamedContent = $derived(stream?.streamedContent ?? streamingStore?.streamedContent ?? "");
   const turnError = $derived(stream?.turnError ?? streamingStore?.turnError ?? null);
   const recordedFailure = $derived(messages.at(-1)?.failure_message === turnError?.message);
-  function errorSummary(model?: string | null, catalogueSelection = false): string {
-    const selection = model;
-    if (!selection) return "The request failed. See the details for the reported cause.";
-    const separator = selection.indexOf(":");
-    return catalogueSelection && separator > 0
-      ? `The request to ${selection.slice(0, separator)} using model ${selection.slice(separator + 1)} failed. See the details for the reported cause.`
-      : `The request using model ${selection} failed. See the details for the reported cause.`;
+  function errorSummary(detail: string, model?: string | null, catalogueSelection = false): string {
+    // The diagnostic belongs to this failure; a conversation selection can
+    // already have changed or still reflect a previous turn.
+    const provider = detail.match(/^(?:provider error: )?provider '([^']+)' at /)?.[1];
+    let reportedCause: string | undefined;
+    const jsonStart = detail.indexOf("{");
+    if (jsonStart >= 0) {
+      try {
+        const body = JSON.parse(detail.slice(jsonStart));
+        if (typeof body?.error?.message === "string" && !body.error.message.includes("{")) reportedCause = body.error.message;
+      } catch { /* Unstructured diagnostics remain in Technical details. */ }
+    }
+    const route = provider ? ` to provider ${provider}` : "";
+    const namedModel = catalogueSelection && provider && model?.startsWith(`${provider}:`) ? model.slice(provider.length + 1) : model;
+    const selection = namedModel ? ` using model ${namedModel}` : "";
+    return `The request${route}${selection} failed. ${reportedCause ? `Reported cause: ${reportedCause}` : "See the details for the reported cause."}`;
   }
   const providerRetry = $derived(stream?.providerRetry ?? streamingStore?.providerRetry ?? null);
   const retryWaitSeconds = $derived(
@@ -258,7 +267,7 @@
   // live region below updates a handful of times per turn, not per token.
   const streamingStatus = $derived(
     turnError
-      ? errorSummary(store?.activeConversation?.selected_model_id, true)
+      ? errorSummary(turnError.message, turnError.selectedModelId, true)
       : providerRetry
         ? `Retrying provider: attempt ${providerRetry.attempt} of ${providerRetry.max_retries}`
         : isStreaming
@@ -473,7 +482,7 @@
 
     <!-- ---- Turn error: shown inline after any partial response ---- -->
     {#if turnError && !recordedFailure}
-      {@render failureNotice(turnError.message, store?.activeConversation?.selected_model_id, lastPersonsMessage?.content ?? null, true)}
+      {@render failureNotice(turnError.message, turnError.selectedModelId, lastPersonsMessage?.content ?? null, true)}
     {/if}
   {/if}
 </div>
@@ -482,7 +491,7 @@
   <div class="turn-error" role="alert">
     <span class="error-icon" aria-hidden="true">⚠</span>
     <div class="error-message">
-      <p>{errorSummary(model, catalogueSelection)}</p>
+      <p>{errorSummary(detail, model, catalogueSelection)}</p>
       <div class="error-actions"><button class="branch-link" disabled={isStreaming || content === null} onclick={() => content !== null && retry(content)}>Retry</button><a href="/settings/providers">Provider settings</a></div>
       <details><summary>Technical details</summary><pre>{detail}</pre></details>
     </div>

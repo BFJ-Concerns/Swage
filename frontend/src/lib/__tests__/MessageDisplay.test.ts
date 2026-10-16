@@ -194,6 +194,42 @@ describe("provider failure notice", () => {
     expect(compiled.css?.code).toMatch(/overflow-wrap:\s*anywhere/);
   });
 
+  it.each(["unknown provider for model gpt-model-access-does-not-exist", "Authentication rejected"])("uses the failed turn selection with a stale conversation: %s", (cause) => {
+    const request: MessageView = { role: "user", content: "Hello", timestamp: "2026-10-15T12:00:00Z" };
+    const store = makeConversationStore([request]);
+    Object.defineProperty(store.activeConversation!, "selected_model_id", { value: "sol" });
+    const raw = `provider 'cliproxy-openai' at https://Proxy.Example/v1: HTTP error 400: ${JSON.stringify({ error: { message: cause } })}`;
+    const sendMessage = vi.fn();
+    const streaming = createStreamingStore({ conversationStore: store, connectionStore: { sendMessage, cancelTurn: vi.fn() } });
+    streaming.startTurn("Hello", "cliproxy-openai:gpt-model-access-does-not-exist");
+    streaming.handleServerEvent({ type: "error", code: "provider_error", message: raw });
+    component = mount(MessageDisplay, { target: document.body, props: { store, streamingStore: streaming } });
+    flushSync();
+    const summary = document.querySelector(".turn-error p")!.textContent!;
+    expect(summary).toContain("provider cliproxy-openai");
+    expect(summary).toContain("gpt-model-access-does-not-exist");
+    expect(summary).not.toContain("using model sol");
+    expect(document.querySelector(".turn-error pre")!.textContent).toBe(raw);
+  });
+
+  it("shows the submitted model when a queued turn fails", () => {
+    const store = makeConversationStore([{ role: "user", content: "Queued", timestamp: "2026-10-15T12:00:00Z" }]);
+    const sendMessage = vi.fn();
+    const streaming = createStreamingStore({ conversationStore: store, connectionStore: { sendMessage, cancelTurn: vi.fn() } });
+    streaming.startTurn("First", "first-model");
+    streaming.startTurn("Queued", "Queued-Model");
+    const clientId = sendMessage.mock.calls[1][5] as string;
+    streaming.handleServerEvent({ type: "message_queued", session_id: "conv-1", queued: {
+      client_id: clientId, id: "q-1", origin: "user", content: "Queued", queued_at: "2026-10-15T12:00:00Z",
+    } });
+    streaming.handleServerEvent({ type: "turn_complete", turn_id: "first-turn" });
+    streaming.handleServerEvent({ type: "queue_drained", session_id: "conv-1", turn_id: "queued-turn", queued_ids: ["q-1"] });
+    streaming.handleServerEvent({ type: "error", code: "provider_error", message: "Request rejected" });
+    component = mount(MessageDisplay, { target: document.body, props: { store, streamingStore: streaming } });
+    flushSync();
+    expect(document.querySelector(".turn-error p")?.textContent).toContain("using model Queued-Model failed");
+  });
+
   it("offers generic recovery without inventing a provider or error category", () => {
     const streaming = makeStreamingStore();
     Object.defineProperty(streaming, "turnError", { get: () => ({ code: "provider_error", message: "opaque diagnostic" }) });

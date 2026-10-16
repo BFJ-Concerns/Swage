@@ -68,6 +68,9 @@
   let savedProviderIds = $state<Set<string>>(new Set());
   let isPersisting = $state(false);
   let saveFailed = $state(false);
+  let providerSaveInFlight = $state(false);
+  let lastPersistedProviderFingerprint = $state("");
+  let lastRejectedSettingsFingerprint = $state<string | null>(null);
   let hasLoadedSettings = $state(false);
   let leaving = false;
   let previousTab: SettingsTabId | null = null;
@@ -77,22 +80,22 @@
     previousTab = current;
     if (leavingProviders) untrack(() => {
       leaving = true;
-      if (hasLoadedSettings && settingsFingerprint() !== lastPersistedSettingsFingerprint && !isPersisting) void persist();
+      if (hasLoadedSettings && settingsFingerprint() !== lastPersistedSettingsFingerprint && settingsFingerprint() !== lastRejectedSettingsFingerprint && !isPersisting) void persist();
     });
   });
 
   function warnBeforeUnload(event: BeforeUnloadEvent): void {
-    if (tab !== "providers" || (!providerEditsPending && !isPersisting)) return;
+    if (!providerEditsPending && !providerSaveInFlight) return;
     event.preventDefault();
     event.returnValue = "";
   }
 
   onDestroy(() => {
     leaving = true;
-    if (providerEditsPending && !isPersisting) void persist();
+    if (providerEditsPending && !isPersisting && settingsFingerprint() !== lastRejectedSettingsFingerprint) void persist();
   });
   let lastPersistedSettingsFingerprint = $state("");
-  const providerEditsPending = $derived(tab === "providers" && hasLoadedSettings && settingsFingerprint() !== lastPersistedSettingsFingerprint);
+  const providerEditsPending = $derived(hasLoadedSettings && providerFingerprint() !== lastPersistedProviderFingerprint);
 
   let lastSavedSearch: SettingsResponse["tool_runtime"]["search"] = null;
   let hasInvalidBundlesJson = $state(false);
@@ -119,6 +122,7 @@
       lastSavedSearch = settings.tool_runtime.search ? { ...settings.tool_runtime.search } : null;
       savedProviderIds = new Set(Object.keys(settings.providers));
       lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
+      lastPersistedProviderFingerprint = providerFingerprint() ?? "";
       hasLoadedSettings = true;
     } catch (err) {
       error = err instanceof Error ? err.message : "Failed to load settings.";
@@ -153,6 +157,11 @@
 
   function toolRuntimeForSave(runtime: SettingsResponse["tool_runtime"]): SettingsResponse["tool_runtime"] {
     return { ...runtime, search: searchIsIncomplete(runtime.search) ? lastSavedSearch : runtime.search };
+  }
+
+  function providerFingerprint(): string | null {
+    if (!settings) return null;
+    return JSON.stringify({ providers: settings.providers, models: settings.models, default_provider: settings.default_provider, default_model: settings.default_model });
   }
 
   function settingsFingerprint(): string | null {
@@ -206,10 +215,12 @@
     settings.memory.curator_idle_minutes = Math.min(10080, Math.max(1, nullableNumber(settings.memory.curator_idle_minutes) ?? 10));
     settings.context.timeout = nullableNumber(settings.context.timeout) ?? 0;
     settings.context.budget = nullableNumber(settings.context.budget);
+    let submittedFingerprint: string | null = null;
     try {
       isPersisting = true;
       normaliseDefaultModel();
-      const submittedFingerprint = settingsFingerprint();
+      submittedFingerprint = settingsFingerprint();
+      providerSaveInFlight = providerEditsPending;
       const submitted = JSON.parse(JSON.stringify({ ...settings, tool_runtime: toolRuntimeForSave(settings.tool_runtime) })) as SettingsPayload;
       const saved = await saveSettings(submitted);
       const editedDuringSave = settingsFingerprint() !== submittedFingerprint;
@@ -223,6 +234,7 @@
       // password field returns to the "Stored credential" placeholder.
       for (const provider of Object.values(settings.providers)) provider.api_key = "";
       lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
+      lastPersistedProviderFingerprint = providerFingerprint() ?? "";
       if (editedDuringSave) {
         for (const [id, provider] of Object.entries(pendingSettings.providers)) {
           const savedProvider = saved.providers[id];
@@ -244,10 +256,12 @@
           : options.message ?? "Saved. New turns will use the updated runtime.";
       return true;
     } catch (err) {
+      lastRejectedSettingsFingerprint = submittedFingerprint;
       saveFailed = true;
       error = err instanceof Error ? err.message : "Failed to save settings.";
       return false;
     } finally {
+      providerSaveInFlight = false;
       isPersisting = false;
       if (leaving && !error && settingsFingerprint() !== lastPersistedSettingsFingerprint) void persist();
     }
@@ -350,7 +364,7 @@
   $effect(() => {
     if (!hasLoadedSettings || !shouldAutosaveSettings || isPersisting) return;
     const fingerprint = settingsFingerprint();
-    if (!fingerprint || fingerprint === lastPersistedSettingsFingerprint) return;
+    if (!fingerprint || fingerprint === lastPersistedSettingsFingerprint || fingerprint === lastRejectedSettingsFingerprint) return;
 
     const timer = window.setTimeout(() => {
       void persist({ message: "Saved automatically. New turns will use the updated runtime." });

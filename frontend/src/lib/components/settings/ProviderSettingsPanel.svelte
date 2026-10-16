@@ -57,7 +57,7 @@
 
   onMount(() => {
     void fetchProviderSecrets().then((response) => {
-      secrets = response.secrets.filter((secret) => secret.material_kind === "provider_key" && secret.status === "active" && secret.scope_kind === "global").sort((a, b) => a.name.localeCompare(b.name));
+      secrets = response.secrets.filter((secret) => secret.material_kind === "provider_key" && secret.status === "active").sort((a, b) => a.name.localeCompare(b.name));
     }).catch(() => { secretsError = "Could not load stored credentials. Reload to try again, or paste a key."; });
     selectedProvider = settings.default_provider || providerIds[0] || "";
     if (selectedProvider) void loadModels();

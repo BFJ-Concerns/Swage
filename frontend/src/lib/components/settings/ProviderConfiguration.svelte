@@ -68,7 +68,7 @@
           <select class="text" aria-label={`Stored credential for ${displayName}`} value={provider.api_key_secret_ref ?? ""} onchange={selectSecret}>
             <option value="">No stored credential selected</option>
             {#if provider.api_key_secret_ref && !secrets.some((secret) => secret.reference === provider.api_key_secret_ref)}<option value={provider.api_key_secret_ref}>Current credential</option>{/if}
-            {#each secrets as secret (secret.id)}<option value={secret.reference}>{secret.name}</option>{/each}
+            {#each secrets.filter((secret) => secret.scope_kind === "global" || (secret.scope_kind === "provider" && secret.scope_id === id)) as secret (secret.id)}<option value={secret.reference}>{secret.name}</option>{/each}
           </select>
           {#if secretsError}<p role="status">{secretsError}</p>{/if}
         </div></div>

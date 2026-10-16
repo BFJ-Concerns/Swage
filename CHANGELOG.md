@@ -45,6 +45,15 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Pasted provider keys only rotate managed credentials; file and environment credentials explain where to update them.
+
+- Failure notices retain the submitted model for turns queued behind a running response.
+
+- Provider edits and pending saves keep unload protection after switching settings tabs.
+
+- Provider credentials rotate using their governed references, and provider-scoped keys appear only for their owning provider alongside global keys. Rejected settings saves wait for another edit before retrying.
+- Model chips use a font with lower-case glyphs. Failure notices name the submitted turn’s model and the provider reported in its diagnostic, preserving the original reported cause.
+
 - Provider settings preserve chosen names and pending edits, distinguish stored and environment credentials, show save status and default-model readiness, and keep readable model choices in a stable order.
 - Opening provider settings directly retains application navigation. Conversation failures preserve identifier case, wrap diagnostics behind a disclosure, and offer Retry and Provider settings.
 

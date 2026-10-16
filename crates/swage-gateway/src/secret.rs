@@ -688,7 +688,7 @@ fn validate_secret_request(request: &CreateSecretRequest) -> Result<(), GatewayE
     Ok(())
 }
 
-fn parse_secret_reference(reference: &str) -> Result<Uuid, GatewayError> {
+pub(crate) fn parse_secret_reference(reference: &str) -> Result<Uuid, GatewayError> {
     let (scheme, tail) = reference.split_once("://").ok_or_else(|| {
         GatewayError::ValidationError(format!("invalid secret reference '{reference}'"))
     })?;
@@ -782,7 +782,7 @@ fn make_base32_secret(minimum_length: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 
     use std::sync::{Mutex, MutexGuard};
 
@@ -795,7 +795,7 @@ mod tests {
     // awaits so concurrent secret tests cannot race the managed key value.
     static SECRET_ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn with_secret_env() -> MutexGuard<'static, ()> {
+    pub(crate) fn with_secret_env() -> MutexGuard<'static, ()> {
         let guard = SECRET_ENV_LOCK.lock().unwrap();
         unsafe {
             env::set_var(MANAGED_SECRET_KEY_ENV, BASE64.encode([9_u8; 32]));

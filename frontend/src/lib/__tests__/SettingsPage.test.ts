@@ -1,6 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
+import { compile } from "svelte/compiler";
+import defaultModelSource from "../components/settings/ProviderDefaultModel.svelte?raw";
+import modelManagementSource from "../components/settings/ProviderModelManagement.svelte?raw";
 import { createClassComponent } from "svelte/legacy";
 import { fromStore, writable } from "svelte/store";
 
@@ -303,6 +306,25 @@ describe("SettingsPage", () => {
     } finally { page.$destroy(); }
   });
 
+  it.each(["rejected", "in-flight"])("protects %s provider saves after switching tabs", async (state) => {
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(configuredProvider());
+    if (state === "rejected") vi.mocked(settingsApi.saveSettings).mockRejectedValue(new Error("Save rejected"));
+    else vi.mocked(settingsApi.saveSettings).mockImplementation(() => new Promise(() => {}));
+    const page = createClassComponent({ component: SettingsPage, target: document.body, props: { tab: "providers" as "providers" | "agents" } });
+    await flushUi();
+    try {
+      const input = document.querySelector<HTMLInputElement>('.provider-section input[type="text"]')!;
+      input.value = "https://Unsaved.Example/v1";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      await waitForSaveCall(); await flushUi();
+      page.$set({ tab: "agents" }); await flushUi();
+      const event = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+      expect(settingsApi.saveSettings).toHaveBeenCalledTimes(1);
+    } finally { page.$destroy(); }
+  });
+
   it("labels pasted credentials as unsaved and preserves edits made during a save", async () => {
     vi.mocked(settingsApi.fetchSettings).mockResolvedValue(configuredProvider("stored"));
     let release!: (value: SettingsResponse) => void;
@@ -330,6 +352,15 @@ describe("SettingsPage", () => {
     expect(document.body.textContent).toContain("Save rejected");
     expect(document.querySelector(".autosave-state")?.textContent).toContain("Save failed");
     expect(input.value).toBe("edited-key");
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    expect(settingsApi.saveSettings).toHaveBeenCalledTimes(1);
+    input.value = "corrected-key"; input.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    expect(settingsApi.saveSettings).toHaveBeenCalledTimes(2);
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    expect(settingsApi.saveSettings).toHaveBeenCalledTimes(2);
+    await unmount(component); component = undefined; await flushUi();
+    expect(settingsApi.saveSettings).toHaveBeenCalledTimes(2);
   });
 
   it("binds an existing governed secret by reference without putting its value in the key input", async () => {
@@ -343,6 +374,31 @@ describe("SettingsPage", () => {
     const sent = vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].providers.proxy;
     expect(sent.api_key_secret_ref).toBe("secret:chosen"); expect(sent.api_key_env).toBeNull(); expect(sent.api_key).toBe("");
     expect(document.querySelector<HTMLInputElement>('input[type="password"]')?.value).toBe("");
+  });
+
+  it("offers owned provider secrets alongside global secrets and excludes other scopes", async () => {
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(configuredProvider("environment"));
+    const global = { id: "global", name: "Global key", reference: "secret://managed/00000000-0000-4000-8000-000000000001", material_kind: "provider_key", owner_kind: "provider", backend_kind: "managed", scope_kind: "global", scope_id: null, metadata: {}, status: "active", created_at: "2026-01-01", updated_at: "2026-01-01", revoked_at: null, revealed_value: null };
+    const owned = { ...global, id: "owned", name: "Owned key", reference: "secret://file/00000000-0000-4000-8000-000000000002", backend_kind: "file", scope_kind: "provider", scope_id: "proxy" };
+    vi.mocked(settingsApi.fetchProviderSecrets).mockResolvedValue({ secrets: [global, owned, { ...owned, id: "other", name: "Other provider key", scope_id: "other" }, { ...owned, id: "revoked", name: "Revoked key", status: "revoked" }], managed_backend: { status: "ready", detail: "", key_source: null } });
+    component = mount(SettingsPage, { target: document.body, props: { tab: "providers" } }); await flushUi();
+    const select = document.querySelector<HTMLSelectElement>('select[aria-label="Stored credential for Homelab proxy"]')!;
+    const labels = [...select.options].map((option) => option.textContent);
+    expect(labels).toContain("Owned key"); expect(labels).toContain("Global key");
+    expect(labels).not.toContain("Other provider key"); expect(labels).not.toContain("Revoked key");
+    select.value = owned.reference; select.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitForSaveCall(); await flushUi();
+    const sent = vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].providers.proxy;
+    expect(sent.api_key_secret_ref).toBe(owned.reference); expect(sent.api_key_env).toBeNull(); expect(sent.api_key).toBe("");
+  });
+
+  it("renders model choices with a font that has lower-case glyphs", () => {
+    for (const source of [defaultModelSource, modelManagementSource]) {
+      const css = compile(source, { generate: "client", css: "external" }).css!.code;
+      const rule = css.match(/\.opt[^{}]*\{([^}]+)\}/)![1];
+      expect(rule).toMatch(/font-family:\s*var\(--font-mono\)/);
+      expect(rule).toMatch(/text-transform:\s*none/);
+    }
   });
 
   it("refuses invalid provider URL drafts before autosave and accepts corrections or clearing", async () => {
