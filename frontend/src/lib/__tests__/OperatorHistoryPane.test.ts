@@ -202,6 +202,12 @@ describe("OperatorHistoryPane", () => {
         ["Providers › google › Credential", "false", "true"],
       ],
     },
+    ...(["set", "clear"] as const).map((action) => ({
+      name: `literal unset environment variable ${action}`,
+      prior: { providers: { google: { api_key_env: action === "set" ? null : "unset" } } },
+      next: { providers: { google: { api_key_env: action === "set" ? "unset" : null } } },
+      rows: [["Providers › google › API key environment variable", "unset", "unset"]],
+    })),
     ...(["creation", "deletion"] as const).map((action) => {
       const snapshot = { providers: { google: {
         api_key: null, api_key_env: null, api_key_secret_ref: null, base_url: null,

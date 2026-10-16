@@ -63,7 +63,7 @@
   // Objects compare by field, including when the other snapshot is absent.
   // Arrays and scalars compare whole; redacted values stay as recorded.
   function changedFields(prior: unknown, next: unknown, path: string[] = []): ChangedField[] {
-    if (JSON.stringify(prior) === JSON.stringify(next)) return [];
+    if (JSON.stringify(prior ?? null) === JSON.stringify(next ?? null)) return [];
     if ((isRecord(prior) && (isRecord(next) || next == null)) ||
         (isRecord(next) && prior == null)) {
       const before = isRecord(prior) ? prior : {};
@@ -75,7 +75,6 @@
     }
     const priorValue = formatValue(prior);
     const nextValue = formatValue(next);
-    if (priorValue === nextValue) return [];
     return [{ id: JSON.stringify(path), label: fieldLabel(path), prior: priorValue, next: nextValue }];
   }
 

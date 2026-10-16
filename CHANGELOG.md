@@ -45,6 +45,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Configuration history retains changes between a missing value and the literal environment-variable name `unset`, while suppressing absent-to-null rows.
+
 - Settings labels the provider credential input “API key”; history labels credential environment variables separately.
 
 - Configuration history uses Settings’ labels, including provider credentials, and shows creations, deletions, unchanged saves, arrays and single-field changes without misleading or duplicate field rows. Null and absent values both read as unset.
