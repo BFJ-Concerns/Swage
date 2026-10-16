@@ -112,6 +112,7 @@
   async function renameSurface(): Promise<void> {
     const surface = store.activeSurface;
     if (!surface || surface.id !== renamingSurfaceId || !renamedTitle.trim()) return;
+    moduleError = null;
     try {
       await store.renameSurface(surface.id, renamedTitle.trim());
       renamingSurfaceId = null;
@@ -121,6 +122,7 @@
   async function resolveNote(annotationId: string): Promise<void> {
     const surface = store.activeSurface;
     if (!surface) return;
+    moduleError = null;
     try { await store.resolveAnnotation(surface.id, annotationId); }
     catch (error) { await reportAndRefreshFailure(error, surface.id); }
   }

@@ -388,6 +388,22 @@ describe("surface workspace corrections", () => {
     expect(document.querySelector<HTMLInputElement>('input[placeholder="Note on this module"]')?.value, "open note draft").toBe("Unsaved checklist note");
   });
 
+  it.each(["rename", "resolution"] as const)("clears the failure notice after a successful %s retry", async (operation) => {
+    const plan = module("m", "# Plan", 0);
+    plan.annotations = [{ id: "note", module_id: "m", body: "Act on this", tags: [], author: "gateway", created_at: "2026-10-01T10:00:00Z", updated_at: "2026-10-01T10:00:00Z" }];
+    const store = fakeStore(surface([plan]));
+    const mutation = operation === "rename" ? store.renameSurface : store.resolveAnnotation;
+    mutation.mockRejectedValueOnce(new Error("The change was not applied."));
+    show(store);
+    if (operation === "rename") { button("Rename surface").click(); await settled(); }
+    const submit = () => button(operation === "rename" ? "Save title" : "Resolve").click();
+    submit(); await settled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("The change was not applied.");
+    submit(); await settled();
+    expect(mutation).toHaveBeenCalledTimes(2);
+    expect(document.querySelector('[role="alert"]'), "successful retry failure notice").toBeNull();
+  });
+
   it("requests resolution of an open note and filters recorded resolved notes", async () => {
     const m = module("m", "# Plan", 0);
     m.annotations = [
