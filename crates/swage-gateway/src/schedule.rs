@@ -1921,6 +1921,22 @@ struct DigestMessage {
     excerpt: String,
 }
 
+#[cfg(test)]
+static DIGEST_TRANSITIONS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<Uuid, Uuid>>,
+> = std::sync::LazyLock::new(Default::default);
+
+#[cfg(test)]
+async fn digest_transition_hook(storage: &Arc<dyn Storage>, schedule_id: Uuid) {
+    let run_id = DIGEST_TRANSITIONS.lock().unwrap().remove(&schedule_id);
+    if let Some(run_id) = run_id {
+        storage
+            .update_workflow_run_state(run_id, "completed", None, None, None)
+            .await
+            .unwrap();
+    }
+}
+
 /// Assemble the gate's state digest from the stores. Reads only; a read
 /// failure propagates and fails the run closed, the same posture as an
 /// unreachable gate model — never silently degrade to a stateless verdict.
@@ -1982,6 +1998,11 @@ async fn assemble_gate_state_digest(
     let mut ended_workflow_runs = Vec::new();
     let mut more_ended_workflow_runs = false;
     if let Some(topic_id) = topic_id {
+        // Read open state first: a concurrent completion then appears here or
+        // in the later ending read. Prefer the ending if both reads saw it.
+        let open = storage.list_workflow_runs(topic_id).await?;
+        #[cfg(test)]
+        digest_transition_hook(storage, schedule.id).await;
         let mut ended = storage
             .list_unacknowledged_workflow_runs(topic_id, &format!("schedule:{}", schedule.id), 101)
             .await?;
@@ -1990,8 +2011,12 @@ async fn assemble_gate_state_digest(
         for run in ended {
             ended_workflow_runs.push(crate::workflow::ending_notice(run));
         }
-        for run in storage.list_workflow_runs(topic_id).await? {
-            if crate::tool::workflow_run_status::is_terminal_run_state(&run.state) {
+        for run in open {
+            if crate::tool::workflow_run_status::is_terminal_run_state(&run.state)
+                || ended_workflow_runs
+                    .iter()
+                    .any(|ending| ending.run_id == run.id)
+            {
                 continue;
             }
             let pending_events = storage
@@ -3073,6 +3098,37 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn review_fix_3_successful_queue_acknowledges_endings() {
         queued_ending_settlement(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn review_fix_3_completion_between_digest_reads_is_present_once() {
+        let (state, schedule, ending, _, _root, _storage) = review_fix_3_fixture().await;
+        state
+            .storage
+            .update_workflow_run_state(ending, "running", None, None, None)
+            .await
+            .unwrap();
+        DIGEST_TRANSITIONS
+            .lock()
+            .unwrap()
+            .insert(schedule.id, ending);
+        let digest = assemble_gate_state_digest(&state.storage, &schedule)
+            .await
+            .unwrap();
+        let count = digest
+            .open_workflow_runs
+            .iter()
+            .filter(|run| run.run_id == ending)
+            .count()
+            + digest
+                .ended_workflow_runs
+                .iter()
+                .filter(|run| run.run_id == ending)
+                .count();
+        assert_eq!(
+            count, 1,
+            "a run completing between digest reads must appear exactly once"
+        );
     }
 
     struct SkipGateProvider;
