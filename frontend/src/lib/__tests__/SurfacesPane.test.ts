@@ -430,6 +430,14 @@ it("distinguishes identical library cards by their recorded save times", () => {
   Object.assign(store, { library: times.map((updated_at, i) => ({ id: String(i), name: "Plan", description: "Plan", tags: [], updated_at, origin_topic_deleted: false })) });
   const component = mount(SurfaceLibrary, { target: document.body, props: { store, sessionId: null } });
   flushSync();
-  try { expect(Array.from(document.querySelectorAll("time")).map(t => t.dateTime)).toEqual(times); }
+  try {
+    const cards = Array.from(document.querySelectorAll(".entry"));
+    expect(cards).toHaveLength(times.length);
+    cards.forEach((card, index) => {
+      const savedAt = card.querySelector("time");
+      expect(savedAt?.dateTime, `save time on card ${index}`).toBe(times[index]);
+      expect(savedAt?.textContent).toContain(times[index]);
+    });
+  }
   finally { unmount(component); document.body.innerHTML = ""; }
 });

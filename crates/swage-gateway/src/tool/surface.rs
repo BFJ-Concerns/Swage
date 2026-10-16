@@ -28,6 +28,7 @@ use swage_protocol::client::surface::{
 };
 use swage_storage::Session;
 use swage_tool::context::ToolContext;
+use swage_tool::validation::validate_tool_schema;
 
 use crate::state::AppState;
 use crate::surface;
@@ -162,29 +163,6 @@ async fn session_surface_result(
     }
 }
 
-fn validate_arguments(tool: &str, params: &Value, schema: &Value) -> Result<(), ToolError> {
-    let object = params
-        .as_object()
-        .ok_or_else(|| invalid(tool, "arguments must be an object"))?;
-    for (key, value) in object {
-        let property = &schema["properties"][key];
-        let valid = match property["type"].as_str() {
-            Some("string") => value.is_string(),
-            Some("integer") => value.as_i64().is_some(),
-            Some("boolean") => value.is_boolean(),
-            Some("array") => value
-                .as_array()
-                .is_some_and(|a| a.iter().all(Value::is_string)),
-            Some("object") => value.is_object(),
-            _ => return Err(invalid(tool, format!("unrecognised argument {key}"))),
-        };
-        if !valid {
-            return Err(invalid(tool, format!("invalid value for {key}")));
-        }
-    }
-    Ok(())
-}
-
 fn parse_module_id(params: &Value) -> Result<Option<Uuid>, ToolError> {
     params
         .get("module_id")
@@ -254,7 +232,9 @@ impl Tool for SurfaceReadTool {
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let state = gateway_state(READ_TOOL, ctx)?;
         let result = async {
-            validate_arguments(READ_TOOL, &params, &self.parameters())?;
+            let mut schema = self.parameters();
+            schema["additionalProperties"] = json!(false);
+            validate_tool_schema(READ_TOOL, &schema, &params)?;
             self.execute_inner(params, ctx).await
         }
         .await;
@@ -388,7 +368,9 @@ impl Tool for SurfaceWriteTool {
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let state = gateway_state(WRITE_TOOL, ctx)?;
         let result = async {
-            validate_arguments(WRITE_TOOL, &params, &self.parameters())?;
+            let mut schema = self.parameters();
+            schema["additionalProperties"] = json!(false);
+            validate_tool_schema(WRITE_TOOL, &schema, &params)?;
             self.execute_inner(params, ctx).await
         }
         .await;
