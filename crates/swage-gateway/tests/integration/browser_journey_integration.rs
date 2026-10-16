@@ -565,7 +565,7 @@ async fn browser_tools_run_through_dispatcher_storage_and_secret_hygiene() {
     tx1.send(StreamChunk::ToolUse {
         call_id: "browser-nav".into(),
         name: "browser_navigate".into(),
-        arguments: json!({"url": fixture.url("/login")}),
+        arguments: json!({"url": fixture.url("/long-login")}),
     })
     .await
     .expect("send navigate chunk");
@@ -1154,6 +1154,7 @@ impl FixtureServer {
         let saw_login = Arc::new(AtomicBool::new(false));
         let app = Router::new()
             .route("/login", get(login_page).post(login_post))
+            .route("/long-login", get(long_login_page))
             .route("/fallback-mask", get(fallback_mask_page))
             .route("/single-action", get(single_action_page))
             .route("/mutate", get(mutate_page))
@@ -1208,6 +1209,16 @@ async fn login_page() -> Html<&'static str> {
             <a href="/set-cookie">Sign in</a>
         </form>"#,
     )
+}
+
+// The long page puts the snapshot over budget so the secret-hygiene journey
+// exercises the full-snapshot spill path.
+async fn long_login_page() -> Html<String> {
+    Html(format!(
+        "{}<section><p>{}</p></section>",
+        login_page().await.0,
+        "Signing in keeps your account available for later visits. ".repeat(80)
+    ))
 }
 
 async fn login_post(State(saw_login): State<Arc<AtomicBool>>) -> impl IntoResponse {
