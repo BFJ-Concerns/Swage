@@ -6,9 +6,9 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    GateConfig, GateDecision, NewDeliveryRecord, NewSchedule, NewScheduleRun, Schedule,
-    ScheduleCreator, ScheduleRun, ScheduleRunState, ScheduleRunUpdate, SessionPolicy,
-    UpdateSchedule,
+    GateConfig, GateDecision, NewDeliveryRecord, NewSchedule, NewScheduleRun, OverlapPolicy,
+    Schedule, ScheduleCreator, ScheduleRun, ScheduleRunState, ScheduleRunUpdate, SessionPolicy,
+    SkipReason, UpdateSchedule,
 };
 use crate::sqlite::SqliteStorage;
 use crate::store::ScheduleStore;
@@ -191,7 +191,7 @@ fn gate_decision_from_columns(
 
 const SCHEDULE_COLUMNS: &str = "id, message, status, kind, expression, session_policy, topic_id, \
      agent_id, session_id, delivery_json, gate_model, gate_criteria, next_run_at, last_run_at, \
-     created_at, updated_at, creator_kind, creator_agent_id, gate_observations";
+     created_at, updated_at, creator_kind, creator_agent_id, gate_observations, overlap_policy, pending_cap";
 
 fn row_to_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
     let id: String = row.get(0)?;
@@ -215,6 +215,8 @@ fn row_to_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
     let gate_observations: Option<String> = row.get(18)?;
 
     Ok(Schedule {
+        overlap_policy: parse_enum(19, &row.get::<_, String>(19)?)?,
+        pending_cap: row.get(20)?,
         id: parse_uuid(&id)?,
         message,
         status: parse_enum(2, &status)?,
@@ -239,7 +241,7 @@ fn row_to_schedule(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
 
 const SCHEDULE_RUN_COLUMNS: &str = "id, schedule_id, trigger_kind, state, skip_reason, \
      scheduled_for, session_id, turn_id, gate_model, gate_verdict, gate_reasoning, output_text, \
-     error_message, created_at, started_at, completed_at, executed_message";
+     error_message, created_at, started_at, completed_at, executed_message, overlap_policy, task_outcome";
 
 fn row_to_schedule_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduleRun> {
     let id: String = row.get(0)?;
@@ -261,6 +263,8 @@ fn row_to_schedule_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduleRun>
     let executed_message: String = row.get(16)?;
 
     Ok(ScheduleRun {
+        overlap_policy: parse_enum(17, &row.get::<_, String>(17)?)?,
+        task_outcome: row.get(18)?,
         id: parse_uuid(&id)?,
         schedule_id: parse_uuid(&schedule_id)?,
         trigger: parse_enum(2, &trigger_kind)?,
@@ -311,9 +315,9 @@ impl ScheduleStore for SqliteStorage {
                  (id, message, status, kind, expression, session_policy, topic_id, agent_id,
                   session_id, creator_kind, creator_agent_id, delivery_json, gate_model,
                   gate_criteria, next_run_at, last_run_at, created_at, updated_at,
-                  gate_observations)
+                  gate_observations, overlap_policy, pending_cap)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                  ?17, ?17, ?18)",
+                  ?17, ?17, ?18, ?19, ?20)",
                 params![
                     id.to_string(),
                     &schedule.message,
@@ -332,11 +336,15 @@ impl ScheduleStore for SqliteStorage {
                     &next_run_at,
                     &last_run_at,
                     &now_str,
-                    &gate_observations
+                    &gate_observations,
+                    schedule.overlap_policy.to_string(),
+                    schedule.pending_cap
                 ],
             )?;
 
             Ok(Schedule {
+                overlap_policy: schedule.overlap_policy,
+                pending_cap: schedule.pending_cap,
                 id,
                 message: schedule.message,
                 status: schedule.status,
@@ -440,6 +448,8 @@ impl ScheduleStore for SqliteStorage {
                      gate_observations = CASE WHEN ?11 THEN ?20 ELSE gate_observations END,
                      next_run_at = CASE WHEN ?14 THEN ?15 ELSE next_run_at END,
                      last_run_at = CASE WHEN ?16 THEN ?17 ELSE last_run_at END,
+                     overlap_policy = COALESCE(?21, overlap_policy),
+                     pending_cap = COALESCE(?22, pending_cap),
                      updated_at = ?18
                  WHERE id = ?19",
                     params![
@@ -463,6 +473,8 @@ impl ScheduleStore for SqliteStorage {
                         &updated_at,
                         &id_text,
                         &gate_observations,
+                        update.overlap_policy.map(|p| p.to_string()),
+                        update.pending_cap,
                     ],
                 )
             })
@@ -493,8 +505,28 @@ impl ScheduleStore for SqliteStorage {
         .await
     }
 
-    async fn create_schedule_run(&self, run: NewScheduleRun) -> Result<ScheduleRun, StorageError> {
+    async fn create_schedule_run(
+        &self,
+        mut run: NewScheduleRun,
+    ) -> Result<ScheduleRun, StorageError> {
         self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            if run.state == ScheduleRunState::Pending && run.overlap_policy == OverlapPolicy::Queue {
+                let (active, queued, cap): (bool, u32, u32) = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM schedule_runs WHERE schedule_id = ?1 AND state IN ('pending', 'running')),
+                     (SELECT COUNT(*) FROM schedule_runs WHERE schedule_id = ?1 AND state = 'queued'),
+                     pending_cap FROM schedules WHERE id = ?1",
+                    params![run.schedule_id.to_string()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+                if active || queued > 0 {
+                    if queued >= cap {
+                        run.state = ScheduleRunState::Skipped;
+                        run.skip_reason = Some(SkipReason::PendingCap);
+                        run.error_message = Some("the schedule's pending fire cap was reached".into());
+                    } else {
+                        run.state = ScheduleRunState::Queued;
+                    }
+                }
+            }
             let id = Uuid::new_v4();
             let now = Utc::now();
             let created_at = now.to_rfc3339();
@@ -512,11 +544,11 @@ impl ScheduleStore for SqliteStorage {
             )
             .then(|| now.to_rfc3339());
 
-            conn.execute(
+            tx.execute(
                 "INSERT INTO schedule_runs
                  (id, schedule_id, trigger_kind, state, skip_reason, scheduled_for,
-                  executed_message, error_message, created_at, completed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                  executed_message, error_message, created_at, completed_at, overlap_policy)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     id.to_string(),
                     run.schedule_id.to_string(),
@@ -528,10 +560,14 @@ impl ScheduleStore for SqliteStorage {
                     &run.error_message,
                     &created_at,
                     &completed_at,
+                    run.overlap_policy.to_string(),
                 ],
             )?;
 
+            tx.commit()?;
             Ok(ScheduleRun {
+                overlap_policy: run.overlap_policy,
+                task_outcome: None,
                 id,
                 schedule_id: run.schedule_id,
                 trigger: run.trigger,
@@ -548,6 +584,46 @@ impl ScheduleStore for SqliteStorage {
                 started_at: None,
                 completed_at: completed_at.as_deref().map(parse_dt).transpose()?,
             })
+        })
+        .await
+    }
+
+    async fn claim_queued_schedule_run(
+        &self,
+        schedule_id: Uuid,
+    ) -> Result<Option<ScheduleRun>, StorageError> {
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let id: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM schedule_runs WHERE schedule_id = ?1 AND state = 'queued'
+                 ORDER BY created_at, id LIMIT 1",
+                    params![schedule_id.to_string()],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(id) = id else {
+                return Ok(None);
+            };
+            match tx.execute(
+                "UPDATE schedule_runs SET state = 'pending' WHERE id = ?1",
+                params![&id],
+            ) {
+                Ok(_) => {}
+                Err(rusqlite::Error::SqliteFailure(failure, _))
+                    if failure.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            }
+            let run = tx.query_row(
+                &format!("SELECT {SCHEDULE_RUN_COLUMNS} FROM schedule_runs WHERE id = ?1"),
+                params![&id],
+                row_to_schedule_run,
+            )?;
+            tx.commit()?;
+            Ok(Some(run))
         })
         .await
     }
@@ -625,6 +701,7 @@ impl ScheduleStore for SqliteStorage {
                      output_text = COALESCE(?8, output_text),
                      error_message = COALESCE(?9, error_message),
                      started_at = COALESCE(?10, started_at),
+                     task_outcome = COALESCE(?13, task_outcome),
                      completed_at = COALESCE(?11, completed_at)
                  WHERE id = ?12",
                 params![
@@ -639,7 +716,8 @@ impl ScheduleStore for SqliteStorage {
                     &update.error_message,
                     &started_at,
                     &completed_at,
-                    id.to_string()
+                    id.to_string(),
+                    update.task_outcome,
                 ],
             )?;
             Ok(())
@@ -761,6 +839,8 @@ mod tests {
         let topic = storage.general_scope().await.unwrap();
         let created = storage
             .create_schedule(NewSchedule {
+                overlap_policy: Default::default(),
+                pending_cap: 1,
                 id: Uuid::new_v4(),
                 message: "Clear the inbox.".into(),
                 status: ScheduleStatus::Active,
@@ -833,6 +913,8 @@ mod tests {
 
     fn fresh_schedule(topic_id: Uuid) -> NewSchedule {
         NewSchedule {
+            overlap_policy: Default::default(),
+            pending_cap: 1,
             id: Uuid::new_v4(),
             message: "run now".into(),
             status: ScheduleStatus::Active,
@@ -872,6 +954,8 @@ mod tests {
 
         let fresh = storage
             .create_schedule(NewSchedule {
+                overlap_policy: Default::default(),
+                pending_cap: 1,
                 id: Uuid::new_v4(),
                 gate: Some(GateConfig {
                     model: "small".into(),
@@ -884,6 +968,8 @@ mod tests {
             .unwrap();
         let continuation = storage
             .create_schedule(NewSchedule {
+                overlap_policy: Default::default(),
+                pending_cap: 1,
                 message: "check in".into(),
                 session_policy: SessionPolicy::Continuation { session_id },
                 ..fresh_schedule(topic_id)
@@ -930,6 +1016,8 @@ mod tests {
             .unwrap();
         let agent = storage
             .create_schedule(NewSchedule {
+                overlap_policy: Default::default(),
+                pending_cap: 1,
                 creator: ScheduleCreator::Agent {
                     agent_id: "researcher".into(),
                 },
@@ -959,6 +1047,8 @@ mod tests {
             .unwrap();
         storage
             .create_schedule(NewSchedule {
+                overlap_policy: Default::default(),
+                pending_cap: 1,
                 status: ScheduleStatus::Paused,
                 ..fresh_schedule(topic_id)
             })
@@ -975,6 +1065,8 @@ mod tests {
         let (storage, topic_id, _) = make_storage_with_session().await;
         let schedule = storage
             .create_schedule(NewSchedule {
+                overlap_policy: Default::default(),
+                pending_cap: 1,
                 gate: Some(GateConfig {
                     model: "small".into(),
                     criteria: None,
@@ -1087,7 +1179,75 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn one_in_flight_run_per_schedule_is_enforced_by_the_index() {
+    async fn queue_after_overlap_waits_for_every_active_predecessor() {
+        let (storage, topic_id, _) = make_storage_with_session().await;
+        let mut definition = fresh_schedule(topic_id);
+        definition.overlap_policy = OverlapPolicy::Overlap;
+        let schedule = storage.create_schedule(definition).await.unwrap();
+        let mut predecessors = Vec::new();
+        for state in [ScheduleRunState::Pending, ScheduleRunState::Running] {
+            let mut fire =
+                NewScheduleRun::pending(schedule.id, ScheduleRunTrigger::Tick, None, "work")
+                    .with_overlap_policy(OverlapPolicy::Overlap);
+            fire.state = state;
+            predecessors.push(storage.create_schedule_run(fire).await.unwrap());
+        }
+        storage
+            .update_schedule(
+                schedule.id,
+                UpdateSchedule {
+                    overlap_policy: Some(OverlapPolicy::Queue),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let waiting = storage
+            .create_schedule_run(
+                NewScheduleRun::pending(schedule.id, ScheduleRunTrigger::Tick, None, "waiting")
+                    .with_overlap_policy(OverlapPolicy::Queue),
+            )
+            .await
+            .unwrap();
+        assert_eq!(waiting.state, ScheduleRunState::Queued);
+        for predecessor in predecessors {
+            assert!(
+                storage
+                    .claim_queued_schedule_run(schedule.id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "queued fire must wait for every active overlap predecessor"
+            );
+            storage
+                .update_schedule_run(
+                    predecessor.id,
+                    ScheduleRunUpdate {
+                        state: Some(ScheduleRunState::Completed),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let claimed = storage
+            .claim_queued_schedule_run(schedule.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.id, waiting.id);
+        assert_eq!(claimed.state, ScheduleRunState::Pending);
+        assert!(
+            storage
+                .claim_queued_schedule_run(schedule.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_in_flight_run_per_schedule_is_enforced_by_storage() {
         let (storage, topic_id, _) = make_storage_with_session().await;
         let schedule = storage
             .create_schedule(fresh_schedule(topic_id))
@@ -1106,7 +1266,7 @@ mod tests {
             .unwrap();
 
         // A second in-flight run for the same schedule is refused by the
-        // partial unique index — the insert *is* the overlap check.
+        // admission trigger — the insert *is* the overlap check.
         let clash = storage
             .create_schedule_run(NewScheduleRun::pending(
                 schedule.id,
@@ -1120,7 +1280,7 @@ mod tests {
             "a second in-flight run must trip the guard, got {clash:?}"
         );
 
-        // A run born terminal (an overlap skip) sits outside the predicate,
+        // A run born terminal (an overlap skip) needs no admission,
         // so it coexists with the live run freely.
         storage
             .create_schedule_run(NewScheduleRun::skipped_overlap(

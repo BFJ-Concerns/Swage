@@ -337,6 +337,8 @@ async fn operator_overview_lists_sessions_jobs_approvals_channels_and_devices() 
     create_schedule(
         &state,
         CreateScheduleRequest {
+            overlap_policy: Default::default(),
+            pending_cap: 1,
             message: "Nightly sweep".into(),
             spec: ScheduleSpec::Interval {
                 every: "every 5 minutes".into(),
@@ -473,6 +475,8 @@ async fn operator_controls_manage_approvals_and_schedules_without_full_restart()
     let scheduled = create_schedule(
         &state,
         CreateScheduleRequest {
+            overlap_policy: Default::default(),
+            pending_cap: 1,
             message: "Digest".into(),
             spec: ScheduleSpec::Interval {
                 every: "every 10 minutes".into(),

@@ -415,6 +415,8 @@ mod tests {
         // A schedule with a run session.
         let schedule = storage
             .create_schedule(NewSchedule {
+                overlap_policy: Default::default(),
+                pending_cap: 1,
                 id: Uuid::new_v4(),
                 message: "Summarise the inbox".to_string(),
                 status: ScheduleStatus::Active,

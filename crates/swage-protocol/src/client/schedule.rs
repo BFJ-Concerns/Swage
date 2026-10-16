@@ -28,6 +28,21 @@ pub enum ScheduleSpec {
     Cron { cron: String },
 }
 
+/// What a fire does while a previous run is in flight.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlapPolicy {
+    #[default]
+    Skip,
+    Queue,
+    Overlap,
+}
+
+/// Maximum number of fires waiting for their predecessor, when omitted.
+pub fn default_pending_cap() -> u32 {
+    1
+}
+
 /// Which session each run executes in.
 ///
 /// - `fresh` — every run creates a new session in the selected topic, or
@@ -160,6 +175,7 @@ pub enum ScheduleRunTrigger {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ScheduleRunState {
+    Queued,
     Pending,
     Running,
     Completed,
@@ -174,6 +190,8 @@ pub enum ScheduleRunState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
+    /// The schedule already has its allowed number of waiting fires.
+    PendingCap,
     /// The gate model decided no work was needed.
     Gate,
     /// A previous run of this schedule (or another turn in the target
@@ -228,6 +246,8 @@ macro_rules! string_round_trip {
     };
 }
 
+string_round_trip!(OverlapPolicy { Skip => "skip", Queue => "queue", Overlap => "overlap" });
+
 string_round_trip!(ScheduleStatus {
     Active => "active",
     Paused => "paused",
@@ -240,6 +260,7 @@ string_round_trip!(ScheduleRunTrigger {
 });
 
 string_round_trip!(ScheduleRunState {
+    Queued => "queued",
     Pending => "pending",
     Running => "running",
     Completed => "completed",
@@ -249,6 +270,7 @@ string_round_trip!(ScheduleRunState {
 });
 
 string_round_trip!(SkipReason {
+    PendingCap => "pending_cap",
     Gate => "gate",
     Overlap => "overlap",
 });
@@ -262,6 +284,13 @@ string_round_trip!(GateVerdict {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct CreateScheduleRequest {
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub overlap_policy: OverlapPolicy,
+    #[serde(default = "default_pending_cap")]
+    #[ts(optional, as = "Option<_>")]
+    #[schemars(range(min = 1))]
+    pub pending_cap: u32,
     /// What each run asks the agent to do.
     pub message: String,
     pub spec: ScheduleSpec,
@@ -282,6 +311,13 @@ pub struct CreateScheduleRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct UpdateScheduleRequest {
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub overlap_policy: Option<OverlapPolicy>,
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    #[schemars(range(min = 1))]
+    pub pending_cap: Option<u32>,
     /// Recognised so an attempted agent change receives an actionable refusal.
     /// The agent is fixed when the schedule is created.
     #[serde(default)]
@@ -306,6 +342,8 @@ pub struct UpdateScheduleRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct Schedule {
+    pub overlap_policy: OverlapPolicy,
+    pub pending_cap: u32,
     pub id: Uuid,
     pub message: String,
     pub status: ScheduleStatus,
@@ -330,6 +368,10 @@ pub struct Schedule {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct ScheduleRun {
+    /// The policy fixed when this fire was recorded.
+    pub overlap_policy: OverlapPolicy,
+    /// Failed or refused calls observed when the run settled.
+    pub task_outcome: Option<String>,
     pub id: Uuid,
     pub schedule_id: Uuid,
     pub trigger: ScheduleRunTrigger,

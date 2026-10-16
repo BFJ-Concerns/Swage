@@ -487,3 +487,22 @@ fn assert_option_fields_project_as_optional_nullable(bindings: &Path) {
         offenders.join("\n")
     );
 }
+
+fn assert_positive_schedule_cap<T: schemars::JsonSchema>() {
+    let value = serde_json::to_value(schemars::schema_for!(T)).expect("schema serialises");
+    assert_eq!(
+        value["properties"]["pending_cap"]["minimum"].as_f64(),
+        Some(1.0),
+        "schedule pending cap schema must match the API's positive minimum"
+    );
+}
+
+#[test]
+fn schedule_pending_caps_require_at_least_one_in_create_schema() {
+    assert_positive_schedule_cap::<client::schedule::CreateScheduleRequest>();
+}
+
+#[test]
+fn schedule_pending_caps_require_at_least_one_in_update_schema() {
+    assert_positive_schedule_cap::<client::schedule::UpdateScheduleRequest>();
+}

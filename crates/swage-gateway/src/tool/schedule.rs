@@ -288,6 +288,8 @@ impl Tool for ScheduleTool {
                     "description": "For session=continuation: the UUID of the existing session \
                                     every run continues."
                 },
+                "overlap_policy": { "type": "string", "enum": ["skip", "queue", "overlap"], "description": "What a fire does while a previous run is in flight: skip, queue, or overlap." },
+                "pending_cap": { "type": "integer", "minimum": 1, "description": "Maximum waiting fires for queue; defaults to one." },
                 "gate_model": {
                     "type": "string",
                     "description": "Optional. A cheap model (a catalogue id or alias) that checks \
@@ -413,6 +415,8 @@ impl ScheduleTool {
         let routing = build_routing(params)?;
 
         let request = wire::CreateScheduleRequest {
+            overlap_policy: overlap_policy(params)?.unwrap_or_default(),
+            pending_cap: pending_cap(params)?.unwrap_or(1),
             message,
             spec,
             session,
@@ -471,6 +475,8 @@ impl ScheduleTool {
             .map(|_| required_str(SCHEDULE_TOOL, params, "agent_id").map(str::to_owned))
             .transpose()?;
         let request = wire::UpdateScheduleRequest {
+            overlap_policy: overlap_policy(params)?,
+            pending_cap: pending_cap(params)?,
             agent_id,
             message,
             spec,
@@ -556,6 +562,37 @@ fn schedule_id(params: &Value) -> Result<Uuid, ToolError> {
         "schedule_id",
         required_str(SCHEDULE_TOOL, params, "schedule_id")?,
     )
+}
+
+fn overlap_policy(params: &Value) -> Result<Option<wire::OverlapPolicy>, ToolError> {
+    params
+        .get("overlap_policy")
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| {
+                    invalid(
+                        SCHEDULE_TOOL,
+                        "overlap_policy must be skip, queue, or overlap",
+                    )
+                })?
+                .parse()
+                .map_err(|error| invalid(SCHEDULE_TOOL, error))
+        })
+        .transpose()
+}
+
+fn pending_cap(params: &Value) -> Result<Option<u32>, ToolError> {
+    params
+        .get("pending_cap")
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|n| *n > 0)
+                .ok_or_else(|| invalid(SCHEDULE_TOOL, "pending_cap must be a positive integer"))
+        })
+        .transpose()
 }
 
 /// Assemble a schedule spec from the flat timing parameters, checking that the
@@ -819,6 +856,8 @@ impl Tool for WakeMeLaterTool {
         // A self-wake is a one-shot that continues this very session — the one
         // case where reusing the current conversation is exactly right.
         let request = wire::CreateScheduleRequest {
+            overlap_policy: Default::default(),
+            pending_cap: 1,
             message,
             spec: wire::ScheduleSpec::OneShot {
                 at: wake_at.to_rfc3339(),

@@ -980,3 +980,37 @@ async fn scheduling_bundle_is_the_grant_unit() {
         Err(swage_core::ToolError::PermissionDenied { .. })
     ));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_outcomes_tool_policy_is_persisted_and_updated() {
+    let state = test_state();
+    let topic = state.topic_store.general_scope().await.unwrap();
+    let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
+    let ctx = host_context(&state, "researcher", tool_session(&state, topic.id).await);
+    let output = dispatcher.dispatch("schedule",json!({"action":"create","message":"serial work", "timing":"every", "every":"every 1 hours", "session":"fresh", "agent_id":"gateway", "overlap_policy":"queue", "pending_cap":2}),&ctx,"researcher").await.unwrap();
+    let id: Uuid = output.result["schedule"]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let stored = state.storage.get_schedule(id).await.unwrap().unwrap();
+    let stored = serde_json::to_value(stored).unwrap();
+    assert_eq!(stored["overlap_policy"], "queue");
+    assert_eq!(stored["pending_cap"], 2);
+    dispatcher
+        .dispatch(
+            "schedule",
+            json!({"action":"update","schedule_id":id,"overlap_policy":"overlap"}),
+            &ctx,
+            "researcher",
+        )
+        .await
+        .unwrap();
+    let stored =
+        serde_json::to_value(state.storage.get_schedule(id).await.unwrap().unwrap()).unwrap();
+    assert_eq!(stored["overlap_policy"], "overlap");
+    assert_eq!(
+        stored["pending_cap"], 2,
+        "an omitted cap survives policy edits"
+    );
+}

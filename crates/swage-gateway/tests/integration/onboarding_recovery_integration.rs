@@ -589,3 +589,50 @@ async fn recovery_bundle_restores_service_after_installation_move() {
 
     device_shutdown.cancel();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_round_trip_preserves_schedule_overlap_policy_and_pending_cap() {
+    let (origin, _) = start_test_server(
+        None,
+        ChannelProvider::new(vec![]),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+    )
+    .await;
+    let (status, created) = post_json(
+        origin,
+        "/api/schedules",
+        json!({
+            "message": "Queued recovery check",
+            "spec": { "kind": "interval", "every": "every 10 minutes" },
+            "session": { "policy": "fresh", "agent_id": "gateway" },
+            "overlap_policy": "queue",
+            "pending_cap": 3
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["overlap_policy"], "queue");
+    assert_eq!(created["pending_cap"], 3);
+
+    let (status, bundle) = get_json(origin, "/api/recovery/export").await;
+    assert_eq!(status, StatusCode::OK);
+    let (destination, _) = start_test_server(
+        None,
+        ChannelProvider::new(vec![]),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+    )
+    .await;
+    let (status, imported) = post_json(
+        destination,
+        "/api/recovery/import",
+        json!({ "bundle": bundle }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{imported}");
+    let (status, restored) = get_json(destination, "/api/schedules").await;
+    assert_eq!(status, StatusCode::OK);
+    let schedules = restored["schedules"].as_array().unwrap();
+    assert_eq!(schedules.len(), 1);
+    assert_eq!(schedules[0]["overlap_policy"], "queue");
+    assert_eq!(schedules[0]["pending_cap"], 3);
+}

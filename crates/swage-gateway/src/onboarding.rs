@@ -160,6 +160,8 @@ pub struct RecoveryDeviceRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoveryScheduleRecord {
+    pub overlap_policy: swage_protocol::client::schedule::OverlapPolicy,
+    pub pending_cap: u32,
     pub message: String,
     pub status: String,
     pub kind: String,
@@ -487,6 +489,8 @@ pub async fn export_gateway_recovery_bundle(
         schedules: schedules
             .into_iter()
             .map(|schedule| RecoveryScheduleRecord {
+                overlap_policy: schedule.overlap_policy,
+                pending_cap: schedule.pending_cap,
                 message: schedule.message,
                 status: schedule.status.to_string(),
                 kind: schedule.kind.to_string(),
@@ -711,6 +715,8 @@ pub async fn import_gateway_recovery_bundle(
             },
         };
         let imported = NewSchedule {
+            overlap_policy: schedule.overlap_policy,
+            pending_cap: schedule.pending_cap,
             id: Uuid::new_v4(),
             message: schedule.message,
             status: parse_recovery_value::<ScheduleStatus>(&schedule.status)?,

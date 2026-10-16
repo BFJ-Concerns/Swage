@@ -3,4 +3,4 @@
 /**
  * Lifecycle state of a recorded run.
  */
-export type ScheduleRunState = "pending" | "running" | "completed" | "completed_empty" | "failed" | "skipped";
+export type ScheduleRunState = "queued" | "pending" | "running" | "completed" | "completed_empty" | "failed" | "skipped";

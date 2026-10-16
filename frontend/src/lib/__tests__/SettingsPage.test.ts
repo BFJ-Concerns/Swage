@@ -849,6 +849,8 @@ describe("SettingsPage", () => {
 
     expect(workflowApi.createSchedule).toHaveBeenCalledWith({
       message: "Review the queue.",
+      overlap_policy: "skip",
+      pending_cap: 1,
       spec: { kind: "interval", every: "every 1 hours" },
       session: { policy: "fresh", topic_id: "selected-topic", agent_id: "gateway" },
       routing: null,

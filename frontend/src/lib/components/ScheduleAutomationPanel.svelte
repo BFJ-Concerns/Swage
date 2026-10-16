@@ -23,6 +23,9 @@
 
   let { topicId, sessionId, topics = [] }: Props = $props();
 
+  let overlapPolicy = $state<"skip" | "queue" | "overlap">("skip");
+  let pendingCap = $state(1);
+
   // Creation form.
   let scheduleMessage = $state("");
   let scheduleKind = $state<"interval" | "cron" | "one_shot">("interval");
@@ -151,10 +154,16 @@
       return;
     }
 
+    if (!Number.isInteger(pendingCap) || pendingCap < 1) {
+      error = "Pending fire cap must be a positive whole number.";
+      return;
+    }
     isCreating = true;
     try {
       const created = await createSchedule({
         message,
+        overlap_policy: overlapPolicy,
+        pending_cap: pendingCap,
         spec,
         session,
         routing: null,
@@ -239,6 +248,7 @@
   }
 
   function describeRunState(run: ScheduleRun): string {
+    if (run.task_outcome) return "completed with errors";
     return run.state === "completed_empty" ? "completed empty" : run.state;
   }
 
@@ -327,6 +337,20 @@
         <input bind:value={scheduleAgentId} placeholder="gateway" />
       </label>
     {/if}
+    <label>
+      <span>While a previous run is active</span>
+      <select bind:value={overlapPolicy}>
+        <option value="skip">Skip</option>
+        <option value="queue">Queue</option>
+        <option value="overlap">Allow overlap</option>
+      </select>
+    </label>
+    {#if overlapPolicy === "queue"}
+      <label>
+        <span>Pending fire cap</span>
+        <input type="number" min="1" step="1" bind:value={pendingCap} />
+      </label>
+    {/if}
     <label class="gate-toggle">
       <input type="checkbox" bind:checked={gateEnabled} />
       <span>Check with a small model first</span>
@@ -390,6 +414,7 @@
           <span class="creator creator-{schedule.creator.kind}"
             >by {describeCreator(schedule.creator)}</span
           >
+          <span>While a run is active: {schedule.overlap_policy}{schedule.overlap_policy === "queue" ? ` (cap ${schedule.pending_cap})` : ""}</span>
           {#if schedule.status !== "paused"}
             <span>next {formatTime(schedule.next_run_at ?? null)}</span>
           {/if}
@@ -426,7 +451,7 @@
           {#each runHistory(schedule.id) as run (run.id)}
             <div class="run-row">
               <div class="run-head">
-                <span class="status status-run-{run.state}">{describeRunState(run)}</span>
+                <span class="status status-run-{run.task_outcome ? "failed" : run.state}">{describeRunState(run)}</span>
                 <span>{run.trigger}</span>
                 {#if run.skip_reason}<span>skipped: {run.skip_reason}</span>{/if}
                 {#if run.gate}<span>gate {run.gate.verdict}</span>{/if}
@@ -434,6 +459,7 @@
               {#if run.executed_message !== schedule.message}<p class="run-detail executed-brief">Ran an earlier brief: {run.executed_message}</p>{/if}
               {#if describeRunOutcome(run)}<p class="run-detail">{describeRunOutcome(run)}</p>{/if}
               {#if run.output_text}<p class="run-detail">{run.output_text}</p>{/if}
+              {#if run.task_outcome}<p class="run-detail error">{run.task_outcome}</p>{/if}
               {#if run.error_message}<p class="run-detail error">{run.error_message}</p>{/if}
               <span class="run-time">{formatTime(run.created_at)}</span>
             </div>

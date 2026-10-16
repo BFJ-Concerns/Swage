@@ -589,6 +589,8 @@ mod tests {
             .topic_id;
         let schedule = storage
             .create_schedule(NewSchedule {
+                overlap_policy: Default::default(),
+                pending_cap: 1,
                 id: Uuid::new_v4(),
                 message: "scheduled brief".into(),
                 status: ScheduleStatus::Active,
@@ -659,6 +661,8 @@ mod tests {
             .topic_id;
         let schedule = storage
             .create_schedule(NewSchedule {
+                overlap_policy: Default::default(),
+                pending_cap: 1,
                 id: Uuid::new_v4(),
                 message: "scheduled brief".into(),
                 status: ScheduleStatus::Active,

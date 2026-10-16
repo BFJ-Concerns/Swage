@@ -1583,6 +1583,16 @@
           "description": "What each run asks the agent to do.",
           "type": "string"
         },
+        "overlap_policy": {
+          "$ref": "#/$defs/OverlapPolicy",
+          "default": "skip"
+        },
+        "pending_cap": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 1
+        },
         "routing": {
           "description": "Defaults to local-record-only routing when omitted.",
           "anyOf": [
@@ -3280,6 +3290,15 @@
         "guidance"
       ]
     },
+    "OverlapPolicy": {
+      "description": "What a fire does while a previous run is in flight.",
+      "type": "string",
+      "enum": [
+        "skip",
+        "queue",
+        "overlap"
+      ]
+    },
     "PostWorkflowRunEventRequest": {
       "type": "object",
       "properties": {
@@ -4229,6 +4248,14 @@
           ],
           "format": "date-time"
         },
+        "overlap_policy": {
+          "$ref": "#/$defs/OverlapPolicy"
+        },
+        "pending_cap": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
         "routing": {
           "$ref": "#/$defs/DeliveryRoutingRequest"
         },
@@ -4247,6 +4274,8 @@
         }
       },
       "required": [
+        "overlap_policy",
+        "pending_cap",
         "id",
         "message",
         "status",
@@ -4384,6 +4413,10 @@
             "null"
           ]
         },
+        "overlap_policy": {
+          "description": "The policy fixed when this fire was recorded.",
+          "$ref": "#/$defs/OverlapPolicy"
+        },
         "schedule_id": {
           "type": "string",
           "format": "uuid"
@@ -4423,6 +4456,13 @@
         "state": {
           "$ref": "#/$defs/ScheduleRunState"
         },
+        "task_outcome": {
+          "description": "Failed or refused calls observed when the run settled.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "trigger": {
           "$ref": "#/$defs/ScheduleRunTrigger"
         },
@@ -4435,6 +4475,7 @@
         }
       },
       "required": [
+        "overlap_policy",
         "id",
         "schedule_id",
         "trigger",
@@ -4463,6 +4504,7 @@
         {
           "type": "string",
           "enum": [
+            "queued",
             "pending",
             "running",
             "completed",
@@ -5863,6 +5905,11 @@
       "description": "Why a run was skipped rather than executed.",
       "oneOf": [
         {
+          "description": "The schedule already has its allowed number of waiting fires.",
+          "type": "string",
+          "const": "pending_cap"
+        },
+        {
           "description": "The gate model decided no work was needed.",
           "type": "string",
           "const": "gate"
@@ -6707,6 +6754,26 @@
             "null"
           ],
           "default": null
+        },
+        "overlap_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OverlapPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "pending_cap": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 1
         },
         "routing": {
           "anyOf": [

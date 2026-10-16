@@ -272,6 +272,7 @@ pub(crate) async fn resolve_create_schedule(
             "schedule message must not be empty".into(),
         ));
     }
+    validate_pending_cap(request.pending_cap)?;
     let parsed = ParsedSpec::parse(&request.spec)?;
     let session_policy = resolve_session_policy(state, request.session).await?;
     validate_session_policy(state, &session_policy).await?;
@@ -287,6 +288,8 @@ pub(crate) async fn resolve_create_schedule(
 
     let now = Utc::now();
     Ok(NewSchedule {
+        overlap_policy: request.overlap_policy,
+        pending_cap: request.pending_cap,
         id: Uuid::new_v4(),
         message: request.message,
         status: ScheduleStatus::Active,
@@ -393,6 +396,8 @@ pub(crate) async fn resolve_update_schedule(
     };
 
     Ok(NewSchedule {
+        overlap_policy: request.overlap_policy.unwrap_or(existing.overlap_policy),
+        pending_cap: request.pending_cap.unwrap_or(existing.pending_cap),
         id: existing.id,
         message: request.message.unwrap_or(existing.message),
         status: armed.map_or(existing.status, |(status, _)| status),
@@ -526,6 +531,8 @@ pub(crate) async fn resolve_resume_schedule(
 
 fn new_schedule_from_existing(schedule: Schedule) -> NewSchedule {
     NewSchedule {
+        overlap_policy: schedule.overlap_policy,
+        pending_cap: schedule.pending_cap,
         id: schedule.id,
         message: schedule.message,
         status: schedule.status,
@@ -565,7 +572,17 @@ async fn resolve_session_policy(
     }
 }
 
+fn validate_pending_cap(cap: u32) -> Result<(), GatewayError> {
+    if cap == 0 {
+        return Err(GatewayError::ValidationError(
+            "pending cap must be at least one".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_schedule_shape(schedule: &NewSchedule) -> Result<(), GatewayError> {
+    validate_pending_cap(schedule.pending_cap)?;
     if schedule.message.trim().is_empty() {
         return Err(GatewayError::ValidationError(
             "schedule message must not be empty".into(),
@@ -606,6 +623,8 @@ async fn apply_schedule_edit(
         .update_schedule(
             schedule.id,
             UpdateSchedule {
+                overlap_policy: Some(schedule.overlap_policy),
+                pending_cap: Some(schedule.pending_cap),
                 message: Some(schedule.message.clone()),
                 status: rearm.then_some(schedule.status),
                 kind: Some(schedule.kind),
@@ -785,6 +804,8 @@ async fn validate_gate(
         }
     }
     let probe = Schedule {
+        overlap_policy: Default::default(),
+        pending_cap: 1,
         id: Uuid::nil(),
         message: String::new(),
         status: ScheduleStatus::Active,
@@ -897,6 +918,22 @@ pub async fn tick_once(
 ) -> Result<Vec<JoinHandle<()>>, GatewayError> {
     let schedules = state.storage.list_due_schedules(now).await?;
     let mut handles = Vec::with_capacity(schedules.len());
+    for schedule in state.storage.list_schedules().await? {
+        if let Some(run) = state.storage.claim_queued_schedule_run(schedule.id).await? {
+            let task_state = state.clone();
+            handles.push(tokio::spawn(async move {
+                let result = async {
+                    drive_recorded_run(&task_state, &schedule, &run).await?;
+                    drain_schedule_queue(&task_state, schedule.id).await
+                }
+                .await;
+                if let Err(error) = result {
+                    tracing::warn!(schedule_id = %schedule.id, %error, "queued schedule failed");
+                }
+            }));
+        }
+    }
+
     for schedule in schedules {
         let parsed = ParsedSpec::parse_stored(schedule.kind, &schedule.expression)?;
         let next_status = match schedule.kind {
@@ -1073,10 +1110,10 @@ impl From<swage_core::StorageError> for RunFailure {
 /// Drive a schedule run to execution, refusal, or durable queueing.
 ///
 /// The pending-run insert is the overlap check (a partial unique index
-/// admits one non-terminal run per schedule); losing that race records a
+/// admits one pending/running non-overlap run per schedule); losing that race records a
 /// terminal overlap skip. Past that point a run row exists, and a single
 /// catch settles every executed or refused run — completed, skipped, or
-/// failed with any output it managed to produce. A queued run stays pending
+/// failed with any output it managed to produce. A waiting fire stays queued
 /// until the drain claims and settles it. The returned run is the outcome: a failure lives on the row, not in an `Err`, so a
 /// manual trigger returns the failed run and the tick loop simply moves on.
 async fn execute_schedule(
@@ -1087,12 +1124,15 @@ async fn execute_schedule(
 ) -> Result<ScheduleRun, GatewayError> {
     let run = match state
         .storage
-        .create_schedule_run(NewScheduleRun::pending(
-            schedule.id,
-            trigger,
-            scheduled_for,
-            schedule.message.clone(),
-        ))
+        .create_schedule_run(
+            NewScheduleRun::pending(
+                schedule.id,
+                trigger,
+                scheduled_for,
+                schedule.message.clone(),
+            )
+            .with_overlap_policy(schedule.overlap_policy),
+        )
         .await
     {
         Ok(run) => run,
@@ -1106,7 +1146,29 @@ async fn execute_schedule(
         Err(error) => return Err(error.into()),
     };
 
-    match run_body(state, schedule, &run).await {
+    if run.state == ScheduleRunState::Queued {
+        return Ok(run);
+    }
+    if run.state == ScheduleRunState::Skipped {
+        let reason = run
+            .error_message
+            .as_deref()
+            .unwrap_or("pending fire cap reached");
+        record_overlap_audit(state, schedule, run.id, SkipReason::PendingCap, reason).await?;
+        crate::channel_gateway::record_no_delivery(state, run.id, reason).await?;
+        return Ok(run);
+    }
+    let result = drive_recorded_run(state, schedule, &run).await?;
+    drain_schedule_queue(state, schedule.id).await?;
+    Ok(result)
+}
+
+async fn drive_recorded_run(
+    state: &AppState,
+    schedule: &Schedule,
+    run: &ScheduleRun,
+) -> Result<ScheduleRun, GatewayError> {
+    match run_body(state, schedule, run).await {
         Ok(RunOutcome::Queued) => fetch_run(state, run.id).await,
         Ok(RunOutcome::Completed { output }) => complete_run(state, run.id, output).await,
         Ok(RunOutcome::Skipped {
@@ -1120,6 +1182,20 @@ async fn execute_schedule(
             delivery_attempted,
         }) => fail_run(state, schedule, run.id, message, output, delivery_attempted).await,
     }
+}
+
+/// Start waiting fires in record order, claiming each through the one-active index.
+fn drain_schedule_queue(
+    state: &AppState,
+    schedule_id: Uuid,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), GatewayError>> + Send + '_>> {
+    Box::pin(async move {
+        while let Some(run) = state.storage.claim_queued_schedule_run(schedule_id).await? {
+            let schedule = get_schedule(state, schedule_id).await?;
+            drive_recorded_run(state, &schedule, &run).await?;
+        }
+        Ok(())
+    })
 }
 
 /// Everything between a fresh pending run and its terminal outcome: gate
@@ -1320,15 +1396,18 @@ async fn record_overlap_skip(
     const MESSAGE: &str = "a previous run of this schedule was still in flight";
     let run = state
         .storage
-        .create_schedule_run(NewScheduleRun::skipped_overlap(
-            schedule.id,
-            trigger,
-            scheduled_for,
-            schedule.message.clone(),
-            MESSAGE,
-        ))
+        .create_schedule_run(
+            NewScheduleRun::skipped_overlap(
+                schedule.id,
+                trigger,
+                scheduled_for,
+                schedule.message.clone(),
+                MESSAGE,
+            )
+            .with_overlap_policy(schedule.overlap_policy),
+        )
         .await?;
-    record_overlap_audit(state, schedule, run.id, MESSAGE).await?;
+    record_overlap_audit(state, schedule, run.id, SkipReason::Overlap, MESSAGE).await?;
     crate::channel_gateway::record_no_delivery(state, run.id, MESSAGE).await?;
     tracing::info!(
         schedule_id = %schedule.id,
@@ -1390,6 +1469,7 @@ pub(crate) async fn settle_queued_run(
             }
         }
     }
+    drain_schedule_queue(state, schedule.id).await?;
     Ok(())
 }
 
@@ -1399,6 +1479,46 @@ async fn complete_run(
     run_id: Uuid,
     output: String,
 ) -> Result<ScheduleRun, GatewayError> {
+    let run = fetch_run(state, run_id).await?;
+    let calls = match run.turn_id {
+        Some(turn_id) => state.storage.list_tool_calls_by_turn(turn_id).await?,
+        None => Vec::new(),
+    };
+    let failures = calls
+        .iter()
+        .filter(|call| {
+            call.status
+                .as_deref()
+                .is_some_and(|status| status != "success")
+        })
+        .map(|call| {
+            let exit_code = call
+                .result
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .and_then(|value| value.get("exit_code").and_then(serde_json::Value::as_i64));
+            let detail = match exit_code {
+                Some(code) => format!("exit code {code}"),
+                None => {
+                    let model_result = call.model_result.as_deref().unwrap_or("");
+                    let preview =
+                        serde_json::from_str::<swage_core::CompactToolReplay>(model_result)
+                            .map(|replay| replay.preview)
+                            .unwrap_or_else(|_| model_result.to_owned());
+                    preview.chars().take(240).collect()
+                }
+            };
+            format!(
+                "{} ({}): {} — {}",
+                call.tool,
+                call.call_id,
+                call.status.as_deref().unwrap_or("unsettled"),
+                detail
+            )
+        })
+        .collect::<Vec<_>>();
+    let task_outcome =
+        (!failures.is_empty()).then(|| format!("Completed with errors: {}", failures.join("; ")));
     let state_value = if output.trim().is_empty() {
         ScheduleRunState::CompletedEmpty
     } else {
@@ -1409,6 +1529,7 @@ async fn complete_run(
         .update_schedule_run(
             run_id,
             ScheduleRunUpdate {
+                task_outcome,
                 state: Some(state_value),
                 output_text: Some(output),
                 ..Default::default()
@@ -1501,6 +1622,7 @@ async fn skip_run(
         )
         .await?;
     let reason = message.as_deref().unwrap_or(match reason {
+        SkipReason::PendingCap => "the schedule pending fire cap was reached",
         SkipReason::Gate => "schedule gate decided no work was needed",
         SkipReason::Overlap => "schedule run overlapped an in-flight run",
     });
@@ -1521,6 +1643,7 @@ async fn record_overlap_audit(
     state: &AppState,
     schedule: &Schedule,
     run_id: Uuid,
+    reason: SkipReason,
     cause: &str,
 ) -> Result<(), GatewayError> {
     state
@@ -1530,8 +1653,8 @@ async fn record_overlap_audit(
             session_id: None,
             entity_kind: "schedule_run".into(),
             entity_id: run_id.to_string(),
-            event_kind: "overlap_skip".into(),
-            summary: "schedule run skipped: a previous run was still in flight".into(),
+            event_kind: format!("{reason}_skip"),
+            summary: format!("schedule run skipped: {cause}"),
             metadata: serde_json::json!({
                 "schedule_id": schedule.id,
                 "cause": cause,
@@ -2169,6 +2292,8 @@ async fn map_schedule(
         continuation => continuation,
     };
     Ok(wire::Schedule {
+        overlap_policy: schedule.overlap_policy,
+        pending_cap: schedule.pending_cap,
         id: schedule.id,
         message: schedule.message,
         status: schedule.status,
@@ -2224,6 +2349,8 @@ fn declared_criteria(gate: &GateConfig) -> Option<&str> {
 
 fn map_run(run: ScheduleRun) -> wire::ScheduleRun {
     wire::ScheduleRun {
+        overlap_policy: run.overlap_policy,
+        task_outcome: run.task_outcome,
         id: run.id,
         schedule_id: run.schedule_id,
         trigger: run.trigger,
@@ -2397,6 +2524,8 @@ mod tests {
 
         let schedule = storage
             .create_schedule(NewSchedule {
+                overlap_policy: Default::default(),
+                pending_cap: 1,
                 id: Uuid::new_v4(),
                 message: "Check the queue.".into(),
                 status: ScheduleStatus::Active,
@@ -2548,6 +2677,8 @@ mod tests {
         assert!(gate_declaration_warnings(&blank_criteria).is_empty());
 
         let schedule_with = |gate: GateConfig| Schedule {
+            overlap_policy: Default::default(),
+            pending_cap: 1,
             id: Uuid::nil(),
             message: "Work the inbox.".into(),
             status: ScheduleStatus::Active,
@@ -2638,6 +2769,8 @@ mod tests {
         let file = |path: &str| GateObservation::File { path: path.into() };
         let schedule = storage
             .create_schedule(NewSchedule {
+                overlap_policy: Default::default(),
+                pending_cap: 1,
                 id: Uuid::new_v4(),
                 message: "Work the inbox.".into(),
                 status: ScheduleStatus::Active,
@@ -2715,6 +2848,8 @@ mod tests {
             .await
             .expect("bare session");
         let bare = Schedule {
+            overlap_policy: Default::default(),
+            pending_cap: 1,
             session_policy: SessionPolicy::Continuation {
                 session_id: bare_session.id,
             },
@@ -2848,6 +2983,8 @@ mod tests {
 
         let schedule = storage
             .create_schedule(NewSchedule {
+                overlap_policy: Default::default(),
+                pending_cap: 1,
                 id: Uuid::new_v4(),
                 message: "Clear the pipelines' pending decisions.".into(),
                 status: ScheduleStatus::Active,

@@ -726,7 +726,9 @@ const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
                 'skip_reason', COALESCE(NEW.skip_reason, ''),
                 'gate_verdict', COALESCE(NEW.gate_verdict, ''),
                 'turn_id', COALESCE(NEW.turn_id, ''),
-                'error_message', COALESCE(NEW.error_message, '')
+                'error_message', COALESCE(NEW.error_message, ''),
+                'overlap_policy', NEW.overlap_policy,
+                'task_outcome', NEW.task_outcome
             ),
             strftime('%Y-%m-%dT%H:%M:%fZ','now')
         );
@@ -1042,6 +1044,8 @@ const COMPLETE_SCHEMA: &str = "
         creator_kind     TEXT NOT NULL,
         creator_agent_id TEXT,
         delivery_json  TEXT NOT NULL,
+        overlap_policy TEXT NOT NULL,
+        pending_cap INTEGER NOT NULL CHECK (pending_cap > 0),
         gate_model     TEXT,
         gate_criteria  TEXT,
         gate_observations TEXT,
@@ -1077,6 +1081,8 @@ const COMPLETE_SCHEMA: &str = "
         -- The brief this run executed: the schedule's message as it stood
         -- when the run was created, kept through later edits of the schedule.
         executed_message TEXT NOT NULL,
+        overlap_policy TEXT NOT NULL,
+        task_outcome TEXT,
         created_at     TEXT NOT NULL,
         started_at     TEXT,
         completed_at   TEXT
@@ -1087,15 +1093,33 @@ const COMPLETE_SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS idx_schedule_runs_state
         ON schedule_runs(schedule_id, state);
 
-    -- At most one in-flight run per schedule. This partial unique index is
-    -- the overlap guard itself: the pending-run insert either succeeds
-    -- (this run owns the schedule) or trips the constraint (a predecessor is
-    -- still running), which the scheduler turns into a deliberate skip.
-    -- Terminal rows fall outside the predicate, so any number of finished
-    -- runs — including skipped-for-overlap ones — coexist freely.
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_schedule_runs_one_active
-        ON schedule_runs(schedule_id)
-        WHERE state IN ('pending', 'running');
+    -- A restrictive fire waits for every active predecessor, including runs
+    -- admitted under overlap. The incoming fire's policy decides admission;
+    -- an overlap fire can still start while a restrictive run is active.
+    -- Both insertion and promotion from the queue enforce the same rule.
+    CREATE TRIGGER IF NOT EXISTS schedule_runs_admit_insert
+    BEFORE INSERT ON schedule_runs
+    WHEN NEW.state IN ('pending', 'running') AND NEW.overlap_policy != 'overlap'
+    BEGIN
+        SELECT RAISE(ABORT, 'a previous run of this schedule is still active')
+        WHERE EXISTS (
+            SELECT 1 FROM schedule_runs
+            WHERE schedule_id = NEW.schedule_id AND state IN ('pending', 'running')
+        );
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS schedule_runs_admit_update
+    BEFORE UPDATE OF state ON schedule_runs
+    WHEN NEW.state IN ('pending', 'running') AND OLD.state NOT IN ('pending', 'running')
+        AND NEW.overlap_policy != 'overlap'
+    BEGIN
+        SELECT RAISE(ABORT, 'a previous run of this schedule is still active')
+        WHERE EXISTS (
+            SELECT 1 FROM schedule_runs
+            WHERE schedule_id = NEW.schedule_id AND state IN ('pending', 'running')
+                AND id != NEW.id
+        );
+    END;
 
     -- Threads: a conversation thread within a session, owned by an agent.
     -- State defaults to 'idle'; transitions are managed by the agent runtime.

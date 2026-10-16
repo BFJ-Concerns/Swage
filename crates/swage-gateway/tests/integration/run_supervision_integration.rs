@@ -305,6 +305,8 @@ async fn operator_runs_survive_restart_with_durable_history() {
 
     let schedule = storage
         .create_schedule(NewSchedule {
+            overlap_policy: Default::default(),
+            pending_cap: 1,
             id: Uuid::new_v4(),
             message: "nightly".into(),
             status: ScheduleStatus::Active,
@@ -431,4 +433,50 @@ async fn operator_run_detail_tracks_live_execution_into_history() {
     assert_eq!(completed_body["run"]["status"], "completed");
     assert_eq!(completed_body["detail"]["assistant_response"], "finished");
     assert!(completed_body["run"]["completed_at"].is_string());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn operator_active_runs_include_queued_schedule_fires() {
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let router = build_router(test_state(Arc::clone(&storage)));
+    let (_, session_id, _) = seed_session(&storage).await;
+    let schedule = storage
+        .create_schedule(NewSchedule {
+            overlap_policy: swage_protocol::client::schedule::OverlapPolicy::Queue,
+            pending_cap: 3,
+            id: Uuid::new_v4(),
+            message: "Queued supervision check".into(),
+            status: ScheduleStatus::Active,
+            kind: ScheduleKind::Cron,
+            expression: "0 * * * * *".into(),
+            session_policy: SessionPolicy::Continuation { session_id },
+            creator: ScheduleCreator::User,
+            delivery_routing: json!({"store_local_output": true}),
+            gate: None,
+            next_run_at: None,
+            last_run_at: None,
+        })
+        .await
+        .unwrap();
+    let mut fire = NewScheduleRun::pending(
+        schedule.id,
+        ScheduleRunTrigger::Tick,
+        Some(Utc::now()),
+        "Queued supervision check",
+    )
+    .with_overlap_policy(swage_protocol::client::schedule::OverlapPolicy::Queue);
+    fire.state = ScheduleRunState::Queued;
+    let queued = storage.create_schedule_run(fire).await.unwrap();
+
+    let (status, all) = get_json(&router, "/api/operator/runs").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(run_status_by_id(&all)[&queued.id].1, "queued");
+    let (status, active) = get_json(&router, "/api/operator/runs?active_only=true").await;
+    assert_eq!(status, StatusCode::OK);
+    let runs = run_status_by_id(&active);
+    assert!(
+        runs.contains_key(&queued.id),
+        "queued fire missing from active-only listing: {active}"
+    );
+    assert_eq!(runs[&queued.id].1, "queued");
 }

@@ -1733,8 +1733,8 @@ pub struct ActiveSkillRecord {
 // Wire-visible schedule types come from the protocol crate — one
 // definition, stored as TEXT columns via their string forms.
 pub use swage_protocol::client::schedule::{
-    GateConfig, GateDecision, GateObservation, GateVerdict, ScheduleCreator, ScheduleRunState,
-    ScheduleRunTrigger, ScheduleStatus, SessionPolicy, SkipReason,
+    GateConfig, GateDecision, GateObservation, GateVerdict, OverlapPolicy, ScheduleCreator,
+    ScheduleRunState, ScheduleRunTrigger, ScheduleStatus, SessionPolicy, SkipReason,
 };
 
 /// Canonical schedule kinds supported by the scheduler.
@@ -1780,6 +1780,8 @@ impl FromStr for ScheduleKind {
 /// keep returning to. No agent id is copied off a session at creation time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Schedule {
+    pub overlap_policy: OverlapPolicy,
+    pub pending_cap: u32,
     pub id: Uuid,
     pub message: String,
     pub status: ScheduleStatus,
@@ -1805,6 +1807,8 @@ pub struct Schedule {
 /// what the scheduler did and why.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduleRun {
+    pub task_outcome: Option<String>,
+    pub overlap_policy: OverlapPolicy,
     pub id: Uuid,
     pub schedule_id: Uuid,
     pub trigger: ScheduleRunTrigger,
@@ -2174,6 +2178,8 @@ pub struct NewTurn {
 /// Input for creating a durable schedule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewSchedule {
+    pub overlap_policy: OverlapPolicy,
+    pub pending_cap: u32,
     /// Chosen by the caller so the recorded configuration change and the
     /// returned wire schedule can name the entity before it is written.
     pub id: Uuid,
@@ -2195,6 +2201,8 @@ pub struct NewSchedule {
 /// to move a schedule between sessions or agents after the fact.
 #[derive(Debug, Clone, Default)]
 pub struct UpdateSchedule {
+    pub overlap_policy: Option<OverlapPolicy>,
+    pub pending_cap: Option<u32>,
     pub message: Option<String>,
     pub status: Option<ScheduleStatus>,
     pub kind: Option<ScheduleKind>,
@@ -2215,6 +2223,7 @@ pub struct UpdateSchedule {
 /// outside the one-in-flight guard rather than tripping it.
 #[derive(Debug, Clone)]
 pub struct NewScheduleRun {
+    pub overlap_policy: OverlapPolicy,
     pub schedule_id: Uuid,
     pub trigger: ScheduleRunTrigger,
     pub state: ScheduleRunState,
@@ -2226,6 +2235,11 @@ pub struct NewScheduleRun {
 }
 
 impl NewScheduleRun {
+    pub fn with_overlap_policy(mut self, policy: OverlapPolicy) -> Self {
+        self.overlap_policy = policy;
+        self
+    }
+
     /// A run about to execute `message`: created `Pending`, to be advanced
     /// through [`ScheduleRunUpdate`] as it progresses.
     pub fn pending(
@@ -2235,6 +2249,7 @@ impl NewScheduleRun {
         message: impl Into<String>,
     ) -> Self {
         Self {
+            overlap_policy: OverlapPolicy::Skip,
             schedule_id,
             trigger,
             state: ScheduleRunState::Pending,
@@ -2256,6 +2271,7 @@ impl NewScheduleRun {
         error_message: impl Into<String>,
     ) -> Self {
         Self {
+            overlap_policy: OverlapPolicy::Skip,
             schedule_id,
             trigger,
             state: ScheduleRunState::Skipped,
@@ -2274,6 +2290,7 @@ impl NewScheduleRun {
 /// layer from the state transition.
 #[derive(Debug, Clone, Default)]
 pub struct ScheduleRunUpdate {
+    pub task_outcome: Option<String>,
     pub state: Option<ScheduleRunState>,
     pub skip_reason: Option<SkipReason>,
     pub session_id: Option<Uuid>,
