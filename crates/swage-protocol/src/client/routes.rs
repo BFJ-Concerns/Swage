@@ -36,8 +36,8 @@ use super::{
     surface::{
         CreateSurfaceAnnotationRequest, CreateSurfaceRequest, DeleteSurfaceAnnotationResponse,
         DeleteSurfaceModuleResponse, LibraryEntryResponse, LibraryListResponse,
-        MoveSurfaceModuleRequest, SaveSurfaceToLibraryRequest, SurfaceAnnotationView,
-        SurfaceListResponse, SurfaceResponse, TopicDefaultSurfaceRequest,
+        MoveSurfaceModuleRequest, RenameSurfaceRequest, SaveSurfaceToLibraryRequest,
+        SurfaceAnnotationView, SurfaceListResponse, SurfaceResponse, TopicDefaultSurfaceRequest,
         UpdateSurfaceAnnotationRequest, WriteSurfaceModuleRequest, WriteSurfaceModuleResponse,
     },
     topic::{
@@ -781,6 +781,46 @@ pub fn routes() -> Vec<Route> {
             response: Response {
                 status: 200,
                 body: schema::<SurfaceResponse>(),
+            },
+        },
+        Route {
+            operation_id: "rename_surface",
+            method: Method::Post,
+            path: "/api/surfaces/{surface_id}",
+            path_parameters: vec![Parameter {
+                name: "surface_id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Rename this session's surface.",
+            request_optional: false,
+            request: schema::<RenameSurfaceRequest>(),
+            response: Response {
+                status: 200,
+                body: schema::<SurfaceResponse>(),
+            },
+        },
+        Route {
+            operation_id: "resolve_surface_annotation",
+            method: Method::Post,
+            path: "/api/surfaces/{surface_id}/annotations/{annotation_id}/resolve",
+            path_parameters: vec![
+                Parameter {
+                    name: "surface_id",
+                    kind: ParameterType::Uuid,
+                },
+                Parameter {
+                    name: "annotation_id",
+                    kind: ParameterType::Uuid,
+                },
+            ],
+            query_parameters: vec![],
+            summary: "Resolve a note while keeping it in the record.",
+            request_optional: false,
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<SurfaceAnnotationView>(),
             },
         },
         Route {

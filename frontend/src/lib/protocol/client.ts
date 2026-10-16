@@ -31,6 +31,7 @@ import type { MoveSurfaceModuleRequest } from "./MoveSurfaceModuleRequest";
 import type { ProviderSignInState } from "./ProviderSignInState";
 import type { RecentSessionsResponse } from "./RecentSessionsResponse";
 import type { RelinkWorkspaceAttachmentRequest } from "./RelinkWorkspaceAttachmentRequest";
+import type { RenameSurfaceRequest } from "./RenameSurfaceRequest";
 import type { RestartStatusResponse } from "./RestartStatusResponse";
 import type { SaveProviderSettings } from "./SaveProviderSettings";
 import type { SaveSettingsRequest } from "./SaveSettingsRequest";
@@ -261,6 +262,16 @@ export async function removeTopicDefaultSurface(topicId: string, entryId: string
 /** Read a surface. */
 export async function getSurface(surfaceId: string): Promise<SurfaceResponse> {
   return request<SurfaceResponse>("GET", `/api/surfaces/${encodeURIComponent(surfaceId)}`);
+}
+
+/** Rename this session's surface. */
+export async function renameSurface(surfaceId: string, body: RenameSurfaceRequest): Promise<SurfaceResponse> {
+  return request<SurfaceResponse>("POST", `/api/surfaces/${encodeURIComponent(surfaceId)}`, body);
+}
+
+/** Resolve a note while keeping it in the record. */
+export async function resolveSurfaceAnnotation(surfaceId: string, annotationId: string): Promise<SurfaceAnnotationView> {
+  return request<SurfaceAnnotationView>("POST", `/api/surfaces/${encodeURIComponent(surfaceId)}/annotations/${encodeURIComponent(annotationId)}/resolve`);
 }
 
 /** Write a surface module: append one, or replace one's source against the revision read — a moved-on revision is refused with the module as it now stands. */

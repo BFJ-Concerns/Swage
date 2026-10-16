@@ -3600,6 +3600,18 @@
         ],
         "type": "object"
       },
+      "RenameSurfaceRequest": {
+        "description": "Rename only this session's surface, leaving its saved origin untouched.",
+        "properties": {
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "type": "object"
+      },
       "RequireApprovalEntry": {
         "anyOf": [
           {
@@ -5811,6 +5823,15 @@
             "format": "uuid",
             "type": "string"
           },
+          "resolved_at": {
+            "default": null,
+            "description": "Resolution time; the note remains in the record after leaving the working view.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "tags": {
             "items": {
               "type": "string"
@@ -5937,6 +5958,10 @@
             "format": "uuid",
             "type": "string"
           },
+          "shape_only": {
+            "description": "True when the copy starts with shape alone, without its origin's content.",
+            "type": "boolean"
+          },
           "title": {
             "type": "string"
           },
@@ -5946,6 +5971,7 @@
           }
         },
         "required": [
+          "shape_only",
           "id",
           "session_id",
           "title",
@@ -10209,6 +10235,46 @@
           }
         },
         "summary": "Read a surface."
+      },
+      "post": {
+        "operationId": "rename_surface",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "surface_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameSurfaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurfaceResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Rename this session's surface."
       }
     },
     "/api/surfaces/{surface_id}/annotations": {
@@ -10251,6 +10317,47 @@
           }
         },
         "summary": "Create a surface annotation."
+      }
+    },
+    "/api/surfaces/{surface_id}/annotations/{annotation_id}/resolve": {
+      "post": {
+        "operationId": "resolve_surface_annotation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "surface_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "annotation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurfaceAnnotationView"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Resolve a note while keeping it in the record."
       }
     },
     "/api/surfaces/{surface_id}/modules": {
