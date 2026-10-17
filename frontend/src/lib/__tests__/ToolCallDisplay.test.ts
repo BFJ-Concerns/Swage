@@ -498,4 +498,9 @@ describe("recorded result navigation", () => {
     component = mount(ToolCallDisplay, { target: document.body, props: { toolCall: makeCompletedCall({ result: asString ? JSON.stringify(result) : result }), isLive: !asString } });
     expect(document.querySelector("a.result-link")?.getAttribute("href")).toBe("/workflow-runs/run-linked");
   });
+  it.each(["//elsewhere.invalid", "/\n/elsewhere.invalid", "/\t\\elsewhere.invalid"])("rejects off-origin result addresses (%j)", (view_url) => {
+    component = mount(ToolCallDisplay, { target: document.body, props: { toolCall: makeCompletedCall({ result: { view_url } }), isLive: false } });
+    expect(document.querySelector("a.result-link")).toBeNull();
+  });
+
 });

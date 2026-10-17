@@ -54,7 +54,7 @@
     }
     if (!result || typeof result !== "object" || !("view_url" in result)) return null;
     const path = result.view_url;
-    return typeof path === "string" && /^\/(?![\/\\])/.test(path) ? path : null;
+    return typeof path === "string" && /^\/(?![\/\\])[^\u0000-\u0020\u007f\\]*$/u.test(path) ? path : null;
   });
   const isLongResult = $derived(resultText.length >= 500);
 
