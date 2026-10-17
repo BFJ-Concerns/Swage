@@ -2279,6 +2279,23 @@ impl swage_storage::ProviderRoundStore for MockStorage {
 
 #[async_trait]
 impl swage_storage::WorkflowStore for MockStorage {
+    async fn list_unacknowledged_workflow_runs(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<swage_storage::WorkflowRunRecord>, StorageError> {
+        Ok(vec![])
+    }
+    async fn acknowledge_workflow_runs(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: &[Uuid],
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
     async fn create_workflow_script(
         &self,
         _: swage_storage::NewWorkflowScript,
@@ -4612,6 +4629,18 @@ impl TurnStore for MockStorage {
 
     async fn get_turn(&self, id: Uuid) -> Result<Option<Turn>, StorageError> {
         Ok(self.db.lock().await.turns.get(&id).cloned())
+    }
+
+    async fn get_turn_observation(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<(Turn, chrono::DateTime<chrono::Utc>)>, StorageError> {
+        let db = self.db.lock().await;
+        Ok(db
+            .turns
+            .get(&id)
+            .cloned()
+            .map(|turn| (turn, chrono::Utc::now())))
     }
 
     async fn list_turns_by_thread(&self, thread_id: Uuid) -> Result<Vec<Turn>, StorageError> {
@@ -11328,6 +11357,114 @@ async fn delegated_snapshot_loss_records_degradation_and_double_failure_escalate
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn review_fix_2_detached_observation_includes_completion_time() {
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let topic = storage.general_scope().await.expect("default topic");
+    let session = storage
+        .create_session(new_session(topic.id))
+        .await
+        .expect("create session");
+    let session_id = session.id;
+    let root_thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id,
+            agent_id: "gateway".to_string(),
+        },
+    )
+    .await
+    .expect("create root thread");
+
+    let child_started = Arc::new(Notify::new());
+    let child_release = Arc::new(Notify::new());
+    let child_marker = Uuid::new_v4().to_string();
+    let (provider, _captured_requests) = DetachedGatedProvider::new(
+        child_started.clone(),
+        child_release.clone(),
+        child_marker.clone(),
+    );
+
+    let dispatcher =
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn crate::tool::Tool>
+        ]);
+    let root = tempfile::tempdir().unwrap();
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        dispatcher,
+        None,
+        root.path().to_path_buf(),
+    );
+
+    let pause =
+        crate::workflow::workflow_pause_test_hook::install("detached-snapshot-pending", session_id);
+    let parent_state = state.clone();
+    let parent = tokio::spawn(async move {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &parent_state,
+            session_id,
+            None,
+            "Delegate independently".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .unwrap();
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    child_release.notify_one();
+    let child_turn = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let children = state.storage.list_by_topic(topic.id).await.unwrap();
+            for child in children.into_iter().filter(|child| child.id != session_id) {
+                for thread in state.storage.list_by_session(child.id).await.unwrap() {
+                    for turn in state.storage.list_turns_by_thread(thread.id).await.unwrap() {
+                        if turn.state == TurnState::Completed {
+                            return turn;
+                        }
+                    }
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    pause.release.add_permits(1);
+    parent.await.unwrap();
+    let root_turn = state
+        .storage
+        .list_turns_by_thread(root_thread.id)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let calls = state
+        .storage
+        .list_tool_calls_by_turn(root_turn.id)
+        .await
+        .unwrap();
+    let call = calls.iter().find(|call| call.tool == "delegate").unwrap();
+    let output: serde_json::Value = serde_json::from_str(call.result.as_deref().unwrap()).unwrap();
+    assert_eq!(output["status"], "completed");
+    let observed =
+        chrono::DateTime::parse_from_rfc3339(output["status_as_of"].as_str().unwrap()).unwrap();
+    assert!(
+        observed >= child_turn.completed_at.unwrap(),
+        "a completed detached child observation must not precede its completion"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn completed_detached_result_reaches_parent_next_turn() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let topic = storage.general_scope().await.expect("default topic");
@@ -11414,10 +11551,22 @@ async fn completed_detached_result_reaches_parent_next_turn() {
             .expect("delegate tool result should be stored"),
     )
     .expect("delegate tool result should be JSON");
-    assert_eq!(detached_output["status"], "detached");
     assert_eq!(
-        detached_output["result_delivery"],
-        "The delegated work continues independently. Its durable result message will be stored with correlation_id equal to delegate_message_id when the child finishes."
+        detached_output["status"], "processing",
+        "the gated child is still awaiting its provider"
+    );
+    assert_eq!(detached_output["completion_mode"], "detach");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(
+            detached_output["status_as_of"]
+                .as_str()
+                .expect("observation time")
+        )
+        .is_ok()
+    );
+    assert!(
+        detached_output.get("result_delivery").is_none(),
+        "no static claim about continued execution may contradict the observed state"
     );
 
     let delegate_message_id = detached_output["delegate_message_id"]

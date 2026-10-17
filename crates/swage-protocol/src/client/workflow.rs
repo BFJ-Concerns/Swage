@@ -232,6 +232,7 @@ pub struct AnswerWorkflowRunHoldResponse {
     /// Whether answering made a parked run due again. False when the run was
     /// still holding its engine and will take the answer directly.
     pub wake_provisioned: bool,
+    pub run_state: WorkflowRunState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -267,6 +268,9 @@ pub enum WorkflowRunState {
 #[serde(tag = "classification", rename_all = "snake_case")]
 #[ts(optional_fields = nullable)]
 pub enum WorkflowRunHandover {
+    AuthorError {
+        failure: String,
+    },
     /// An attributed agent-call failure stopped the run.
     Interrupted {
         failure: String,
@@ -346,6 +350,8 @@ pub enum WorkflowRunEnding {
     Returned,
     /// The script threw, or the engine failed the run.
     Threw { error: String },
+    /// Invalid workflow input refused before its worker spawned.
+    AuthorError { error: String },
     /// An operator or a parent run cancelled it.
     Cancelled,
     /// The working token allowance ran out and the run ended under
@@ -422,10 +428,12 @@ pub struct WorkflowPartialResults {
 pub struct WorkflowRunTerminalAccount {
     pub ending: WorkflowRunEnding,
     pub workers: WorkflowWorkerPartition,
-    /// Present exactly when the run ended without its script returning.
+    /// Present when a run ended without returning and has completed worker output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partial_results: Option<WorkflowPartialResults>,
     pub settled_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation: Option<WorkflowRunCancellation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -776,6 +784,19 @@ pub struct WorkflowAgentCallDetail {
     pub provider_rounds: Option<Vec<WorkflowProviderRound>>,
 }
 
+/// One worker's activity in an open-run overview.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct WorkflowWorkerActivity {
+    pub id: Uuid,
+    #[ts(type = "number")]
+    pub seq: u64,
+    pub label: Option<String>,
+    pub status: WorkflowJournalEntryStatus,
+    pub agent_definition_id: Option<String>,
+    pub liveness: Option<WorkflowWorkerLiveness>,
+}
+
 /// Earliest liveness evidence for one workflow worker.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
@@ -1022,4 +1043,66 @@ mod journal_result_tests {
             serde_json::json!({"kind": "timer", "fired": true})
         );
     }
+}
+
+/// A run's observed state when its start request returns.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct WorkflowRunStartResult {
+    #[serde(flatten)]
+    pub run: WorkflowRun,
+    pub status_as_of: DateTime<Utc>,
+    pub workers_dispatched: Option<u32>,
+}
+
+/// The recorded request which cancelled a run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct WorkflowRunCancellation {
+    pub source: String,
+    pub session_id: Option<Uuid>,
+    pub actor: Option<String>,
+    pub requested_at: DateTime<Utc>,
+}
+
+/// An ended run awaiting acknowledgement by a lead or schedule gate.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct WorkflowRunEndingNotice {
+    pub run_id: Uuid,
+    pub script_name: Option<String>,
+    pub state: String,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
+pub struct WorkflowRunStatusRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 100))]
+    pub acknowledge_run_ids: Option<Vec<Uuid>>,
+}
+
+impl WorkflowRunStatusRequest {
+    pub fn json_schema() -> Value {
+        serde_json::to_value(schemars::schema_for!(Self)).expect("status request schema serialises")
+    }
+}
+
+/// A delegated child's state observed when its start request returns.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct DelegationStartResult {
+    pub status: Option<String>,
+    pub status_as_of: Option<DateTime<Utc>>,
+    pub completion_mode: String,
+    pub delegate_message_id: Uuid,
+    pub child_session_id: Uuid,
+    pub child_thread_id: Uuid,
+    pub child_turn_id: Uuid,
+    pub target_agent_id: String,
+    pub error_message: Option<String>,
 }
