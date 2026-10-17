@@ -21297,3 +21297,133 @@ async fn a_delegation_result_reads_its_fate_before_its_text() {
             .starts_with("Delegated agent worker completed:\ndone")
     );
 }
+
+/// A child's Result readdressed to its parent's session after a restart is
+/// delivered by that session's next turn and by no other session of the
+/// same agent: the other session's turn leaves it in the mailbox.
+#[tokio::test]
+async fn a_readdressed_result_is_delivered_only_in_the_parents_session() {
+    use swage_core::{MessageKind, MessageStatus};
+    use swage_storage::model::NewAgentMessage;
+    use swage_storage::store::AgentMessageStore;
+
+    let storage = Arc::new(MockStorage::new());
+    let topic = storage.general_scope().await.unwrap();
+    let mut sessions = Vec::new();
+    for _ in 0..2 {
+        let session = storage
+            .create_session(NewSession {
+                agent_id: "lead".to_string(),
+                ..new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "lead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "lead".to_string(),
+                state: TurnState::Pending,
+                user_input: Some("next".to_string()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        sessions.push((session.id, thread.id, turn.id));
+    }
+    let (parent_session, parent_thread, parent_turn) = sessions[0];
+    let (other_session, other_thread, other_turn) = sessions[1];
+    let delegate = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "lead".to_string(),
+            recipient_agent_id: "scout".to_string(),
+            kind: MessageKind::Delegate,
+            correlation_id: None,
+            payload: serde_json::json!({ "task": "work" }),
+        })
+        .await
+        .unwrap();
+    let result = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "scout".to_string(),
+            recipient_agent_id: "lead".to_string(),
+            kind: MessageKind::Result,
+            correlation_id: Some(delegate.id),
+            payload: serde_json::json!({
+                "response": "Scouted.",
+                "parent_session_id": parent_session,
+            }),
+        })
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+
+    super::detached_delivery::deliver_detached_results(
+        &state,
+        other_session,
+        "lead",
+        other_thread,
+        other_turn,
+    )
+    .await
+    .unwrap();
+    assert!(
+        storage
+            .list_messages_by_thread(other_thread)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the other session's turn takes nothing"
+    );
+    assert_eq!(
+        storage
+            .get_agent_message(result.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MessageStatus::Pending
+    );
+
+    super::detached_delivery::deliver_detached_results(
+        &state,
+        parent_session,
+        "lead",
+        parent_thread,
+        parent_turn,
+    )
+    .await
+    .unwrap();
+    let delivered = storage
+        .list_messages_by_thread(parent_thread)
+        .await
+        .unwrap();
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert!(delivered[0].content.contains("Scouted."));
+    assert_eq!(
+        storage
+            .get_agent_message(result.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MessageStatus::Delivered
+    );
+}
