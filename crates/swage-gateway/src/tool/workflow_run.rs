@@ -98,7 +98,37 @@ impl Tool for WorkflowRunTool {
                 name: self.name().into(),
                 message: "workflow gateway state is unavailable".into(),
             })?;
-        let launcher = GatewayWorkflowLauncher::new(state.clone());
+        let thread_id = match ctx.turn_id() {
+            Some(turn_id) => Some(
+                gateway
+                    .storage()
+                    .get_turn(turn_id)
+                    .await
+                    .map_err(|error| ToolError::ExecutionFailed {
+                        name: self.name().into(),
+                        message: error.to_string(),
+                    })?
+                    .ok_or_else(|| ToolError::ExecutionFailed {
+                        name: self.name().into(),
+                        message: format!("turn {turn_id} was not found"),
+                    })?
+                    .thread_id,
+            ),
+            None => None,
+        };
+        if let Some(thread_id) = thread_id {
+            crate::thread_selection::resolve_thread_for_session(
+                state.storage.as_ref(),
+                session_id,
+                Some(thread_id),
+            )
+            .await
+            .map_err(|error| ToolError::ExecutionFailed {
+                name: self.name().into(),
+                message: error.to_string(),
+            })?;
+        }
+        let launcher = GatewayWorkflowLauncher::new(state.clone()).with_thread_id(thread_id);
         let result = match (name, source) {
             (Some(name), None) => {
                 launcher

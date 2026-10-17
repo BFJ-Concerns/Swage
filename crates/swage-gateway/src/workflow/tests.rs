@@ -35,11 +35,11 @@ use super::*;
 use futures::StreamExt;
 use swage_protocol::client::workflow::{WorkflowJournalEntryKind, WorkflowJournalEntryStatus};
 use swage_storage::{
-    AgentDefinitionStore, AuditStore, CitationStore, ContextSnapshotStore, NewSourceObservation,
-    NewWorkflowScript, NewWorkspaceAttachment, ObservationOrigin, ObservationStore,
-    OrientationCardStore, ProviderRoundStore, SessionStore, SqliteStorage, Storage,
-    TaskDefinitionStore, ThreadState, ThreadStore, ToolCallStore, TopicStore, TurnState, TurnStore,
-    WorkflowStore, WorkspaceAttachmentStore,
+    AgentDefinitionStore, AuditStore, CitationStore, ContextSnapshotStore, MessageStore,
+    NewSourceObservation, NewWorkflowScript, NewWorkspaceAttachment, ObservationOrigin,
+    ObservationStore, OrientationCardStore, ProviderRoundStore, SessionStore, SqliteStorage,
+    Storage, TaskDefinitionStore, ThreadState, ThreadStore, ToolCallStore, TopicStore, TurnState,
+    TurnStore, WorkflowStore, WorkspaceAttachmentStore,
 };
 use swage_workflow::AgentSessionRef;
 
@@ -1682,6 +1682,15 @@ async fn launch_resolves_captured_sources_from_the_persisted_authority_root() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn research_sweep_executes_its_gather_organise_and_synthesis_contract() {
+    research_sweep_report_contract(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn research_sweep_report_reaches_initiating_branch() {
+    research_sweep_report_contract(true).await;
+}
+
+async fn research_sweep_report_contract(branch: bool) {
     let _swage_home = crate::test_support::SwageHomeGuard::new();
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
@@ -1733,28 +1742,116 @@ async fn research_sweep_executes_its_gather_organise_and_synthesis_contract() {
         None,
     );
 
-    let Json(started) = start_saved_run(
-        State(state.clone()),
-        Path(research_sweep_id(topic.id)),
-        Json(StartWorkflowRunRequest {
-            args: serde_json::json!({
-                "subject": "contract evidence",
-                "purpose": "prove the shipped sweep contract"
-            }),
-            budget: None,
-        }),
+    let session = storage
+        .create_session(NewSession {
+            ..swage_storage::fixtures::new_session(topic.id)
+        })
+        .await
+        .expect("originating session");
+    let root = ThreadStore::create(
+        storage.as_ref(),
+        NewThread {
+            session_id: session.id,
+            agent_id: session.agent_id.clone(),
+        },
     )
     .await
-    .expect("start research sweep with valid arguments");
-    wait_for_terminal(&state, started.id).await;
+    .expect("root thread");
+    let initiating_thread = if branch {
+        let seed = storage
+            .create_message(swage_storage::NewMessage {
+                thread_id: root.id,
+                attachments: vec![],
+                turn_id: None,
+                role: swage_core::Role::User,
+                origin: swage_storage::MessageOrigin::User,
+                content: "start here".into(),
+                position: 0,
+                agent_id: session.agent_id.clone(),
+            })
+            .await
+            .expect("branch anchor");
+        storage
+            .create_branch(root.id, seed.id)
+            .await
+            .expect("branch")
+            .child_thread_id
+    } else {
+        root.id
+    };
+    let turn = storage
+        .create_turn(swage_storage::NewTurn {
+            thread_id: initiating_thread,
+            agent_id: session.agent_id.clone(),
+            state: TurnState::Completed,
+            user_input: Some("sweep".into()),
+            parent_turn_id: None,
+        })
+        .await
+        .expect("initiating turn");
+    let mut base =
+        swage_tool::context::MockToolContext::new(&session.agent_id, session.id.to_string());
+    base.turn_id = Some(turn.id);
+    let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
+    let context = crate::tool_executor::GatewayToolContext::new(
+        &base,
+        ws_tx,
+        storage.clone() as Arc<dyn Storage>,
+    )
+    .with_app_state(Some(state.clone()));
+    let mut announcements = state.broadcast.subscribe();
+    let started = crate::tool::Tool::execute(
+        &crate::tool::workflow_run::WorkflowRunTool,
+        serde_json::json!({"name": "research-sweep", "args": {"subject": "contract evidence", "purpose": "prove the shipped sweep contract"}}),
+        &context,
+    ).await.expect("start carried research sweep from initiating thread");
+    let started_id = Uuid::parse_str(started["id"].as_str().expect("run id")).expect("uuid");
+    wait_for_report_completion(&mut announcements, started_id).await;
 
     let run = storage
-        .get_workflow_run(started.id)
+        .get_workflow_run(started_id)
         .await
         .expect("run query")
         .expect("research sweep run");
     assert_eq!(run.state, "completed", "run error: {:?}", run.error_message);
     let output = run.final_output.expect("terminal research report");
+    let messages = storage
+        .list_messages_by_thread(initiating_thread)
+        .await
+        .expect("messages");
+    let reports = messages
+        .iter()
+        .filter(|message| message.origin == swage_storage::MessageOrigin::Workflow)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reports.len(),
+        1,
+        "the completed sweep posts one report on the initiating thread"
+    );
+    assert_eq!(
+        reports[0].content,
+        output["rendered"].as_str().expect("rendered report")
+    );
+    let delivery_events = storage
+        .list_audit_events_by_session(session.id)
+        .await
+        .expect("delivery audit query")
+        .into_iter()
+        .filter(|event| {
+            event.event_kind == "report_delivered" && event.entity_id == run.id.to_string()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        delivery_events.len(),
+        1,
+        "a delivered sweep records an audit event linking its run and message"
+    );
+    assert_eq!(delivery_events[0].entity_kind, "workflow_run");
+    assert_eq!(
+        delivery_events[0].metadata["message_id"],
+        reports[0].id.to_string(),
+        "the delivery audit names the persisted report message"
+    );
     // The gatherer for the comparison source claimed a recording the
     // knowledge base does not hold: the store decides, and the report
     // says both what the gatherer claimed and what the store shows.
@@ -19218,4 +19315,267 @@ async fn a_usage_record_outside_the_contract_is_rejected_not_passed_through() {
         message.contains(&intent.id.to_string()),
         "error names the offending record: {message}"
     );
+}
+
+// The completed event follows report delivery; polling terminal state alone can
+// observe the durable run before its completion side effects have finished.
+async fn wait_for_report_completion(
+    events: &mut tokio::sync::broadcast::Receiver<ServerEvent>,
+    run_id: Uuid,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        loop {
+            if let ServerEvent::WorkflowRunCompleted { event } = events.recv().await.expect("event")
+                && event.run.id == run_id
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("completion announced");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn conversation_report_delivery_requires_success_grant_and_originating_session() {
+    let _home = crate::test_support::SwageHomeGuard::new();
+    let (state, storage) = workflow_test_state();
+    let topic = storage.general_scope().await.expect("topic");
+    let carried = resolve_workflow_by_id(&state, research_sweep_id(topic.id), None)
+        .await
+        .expect("resolve")
+        .expect("carried research workflow");
+    // The positive case gets its grant from the product's carried-workflow
+    // resolver, rather than a fixture manufacturing the capability being proved.
+    for (granted, has_session, failed, is_carried, has_rendered) in [
+        (true, true, false, true, true),
+        (false, true, false, true, true),
+        (true, false, false, true, true),
+        (true, true, true, true, true),
+        (true, true, false, false, true),
+        (true, true, false, true, false),
+    ] {
+        let session = storage
+            .create_session(NewSession {
+                ..swage_storage::fixtures::new_session(topic.id)
+            })
+            .await
+            .expect("session");
+        ThreadStore::create(
+            storage.as_ref(),
+            NewThread {
+                session_id: session.id,
+                agent_id: session.agent_id.clone(),
+            },
+        )
+        .await
+        .expect("root thread");
+        let thread = crate::thread_selection::resolve_thread_for_session(
+            state.storage.as_ref(),
+            session.id,
+            None,
+        )
+        .await
+        .expect("thread");
+        let source = if failed {
+            "throw new Error('sweep failed');"
+        } else {
+            "return args.report;"
+        };
+        let report = if has_rendered {
+            serde_json::json!({"rendered": "### 1. Exact\n> curly ‘quote’\n> second line\nSource: https://example.test/origin\nCitation: stable-id\n"})
+        } else {
+            serde_json::json!({"findings": ["must not be composed"]})
+        };
+        let record = storage
+            .create_workflow_run(NewWorkflowRun {
+                inline_workflow_id: granted.then_some(carried.id),
+                inline_workflow_name: Some("report-proof".into()),
+                carrying_skill: is_carried.then(|| "research".into()),
+                source: Some(source.into()),
+                source_hash: source_hash(source),
+                args: serde_json::json!({"report": report}),
+                dispatching_session_id: has_session.then_some(session.id),
+                ..swage_storage::fixtures::new_workflow_run(topic.id)
+            })
+            .await
+            .expect("run");
+        let mut events = state.broadcast.subscribe();
+        storage
+            .update_workflow_run_state(record.id, "interrupted", None, None, None)
+            .await
+            .expect("interrupted run");
+        resume_workflow_run_record(
+            state.clone(),
+            storage
+                .get_workflow_run(record.id)
+                .await
+                .expect("query")
+                .expect("run"),
+        )
+        .await
+        .expect("resume engine with re-resolved grant");
+        let mut announced = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(45), async {
+            loop {
+                match events.recv().await.expect("event") {
+                    ServerEvent::MessageAppended {
+                        session_id,
+                        message,
+                    } => {
+                        assert_eq!(session_id, session.id);
+                        announced.push(message);
+                    }
+                    ServerEvent::WorkflowRunCompleted { event } if event.run.id == record.id => {
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("completed engine");
+        let ended = storage
+            .get_workflow_run(record.id)
+            .await
+            .expect("query")
+            .expect("run");
+        assert_eq!(ended.state, if failed { "failed" } else { "completed" });
+        let messages = storage
+            .list_messages_by_thread(thread.id)
+            .await
+            .expect("rows");
+        let expected = usize::from(granted && has_session && !failed && is_carried && has_rendered);
+        assert_eq!(
+            messages.len(),
+            expected,
+            "grant={granted} session={has_session} failed={failed} carried={is_carried} rendered={has_rendered}"
+        );
+        assert_eq!(
+            announced.len(),
+            expected,
+            "every report is announced exactly once"
+        );
+        let delivery_failures = storage
+            .list_audit_events_by_session(session.id)
+            .await
+            .expect("delivery failure audit query")
+            .into_iter()
+            .filter(|event| {
+                event.event_kind == "report_delivery_failed"
+                    && event.entity_id == record.id.to_string()
+            })
+            .collect::<Vec<_>>();
+        let missing_report = granted && has_session && !failed && is_carried && !has_rendered;
+        assert_eq!(
+            delivery_failures.len(),
+            usize::from(missing_report),
+            "only a completed run missing its rendered report records a delivery failure"
+        );
+        if missing_report {
+            assert_eq!(delivery_failures[0].entity_kind, "workflow_run");
+            assert_eq!(
+                delivery_failures[0].metadata["error"], "completed workflow has no rendered report",
+                "the delivery failure records why the report could not be posted"
+            );
+        }
+        if expected == 1 {
+            assert_eq!(messages[0].origin, swage_storage::MessageOrigin::Workflow);
+            assert_eq!(
+                messages[0].content,
+                ended.final_output.as_ref().expect("result")["rendered"]
+                    .as_str()
+                    .expect("rendered")
+            );
+            assert_eq!(announced[0].id, messages[0].id);
+            assert_eq!(announced[0].content, messages[0].content);
+            assert_eq!(announced[0].origin, swage_storage::MessageOrigin::Workflow);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn completed_report_retains_workflow_origin_and_session_activity() {
+    let _home = crate::test_support::SwageHomeGuard::new();
+    let (state, storage) = workflow_test_state();
+    let topic = storage.general_scope().await.expect("topic");
+    let session = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .expect("session");
+    let root = ThreadStore::create(
+        storage.as_ref(),
+        NewThread {
+            session_id: session.id,
+            agent_id: session.agent_id.clone(),
+        },
+    )
+    .await
+    .expect("root");
+    let run = storage
+        .create_workflow_run(NewWorkflowRun {
+            dispatching_session_id: Some(session.id),
+            carrying_skill: Some("research".into()),
+            ..swage_storage::fixtures::new_workflow_run(topic.id)
+        })
+        .await
+        .expect("run");
+    storage
+        .update_workflow_run_state(
+            run.id,
+            "completed",
+            Some(serde_json::json!({"rendered": "Recorded research report"})),
+            None,
+            None,
+        )
+        .await
+        .expect("completed");
+    let completed = storage
+        .get_workflow_run(run.id)
+        .await
+        .expect("query")
+        .expect("run");
+    let mut events = state.broadcast.subscribe();
+    crate::workflow_delivery::deliver_completed_report(
+        &state,
+        &completed,
+        Some(&serde_json::json!([{"kind": "conversation"}])),
+    )
+    .await
+    .expect("delivery");
+    let messages = storage
+        .list_messages_by_thread(root.id)
+        .await
+        .expect("messages");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages[0].origin,
+        swage_storage::MessageOrigin::Workflow,
+        "the report retains workflow provenance"
+    );
+    let activity = storage
+        .get_session_activity(session.id)
+        .await
+        .expect("activity query")
+        .expect("activity");
+    assert_eq!(
+        activity.latest_message.as_deref(),
+        Some("Recorded research report"),
+        "the report supplies the session preview"
+    );
+    assert_eq!(
+        activity.last_activity, messages[0].created_at,
+        "the report advances session activity"
+    );
+    match events.recv().await.expect("announcement") {
+        ServerEvent::MessageAppended {
+            session_id,
+            message,
+        } => {
+            assert_eq!(session_id, session.id);
+            assert_eq!(message.id, messages[0].id);
+            assert_eq!(message.origin, swage_storage::MessageOrigin::Workflow);
+        }
+        other => panic!("expected report announcement, got {other:?}"),
+    }
 }

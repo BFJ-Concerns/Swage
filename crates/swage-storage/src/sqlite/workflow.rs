@@ -175,6 +175,7 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
                 )
             })?,
         dispatching_session_id: row.get::<_, Option<String>>(27)?.map(uuid).transpose()?,
+        dispatching_thread_id: row.get::<_, Option<String>>(28)?.map(uuid).transpose()?,
         created_at: time(row.get(19)?)?,
         completed_at: completed_at.map(time).transpose()?,
     })
@@ -186,7 +187,7 @@ const RUN_COLUMNS: &str = "id, topic_id, parent_run_id, parent_seq, script_versi
     COALESCE((SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_id), \
     COALESCE((SELECT name FROM workflow_scripts WHERE id = (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id)), inline_workflow_name), \
     COALESCE((SELECT version FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_version), \
-    carrying_skill, task, source, source_hash, args_json, budget_json, state, final_output_json, handover_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, wake_at, inherited_worker_placement_json, workflow_call_tools_json, terminal_account_json, dispatching_session_id";
+    carrying_skill, task, source, source_hash, args_json, budget_json, state, final_output_json, handover_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, wake_at, inherited_worker_placement_json, workflow_call_tools_json, terminal_account_json, dispatching_session_id, dispatching_thread_id";
 const JOURNAL_COLUMNS: &str = "id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, terminal_metadata_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at, dispatch_json, dispatch_attempts_json, termination_json";
 const RUN_EVENT_COLUMNS: &str = "id, run_id, journal_entry_id, seq, kind, payload_json, source_surface, source_agent_id, source_session_id, source_turn_id, posted_at, delivered_wake_seq, delivered_at";
 
@@ -472,7 +473,7 @@ impl WorkflowStore for SqliteStorage {
             .map(|tools| serde_json::to_string(&tools))
             .transpose()
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-        self.with_conn(move |conn| { conn.execute("INSERT INTO workflow_runs (id, topic_id, parent_run_id, parent_seq, script_version_id, inline_workflow_id, inline_workflow_name, inline_workflow_version, carrying_skill, task, source, source_hash, args_json, budget_json, state, engine_version, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, inherited_worker_placement_json, workflow_call_tools_json, created_at, dispatching_session_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'running', ?15, ?16, ?17, ?18, ?19, ?20, ?21)", params![id.to_string(), run.topic_id.to_string(), run.parent_run_id.map(|v| v.to_string()), run.parent_seq.map(|v| v as i64), run.script_version_id.map(|v| v.to_string()), run.inline_workflow_id.map(|v| v.to_string()), run.inline_workflow_name, run.inline_workflow_version, run.carrying_skill, run.task, run.source, run.source_hash, args, budget, run.engine_version, dispatch_bound_agent_ids, dispatch_bound_task_definition_ids, inherited_worker_placement, workflow_call_tools, now.to_rfc3339(), run.dispatching_session_id.map(|v| v.to_string())])?; conn.query_row(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"), [id.to_string()], run_row) }).await
+        self.with_conn(move |conn| { conn.execute("INSERT INTO workflow_runs (id, topic_id, parent_run_id, parent_seq, script_version_id, inline_workflow_id, inline_workflow_name, inline_workflow_version, carrying_skill, task, source, source_hash, args_json, budget_json, state, engine_version, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, inherited_worker_placement_json, workflow_call_tools_json, created_at, dispatching_session_id, dispatching_thread_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'running', ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)", params![id.to_string(), run.topic_id.to_string(), run.parent_run_id.map(|v| v.to_string()), run.parent_seq.map(|v| v as i64), run.script_version_id.map(|v| v.to_string()), run.inline_workflow_id.map(|v| v.to_string()), run.inline_workflow_name, run.inline_workflow_version, run.carrying_skill, run.task, run.source, run.source_hash, args, budget, run.engine_version, dispatch_bound_agent_ids, dispatch_bound_task_definition_ids, inherited_worker_placement, workflow_call_tools, now.to_rfc3339(), run.dispatching_session_id.map(|v| v.to_string()), run.dispatching_thread_id.map(|v| v.to_string())])?; conn.query_row(&format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE id = ?1"), [id.to_string()], run_row) }).await
     }
 
     async fn get_workflow_run(&self, id: Uuid) -> Result<Option<WorkflowRunRecord>, StorageError> {

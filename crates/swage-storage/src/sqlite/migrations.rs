@@ -220,9 +220,6 @@ const ADD_SESSION_ORIGIN_AND_ARCHIVE: &str = "
     ALTER TABLE sessions ADD COLUMN archived_at TEXT;
     CREATE INDEX IF NOT EXISTS idx_sessions_origin ON sessions(origin_kind, origin_source_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived_at);
-    ALTER TABLE workflow_runs ADD COLUMN dispatching_session_id TEXT;
-    CREATE INDEX IF NOT EXISTS idx_workflow_runs_dispatching_session
-        ON workflow_runs(dispatching_session_id);
 ";
 
 /// Annotations on a surface's modules: the notes a user and an agent both hang
@@ -381,7 +378,9 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         -- recoverable from a run that never returned. Generic JSON like
         -- every other run blob; the contract lives in `swage-protocol` and
         -- is enforced at the wire boundary.
-        terminal_account_json TEXT
+        terminal_account_json TEXT,
+        dispatching_session_id TEXT,
+        dispatching_thread_id TEXT
     );
     INSERT INTO workflow_runs_parking_new (
         id, topic_id, script_version_id, inline_workflow_id,
@@ -405,6 +404,8 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
     FROM workflow_runs;
     DROP TABLE workflow_runs;
     ALTER TABLE workflow_runs_parking_new RENAME TO workflow_runs;
+    CREATE INDEX IF NOT EXISTS idx_workflow_runs_dispatching_session
+        ON workflow_runs(dispatching_session_id);
     CREATE INDEX IF NOT EXISTS idx_workflow_runs_topic_created
         ON workflow_runs(topic_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_workflow_runs_state

@@ -71,6 +71,162 @@ pub(crate) async fn capability_from_grant(
     }
 }
 
+/// Completion delivery reads only the durable result. The grant opts a carried
+/// workflow in; the destination always comes from the run's dispatching session.
+pub(crate) async fn deliver_completed_report(
+    state: &AppState,
+    run: &swage_storage::WorkflowRunRecord,
+    grant: Option<&Value>,
+) -> Result<(), String> {
+    if run.state != "completed" || run.carrying_skill.is_none() {
+        return Ok(());
+    }
+    let granted = grant.and_then(Value::as_array).is_some_and(|targets| {
+        targets
+            .iter()
+            .any(|target| target["kind"] == "conversation")
+    });
+    if !granted {
+        return Ok(());
+    }
+    let Some(session_id) = run.dispatching_session_id else {
+        return Ok(());
+    };
+    let content = run
+        .final_output
+        .as_ref()
+        .and_then(|output| output.get("rendered"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "completed workflow has no rendered report".to_string())?;
+    let capability: Arc<dyn DeliveryCapability> = Arc::new(
+        ConversationDeliveryCapability::for_session(
+            state.clone(),
+            run.topic_id,
+            session_id,
+            run.dispatching_thread_id,
+        )
+        .await?,
+    );
+    capability
+        .deliver(
+            run.id,
+            EffectPayload {
+                content: content.into(),
+                metadata: None,
+                target: None,
+            },
+            0,
+            CancellationToken::new(),
+        )
+        .await?;
+    Ok(())
+}
+
+struct ConversationDeliveryCapability {
+    state: AppState,
+    session_id: Uuid,
+    thread_id: Uuid,
+    agent_id: String,
+}
+
+impl ConversationDeliveryCapability {
+    async fn for_session(
+        state: AppState,
+        topic_id: Uuid,
+        session_id: Uuid,
+        thread_id: Option<Uuid>,
+    ) -> Result<Self, String> {
+        let session = state
+            .storage
+            .get_session(session_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("no session with id {session_id}"))?;
+        if session.topic_id != topic_id {
+            return Err("conversation delivery target is not in the workflow's topic".into());
+        }
+        let thread = crate::thread_selection::resolve_thread_for_session(
+            state.storage.as_ref(),
+            session_id,
+            thread_id,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        Ok(Self {
+            state,
+            session_id,
+            thread_id: thread.id,
+            agent_id: session.agent_id,
+        })
+    }
+}
+
+#[async_trait]
+impl DeliveryCapability for ConversationDeliveryCapability {
+    fn kind(&self) -> &'static str {
+        "conversation"
+    }
+    fn effect_kind(&self) -> EffectKind {
+        EffectKind::CheckBeforeRedo
+    }
+
+    async fn deliver(
+        &self,
+        run_id: Uuid,
+        payload: EffectPayload,
+        effect_seq: u64,
+        cancellation: CancellationToken,
+    ) -> Result<EffectReceipt, String> {
+        if cancellation.is_cancelled() {
+            return Err("WorkflowCancelledError: delivery cancelled".into());
+        }
+        let message = crate::service::append_platform_message(
+            &self.state,
+            crate::service::PlatformMessage {
+                session_id: self.session_id,
+                thread_id: self.thread_id,
+                turn_id: None,
+                agent_id: self.agent_id.clone(),
+                origin: swage_storage::MessageOrigin::Workflow,
+                content: payload.content,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        self.state
+            .storage
+            .create_audit_event(swage_storage::NewAuditEvent {
+                id: Uuid::new_v4().to_string(),
+                session_id: Some(self.session_id),
+                entity_kind: "workflow_run".into(),
+                entity_id: run_id.to_string(),
+                event_kind: "report_delivered".into(),
+                summary: "Completed workflow report delivered".into(),
+                metadata: serde_json::json!({"message_id": message.id}),
+            })
+            .await
+            .map_err(|error| {
+                format!(
+                    "report message {} delivered but its delivery audit could not be recorded: {error}",
+                    message.id
+                )
+            })?;
+        Ok(EffectReceipt {
+            delivered: true,
+            target: self.kind().into(),
+            effect_seq,
+        })
+    }
+
+    async fn probe(
+        &self,
+        _key: Uuid,
+        _payload: &EffectPayload,
+    ) -> Result<Option<EffectReceipt>, String> {
+        Ok(None)
+    }
+}
+
 struct SurfaceDeliveryCapability {
     state: AppState,
     surface_id: Uuid,

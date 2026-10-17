@@ -198,7 +198,14 @@ async fn carried_workflows(
                     file.contents.into(),
                     file.captured_sources_grant,
                 ) {
-                    Ok(workflow) => workflows.push(workflow),
+                    Ok(mut workflow) => {
+                        if file.conversation_delivery {
+                            workflow.delivery_grant = Some(serde_json::json!([{
+                                "kind": "conversation", "name": "report"
+                            }]));
+                        }
+                        workflows.push(workflow);
+                    }
                     Err(error) => {
                         record_carried_workflow_exclusion(
                             state,
@@ -1547,11 +1554,20 @@ pub trait WorkflowLauncher: Send + Sync {
 
 pub struct GatewayWorkflowLauncher {
     state: AppState,
+    thread_id: Option<Uuid>,
 }
 
 impl GatewayWorkflowLauncher {
     pub fn new(state: AppState) -> Self {
-        Self { state }
+        Self {
+            state,
+            thread_id: None,
+        }
+    }
+
+    pub fn with_thread_id(mut self, thread_id: Option<Uuid>) -> Self {
+        self.thread_id = thread_id;
+        self
     }
 }
 
@@ -1669,6 +1685,7 @@ impl GatewayWorkflowLauncher {
             self.state.clone(),
             session.topic_id,
             Some(session.id),
+            self.thread_id,
             script_version_id,
             inline_identity,
             source,
@@ -7682,6 +7699,7 @@ async fn complete_workflow_call_entry(
                     parent_run_id: Some(parent_run_id),
                     parent_seq: Some(parent_seq),
                     dispatching_session_id: None,
+                    dispatching_thread_id: None,
                     script_version_id: script.script_version_id,
                     inline_workflow_id: inline_identity.as_ref().map(|identity| identity.id),
                     inline_workflow_name: inline_identity
@@ -8131,6 +8149,7 @@ async fn start_run(
     state: AppState,
     topic_id: Uuid,
     dispatching_session_id: Option<Uuid>,
+    dispatching_thread_id: Option<Uuid>,
     script_version_id: Option<Uuid>,
     inline_identity: Option<InlineWorkflowIdentity>,
     source: String,
@@ -8161,6 +8180,7 @@ async fn start_run(
             parent_run_id: None,
             parent_seq: None,
             dispatching_session_id,
+            dispatching_thread_id,
             script_version_id,
             inline_workflow_id: inline_identity.as_ref().map(|identity| identity.id),
             inline_workflow_name: inline_identity
@@ -8630,6 +8650,28 @@ async fn launch_existing_run(
                 metadata: serde_json::json!({}),
             })
             .await;
+        if state_update.is_ok()
+            && let Ok(Some(record)) = storage.get_workflow_run(run_id).await
+            && let Err(problem) = crate::workflow_delivery::deliver_completed_report(
+                &terminal_budget_state_owner,
+                &record,
+                delivery_grant.as_ref(),
+            )
+            .await
+        {
+            tracing::error!(%run_id, %problem, "could not deliver completed workflow report");
+            let _ = storage
+                .create_audit_event(NewAuditEvent {
+                    id: Uuid::new_v4().to_string(),
+                    session_id: record.dispatching_session_id,
+                    entity_kind: "workflow_run".into(),
+                    entity_id: run_id.to_string(),
+                    event_kind: "report_delivery_failed".into(),
+                    summary: "Completed workflow report could not be delivered".into(),
+                    metadata: serde_json::json!({"error": problem}),
+                })
+                .await;
+        }
         if let Ok(Some(record)) = storage.get_workflow_run(run_id).await
             && let Ok(run) = run_wire(record)
         {
@@ -8836,6 +8878,7 @@ pub async fn start_inline_run(
             None,
             None,
             None,
+            None,
             request.source,
             None,
             task,
@@ -8867,6 +8910,7 @@ pub async fn start_saved_run(
         start_run(
             state,
             script.topic_id,
+            None,
             None,
             script.script_version_id,
             script.inline_identity(),
@@ -9269,6 +9313,11 @@ async fn resume_workflow_run_record(
             .await
             .map_err(internal)?
             .and_then(|script| script.effective_delivery_grant())
+    } else if let Some(id) = run.script_id {
+        resolve_workflow_by_id(&state, id, None)
+            .await
+            .map_err(internal)?
+            .and_then(|workflow| workflow.delivery_grant)
     } else {
         None
     };

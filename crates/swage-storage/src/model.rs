@@ -2494,6 +2494,8 @@ pub struct WorkflowRunRecord {
     /// workers are grouped beneath in the recent-sessions list. `None` for a
     /// run started by the operator API or a schedule.
     pub dispatching_session_id: Option<Uuid>,
+    /// The initiating conversation thread; absent for launches without a turn.
+    pub dispatching_thread_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
@@ -2505,6 +2507,8 @@ pub struct NewWorkflowRun {
     pub parent_seq: Option<u64>,
     /// See `WorkflowRunRecord::dispatching_session_id`.
     pub dispatching_session_id: Option<Uuid>,
+    /// The initiating conversation thread; absent for launches without a turn.
+    pub dispatching_thread_id: Option<Uuid>,
     pub script_version_id: Option<Uuid>,
     /// Identity carried beside inline source when the source belongs to an
     /// immutable workflow outside the authored-version tables.

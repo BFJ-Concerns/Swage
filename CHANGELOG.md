@@ -60,6 +60,7 @@ All notable changes to Swage are documented in this file.
 - Browser navigation keeps working after settings or grant changes, retaining the logged-in profile; startup timeouts explain how to recover.
 
 - Oversized browser snapshots retain the article’s opening paragraph through ignored accessibility wrappers and preceding infobox tables instead of eliding it.
+- A completed research sweep’s report arrives in its originating conversation thread exactly as recorded, with finding numbers, quotes and source trails intact; its workflow authorship is retained and it updates session activity and previews.
 
 - Session previews in the recent list, sidebar, conversation selector, delete controls and Operator deck show plain text without Markdown formatting or link destinations. Operator session summaries are limited to three lines.
 - The workflow-authoring skill states event-kind names as the gateway accepts them: segments are joined by `.`, `:` or `/` only, with `_` and `-` allowed inside a segment but never separating one.
