@@ -14,6 +14,7 @@ import * as settingsApi from "../api/settings";
 import * as skillsApi from "../api/skills";
 import * as workflowApi from "../api/workflows";
 import * as operatorApi from "../api/operator";
+import { makeAgentDefinition } from "./fixtures/agent-definitions";
 import { makeSchedule } from "./fixtures/schedules";
 
 vi.mock("../api/sessions", () => ({ listRecentSessions: vi.fn(async () => []) }));
@@ -896,6 +897,7 @@ describe("SettingsPage", () => {
   });
 
   it("routes a chosen continuation conversation to its surface through Settings", async () => {
+    vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockResolvedValue([makeAgentDefinition("gateway", "built_in")]);
     vi.mocked(sessionsApi.listRecentSessions).mockResolvedValue([{
       source: { kind: "conversation", session: {
         id: "conversation-orchard", topic_name: "Orchard", agent_id: "gateway",

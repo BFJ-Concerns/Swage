@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { formatScheduleBrief } from "../schedule-brief";
   import { untrack } from "svelte";
   import { listRecentSessions } from "../api/sessions";
   import type { RecentSession } from "../protocol/RecentSession";
@@ -71,11 +72,23 @@
     conversationsLoading = true;
     conversationLoadError = null;
     void listRecentSessions(null)
-      .then((entries) => {
-        if (active) conversations = entries.flatMap((entry) => [
+      .then(async (entries) => {
+        const sessions = entries.flatMap((entry) => [
           ...(entry.source.kind === "conversation" ? [entry.source.session] : []),
           ...entry.automated,
         ]);
+        const scopes = [...new Set(sessions.map((session) => session.topic_id ?? null))];
+        const definitions = new Map(await Promise.all(scopes.map(async (scope) =>
+          [scope, await listEffectiveAgentDefinitions(scope)] as const)));
+        const selectable = sessions.filter((session) => definitions.get(session.topic_id ?? null)
+          ?.some((definition) => definition.id === session.agent_id && definition.selectable));
+        if (active) {
+          conversations = selectable;
+          if (sessions.some((session) => session.id === runConversationId)
+            && !selectable.some((session) => session.id === runConversationId)) {
+            chooseRunConversation("");
+          }
+        }
       })
       .catch((err: unknown) => {
         if (active) conversationLoadError = err instanceof Error ? err.message : "Failed to load conversations.";
@@ -477,7 +490,7 @@
         class:active={schedulePolicy === "continuation"}
         onclick={() => (schedulePolicy = "continuation")}
       >
-        {sessionId ? "This conversation" : "Continue a conversation"}
+        Continue a conversation
       </button>
     </div>
     {#if schedulePolicy === "fresh"}
@@ -499,9 +512,6 @@
         <select aria-label="Run conversation" value={runConversationId} disabled={conversationsLoading}
           onchange={(event) => chooseRunConversation(event.currentTarget.value)}>
           <option value="">Choose a conversation</option>
-          {#if sessionId && !conversations.some((conversation) => conversation.id === sessionId)}
-            <option value={sessionId}>This conversation</option>
-          {/if}
           {#each conversations as conversation (conversation.id)}
             <option value={conversation.id}>{conversation.topic_name} · {conversation.message_preview || conversation.id}</option>
           {/each}
@@ -604,10 +614,11 @@
   <div class="schedule-list" aria-label="Schedules">
     {#each schedules as schedule (schedule.id)}
       {@const latestRun = cardRun(schedule)}
+      {@const brief = formatScheduleBrief(schedule)}
       <article class="schedule-row">
         <div class="schedule-main">
-          <strong>{schedule.message.trim().length > 72 ? `${schedule.message.trim().slice(0, 60).replace(/\s+/g, " ")}… · ${schedule.id.slice(-8)}` : schedule.message}</strong>
-          {#if schedule.message.trim().length > 72}
+          <strong>{brief.heading}</strong>
+          {#if brief.truncated}
             <details><summary>Full brief</summary><p class="full-brief">{schedule.message}</p></details>
           {/if}
           <span class="schedule-sub">

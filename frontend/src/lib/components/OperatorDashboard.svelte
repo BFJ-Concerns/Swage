@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { formatScheduleBrief } from "../schedule-brief";
   import { messagePreview } from "../message-preview";
   import { onMount } from "svelte";
   import {
@@ -349,10 +350,11 @@
             <p class="empty-copy">Nothing is scheduled.</p>
           {:else}
             {#each overview.schedules.schedules as schedule (schedule.id)}
+              {@const brief = formatScheduleBrief(schedule)}
               {@const latestRun = passedOneShot(schedule) ? scheduleRuns[schedule.id]?.[0] : undefined}
               <section class="control-card">
                 <div class="primary-line">
-                  <span>{schedule.message.trim().length > 72 ? `${schedule.message.trim().slice(0, 60).replace(/\s+/g, " ")}… · ${schedule.id.slice(-8)}` : schedule.message}</span>
+                  <span>{brief.heading}</span>
                   <StatusBadge
                     register={latestRun
                       ? runRegister(latestRun)
@@ -360,7 +362,7 @@
                     label={latestRun ? describeRunState(latestRun) : schedule.status}
                   />
                 </div>
-                {#if schedule.message.trim().length > 72}
+                {#if brief.truncated}
                   <details><summary>Full brief</summary><p class="detail-copy full-brief">{schedule.message}</p></details>
                 {/if}
                 <p class="detail-copy">

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
 
 import ScheduleAutomationPanel from "../components/ScheduleAutomationPanel.svelte";
+import * as sessionsApi from "../api/sessions";
 import * as surfaceApi from "../api/surfaces";
 import * as agentApi from "../api/agent-definitions";
 import { makeAgentDefinition } from "./fixtures/agent-definitions";
@@ -101,6 +102,58 @@ describe("ScheduleAutomationPanel", () => {
       document.body.removeChild(document.body.firstChild);
     }
     vi.clearAllMocks();
+  });
+
+  it("excludes platform-only continuation sessions from the picker", async () => {
+    const session = {
+      id: "ordinary-session", topic_id: "other-topic", topic_name: "Orchard", agent_id: "gateway",
+      origin: { kind: "direct" as const }, created_at: "2026-01-01T00:00:00Z",
+      last_activity: "2026-01-01T00:00:00Z", message_preview: "Orchard review",
+      has_interrupted_turn: false, has_running_turn: false,
+    };
+    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValueOnce([{
+      source: { kind: "conversation", session }, last_activity: session.last_activity,
+      automated: [{ ...session, id: "curator-session", agent_id: "memory-curator" }],
+    }]);
+    vi.mocked(agentApi.listEffectiveAgentDefinitions).mockResolvedValue([
+      makeAgentDefinition("gateway", "built_in"),
+      makeAgentDefinition("memory-curator", "built_in", { selectable: false }),
+    ]);
+    component = mount(ScheduleAutomationPanel, { target: document.body, props: { topicId: null, sessionId: "curator-session" } });
+    await flushUi();
+    [...document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => /This conversation|Continue a conversation/.test(button.textContent ?? ""))?.click();
+    await flushUi();
+    const options = [...document.querySelectorAll<HTMLOptionElement>('select[aria-label="Run conversation"] option')].map((option) => option.value);
+    expect(options).not.toContain("curator-session");
+    expect(options).toContain("ordinary-session");
+    expect(agentApi.listEffectiveAgentDefinitions).toHaveBeenCalledWith("other-topic");
+    expect(document.querySelector<HTMLSelectElement>('select[aria-label="Run conversation"]')?.value).toBe("");
+  });
+
+  it("names the continuation policy independently of the selected conversation", async () => {
+    const session = {
+      id: "other-session", topic_name: "Orchard", agent_id: "gateway",
+      origin: { kind: "direct" as const }, created_at: "2026-01-01T00:00:00Z",
+      last_activity: "2026-01-01T00:00:00Z", message_preview: "Orchard review",
+      has_interrupted_turn: false, has_running_turn: false,
+    };
+    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValueOnce([{
+      source: { kind: "conversation", session }, last_activity: session.last_activity, automated: [],
+    }]);
+    component = mount(ScheduleAutomationPanel, { target: document.body, props: { topicId: null, sessionId: "current-session" } });
+    await flushUi();
+    const policy = [...document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => /This conversation|Continue a conversation/.test(button.textContent ?? ""))!;
+    policy.click();
+    await flushUi();
+    const selector = document.querySelector<HTMLSelectElement>('select[aria-label="Run conversation"]')!;
+    selector.value = "other-session";
+    selector.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUi();
+    expect(selector.value).toBe("other-session");
+    expect(policy.textContent).not.toContain("This conversation");
+    expect(policy.textContent?.trim()).toBe("Continue a conversation");
   });
 
   it.each([false, true])("hides a paused schedule's next run while retaining an active schedule's (gated: %s)", async (gated) => {
@@ -213,7 +266,7 @@ describe("ScheduleAutomationPanel", () => {
     component = mount(ScheduleAutomationPanel, { target: document.body, props: { topicId: null, sessionId: "session-1" } });
     await flushUi();
     setFieldValue(document.querySelector<HTMLTextAreaElement>('textarea[placeholder="Run the review checklist."]')!, "Deliver the digest");
-    clickButton("This conversation");
+    clickButton("Continue a conversation");
     [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("Add destination"))?.click();
     await flushUi();
     const selectType = async (index: number, kind: string) => {

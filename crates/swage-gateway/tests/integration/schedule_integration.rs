@@ -3679,3 +3679,115 @@ async fn schedule_agent_registry_revalidates_the_stored_agent_on_update() {
         .unwrap();
     assert_eq!(stored.message, "Original brief");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_continuation_refuses_platform_agent_on_create_http() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(&dir.path().join("curator.db"), MockProvider::new(vec![]));
+    let topic = state.topic_store.general_scope().await.unwrap();
+    let session = state
+        .storage
+        .create_session(swage_storage::NewSession {
+            topic_id: topic.id,
+            agent_id: "memory-curator".into(),
+            origin: swage_storage::SessionOrigin::Direct,
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .unwrap();
+    let router = build_router(state.clone());
+    let (status, body) = request_json(
+        &router,
+        "POST",
+        "/api/schedules",
+        Some(json!({
+            "message": "Check the orchard", "spec": {"kind": "interval", "every": "every 1 hours"},
+            "session": {"policy": "continuation", "session_id": session.id},
+        })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "platform continuation must be refused: {body}"
+    );
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("platform's own agent")
+    );
+    assert!(state.storage.list_schedules().await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_continuation_refuses_platform_agent_on_update_http() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(
+        &dir.path().join("curator-update.db"),
+        MockProvider::new(vec![]),
+    );
+    let topic = state.topic_store.general_scope().await.unwrap();
+    let session = state
+        .storage
+        .create_session(swage_storage::NewSession {
+            topic_id: topic.id,
+            agent_id: "memory-curator".into(),
+            origin: swage_storage::SessionOrigin::Direct,
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .unwrap();
+    // Persist an existing schedule directly so update validation is independent
+    // of the refusal at creation.
+    let stored = state
+        .storage
+        .create_schedule(swage_storage::NewSchedule {
+            id: Uuid::new_v4(),
+            overlap_policy: swage_protocol::client::schedule::OverlapPolicy::Skip,
+            pending_cap: 1,
+            message: "Original brief".into(),
+            status: swage_storage::ScheduleStatus::Active,
+            kind: swage_storage::ScheduleKind::Interval,
+            expression: "every 1 hours".into(),
+            session_policy: continuation(session.id),
+            creator: ScheduleCreator::User,
+            delivery_routing: serde_json::to_value(DeliveryRoutingRequest::local_only()).unwrap(),
+            gate: None,
+            next_run_at: None,
+            last_run_at: None,
+        })
+        .await
+        .unwrap();
+    let router = build_router(state.clone());
+    let (status, body) = request_json(
+        &router,
+        "PUT",
+        &format!("/api/schedules/{}", stored.id),
+        Some(json!({"message": "Must not be applied"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "platform continuation edit must be refused: {body}"
+    );
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("platform's own agent")
+    );
+    assert_eq!(
+        state
+            .storage
+            .get_schedule(stored.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .message,
+        "Original brief"
+    );
+}
