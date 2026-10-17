@@ -518,6 +518,99 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn permanent_install_approval_preserves_concurrent_security_save() {
+        permanent_approval_preserves_concurrent_security_save(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn permanent_topic_approval_preserves_concurrent_security_save() {
+        permanent_approval_preserves_concurrent_security_save(true).await;
+    }
+
+    async fn permanent_approval_preserves_concurrent_security_save(topic_scope: bool) {
+        let (state, storage, root) = fixture().await;
+        let topic = if topic_scope {
+            Some(
+                TopicStore::create(
+                    storage.as_ref(),
+                    NewTopic {
+                        name: "Orchard".into(),
+                        slug: "orchard".into(),
+                    },
+                )
+                .await
+                .unwrap(),
+            )
+        } else {
+            None
+        };
+        let scope = topic
+            .as_ref()
+            .map_or(SettingsScope::Install, |topic| SettingsScope::Topic {
+                topic_id: topic.id,
+            });
+        let entries = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| RequireApprovalEntry::Simple((*name).into()))
+                .collect()
+        };
+        save_security_settings(
+            &state,
+            scope.clone(),
+            save(SecurityOverrides {
+                require_approval: Some(entries(&["shell", "file_write"])),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        let path = topic.as_ref().map_or_else(
+            || root.path().join("config.toml"),
+            |topic| topic.location().data_dir(root.path()).join("config.toml"),
+        );
+        let (waiting, resume) = crate::settings::config_write_pause::before_write(path.clone());
+        let approval_state = state.clone();
+        let approval = tokio::spawn(async move {
+            if let Some(topic) = topic {
+                crate::settings::persist_permanent_tool_approval_for_topic(
+                    &approval_state,
+                    &topic,
+                    RESERVED_WORKFLOW_AGENT_ID,
+                    "shell",
+                )
+                .await
+                .unwrap();
+            } else {
+                crate::settings::persist_permanent_tool_approval_globally(&approval_state, "shell")
+                    .await
+                    .unwrap();
+            }
+        });
+        // Pause immediately before the update lock, after any configuration
+        // resolved by the caller. Complete a security save in that gap.
+        waiting.await.unwrap();
+        save_security_settings(
+            &state,
+            scope,
+            save(SecurityOverrides {
+                require_approval: Some(entries(&["shell", "file_write", "file_read"])),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        resume.send(()).unwrap();
+        approval.await.unwrap();
+        let partial = read_partial(&path).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(partial.tools.unwrap().require_approval.unwrap()).unwrap(),
+            serde_json::json!(["file_write", "file_read"]),
+            "successful security save was lost by the concurrent permanent approval"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_general_and_security_saves_preserve_both_fields() {
         let (state, _, root) = fixture().await;
         let mut general =

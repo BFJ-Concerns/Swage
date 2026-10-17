@@ -350,12 +350,15 @@ pub async fn save_settings(
 
 pub(crate) async fn persist_permanent_tool_approval_for_topic(
     state: &AppState,
-    config: &swage_config::ResolvedConfig,
     topic: &swage_storage::model::Topic,
+    agent_id: &str,
     tool_name: &str,
 ) -> Result<(), ApiError> {
     let path = scope_config_path(&state.config_root, &topic.location());
-    persist_permanent_tool_approval_to_path(state, config, tool_name, path).await
+    persist_permanent_tool_approval_to_path(state, tool_name, path, || {
+        crate::turn::load_session_config(state, &topic.location(), agent_id).map_err(ApiError::from)
+    })
+    .await
 }
 
 pub(crate) async fn persist_permanent_tool_approval_globally(
@@ -363,15 +366,18 @@ pub(crate) async fn persist_permanent_tool_approval_globally(
     tool_name: &str,
 ) -> Result<(), ApiError> {
     let path = global_config_path(&state.config_root);
-    persist_permanent_tool_approval_to_path(state, &state.active_config(), tool_name, path).await
+    persist_permanent_tool_approval_to_path(state, tool_name, path, || Ok(state.active_config()))
+        .await
 }
 
 async fn persist_permanent_tool_approval_to_path(
     state: &AppState,
-    config: &swage_config::ResolvedConfig,
     tool_name: &str,
     path: PathBuf,
+    resolve_config: impl FnOnce() -> Result<swage_config::ResolvedConfig, ApiError>,
 ) -> Result<(), ApiError> {
+    #[cfg(test)]
+    config_write_pause::wait(&path).await;
     let _config_update = state.config_updates.lock().await;
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(|error| {
@@ -380,8 +386,11 @@ async fn persist_permanent_tool_approval_to_path(
     }
 
     let mut partial = read_partial_config(&path).await?;
+    // Resolve under the update lock and apply the scope's current file so
+    // a completed security save survives even if runtime state lags it.
+    let config = swage_config::apply_overlay(resolve_config()?, partial.clone());
     let tools = partial.tools.get_or_insert_with(Default::default);
-    tools.require_approval = Some(require_approval_entries_without_tool(config, tool_name));
+    tools.require_approval = Some(require_approval_entries_without_tool(&config, tool_name));
 
     let body = toml::to_string_pretty(&partial)
         .map_err(|error| ApiError::validation(format!("failed to serialise settings: {error}")))?;
