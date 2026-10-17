@@ -724,6 +724,7 @@ describe("AppLayout shell navigation", () => {
       topic_id: "default",
       selected_model_id: null,
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       created_at: "",
       last_activity: "",
       messages: [],
