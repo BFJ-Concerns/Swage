@@ -4,6 +4,7 @@
 -->
 <script lang="ts">
   import { approvePendingAction, rejectPendingAction } from "../api/operator";
+  import { securitySettingsChanged } from "../security-settings";
   import type { PendingApproval } from "../stores/streaming";
 
   interface Props {
@@ -46,6 +47,9 @@
         );
       } else {
         await rejectPendingAction(approval.approval_id, "denied by the user");
+      }
+      if (action === "allow-permanent" || action === "allow-global") {
+        securitySettingsChanged();
       }
     } catch (err) {
       error = err instanceof Error ? err.message : "Approval decision failed.";

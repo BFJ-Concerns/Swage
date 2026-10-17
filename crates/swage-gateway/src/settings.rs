@@ -47,6 +47,8 @@ async fn write_config_atomically(path: &std::path::Path, body: &str) -> Result<(
             "config path has no valid file name".to_string(),
         ));
     }
+    #[cfg(test)]
+    config_write_pause::wait(path).await;
     let path = path.to_path_buf();
     let body = body.as_bytes().to_vec();
     tokio::task::spawn_blocking(move || swage_client::runtime::write_atomically(&path, &body))
@@ -143,6 +145,7 @@ pub async fn save_settings(
     request: SaveSettingsRequest,
 ) -> Result<SettingsResponse, ApiError> {
     validate_settings_request(&request)?;
+    let _config_update = state.config_updates.lock().await;
     let prior_settings = settings_audit_snapshot(&load_settings(state).await?)?;
     let SaveSettingsRequest {
         default_provider,
@@ -153,7 +156,6 @@ pub async fn save_settings(
         tool_runtime,
         tool_permissions,
         hitl,
-        sandbox,
         context,
         pricing,
         observability,
@@ -163,8 +165,6 @@ pub async fn save_settings(
         voice,
     } = request;
 
-    let tool_permissions: Option<swage_config::ToolPermissionConfig> =
-        config_from_wire(tool_permissions)?;
     let hitl: Option<swage_config::HitlConfig> = config_from_wire(hitl)?;
     let communication: Option<swage_config::CommunicationConfig> = config_from_wire(communication)?;
     let voice: Option<swage_config::VoiceConfig> = config_from_wire(voice)?;
@@ -227,7 +227,6 @@ pub async fn save_settings(
             tool_runtime: tool_runtime.clone(),
             tool_permissions: tool_permissions.clone(),
             hitl: hitl.clone(),
-            sandbox: sandbox.clone(),
             context: context.clone(),
             pricing: pricing.clone(),
             observability: observability.clone(),
@@ -302,10 +301,12 @@ pub async fn save_settings(
     if let Some(tool_runtime) = tool_runtime {
         apply_tool_runtime_settings(&mut runtime_config.tools, tool_runtime)?;
     }
-    runtime_config.tools.permissions =
-        tool_permissions.unwrap_or_else(|| runtime_config.tools.permissions.clone());
+    if let Some(grants) = tool_permissions {
+        runtime_config.tools.permissions.allow = grants.allow;
+        runtime_config.tools.permissions.deny = grants.deny;
+        runtime_config.tools.permissions.bundles = grants.bundles.into_iter().collect();
+    }
     runtime_config.hitl = hitl.unwrap_or_else(|| runtime_config.hitl.clone());
-    runtime_config.sandbox = sandbox.unwrap_or_else(|| runtime_config.sandbox.clone());
     runtime_config.context = context.unwrap_or_else(|| runtime_config.context.clone());
     runtime_config.pricing = pricing.unwrap_or_else(|| runtime_config.pricing.clone());
     runtime_config.observability =
@@ -348,13 +349,16 @@ pub async fn save_settings(
 }
 
 pub(crate) async fn persist_permanent_tool_approval_for_topic(
-    config_root: &std::path::Path,
-    config: &swage_config::ResolvedConfig,
+    state: &AppState,
     topic: &swage_storage::model::Topic,
+    agent_id: &str,
     tool_name: &str,
 ) -> Result<(), ApiError> {
-    let path = scope_config_path(config_root, &topic.location());
-    persist_permanent_tool_approval_to_path(config, tool_name, path).await
+    let path = scope_config_path(&state.config_root, &topic.location());
+    persist_permanent_tool_approval_to_path(state, tool_name, path, || {
+        crate::turn::load_session_config(state, &topic.location(), agent_id).map_err(ApiError::from)
+    })
+    .await
 }
 
 pub(crate) async fn persist_permanent_tool_approval_globally(
@@ -362,14 +366,19 @@ pub(crate) async fn persist_permanent_tool_approval_globally(
     tool_name: &str,
 ) -> Result<(), ApiError> {
     let path = global_config_path(&state.config_root);
-    persist_permanent_tool_approval_to_path(&state.active_config(), tool_name, path).await
+    persist_permanent_tool_approval_to_path(state, tool_name, path, || Ok(state.active_config()))
+        .await
 }
 
 async fn persist_permanent_tool_approval_to_path(
-    config: &swage_config::ResolvedConfig,
+    state: &AppState,
     tool_name: &str,
     path: PathBuf,
+    resolve_config: impl FnOnce() -> Result<swage_config::ResolvedConfig, ApiError>,
 ) -> Result<(), ApiError> {
+    #[cfg(test)]
+    config_write_pause::wait(&path).await;
+    let _config_update = state.config_updates.lock().await;
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(|error| {
             ApiError::validation(format!("failed to create config directory: {error}"))
@@ -377,12 +386,27 @@ async fn persist_permanent_tool_approval_to_path(
     }
 
     let mut partial = read_partial_config(&path).await?;
+    // Resolve under the update lock and apply the scope's current file so
+    // a completed security save survives even if runtime state lags it.
+    let config = swage_config::apply_overlay(resolve_config()?, partial.clone());
     let tools = partial.tools.get_or_insert_with(Default::default);
-    tools.require_approval = Some(require_approval_entries_without_tool(config, tool_name));
+    let require_approval = require_approval_entries_without_tool(&config, tool_name);
+    tools.require_approval = Some(require_approval.clone());
 
     let body = toml::to_string_pretty(&partial)
         .map_err(|error| ApiError::validation(format!("failed to serialise settings: {error}")))?;
     write_config_atomically(&path, &body).await?;
+
+    if path == global_config_path(&state.config_root) {
+        let mut runtime_config = state.active_config();
+        runtime_config.tools.permissions.require_approval = require_approval;
+        let tool_dispatcher = crate::startup::build_tool_dispatcher(
+            &runtime_config,
+            state.storage.clone(),
+            &state.config_root,
+        );
+        state.replace_runtime(runtime_config, state.active_provider(), tool_dispatcher);
+    }
 
     Ok(())
 }
@@ -844,9 +868,8 @@ where
 #[derive(Debug, Clone, Default)]
 struct RuntimeSectionUpdates {
     tool_runtime: Option<ToolRuntimeSettings>,
-    tool_permissions: Option<swage_config::ToolPermissionConfig>,
+    tool_permissions: Option<swage_protocol::client::settings::ToolGrantSettings>,
     hitl: Option<swage_config::HitlConfig>,
-    sandbox: Option<swage_config::SandboxConfig>,
     context: Option<swage_config::ContextConfig>,
     pricing: Option<swage_config::PricingConfig>,
     observability: Option<swage_config::ObservabilityConfig>,
@@ -864,7 +887,6 @@ fn apply_runtime_settings_to_partial(
         tool_runtime,
         tool_permissions,
         hitl,
-        sandbox,
         context,
         pricing,
         observability,
@@ -910,19 +932,12 @@ fn apply_runtime_settings_to_partial(
         let tools = partial.tools.get_or_insert_with(Default::default);
         tools.allow = Some(tool_permissions.allow);
         tools.deny = Some(tool_permissions.deny);
-        tools.bundles = Some(tool_permissions.bundles);
-        tools.require_approval = Some(tool_permissions.require_approval);
+        tools.bundles = Some(tool_permissions.bundles.into_iter().collect());
     }
     if let Some(hitl) = hitl {
         partial.hitl = Some(swage_config::merge::PartialHitlConfig {
             timeout: Some(hitl.timeout),
             timeout_policy: Some(hitl.timeout_policy),
-        });
-    }
-    if let Some(sandbox) = sandbox {
-        partial.sandbox = Some(swage_config::merge::PartialSandboxConfig {
-            enabled: Some(sandbox.enabled),
-            allow_degraded_execution: Some(sandbox.allow_degraded_execution),
         });
     }
     if let Some(context) = context {
@@ -1053,7 +1068,7 @@ fn validate_tool_runtime_settings(runtime: &ToolRuntimeSettings) -> Result<(), A
 }
 
 fn validate_tool_permissions(
-    permissions: &swage_protocol::client::settings::ToolPermissionConfig,
+    permissions: &swage_protocol::client::settings::ToolGrantSettings,
 ) -> Result<(), ApiError> {
     validate_named_list("tool allow rules", &permissions.allow)?;
     validate_named_list("tool deny rules", &permissions.deny)?;
@@ -1064,13 +1079,6 @@ fn validate_tool_permissions(
             ));
         }
         validate_named_list("tool bundle entries", tools)?;
-    }
-    for entry in &permissions.require_approval {
-        if entry.tool_name().trim().is_empty() {
-            return Err(ApiError::validation(
-                "approval-gated tool names must not be empty".to_string(),
-            ));
-        }
     }
     Ok(())
 }
@@ -1084,6 +1092,7 @@ fn validate_named_list(label: &str, values: &[String]) -> Result<(), ApiError> {
     Ok(())
 }
 
+// Called only within the serialised general settings update.
 async fn persist_provider_key(
     state: &AppState,
     provider_id: &str,
@@ -1310,6 +1319,59 @@ async fn discover_openrouter_models() -> Result<Vec<DiscoveredModel>, ApiError> 
 #[cfg(test)]
 mod tests {
     use crate::test_support::SwageHomeGuard;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn global_permanent_approval_updates_general_session_security_reading() {
+        use std::sync::Arc;
+        use swage_storage::{SessionStore, SqliteStorage, TopicStore};
+
+        let root = tempfile::tempdir().expect("config root");
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let general = storage.general_scope().await.expect("general scope");
+        let session = storage
+            .create_session(swage_storage::fixtures::new_session(general.id))
+            .await
+            .expect("session");
+        let mut config = swage_config::ResolvedConfig::default();
+        config.tools.permissions.require_approval = vec![
+            swage_config::model::RequireApprovalEntry::Simple("shell".into()),
+            swage_config::model::RequireApprovalEntry::Simple("file_write".into()),
+        ];
+        let state = AppState::new_with_config_root(
+            storage.clone(),
+            storage,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            root.path().to_path_buf(),
+        );
+        let before = crate::security_settings::security_settings_for_session(&state, session.id)
+            .await
+            .expect("initial session reading");
+        assert_eq!(before.effective.require_approval.len(), 2);
+
+        persist_permanent_tool_approval_globally(&state, "shell")
+            .await
+            .expect("global permanent approval");
+        let saved = read_partial_config(&global_config_path(root.path()))
+            .await
+            .unwrap();
+        assert_eq!(
+            saved.tools.unwrap().require_approval.unwrap(),
+            vec![swage_config::model::RequireApprovalEntry::Simple(
+                "file_write".into()
+            )]
+        );
+        let after = crate::security_settings::security_settings_for_session(&state, session.id)
+            .await
+            .expect("session reading after approval");
+        assert_eq!(
+            serde_json::to_value(after.effective.require_approval).unwrap(),
+            serde_json::json!(["file_write"]),
+            "general session security must stop requiring approval for the globally approved tool"
+        );
+    }
 
     fn succession_settings_request(context: Option<serde_json::Value>) -> SaveSettingsRequest {
         let mut value = serde_json::json!({
@@ -1914,17 +1976,12 @@ mod tests {
             .into_iter()
             .collect(),
             tool_runtime: None,
-            tool_permissions: Some(swage_protocol::client::settings::ToolPermissionConfig {
+            tool_permissions: Some(swage_protocol::client::settings::ToolGrantSettings {
                 allow: vec!["file_read".to_string()],
                 deny: vec!["shell".to_string()],
                 bundles: Default::default(),
-                require_approval: vec![],
             }),
             hitl: Some(wire_from_config(swage_config::HitlConfig::default())),
-            sandbox: Some(swage_protocol::client::settings::SandboxConfig {
-                enabled: false,
-                allow_degraded_execution: true,
-            }),
             context: Some(swage_protocol::client::settings::ContextConfig {
                 assembly: "default".to_string(),
                 alternatives: Vec::new(),
@@ -2035,7 +2092,6 @@ mod tests {
             tool_runtime: None,
             tool_permissions: None,
             hitl: None,
-            sandbox: None,
             context: None,
             pricing: None,
             observability: None,
@@ -2234,7 +2290,6 @@ mod tests {
             tool_runtime: None,
             tool_permissions: None,
             hitl: None,
-            sandbox: None,
             context: None,
             pricing: None,
             observability: None,
@@ -2391,7 +2446,6 @@ mod tests {
             }),
             tool_permissions: None,
             hitl: None,
-            sandbox: None,
             context: None,
             pricing: None,
             observability: None,
@@ -2563,7 +2617,6 @@ mod tests {
             tool_runtime: None,
             tool_permissions: None,
             hitl: None,
-            sandbox: None,
             context: None,
             pricing: Some(wire_from_config(pricing)),
             observability: Some(wire_from_config(observability)),
@@ -2603,14 +2656,12 @@ mod tests {
             models: HashMap::new(),
             generation_presets: HashMap::new(),
             tool_runtime: None,
-            tool_permissions: Some(swage_protocol::client::settings::ToolPermissionConfig {
+            tool_permissions: Some(swage_protocol::client::settings::ToolGrantSettings {
                 allow: vec!["*".into()],
                 deny: vec!["".into()],
                 bundles: Default::default(),
-                require_approval: vec![],
             }),
             hitl: Some(wire_from_config(swage_config::HitlConfig::default())),
-            sandbox: Some(wire_from_config(swage_config::SandboxConfig::default())),
             context: Some(wire_from_config(swage_config::ContextConfig::default())),
             pricing: None,
             observability: None,
@@ -2688,15 +2739,10 @@ mod tests {
         let mut partial = swage_config::PartialConfig::default();
         let mut bundles = HashMap::new();
         bundles.insert("dangerous".to_string(), vec!["shell".to_string()]);
-        let permissions = swage_config::ToolPermissionConfig {
+        let permissions = swage_protocol::client::settings::ToolGrantSettings {
             allow: vec!["file_read".into()],
             deny: vec!["shell".into()],
-            bundles,
-            require_approval: vec![swage_config::RequireApprovalEntry::WithOptions {
-                tool: "python_execute".into(),
-                timeout: Some(120),
-                timeout_policy: Some(swage_core::ApprovalTimeoutPolicy::Interrupt),
-            }],
+            bundles: bundles.into_iter().collect(),
         };
 
         apply_runtime_settings_to_partial(
@@ -2706,10 +2752,6 @@ mod tests {
                 hitl: Some(swage_config::HitlConfig {
                     timeout: 600,
                     timeout_policy: swage_core::ApprovalTimeoutPolicy::Interrupt,
-                }),
-                sandbox: Some(swage_config::SandboxConfig {
-                    enabled: false,
-                    allow_degraded_execution: true,
                 }),
                 context: Some(swage_config::ContextConfig {
                     assembly: "compact".into(),
@@ -2740,10 +2782,37 @@ mod tests {
         assert!(body.contains("[hitl]"));
         assert!(body.contains("timeout = 600"));
         assert!(body.contains("timeout_policy = \"interrupt\""));
-        assert!(body.contains("[sandbox]"));
-        assert!(body.contains("enabled = false"));
+        assert!(!body.contains("[sandbox]"));
+        assert!(!body.contains("require_approval"));
         assert!(body.contains("[context]"));
         assert!(body.contains("assembly = \"compact\""));
         assert!(body.contains("budget = 8192"));
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod config_write_pause {
+    use std::sync::{LazyLock, Mutex};
+    use tokio::sync::oneshot;
+
+    use super::*;
+
+    type Pause = (oneshot::Sender<()>, oneshot::Receiver<()>);
+    static PAUSES: LazyLock<Mutex<HashMap<PathBuf, Pause>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub fn before_write(path: PathBuf) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (reached, waiting) = oneshot::channel();
+        let (resume, released) = oneshot::channel();
+        PAUSES.lock().unwrap().insert(path, (reached, released));
+        (waiting, resume)
+    }
+
+    pub async fn wait(path: &std::path::Path) {
+        let pause = PAUSES.lock().unwrap().remove(path);
+        if let Some((reached, released)) = pause {
+            reached.send(()).unwrap();
+            released.await.unwrap();
+        }
     }
 }

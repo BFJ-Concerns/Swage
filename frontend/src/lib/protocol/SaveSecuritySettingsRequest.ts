@@ -3,12 +3,12 @@ import type { AccessGateMode } from "./AccessGateMode";
 import type { RequireApprovalEntry } from "./RequireApprovalEntry";
 
 /**
- * A scope's security settings as the settings surface writes them: the
- * overrides the scope should hold afterwards, whole. An absent field clears
- * the scope's own setting and the scope beneath decides again.
+ * Changes to a scope's security overrides. Absent fields leave stored
+ * overrides unchanged; explicit null clears an override so the scope
+ * beneath decides again. A supplied approval list replaces that list.
  */
-export type SaveSecuritySettingsRequest = { sandbox_enabled?: boolean, allow_degraded_execution?: boolean, require_approval?: Array<RequireApprovalEntry>,
+export type SaveSecuritySettingsRequest = { sandbox_enabled?: boolean | null, allow_degraded_execution?: boolean | null, require_approval?: Array<RequireApprovalEntry> | null,
 /**
  * Install scope only; a topic's request carrying it is refused.
  */
-access_gate?: AccessGateMode, };
+access_gate?: AccessGateMode | null, };

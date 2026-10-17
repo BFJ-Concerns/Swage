@@ -8,6 +8,7 @@
   done from here, without leaving the work in view.
 -->
 <script lang="ts">
+  import SessionSecurityBadge from "./SessionSecurityBadge.svelte";
   import ApprovalCard from "./ApprovalCard.svelte";
   import ConnectionIndicator from "./ConnectionIndicator.svelte";
   import MessageDisplay from "./MessageDisplay.svelte";
@@ -145,6 +146,7 @@
     {/if}
     <button class="new-session" aria-label="New conversation" onclick={() => onNewConversation?.(selectedAgentId || undefined)}>+ New</button>
   </header>
+  {#if activeConversation}<SessionSecurityBadge conversationId={activeConversation.id} />{/if}
   {#if activeConversation && branches.length > 0}
     <!-- Which thread the history and composer show. The root is always
          first; a branch is named by the message it was taken from, so two

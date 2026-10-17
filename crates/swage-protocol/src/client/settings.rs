@@ -565,6 +565,16 @@ pub struct SettingsResponse {
     pub can_restart: bool,
 }
 
+/// Tool grants editable through general settings; approval requirements belong
+/// to the scoped security settings.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
+#[ts(optional_fields = nullable)]
+pub struct ToolGrantSettings {
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
+    pub bundles: BTreeMap<String, Vec<String>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[ts(optional_fields = nullable)]
 pub struct SaveSettingsRequest {
@@ -580,13 +590,10 @@ pub struct SaveSettingsRequest {
     pub tool_runtime: Option<ToolRuntimeSettings>,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
-    pub tool_permissions: Option<ToolPermissionConfig>,
+    pub tool_permissions: Option<ToolGrantSettings>,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub hitl: Option<HitlConfig>,
-    #[serde(default)]
-    #[ts(optional, as = "Option<_>")]
-    pub sandbox: Option<SandboxConfig>,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub context: Option<ContextConfig>,

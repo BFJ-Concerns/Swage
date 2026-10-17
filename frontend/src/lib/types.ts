@@ -88,12 +88,11 @@ export type SettingsResponse = Omit<
 };
 export type SettingsPayload = Omit<
   WireSaveSettingsRequest,
-  "providers" | "models" | "generation_presets" | "sandbox"
+  "providers" | "models" | "generation_presets"
 > & {
   providers: Record<string, ProviderSettings>;
   models: Record<string, ModelSettings>;
   generation_presets: Record<string, GenerationPresetConfig>;
-  sandbox: SandboxConfig;
 };
 export type ProviderDiscoveryDraft = Omit<ProviderSettings, "has_credential" | "api_key">;
 

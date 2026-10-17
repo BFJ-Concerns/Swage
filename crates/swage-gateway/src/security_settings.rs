@@ -12,7 +12,7 @@
 //! settings page, the install's Settings and a session's view all say the
 //! same thing from the same reading.
 //!
-//! A write replaces the scope's own security overrides whole, records the
+//! A write updates only the supplied security overrides and records the
 //! change in the audit trail with the prior and new readings, and takes
 //! effect for the next turn: the install's active configuration is updated
 //! in place, and a topic's file is read by every turn that runs under it.
@@ -45,7 +45,7 @@ pub async fn read_security_settings(
     resolved.read(state).await
 }
 
-/// Replace a scope's security overrides, record the change, and return the
+/// Update a scope's supplied security overrides, record the change, and return the
 /// scope as it now reads.
 pub async fn save_security_settings(
     state: &AppState,
@@ -53,11 +53,12 @@ pub async fn save_security_settings(
     request: SaveSecuritySettingsRequest,
 ) -> Result<SecuritySettingsResponse, ApiError> {
     let resolved = ResolvedScope::resolve(state, &scope).await?;
-    validate_overrides(&scope, &request.overrides)?;
+    validate_overrides(&scope, &request)?;
+    let _config_update = state.config_updates.lock().await;
     let prior = resolved.read(state).await?;
 
     let mut partial = read_partial(&resolved.config_path).await?;
-    apply_overrides(&mut partial, &request.overrides)?;
+    apply_overrides(&mut partial, &request)?;
     write_partial(&resolved.config_path, &partial).await?;
 
     if resolved.scope == SettingsScope::Install {
@@ -180,7 +181,16 @@ impl ResolvedScope {
             )?,
         };
         let relaxed = relaxations(&effective, &self.scope, &overrides, &install_overrides);
+        let dispatcher = state.active_tool_dispatcher();
+        let mut available_tools: Vec<String> = dispatcher
+            .registry()
+            .list()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        available_tools.sort();
         Ok(SecuritySettingsResponse {
+            available_tools,
             scope: self.scope.clone(),
             effective,
             overrides,
@@ -350,36 +360,42 @@ fn overrides_from_partial(
     })
 }
 
-/// Write the overrides into the scope's partial, whole: an absent field
-/// clears the scope's own setting.
+/// Apply supplied overrides to the scope's partial configuration. Omission
+/// preserves the stored setting; explicit null clears it.
 fn apply_overrides(
     partial: &mut swage_config::PartialConfig,
-    overrides: &SecurityOverrides,
+    overrides: &SaveSecuritySettingsRequest,
 ) -> Result<(), ApiError> {
-    let sandbox = partial.sandbox.get_or_insert_with(Default::default);
-    sandbox.enabled = overrides.sandbox_enabled;
-    sandbox.allow_degraded_execution = overrides.allow_degraded_execution;
-    if sandbox.enabled.is_none() && sandbox.allow_degraded_execution.is_none() {
+    if let Some(enabled) = overrides.sandbox_enabled {
+        partial.sandbox.get_or_insert_with(Default::default).enabled = enabled;
+    }
+    if let Some(allow_degraded) = overrides.allow_degraded_execution {
+        partial
+            .sandbox
+            .get_or_insert_with(Default::default)
+            .allow_degraded_execution = allow_degraded;
+    }
+    if partial.sandbox.as_ref().is_some_and(|sandbox| {
+        sandbox.enabled.is_none() && sandbox.allow_degraded_execution.is_none()
+    }) {
         partial.sandbox = None;
     }
-    let require_approval = overrides
-        .require_approval
-        .as_ref()
-        .map(|entries| config_entries(entries))
-        .transpose()?;
-    match (&mut partial.tools, require_approval) {
-        (Some(tools), entries) => tools.require_approval = entries,
-        (None, Some(entries)) => {
-            partial.tools = Some(swage_config::merge::PartialToolConfig {
-                require_approval: Some(entries),
-                ..Default::default()
-            });
-        }
-        (None, None) => {}
+    if let Some(entries) = &overrides.require_approval {
+        let entries = entries
+            .as_ref()
+            .map(|entries| config_entries(entries))
+            .transpose()?;
+        partial
+            .tools
+            .get_or_insert_with(Default::default)
+            .require_approval = entries;
     }
-    let server = partial.server.get_or_insert_with(Default::default);
-    server.access = overrides.access_gate;
-    if server.host.is_none() && server.port.is_none() && server.access.is_none() {
+    if let Some(access) = overrides.access_gate {
+        partial.server.get_or_insert_with(Default::default).access = access;
+    }
+    if partial.server.as_ref().is_some_and(|server| {
+        server.host.is_none() && server.port.is_none() && server.access.is_none()
+    }) {
         partial.server = None;
     }
     Ok(())
@@ -412,14 +428,14 @@ fn apply_to_active_config(state: &AppState, partial: &swage_config::PartialConfi
 
 fn validate_overrides(
     scope: &SettingsScope,
-    overrides: &SecurityOverrides,
+    overrides: &SaveSecuritySettingsRequest,
 ) -> Result<(), ApiError> {
     if overrides.access_gate.is_some() && *scope != SettingsScope::Install {
         return Err(ApiError::validation(
             "the access gate admits a client before any topic is chosen, so it is relaxed for the whole install only".into(),
         ));
     }
-    if let Some(entries) = &overrides.require_approval
+    if let Some(Some(entries)) = &overrides.require_approval
         && let Some(blank) = entries
             .iter()
             .find(|entry| entry.tool_name().trim().is_empty())
@@ -507,8 +523,319 @@ mod tests {
         (state, storage, root)
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn absent_overrides_preserve_stored_security_after_permanent_approval() {
+        let (state, _, _root) = fixture().await;
+        save_security_settings(
+            &state,
+            SettingsScope::Install,
+            save(SecurityOverrides {
+                sandbox_enabled: Some(false),
+                allow_degraded_execution: Some(true),
+                access_gate: Some(AccessGateMode::Warn),
+                require_approval: Some(vec![
+                    RequireApprovalEntry::Simple("shell".into()),
+                    RequireApprovalEntry::Simple("file_write".into()),
+                ]),
+            }),
+        )
+        .await
+        .unwrap();
+        crate::settings::persist_permanent_tool_approval_globally(&state, "shell")
+            .await
+            .unwrap();
+        let updated = save_security_settings(
+            &state,
+            SettingsScope::Install,
+            serde_json::from_value(serde_json::json!({"sandbox_enabled": true})).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&updated.overrides.require_approval).unwrap(),
+            serde_json::json!(["file_write"]),
+            "sandbox-only save changed the permanently approved list"
+        );
+        assert_eq!(updated.overrides.allow_degraded_execution, Some(true));
+        assert_eq!(updated.overrides.access_gate, Some(AccessGateMode::Warn));
+        let replaced = save_security_settings(
+            &state,
+            SettingsScope::Install,
+            serde_json::from_value(serde_json::json!({"require_approval": []})).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(replaced.effective.require_approval.is_empty());
+        assert_eq!(replaced.overrides.sandbox_enabled, Some(true));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn explicit_null_clears_only_the_named_security_overrides() {
+        let (state, _, _root) = fixture().await;
+        save_security_settings(
+            &state,
+            SettingsScope::Install,
+            save(SecurityOverrides {
+                sandbox_enabled: Some(false),
+                allow_degraded_execution: Some(true),
+                require_approval: Some(vec![]),
+                access_gate: Some(AccessGateMode::Warn),
+            }),
+        )
+        .await
+        .unwrap();
+        let reset = save_security_settings(
+            &state,
+            SettingsScope::Install,
+            serde_json::from_value(serde_json::json!({"sandbox_enabled": null})).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(reset.overrides.sandbox_enabled.is_none());
+        assert!(reset.effective.sandbox_enabled);
+        assert_eq!(reset.overrides.allow_degraded_execution, Some(true));
+        assert_eq!(reset.overrides.access_gate, Some(AccessGateMode::Warn));
+        assert!(reset.overrides.require_approval.unwrap().is_empty());
+        let reset = save_security_settings(&state, SettingsScope::Install,
+            serde_json::from_value(serde_json::json!({"allow_degraded_execution": null, "require_approval": null, "access_gate": null})).unwrap()
+        ).await.unwrap();
+        assert!(no_overrides(&reset.overrides));
+        assert!(!reset.effective.allow_degraded_execution);
+        assert_eq!(reset.effective.access_gate, AccessGateMode::Token);
+        assert_eq!(reset.effective.require_approval.len(), 8);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn permanent_install_approval_preserves_concurrent_security_save() {
+        permanent_approval_preserves_concurrent_security_save(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn permanent_topic_approval_preserves_concurrent_security_save() {
+        permanent_approval_preserves_concurrent_security_save(true).await;
+    }
+
+    async fn permanent_approval_preserves_concurrent_security_save(topic_scope: bool) {
+        let (state, storage, root) = fixture().await;
+        let topic = if topic_scope {
+            Some(
+                TopicStore::create(
+                    storage.as_ref(),
+                    NewTopic {
+                        name: "Orchard".into(),
+                        slug: "orchard".into(),
+                    },
+                )
+                .await
+                .unwrap(),
+            )
+        } else {
+            None
+        };
+        let scope = topic
+            .as_ref()
+            .map_or(SettingsScope::Install, |topic| SettingsScope::Topic {
+                topic_id: topic.id,
+            });
+        let entries = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| RequireApprovalEntry::Simple((*name).into()))
+                .collect()
+        };
+        save_security_settings(
+            &state,
+            scope.clone(),
+            save(SecurityOverrides {
+                require_approval: Some(entries(&["shell", "file_write"])),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        let path = topic.as_ref().map_or_else(
+            || root.path().join("config.toml"),
+            |topic| topic.location().data_dir(root.path()).join("config.toml"),
+        );
+        let (waiting, resume) = crate::settings::config_write_pause::before_write(path.clone());
+        let approval_state = state.clone();
+        let approval = tokio::spawn(async move {
+            if let Some(topic) = topic {
+                crate::settings::persist_permanent_tool_approval_for_topic(
+                    &approval_state,
+                    &topic,
+                    RESERVED_WORKFLOW_AGENT_ID,
+                    "shell",
+                )
+                .await
+                .unwrap();
+            } else {
+                crate::settings::persist_permanent_tool_approval_globally(&approval_state, "shell")
+                    .await
+                    .unwrap();
+            }
+        });
+        // Pause immediately before the update lock, after any configuration
+        // resolved by the caller. Complete a security save in that gap.
+        waiting.await.unwrap();
+        save_security_settings(
+            &state,
+            scope,
+            save(SecurityOverrides {
+                require_approval: Some(entries(&["shell", "file_write", "file_read"])),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        resume.send(()).unwrap();
+        approval.await.unwrap();
+        let partial = read_partial(&path).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(partial.tools.unwrap().require_approval.unwrap()).unwrap(),
+            serde_json::json!(["file_write", "file_read"]),
+            "successful security save was lost by the concurrent permanent approval"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_general_and_security_saves_preserve_both_fields() {
+        let (state, _, root) = fixture().await;
+        let mut general =
+            serde_json::to_value(crate::settings::load_settings(&state).await.unwrap()).unwrap();
+        general["tool_runtime"]["max_output_bytes"] = serde_json::json!(123_456);
+        let path = root.path().join("config.toml");
+        let (waiting, resume) = crate::settings::config_write_pause::before_write(path.clone());
+        let general_state = state.clone();
+        let general_save = tokio::spawn(async move {
+            crate::settings::save_settings(
+                &general_state,
+                serde_json::from_value(general).unwrap(),
+            )
+            .await
+            .unwrap();
+        });
+        // The general save has read the file and is about to replace it.
+        waiting.await.unwrap();
+        let security_state = state.clone();
+        let mut security_save = tokio::spawn(async move {
+            save_security_settings(
+                &security_state,
+                SettingsScope::Install,
+                save(SecurityOverrides {
+                    allow_degraded_execution: Some(true),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        });
+        // An unprotected writer finishes here; a serialised writer waits for
+        // the paused save. Keep the pending task alive across the timeout.
+        let security_finished =
+            tokio::time::timeout(std::time::Duration::from_secs(5), &mut security_save).await;
+        resume.send(()).unwrap();
+        general_save.await.unwrap();
+        match security_finished {
+            Ok(result) => result.unwrap(),
+            Err(_) => security_save.await.unwrap(),
+        }
+        let partial = read_partial(&path).await.unwrap();
+        assert_eq!(
+            partial.tools.as_ref().unwrap().max_output_bytes,
+            Some(123_456),
+            "successful general save was lost by the concurrent security save"
+        );
+        assert_eq!(
+            overrides_from_partial(&partial)
+                .unwrap()
+                .allow_degraded_execution,
+            Some(true),
+            "successful security save was lost by the concurrent general save"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn general_save_cannot_overwrite_newer_security_settings() {
+        let (state, _, _root) = fixture().await;
+        let mut old =
+            serde_json::to_value(crate::settings::load_settings(&state).await.unwrap()).unwrap();
+        old["sandbox"] = serde_json::json!({"enabled": false, "allow_degraded_execution": false});
+        old["tool_permissions"]["require_approval"] = serde_json::json!([]);
+        save_security_settings(
+            &state,
+            SettingsScope::Install,
+            save(SecurityOverrides {
+                sandbox_enabled: Some(true),
+                allow_degraded_execution: Some(true),
+                require_approval: Some(vec![RequireApprovalEntry::Simple("shell".into())]),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        crate::settings::save_settings(&state, serde_json::from_value(old).unwrap())
+            .await
+            .unwrap();
+        let reading = read_security_settings(&state, SettingsScope::Install)
+            .await
+            .unwrap();
+        assert!(
+            reading.effective.sandbox_enabled,
+            "general save reverted the sandbox"
+        );
+        assert!(
+            reading.effective.allow_degraded_execution,
+            "general save reverted confinement"
+        );
+        assert_eq!(
+            serde_json::to_value(reading.effective.require_approval).unwrap(),
+            serde_json::json!(["shell"])
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unconfined_fallback_is_saved_and_read_as_effective() {
+        let (state, _, _root) = fixture().await;
+        save_security_settings(
+            &state,
+            SettingsScope::Install,
+            save(SecurityOverrides {
+                allow_degraded_execution: Some(true),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        let reading = read_security_settings(&state, SettingsScope::Install)
+            .await
+            .unwrap();
+        assert_eq!(reading.overrides.allow_degraded_execution, Some(true));
+        assert!(reading.effective.allow_degraded_execution);
+        assert!(state.active_config().sandbox.allow_degraded_execution);
+    }
+
+    #[tokio::test]
+    async fn security_reading_lists_the_active_registry_for_the_picker() {
+        let (state, _, _root) = fixture().await;
+        state.replace_runtime(
+            state.active_config(),
+            state.active_provider(),
+            crate::tool::ToolDispatcher::allow_all(vec![Arc::new(
+                crate::tool::file_read::FileReadTool {
+                    max_output_bytes: 4096,
+                },
+            )
+                as Arc<dyn crate::tool::Tool>]),
+        );
+        let reading = read_security_settings(&state, SettingsScope::Install)
+            .await
+            .expect("reading");
+        assert_eq!(reading.available_tools, vec!["file_read"]);
+    }
+
     fn save(overrides: SecurityOverrides) -> SaveSecuritySettingsRequest {
-        SaveSecuritySettingsRequest { overrides }
+        serde_json::from_value(serde_json::to_value(overrides).unwrap()).unwrap()
     }
 
     fn no_overrides(overrides: &SecurityOverrides) -> bool {
@@ -583,10 +910,13 @@ mod tests {
         assert!(changes[0].summary.contains("sandbox relaxed"));
 
         // Clearing the override restores the shipped default.
-        let restored =
-            save_security_settings(&state, SettingsScope::Install, save(Default::default()))
-                .await
-                .expect("clear");
+        let restored = save_security_settings(
+            &state,
+            SettingsScope::Install,
+            serde_json::from_value(serde_json::json!({"sandbox_enabled": null})).unwrap(),
+        )
+        .await
+        .expect("clear");
         assert!(restored.effective.sandbox_enabled);
         assert!(restored.relaxed.is_empty());
         assert!(state.active_config().sandbox.enabled);

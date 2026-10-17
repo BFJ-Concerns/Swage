@@ -1,4 +1,5 @@
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, shell } from "electron";
+import { installPairing } from "./pairing.mjs";
 import { spawn } from "node:child_process";
 import http from "node:http";
 import path from "node:path";
@@ -21,14 +22,14 @@ if (isHeadlessShell) {
   app.commandLine.appendSwitch("disable-gpu");
 }
 
-async function waitForGateway(url, timeoutMs = 30_000) {
+async function waitForGateway(url, timeoutMs = 30_000, pairing) {
   const healthUrl = new URL("/api/health", url);
   const startedAt = Date.now();
   let lastError = null;
 
   while (Date.now() - startedAt < timeoutMs) {
     try {
-      if (await isGatewayHealthy(healthUrl)) return;
+      if (await isGatewayHealthy(healthUrl, pairing)) return;
     } catch (error) {
       lastError = error;
     }
@@ -39,9 +40,9 @@ async function waitForGateway(url, timeoutMs = 30_000) {
   throw new Error(`Timed out waiting for gateway at ${url}${detail}`);
 }
 
-function isGatewayHealthy(healthUrl) {
+function isGatewayHealthy(healthUrl, pairing) {
   return new Promise((resolve, reject) => {
-    const request = http.get(healthUrl, (response) => {
+    const request = http.get(healthUrl, { headers: pairing.headers(healthUrl) }, (response) => {
       response.resume();
       response.on("end", () => {
         resolve(response.statusCode >= 200 && response.statusCode < 300);
@@ -115,6 +116,32 @@ async function createWindow() {
     },
   });
 
+  const gatewayOrigin = new URL(targetUrl).origin;
+  const openInBrowser = (url) => {
+    let destination;
+    try {
+      destination = new URL(url);
+    } catch { return; }
+    if (destination.protocol !== "http:" && destination.protocol !== "https:") return;
+    void shell.openExternal(destination.href).catch(() => {
+      console.error("Failed to open page in the system browser");
+    });
+  };
+  const restrictNavigation = (event, url) => {
+    try {
+      if (new URL(url ?? event.url).origin === gatewayOrigin) return;
+    } catch { /* Invalid destinations cannot be gateway pages. */ }
+    event.preventDefault();
+    openInBrowser(url ?? event.url);
+  };
+  win.webContents.on("will-navigate", restrictNavigation);
+  win.webContents.on("will-redirect", restrictNavigation);
+  win.webContents.on("will-frame-navigate", restrictNavigation);
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    openInBrowser(url);
+    return { action: "deny" };
+  });
+
   win.once("ready-to-show", () => {
     if (!isHeadlessShell) {
       win.show();
@@ -124,7 +151,8 @@ async function createWindow() {
     }
   });
 
-  await waitForGateway(targetUrl);
+  const pairing = await installPairing(win.webContents.session, targetUrl, app.getPath("userData"));
+  await waitForGateway(targetUrl, 30_000, pairing);
   await win.loadURL(targetUrl);
   return win;
 }

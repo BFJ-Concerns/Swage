@@ -92,19 +92,103 @@ pub struct SecurityOverrides {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, TS)]
 #[ts(optional_fields = nullable)]
 pub struct SecuritySettingsResponse {
+    /// Tools currently registered with the gateway, available to the approval picker.
+    pub available_tools: Vec<String>,
     pub scope: SettingsScope,
     pub effective: EffectiveSecurityChecks,
     pub overrides: SecurityOverrides,
     pub relaxed: Vec<RelaxedCheck>,
 }
 
-/// A scope's security settings as the settings surface writes them: the
-/// overrides the scope should hold afterwards, whole. An absent field clears
-/// the scope's own setting and the scope beneath decides again.
+/// Changes to a scope's security overrides. Absent fields leave stored
+/// overrides unchanged; explicit null clears an override so the scope
+/// beneath decides again. A supplied approval list replaces that list.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
 #[ts(optional_fields = nullable)]
 pub struct SaveSecuritySettingsRequest {
-    #[serde(flatten)]
-    pub overrides: SecurityOverrides,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_override"
+    )]
+    #[ts(optional)]
+    pub sandbox_enabled: Option<Option<bool>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_override"
+    )]
+    #[ts(optional)]
+    pub allow_degraded_execution: Option<Option<bool>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_override"
+    )]
+    #[ts(optional)]
+    pub require_approval: Option<Option<Vec<RequireApprovalEntry>>>,
+    /// Install scope only; a topic's request carrying it is refused.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_override"
+    )]
+    #[ts(optional)]
+    pub access_gate: Option<Option<AccessGateMode>>,
+}
+
+// Serde calls this only for a present field, preserving explicit null as
+// Some(None) while the field's default represents omission as None.
+#[expect(
+    clippy::option_option,
+    reason = "serde must distinguish omitted, null and supplied overrides"
+)]
+fn present_override<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn security_updates_distinguish_absent_null_and_value() {
+        let empty: SaveSecuritySettingsRequest =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(empty.sandbox_enabled.is_none());
+        assert!(empty.allow_degraded_execution.is_none());
+        assert!(empty.require_approval.is_none());
+        assert!(empty.access_gate.is_none());
+        assert_eq!(serde_json::to_value(empty).unwrap(), serde_json::json!({}));
+        let cleared: SaveSecuritySettingsRequest = serde_json::from_value(serde_json::json!({
+            "sandbox_enabled": null, "allow_degraded_execution": null,
+            "require_approval": null, "access_gate": null
+        }))
+        .unwrap();
+        assert_eq!(cleared.sandbox_enabled, Some(None));
+        assert_eq!(cleared.allow_degraded_execution, Some(None));
+        assert!(matches!(cleared.require_approval, Some(None)));
+        assert_eq!(cleared.access_gate, Some(None));
+        assert_eq!(
+            serde_json::to_value(cleared).unwrap(),
+            serde_json::json!({
+                "sandbox_enabled": null, "allow_degraded_execution": null,
+                "require_approval": null, "access_gate": null
+            })
+        );
+        let set: SaveSecuritySettingsRequest = serde_json::from_value(serde_json::json!({
+            "sandbox_enabled": false, "allow_degraded_execution": true,
+            "require_approval": [], "access_gate": "warn"
+        }))
+        .unwrap();
+        assert_eq!(set.sandbox_enabled, Some(Some(false)));
+        assert_eq!(set.allow_degraded_execution, Some(Some(true)));
+        assert!(set.require_approval.unwrap().unwrap().is_empty());
+        assert_eq!(set.access_gate, Some(Some(AccessGateMode::Warn)));
+    }
 }

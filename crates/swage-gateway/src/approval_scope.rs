@@ -238,12 +238,6 @@ pub(crate) async fn apply_approval_scope(
             match scope {
                 ApprovalDecisionScope::Permanent => {
                     let topic = approval_topic(state, approval).await?;
-                    let config = crate::turn::load_session_config(
-                        state,
-                        &topic.location(),
-                        &approval.agent_id,
-                    )
-                    .map_err(ApiError::from)?;
                     state
                         .session_approval_grants
                         .lock()
@@ -256,9 +250,9 @@ pub(crate) async fn apply_approval_scope(
                             access: None,
                         });
                     crate::settings::persist_permanent_tool_approval_for_topic(
-                        &state.config_root,
-                        &config,
+                        state,
                         &topic,
+                        &approval.agent_id,
                         tool_name,
                     )
                     .await

@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "electron ./src/main.mjs",
-    "test": "npm --prefix ../frontend run build && node ./tests/smoke.mjs"
+    "test": "node --test ./tests/pairing.test.mjs && npm --prefix ../frontend run build && node ./tests/smoke.mjs"
   },
   "devDependencies": {
     "electron": "42.5.0",

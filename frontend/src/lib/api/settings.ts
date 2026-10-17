@@ -10,7 +10,6 @@ import type { ProviderSignInState } from "../protocol/ProviderSignInState";
 import type { SignInMethod } from "../protocol/SignInMethod";
 import type { StartProviderSignInResponse } from "../protocol/StartProviderSignInResponse";
 import type { SaveProviderSettings } from "../protocol/SaveProviderSettings";
-import type { SaveSettingsRequest } from "../protocol/SaveSettingsRequest";
 import type { SaveSecuritySettingsRequest } from "../protocol/SaveSecuritySettingsRequest";
 import type { SecuritySettingsResponse } from "../protocol/SecuritySettingsResponse";
 import * as generated from "../protocol/client";
@@ -20,7 +19,7 @@ export async function fetchSettings(): Promise<SettingsResponse> {
 }
 
 export async function saveSettings(payload: SettingsPayload): Promise<SettingsResponse> {
-  return generated.saveSettings(payload as unknown as SaveSettingsRequest);
+  return generated.saveSettings(payload);
 }
 
 export async function discoverModels(
