@@ -57,6 +57,21 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Queued scheduled turns acknowledge workflow endings only after successful settlement; failed turns leave them available.
+- Schedule gates retain workflow runs that complete while their digest is being read.
+- Workflow status and open accounts include active workers' start and first-output times.
+- Open workflow overviews omit worker prompts, results and provider-round bodies; named-run inspection retains the full journal.
+
+- Schedule gates acknowledge workflow endings after a successful outcome is durable, keeping failed attempts visible to the next gate.
+- Workflow and detached-child start observations capture their state and timestamp in the same storage read.
+- Interrupted workflow cancellation is refused plainly, and unclaimed cancellation requests leave no misleading audit record.
+- Workflow run status explains how to acknowledge handled run endings.
+- Workflow and delegated-child starts report their observed state and time, including work that finishes immediately.
+- Open workflow inspection includes the provider-round activity shown on the run page.
+- Workflow author errors retain their classification and identifier case; empty partial results are omitted and engine traces are secondary.
+- API workflow cancellations retain their source and request time in the terminal account.
+- Workflow endings close outstanding holds consistently; late answers report the settled run state.
+- Leads and schedule gates discover unseen workflow endings through bounded, durable acknowledgements.
 - Configuration history retains changes between a missing value and the literal environment-variable name `unset`, while suppressing absent-to-null rows.
 
 - Settings labels the provider credential input “API key”; history labels credential environment variables separately.
