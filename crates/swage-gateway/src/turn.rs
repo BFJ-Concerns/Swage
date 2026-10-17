@@ -14,7 +14,7 @@ use swage_core::{
 };
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
 use swage_protocol::client::turn::MessageAttachment;
-use swage_protocol::client::workflow::{WorkflowAgentCallResolution, WorkflowProviderRoundOutcome};
+use swage_protocol::client::workflow::{WorkflowAttemptResolution, WorkflowProviderRoundOutcome};
 use swage_storage::model::{
     AppendMessage, ApprovalKind, ApprovalState, InboundAudit, NewAgentMessage, NewApprovalRequest,
     NewTurn, ToolCallRecord, TurnState,
@@ -504,6 +504,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
 
     let elements = build_assembly_elements(
         &config.instructions,
+        &config.instruction_sources,
         operator_guidance,
         active_skills,
         history_messages,
@@ -555,6 +556,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
     )
     .await;
     let (assembled_messages, mut assembly_report) = (output.messages, output.report);
+    redact_element_texts(state, &mut assembly_report).await;
     assembly_report.tool_scope = Some(serde_json::json!({
         "effective_root": tool_root.path,
     }));

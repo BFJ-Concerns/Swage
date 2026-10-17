@@ -412,9 +412,8 @@
   button.active { font-weight: bold; }
   .conversation { display: grid; grid-template-columns: minmax(16rem, 25%) 1fr; height: calc(100vh - 4rem); }
   .conversation aside { overflow: auto; border-right: 1px solid var(--ink); }
-  /* The work surface and its docked channel share the conversation surface's
-     two-column rule, mirrored: the work takes the wide column. */
-  .surfaces-surface { display: grid; grid-template-columns: 1fr minmax(20rem, 33%); height: calc(100vh - 4rem); }
+  /* The work takes the wide column; its docked conversation stays available. */
+  .surfaces-surface { display: grid; grid-template-columns: minmax(0, 1fr) minmax(20rem, 33%); height: calc(100vh - 4rem); }
   .surfaces-surface .work { min-width: 0; overflow: auto; border-right: 1px solid var(--ink); }
   .no-session { padding: 1rem; color: var(--ink-soft); }
   .operator { min-width: 0; overflow: auto; }

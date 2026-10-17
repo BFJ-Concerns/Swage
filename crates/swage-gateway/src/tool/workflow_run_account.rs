@@ -173,6 +173,7 @@ mod tests {
                         "cause": "run_cancelled",
                         "detail": "WorkflowCancelledError: run cancelled"
                     },
+                    "redispatched_after_interruption": false,
                 }],
                 "unsettled": [],
             },
