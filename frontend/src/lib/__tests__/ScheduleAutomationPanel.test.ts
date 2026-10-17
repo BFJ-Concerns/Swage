@@ -13,6 +13,7 @@ import type { ScheduleRun } from "../protocol/ScheduleRun";
 import { UNSETTLED_RUN_REFRESH_MS } from "../one-shot-runs";
 import { makeSchedule } from "./fixtures/schedules";
 
+vi.mock("../api/sessions", () => ({ listRecentSessions: vi.fn(async () => []) }));
 vi.mock("../api/surfaces", () => ({ listSurfaces: vi.fn(async () => ({ surfaces: [] })) }));
 vi.mock("../api/agent-definitions", () => ({ listEffectiveAgentDefinitions: vi.fn() }));
 

@@ -1,5 +1,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
+  import { listRecentSessions } from "../api/sessions";
+  import type { RecentSession } from "../protocol/RecentSession";
   import { listSurfaces } from "../api/surfaces";
   import type { SurfaceSummary } from "../protocol/SurfaceSummary";
   import AgentPicker from "./AgentPicker.svelte";
@@ -58,6 +60,39 @@
   let scheduleCron = $state("0 0 9 * * * *");
   let scheduleAt = $state("");
   let schedulePolicy = $state<"fresh" | "continuation">("fresh");
+  let runConversationId = $state(untrack(() => sessionId ?? ""));
+  let conversations = $state<RecentSession[]>([]);
+  let conversationsLoading = $state(false);
+  let conversationLoadError = $state<string | null>(null);
+
+  $effect(() => {
+    if (schedulePolicy !== "continuation") return;
+    let active = true;
+    conversationsLoading = true;
+    conversationLoadError = null;
+    void listRecentSessions(null)
+      .then((entries) => {
+        if (active) conversations = entries.flatMap((entry) => [
+          ...(entry.source.kind === "conversation" ? [entry.source.session] : []),
+          ...entry.automated,
+        ]);
+      })
+      .catch((err: unknown) => {
+        if (active) conversationLoadError = err instanceof Error ? err.message : "Failed to load conversations.";
+      })
+      .finally(() => { if (active) conversationsLoading = false; });
+    return () => { active = false; };
+  });
+
+  function chooseRunConversation(id: string): void {
+    runConversationId = id;
+    // A surface belongs to one conversation; selecting another requires a
+    // new destination choice even while its surfaces are still loading.
+    deliveryTargets = deliveryTargets.map((target) => target.kind === "surface"
+      ? { kind: "surface", surface_id: "" }
+      : target);
+  }
+
   let scheduleAgentId = $state("");
   let scheduleTopicId = $state(untrack(() => topicId ?? ""));
   let agentDefinitions = $state<EffectiveAgentDefinitionResponse[]>([]);
@@ -73,7 +108,7 @@
   let surfaceLoadGeneration = 0;
 
   $effect(() => {
-    const continuationId = schedulePolicy === "continuation" ? sessionId : null;
+    const continuationId = schedulePolicy === "continuation" ? runConversationId : null;
     const generation = ++surfaceLoadGeneration;
     deliverySurfaces = [];
     surfaceLoadError = null;
@@ -231,10 +266,10 @@
 
   function buildSessionPolicy(): SessionPolicy {
     if (schedulePolicy === "continuation") {
-      if (!sessionId) {
-        throw new Error("Open a conversation to schedule work that continues it.");
+      if (!runConversationId) {
+        throw new Error("Choose a conversation for this schedule to continue.");
       }
-      return { policy: "continuation", session_id: sessionId };
+      return { policy: "continuation", session_id: runConversationId };
     }
     const agentId = scheduleAgentId || "gateway";
     return scheduleTopicId
@@ -440,10 +475,9 @@
       <button
         type="button"
         class:active={schedulePolicy === "continuation"}
-        disabled={!sessionId}
         onclick={() => (schedulePolicy = "continuation")}
       >
-        This conversation
+        {sessionId ? "This conversation" : "Continue a conversation"}
       </button>
     </div>
     {#if schedulePolicy === "fresh"}
@@ -459,6 +493,22 @@
       <AgentPicker definitions={agentDefinitions} bind:selectedAgentId={scheduleAgentId} disabled={agentsLoading} />
       {#if agentsLoading}<p class="empty">Loading agents…</p>{/if}
       {#if agentLoadError}<p class="error" role="alert">{agentLoadError}</p>{/if}
+    {:else}
+      <label>
+        <span>Run conversation</span>
+        <select aria-label="Run conversation" value={runConversationId} disabled={conversationsLoading}
+          onchange={(event) => chooseRunConversation(event.currentTarget.value)}>
+          <option value="">Choose a conversation</option>
+          {#if sessionId && !conversations.some((conversation) => conversation.id === sessionId)}
+            <option value={sessionId}>This conversation</option>
+          {/if}
+          {#each conversations as conversation (conversation.id)}
+            <option value={conversation.id}>{conversation.topic_name} · {conversation.message_preview || conversation.id}</option>
+          {/each}
+        </select>
+      </label>
+      {#if conversationsLoading}<p class="empty">Loading conversations…</p>{/if}
+      {#if conversationLoadError}<p class="error" role="alert">{conversationLoadError}</p>{/if}
     {/if}
     <label>
       <span>While a previous run is active</span>
@@ -514,7 +564,9 @@
               onchange={(event) => { deliveryTargets[index] = newDeliveryTarget(event.currentTarget.value as DeliveryTarget["kind"]); }}>
               <option value="webhook">Webhook</option>
               <option value="channel">Channel</option>
-              <option value="surface" disabled={schedulePolicy !== "continuation"}>Conversation surface</option>
+              <option value="surface" disabled={schedulePolicy !== "continuation" || !runConversationId}>
+                {schedulePolicy !== "continuation" ? "Conversation surface — requires a continuation schedule" : !runConversationId ? "Conversation surface — choose a conversation first" : "Conversation surface"}
+              </option>
               <option value="local_storage">Local log</option>
             </select>
           </label>
@@ -527,7 +579,7 @@
             <label><span>Account</span><input aria-label="Channel account" bind:value={target.account} /></label>
             <label><span>Conversation</span><input aria-label="Channel conversation" bind:value={target.conversation} /></label>
           {:else if target.kind === "surface"}
-            <label><span>Conversation surface</span><select aria-label="Conversation surface" bind:value={target.surface_id} disabled={surfacesLoading}>
+            <label><span>Conversation surface</span><select aria-label="Conversation surface" bind:value={target.surface_id} disabled={surfacesLoading || schedulePolicy !== "continuation" || !runConversationId}>
               <option value="">Choose a surface</option>
               {#each deliverySurfaces as surface (surface.id)}<option value={surface.id}>{surface.title}</option>{/each}
             </select></label>
