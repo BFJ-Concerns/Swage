@@ -131,6 +131,13 @@
      * so the reader stays there.
      */
     focusTurnId?: string | null;
+    /**
+     * The height of whatever sits sticky above the transcript in the
+     * channel's scroll, in pixels: a scrolled-to message keeps that much
+     * margin so it lands below it. `null` until measured; the focus waits
+     * for the measurement.
+     */
+    focusMargin?: number | null;
   }
 
   let {
@@ -138,6 +145,7 @@
     streamingStore,
     displayPreferences = DEFAULT_DISPLAY_PREFERENCES,
     focusTurnId = null,
+    focusMargin = null,
   }: Props = $props();
 
   // ---- Auto-scroll ----------------------------------------------------------
@@ -178,8 +186,9 @@
   let focusedTurnId: string | null = null;
   $effect(() => {
     const turnId = focusTurnId;
+    const margin = focusMargin;
     void (store?.activeConversation?.messages?.length ?? 0);
-    if (!turnId || !scrollEl || focusedTurnId === turnId) return;
+    if (!turnId || !scrollEl || margin === null || focusedTurnId === turnId) return;
     const target = Array.from(scrollEl.querySelectorAll<HTMLElement>("[data-turn-id]")).find(
       (element) => element.getAttribute("data-turn-id") === turnId,
     );
@@ -337,6 +346,7 @@
         class:assistant={!isPersonsMessage(message)}
         class:platform={!isPersonsMessage(message) && message.role === "user"}
         data-turn-id={message.turn_id ?? undefined}
+        style:scroll-margin-top={focusMargin === null ? undefined : `${focusMargin}px`}
         aria-label={isPersonsMessage(message) ? "Your message" : `${authorLabel(message)} message`}
       >
         <!-- The author label is real DOM text, not a CSS ::before — so it
@@ -610,9 +620,6 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    /* A message scrolled into view (a turn the address names) stops below
-       the channel's sticky session bar, not under it. */
-    scroll-margin-top: var(--session-bar-height, 0px);
   }
 
   /* User messages sit on the right; assistant messages on the left. The role

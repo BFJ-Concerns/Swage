@@ -56,13 +56,14 @@
   }: Props = $props();
 
   // The session bar is sticky at the top of the channel's scroll, so a
-  // message scrolled to the top would sit under it: its height is published
-  // to the transcript as the margin a scrolled-to turn keeps. One line of
-  // controls, measured once it is on the page.
+  // message scrolled to the top would sit under it: its height, measured
+  // once it is on the page, is the margin a scrolled-to turn keeps — handed
+  // to the transcript as a value, so the scroll waits for the measurement
+  // rather than running before it.
   let sessionBar: HTMLElement | undefined = $state();
-  let sessionBarHeight = $state(0);
+  let sessionBarHeight: number | null = $state(null);
   $effect(() => {
-    sessionBarHeight = sessionBar?.offsetHeight ?? 0;
+    sessionBarHeight = sessionBar ? sessionBar.offsetHeight : null;
   });
 
   const activeConversation = $derived(conversationStore.activeConversation);
@@ -136,7 +137,7 @@
   }
 </script>
 
-<section aria-label="Conversation" style:--session-bar-height="{sessionBarHeight}px">
+<section aria-label="Conversation">
   <!-- Session controls travel with the channel, so cycling to another
        conversation or starting one costs no surface. -->
   <header class="session-bar" bind:this={sessionBar}>
@@ -186,7 +187,7 @@
     </div>
   {/if}
   {#if activeConversation}<ConnectionIndicator store={connectionStore} {onRetry} />{/if}
-  <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} {focusTurnId} />
+  <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} {focusTurnId} focusMargin={sessionBarHeight} />
   <!-- Pinned to the foot of the channel's scroll, so a turn waiting on the
        user's decision shows its approval card in view however long the
        history above it is. -->

@@ -183,12 +183,30 @@ describe("turn context inspector trigger", () => {
     expect(streaming.startTurn).toHaveBeenCalledExactlyOnceWith(request.content);
   });
 
-  it("keeps a scrolled-to message below the channel's session bar", () => {
-    const { css } = compile(messageDisplaySource, {
-      filename: "MessageDisplay.svelte",
-      css: "external",
+  it("keeps a scrolled-to message below what sits above the transcript, and waits for that height", () => {
+    const scrolled: Element[] = [];
+    Element.prototype.scrollIntoView = function () {
+      scrolled.push(this);
+    };
+    const ask: MessageView = { role: "user", origin: "user", content: "Ask.", timestamp: "2026-10-05T12:00:00Z", turn_id: "turn-a" };
+    const reply: MessageView = { role: "assistant", origin: "assistant", content: "Answer.", timestamp: "2026-10-05T12:00:01Z", turn_id: "turn-a" };
+    const store = makeConversationStore([ask, reply]);
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore: createStreamingStore(), focusTurnId: "turn-a", focusMargin: null },
     });
-    expect(css!.code).toMatch(/\.message[^{]*\{[^}]*scroll-margin-top:\s*var\(--session-bar-height/);
+    flushSync();
+    expect(scrolled, "no scroll before the margin above the transcript is measured").toHaveLength(0);
+    unmount(component);
+    document.body.innerHTML = "";
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore: createStreamingStore(), focusTurnId: "turn-a", focusMargin: 42 },
+    });
+    flushSync();
+    expect(scrolled).toHaveLength(1);
+    expect((scrolled[0] as HTMLElement).style.scrollMarginTop).toBe("42px");
   });
 
   it("opens at the turn the address names and stops following the end", () => {
@@ -212,7 +230,7 @@ describe("turn context inspector trigger", () => {
     const secondReply: MessageView = { role: "assistant", origin: "assistant", content: "The digest.", timestamp: "2026-10-05T13:00:01Z", turn_id: "turn-b" };
     component = mount(MessageDisplay, {
       target: document.body,
-      props: { store: makeConversationStore([first, firstReply, second, secondReply]), streamingStore: createStreamingStore(), focusTurnId: "turn-b" },
+      props: { store: makeConversationStore([first, firstReply, second, secondReply]), streamingStore: createStreamingStore(), focusTurnId: "turn-b", focusMargin: 0 },
     });
     flushSync();
 
