@@ -28,6 +28,8 @@ fn typescript_bindings_are_regenerated() {
     hosting::sandbox::SandboxPolicy::export_all(&cfg).expect("export sandbox policy");
     hosting::GitCredentialRequest::export_all(&cfg).expect("export git credential request");
     hosting::GitCredentialResponse::export_all(&cfg).expect("export git credential response");
+    hosting::GitSignRequest::export_all(&cfg).expect("export git sign request");
+    hosting::GitSignResponse::export_all(&cfg).expect("export git sign response");
     // Exporting the top-level types pulls in every dependency they
     // reference, so the full surface lands in one pass.
     client::channel::CreateChannelLinkCodeRequest::export_all(&cfg)

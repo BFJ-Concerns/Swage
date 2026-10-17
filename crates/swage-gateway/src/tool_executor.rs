@@ -30,8 +30,10 @@ pub struct PythonExecution {
     pub sandbox: Option<swage_sandbox::SandboxConfig>,
     pub egress: swage_sandbox::EgressSetup,
     pub dispatcher: Arc<swage_tool::dispatch::ToolDispatcher>,
-    // Keep the private IPC service alive through nested calls and workers.
+    // Keep the private IPC services alive through nested calls and workers.
     pub credentials: Arc<crate::git_credential::CredentialServer>,
+    /// The host signer, when the operator signs commits with SSH.
+    pub signer: Option<Arc<crate::git_signer::SignerServer>>,
 }
 
 pub struct GatewayToolContext {

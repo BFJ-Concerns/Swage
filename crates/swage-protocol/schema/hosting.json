@@ -39,6 +39,12 @@
     "git_credential_response": {
       "$ref": "#/$defs/GitCredentialResponse"
     },
+    "git_sign_request": {
+      "$ref": "#/$defs/GitSignRequest"
+    },
+    "git_sign_response": {
+      "$ref": "#/$defs/GitSignResponse"
+    },
     "knowledge_mirror": {
       "$ref": "#/$defs/KnowledgeMirrorRegenerateResponse"
     },
@@ -59,6 +65,8 @@
     "sandbox",
     "git_credential_request",
     "git_credential_response",
+    "git_sign_request",
+    "git_sign_response",
     "presence",
     "approvals",
     "approval_decision",
@@ -1011,6 +1019,44 @@
           ]
         },
         "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "GitSignRequest": {
+      "description": "One request to sign a git payload on the host, from the sandboxed git's\nsigning program over the turn's private IPC socket: the SSH signing\nnamespace git names (`git`), the public key git was configured with, and\nthe payload, base64-encoded.",
+      "type": "object",
+      "properties": {
+        "namespace": {
+          "type": "string"
+        },
+        "payload": {
+          "type": "string"
+        },
+        "public_key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "namespace",
+        "public_key",
+        "payload"
+      ]
+    },
+    "GitSignResponse": {
+      "description": "The SSH signature (`ssh-keygen -Y sign`'s armoured output) for the\npayload, or the refusal that explains why the host did not sign.",
+      "type": "object",
+      "properties": {
+        "refusal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "signature": {
           "type": [
             "string",
             "null"

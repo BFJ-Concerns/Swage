@@ -119,6 +119,33 @@ impl CredentialServer {
     }
 }
 
+/// Append command-scope git configuration to a sandbox's environment after
+/// the entries already there (`GIT_CONFIG_COUNT` and its numbered pairs),
+/// so the services that each own part of the sandboxed git's configuration
+/// compose rather than overwrite one another.
+pub(crate) fn append_git_config(
+    config: &mut swage_sandbox::SandboxConfig,
+    pairs: &[(&str, String)],
+) {
+    let mut count: usize = config
+        .environment
+        .get("GIT_CONFIG_COUNT")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    for (key, value) in pairs {
+        config
+            .environment
+            .insert(format!("GIT_CONFIG_KEY_{count}"), (*key).to_owned());
+        config
+            .environment
+            .insert(format!("GIT_CONFIG_VALUE_{count}"), value.clone());
+        count += 1;
+    }
+    config
+        .environment
+        .insert("GIT_CONFIG_COUNT".into(), count.to_string());
+}
+
 async fn resolve(
     manager: &SecretManager,
     storage: &dyn swage_storage::Storage,

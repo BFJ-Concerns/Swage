@@ -1041,3 +1041,227 @@ except Exception as error:
     assert!(result.traceback.is_none(), "{:?}", result.traceback);
     assert_eq!(result.stdout, "1\nFalse\nruntime read-only\n");
 }
+
+/// A sandboxed `git commit` under an operator who signs with SSH is signed
+/// on the host with the operator's key: the sandbox's git calls the `swage`
+/// binary as its signing program, the host signs over the turn's socket,
+/// another key is refused, each signing is recorded, and the signature
+/// verifies with `ssh-keygen` on the host.
+#[tokio::test(flavor = "multi_thread")]
+async fn sandboxed_git_commits_are_signed_on_the_host_with_the_operators_key() {
+    use swage_gateway::git_signer::{SignerServer, SigningConfig};
+
+    let mut env = ProcessEnvGuard::new();
+    env.set_managed_secret_key(13);
+    env.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let manager = Arc::new(SecretManager::new(storage.clone()));
+    let root = tempfile::Builder::new()
+        .prefix("t")
+        .tempdir_in(
+            std::env::var_os("XDG_RUNTIME_DIR")
+                .unwrap_or_else(|| std::env::temp_dir().into_os_string()),
+        )
+        .unwrap();
+    let runtime_root = root.path().join("r");
+    std::fs::create_dir(&runtime_root).unwrap();
+    env.set_var("XDG_RUNTIME_DIR", &runtime_root);
+
+    // The operator's key, as `user.signingkey` would name it, and a second
+    // key that is nobody's configured signing key.
+    let keys = root.path().join("keys");
+    std::fs::create_dir(&keys).unwrap();
+    for name in ["operator", "stranger"] {
+        let generated = std::process::Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-C", name, "-f"])
+            .arg(keys.join(name))
+            .output()
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+    }
+    let operator_pub = keys.join("operator.pub");
+    let signing = SigningConfig::from_signing_key(operator_pub.to_str().unwrap(), true, false)
+        .expect("the operator's key configures");
+    let credentials = CredentialServer::start(manager, storage.clone(), None, None).unwrap();
+    let signer = SignerServer::start(storage.clone(), None, None, signing).unwrap();
+    let mut policy = SandboxConfig::builder()
+        .working_directory(root.path())
+        .write_path(root.path())
+        .masked_path(&runtime_root)
+        .masked_path(&keys)
+        .build()
+        .unwrap();
+    credentials.configure(&mut policy).unwrap();
+    signer.configure(&mut policy).unwrap();
+    assert!(
+        policy
+            .environment
+            .iter()
+            .any(|(key, value)| key.starts_with("GIT_CONFIG_VALUE_")
+                && value.starts_with("key::ssh-ed25519")),
+        "the sandboxed git is configured with the operator's public key as a literal"
+    );
+
+    // The signing program, as git would call it, against the host signer.
+    let sign = |key_file: std::path::PathBuf, payload: &'static str| {
+        let environment = policy.environment.clone();
+        let dir = root.path().join(uuid::Uuid::new_v4().to_string());
+        async move {
+            std::fs::create_dir(&dir).unwrap();
+            let file = dir.join("payload");
+            std::fs::write(&file, payload).unwrap();
+            let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_swage"))
+                .args(["-Y", "sign", "-n", "git", "-f"])
+                .arg(&key_file)
+                .arg(&file)
+                .envs(environment)
+                .output()
+                .await
+                .unwrap();
+            (output, file)
+        }
+    };
+    let (signed, file) = sign(operator_pub.clone(), "tree 1\n").await;
+    assert!(
+        signed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&signed.stderr)
+    );
+    let signature = std::fs::read_to_string(format!("{}.sig", file.display())).unwrap();
+    assert!(signature.contains("BEGIN SSH SIGNATURE"), "{signature}");
+    let allowed = root.path().join("allowed_signers");
+    std::fs::write(
+        &allowed,
+        format!(
+            "operator {}",
+            std::fs::read_to_string(&operator_pub).unwrap()
+        ),
+    )
+    .unwrap();
+    let verified = std::process::Command::new("ssh-keygen")
+        .args(["-Y", "verify", "-f"])
+        .arg(&allowed)
+        .args(["-I", "operator", "-n", "git", "-s"])
+        .arg(format!("{}.sig", file.display()))
+        .stdin(std::fs::File::open(&file).unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
+
+    let (refused, other) = sign(keys.join("stranger.pub"), "tree 2\n").await;
+    assert!(
+        !refused.status.success(),
+        "a key the operator did not configure must not be signed with"
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("not the operator's configured signing key"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        !other.with_extension("sig").exists()
+            && !std::path::Path::new(&format!("{}.sig", other.display())).exists()
+    );
+
+    // A real sandboxed commit, with the keys masked inside: git signs through
+    // the program, and the host verifies the commit it produced.
+    let repo = root.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["config", "user.email", "operator@example.invalid"][..],
+        &["config", "user.name", "Operator"][..],
+    ] {
+        let done = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            done.status.success(),
+            "{}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+    }
+    use swage_sandbox::Sandbox;
+    policy
+        .environment
+        .insert("HOME".into(), root.path().display().to_string());
+    let mut sandbox = swage_sandbox::BubblewrapSandbox::new(
+        policy,
+        swage_sandbox::llm_handler::HostLlmHandler::new(|_| async {
+            unreachable!("git uses no model")
+        }),
+    );
+    sandbox.spawn_agent().await.expect("sandbox starts");
+    let result = sandbox
+        .execute_tool(
+            "shell",
+            json!({"command": format!(
+                "cd {} && ls {} | wc -l && git commit -q --allow-empty -m signed && git log -1 --format=%H",
+                repo.display(), keys.display()
+            )}),
+        )
+        .await
+        .unwrap();
+    assert!(result.error.is_none(), "{:?}", result.error);
+    let output = result.output["output"].as_str().unwrap_or_default();
+    assert_eq!(
+        result.output["exit_code"], 0,
+        "the sandboxed commit must succeed: {output}"
+    );
+    assert!(
+        output.trim_start().starts_with('0'),
+        "the keys stay masked inside the sandbox: {output}"
+    );
+    sandbox.shutdown().await.unwrap();
+    let shown = std::process::Command::new("git")
+        .args([
+            "-c",
+            &format!("gpg.ssh.allowedSignersFile={}", allowed.display()),
+            "log",
+            "-1",
+            "--show-signature",
+        ])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    let shown_text = String::from_utf8_lossy(&shown.stdout);
+    assert!(
+        shown_text.contains("Good \"git\" signature"),
+        "{shown_text}\n{}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+
+    let events = storage.list_audit_events().await.unwrap();
+    let signings: Vec<_> = events
+        .iter()
+        .filter(|event| event.event_kind == "git_commit_signed")
+        .collect();
+    assert!(
+        signings
+            .iter()
+            .filter(|e| e.metadata["outcome"] == "signed")
+            .count()
+            >= 2,
+        "{signings:?}"
+    );
+    assert!(
+        signings.iter().any(|e| e.metadata["outcome"] == "refused"),
+        "{signings:?}"
+    );
+    assert!(signings.iter().all(|e| {
+        e.metadata["key"]
+            .as_str()
+            .is_some_and(|k| k.ends_with("operator.pub"))
+    }));
+}

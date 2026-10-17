@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- A sandboxed `git commit` under an operator who signs with SSH is signed on the host with the operator's key, the key never entering the sandbox; each signing is recorded, another key is refused, and a host that cannot sign fails the commit with the cause.
 - Sandboxed git commands use an HTTPS credential helper over private IPC, resolving host-scoped credentials through the governed secret store while forge token files remain hidden.
 
 - Settings has a Memory tab listing every memory page, general and per topic, to read; a chat box there changes memory by instructing the curator, showing its reply and each page it changed. The curator's notice links open the page they name.

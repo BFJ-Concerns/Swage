@@ -105,6 +105,17 @@ async fn main() {
             }
         }
     }
+    // Git calls its SSH signing program with ssh-keygen's arguments; the
+    // binary recognises that shape by the leading `-Y`.
+    if args.get(1).is_some_and(|arg| arg == "-Y") {
+        match swage_gateway::git_signer::run_signer(&args[1..]).await {
+            Ok(code) => std::process::exit(code),
+            Err(error) => {
+                eprintln!("swage: commit not signed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
     if args.get(1).is_some_and(|arg| arg == "git-credential") {
         if let Err(error) = swage_gateway::git_credential::run_helper(
             args.get(2).and_then(|arg| arg.to_str()).unwrap_or(""),

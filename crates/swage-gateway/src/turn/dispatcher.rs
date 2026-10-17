@@ -339,6 +339,7 @@ pub(super) async fn build_turn_sandbox(
     workspace_policy: Option<&TrustedWorkspacePolicy>,
     egress: swage_sandbox::EgressSetup,
     credentials: Option<&crate::git_credential::CredentialServer>,
+    signer: Option<&crate::git_signer::SignerServer>,
 ) -> Result<TurnSandboxBuild, swage_core::SandboxError> {
     // An install that declares its boundary (a container image, for one)
     // runs every turn inside it: no per-turn sandbox is built, the host
@@ -405,6 +406,7 @@ pub(super) async fn build_turn_sandbox(
         workspace_policy,
         egress,
         credentials,
+        signer,
         swage_sandbox::find_bwrap().is_ok(),
         true,
     )
@@ -477,6 +479,7 @@ async fn build_turn_sandbox_for_backend_selection(
     workspace_policy: Option<&TrustedWorkspacePolicy>,
     egress: swage_sandbox::EgressSetup,
     credentials: Option<&crate::git_credential::CredentialServer>,
+    signer: Option<&crate::git_signer::SignerServer>,
     bubblewrap_available: bool,
     spawn_fallback: bool,
 ) -> Result<TurnSandboxBuild, swage_core::SandboxError> {
@@ -490,6 +493,9 @@ async fn build_turn_sandbox_for_backend_selection(
 
     if let Some(credentials) = credentials {
         credentials.configure(&mut sandbox_config)?;
+    }
+    if let Some(signer) = signer {
+        signer.configure(&mut sandbox_config)?;
     }
 
     let provider = state.active_provider();
@@ -634,6 +640,18 @@ pub(crate) async fn build_gateway_dispatcher(
         session_id,
         turn_id,
     )?;
+    // The operator's commit signing, forwarded to the host: present only
+    // when the operator signs with SSH, so a configuration that signs
+    // nothing leaves sandboxed git signing nothing.
+    let signer = match crate::git_signer::SigningConfig::from_host_git().await {
+        Some(signing) => Some(crate::git_signer::SignerServer::start(
+            state.storage.clone(),
+            session_id,
+            turn_id,
+            signing,
+        )?),
+        None => None,
+    };
     let sandbox_build = build_turn_sandbox(
         state,
         config,
@@ -641,6 +659,7 @@ pub(crate) async fn build_gateway_dispatcher(
         workspace_policy.as_ref(),
         egress.clone(),
         Some(&credentials),
+        signer.as_deref(),
     )
     .await?;
     tracing::debug!(backend = ?sandbox_build.backend, "selected turn sandbox backend");
@@ -654,6 +673,9 @@ pub(crate) async fn build_gateway_dispatcher(
                 message: error.to_string(),
             })?;
         credentials.configure(&mut policy)?;
+        if let Some(signer) = &signer {
+            signer.configure(&mut policy)?;
+        }
         Some(policy)
     } else {
         None
@@ -709,6 +731,7 @@ pub(crate) async fn build_gateway_dispatcher(
         egress,
         dispatcher: Arc::new(nested_dispatcher),
         credentials,
+        signer,
     };
 
     Ok(GatewayDispatcherBuild {
@@ -1218,9 +1241,17 @@ mod tests {
         let mut config = swage_config::ResolvedConfig::default();
         config.sandbox.enabled = false;
 
-        let build = build_turn_sandbox(&state, &config, &agent_config, None, test_egress(), None)
-            .await
-            .expect("a declared boundary needs no sandbox of its own");
+        let build = build_turn_sandbox(
+            &state,
+            &config,
+            &agent_config,
+            None,
+            test_egress(),
+            None,
+            None,
+        )
+        .await
+        .expect("a declared boundary needs no sandbox of its own");
         assert_eq!(
             build.isolation,
             ExecutionIsolation::Declared {
@@ -1260,9 +1291,17 @@ mod tests {
         config.sandbox.enabled = false;
         config.sandbox.allow_degraded_execution = true;
 
-        let build = build_turn_sandbox(&state, &config, &agent_config, None, test_egress(), None)
-            .await
-            .expect("explicitly opted-in non-Codex execution should remain available");
+        let build = build_turn_sandbox(
+            &state,
+            &config,
+            &agent_config,
+            None,
+            test_egress(),
+            None,
+            None,
+        )
+        .await
+        .expect("explicitly opted-in non-Codex execution should remain available");
 
         assert_eq!(
             build.isolation,
@@ -1291,6 +1330,7 @@ mod tests {
             &agent_config,
             None,
             test_egress(),
+            None,
             None,
             false,
             false,
