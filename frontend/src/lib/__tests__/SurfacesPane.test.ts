@@ -150,6 +150,62 @@ describe("SurfacesPane module controls", () => {
     expect(store.deleteModule).toHaveBeenCalledWith(SURFACE_ID, "m-2");
   });
 
+  it("links every module in order to its own article, including the seventh", () => {
+    const modules = Array.from({ length: 7 }, (_, index) =>
+      module(`m-${index + 1}`, `# Harbour ${index + 1}`, index),
+    );
+    const store = fakeStore(surface(modules));
+    component = mount(SurfacesPane, {
+      target: document.body,
+      props: { store, sessionId: SESSION_ID },
+    });
+    flushSync();
+
+    const links = Array.from(document.querySelectorAll<HTMLAnchorElement>(
+      'nav[aria-label="Modules"] a',
+    ));
+    expect.soft(links).toHaveLength(7);
+    for (const index of modules.keys()) {
+      const article = document.querySelectorAll("article.module")[index];
+      const link = links[index];
+      expect.soft(link?.textContent ?? "").toContain(`Harbour ${index + 1}`);
+      expect.soft(link?.getAttribute("href")).toBe(`#${article.id || "missing-target"}`);
+      if (link) expect(document.getElementById(link.hash.slice(1))).toBe(article);
+      expect(button("Edit", article)).toBeInstanceOf(HTMLButtonElement);
+      expect(button("Add note", article)).toBeInstanceOf(HTMLButtonElement);
+    }
+
+    // The links follow the rendered order when the shared surface changes.
+    store.setActive(surface([modules[6], modules[0]]));
+    flushSync();
+    const reordered = document.querySelectorAll('nav[aria-label="Modules"] a');
+    expect.soft(reordered).toHaveLength(2);
+    expect.soft(reordered[0]?.textContent ?? "").toContain("Harbour 7");
+    expect.soft(reordered[1]?.textContent ?? "").toContain("Harbour 1");
+  });
+
+  it("offers move and delete on every module, and calls the store with the module's place", async () => {
+    const store = fakeStore(surface([module("m-1", "# First", 0), module("m-2", "# Second", 1)]));
+    component = mount(SurfacesPane, {
+      target: document.body,
+      props: { store, sessionId: SESSION_ID },
+    });
+    flushSync();
+
+    const articles = document.querySelectorAll("article.module");
+    expect(articles).toHaveLength(2);
+    expect(button("Move module up", articles[0]).disabled).toBe(true);
+    expect(button("Move module down", articles[1]).disabled).toBe(true);
+
+    button("Move module down", articles[0]).click();
+    await settled();
+    expect(store.moveModule).toHaveBeenCalledWith(SURFACE_ID, "m-1", 1);
+
+    button("Delete module", articles[1]).click();
+    await settled();
+    expect(store.deleteModule).toHaveBeenCalledWith(SURFACE_ID, "m-2");
+  });
+
   it("keeps a draft whose module was removed meanwhile, as a new module or discarded", async () => {
     const opened = module("m-1", "# Mine", 0);
     const store = fakeStore(surface([opened]));
