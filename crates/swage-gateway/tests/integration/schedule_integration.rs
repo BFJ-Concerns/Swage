@@ -3350,6 +3350,9 @@ async fn outcomes_tool_run(command: &str, refused: bool, queued: bool) {
         swage_gateway::turn_queue::drain_queue(&state, session)
             .await
             .unwrap();
+        // Another drain may already own the queued input, so the explicit
+        // drain returning does not establish that its run has settled.
+        await_terminal_run(&state, id).await;
         assert!(run.turn_id.is_none());
         id
     } else {
