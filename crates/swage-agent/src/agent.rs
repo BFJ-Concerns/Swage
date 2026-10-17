@@ -1834,6 +1834,12 @@ impl Agent {
         let mut stream_polled = false;
         loop {
             tokio::select! {
+                // Cancellation is read first: once the token is cancelled,
+                // a chunk the provider already queued is drained below as
+                // the cancellation's own diagnostics, never taken through
+                // the ordinary path — which would record an attempt as
+                // outstanding and then again as interrupted.
+                biased;
                 _ = cancel_token.cancelled() => {
                     // A retry may already have queued its initial attempt
                     // without delivering it to this consumer. Preserve ready
