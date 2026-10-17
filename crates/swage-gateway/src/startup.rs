@@ -177,11 +177,19 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         }
     }
 
-    match raw_storage.interrupt_running_workflow_runs().await {
-        Ok(0) => {}
+    match raw_storage
+        .record_gateway_interruption(chrono::Utc::now())
+        .await
+    {
         // Marking is half the recovery; the workflow wake loop spawned at
         // server start relaunches these (and due parked runs) by replay.
-        Ok(n) => info!("Marked {n} workflow run(s) interrupted by a previous shutdown; resuming"),
+        // Every run the gateway's absence touched — running or parked —
+        // carries the interruption on its record.
+        Ok(counts) if counts.running_interrupted > 0 || counts.parked > 0 => info!(
+            "Marked {} workflow run(s) interrupted by a previous shutdown and {} parked run(s) as having outlived it; resuming",
+            counts.running_interrupted, counts.parked
+        ),
+        Ok(_) => {}
         Err(e) => {
             eprintln!("Workflow startup recovery failed: {e}");
             std::process::exit(1);

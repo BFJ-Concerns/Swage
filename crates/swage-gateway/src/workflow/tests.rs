@@ -2020,7 +2020,12 @@ async fn workflow_journal_preserves_and_recomposes_call_scoped_context() {
                 .iter_mut()
                 .find(|element| element["name"] == "orientation")
         }) {
-            orientation.as_object_mut().unwrap().remove("token_count");
+            let orientation = orientation.as_object_mut().unwrap();
+            orientation.remove("token_count");
+            let root = tool_roots.last().expect("effective tool root");
+            if let Some(Value::String(text)) = orientation.get_mut("full_text") {
+                *text = text.replace(root.as_str(), "<call tool root>");
+            }
         }
         reports.push(report);
     }
@@ -10622,7 +10627,7 @@ async fn startup_recovery_redrives_a_continuation_after_its_worker_turn_was_orph
         ..swage_workflow::fixtures::agent_call_request("continue".into())
     };
     let continuation_json = serde_json::to_value(&continuation).expect("continuation request");
-    storage
+    let started = storage
         .create_workflow_journal_intent(NewWorkflowJournalIntent {
             run_id: run.id,
             seq: 1,
@@ -10635,6 +10640,15 @@ async fn startup_recovery_redrives_a_continuation_after_its_worker_turn_was_orph
         })
         .await
         .expect("started continuation");
+    // The orphaned turn was this entry's first attempt, opened by the run
+    // and resolved by the turn before the gateway died.
+    dispatch_attempt(
+        storage.as_ref(),
+        started.id,
+        swage_protocol::client::workflow::WorkflowAttemptCause::First,
+        orphan.id,
+    )
+    .await;
 
     assert_eq!(
         crate::shutdown::recover_orphaned_turns(
@@ -10658,7 +10672,14 @@ async fn startup_recovery_redrives_a_continuation_after_its_worker_turn_was_orph
             .state,
         ThreadState::Idle
     );
-    assert_eq!(storage.interrupt_running_workflow_runs().await.unwrap(), 1);
+    assert_eq!(
+        storage
+            .record_gateway_interruption(chrono::Utc::now())
+            .await
+            .unwrap()
+            .running_interrupted,
+        1
+    );
 
     let provider = Arc::new(ScriptedRecordingProvider {
         outputs: std::sync::Mutex::new(std::collections::VecDeque::from([scripted_text_output(
@@ -10684,6 +10705,54 @@ async fn startup_recovery_redrives_a_continuation_after_its_worker_turn_was_orph
     assert!(
         !provider.requests.lock().expect("requests").is_empty(),
         "replayed worker call should reach the provider"
+    );
+    // The record shows the interruption: on the run, as the boot that found
+    // it running; on the re-dispatched call, as the cause of its second
+    // attempt beside the first one the orphaned turn ran; and on the
+    // terminal account's worker, as a redispatch after an interruption.
+    assert_eq!(recovered.interruptions.len(), 1);
+    assert_eq!(recovered.interruptions[0]["run_state"], "running");
+    let attempts: Vec<swage_protocol::client::workflow::WorkflowAgentCallResolution> =
+        serde_json::from_value(
+            storage
+                .list_workflow_journal(run.id)
+                .await
+                .expect("journal")
+                .into_iter()
+                .find(|entry| entry.id == started.id)
+                .expect("continuation entry")
+                .dispatch_attempts
+                .expect("attempts"),
+        )
+        .expect("attempt records");
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(
+        attempts[0].cause,
+        swage_protocol::client::workflow::WorkflowAttemptCause::First
+    );
+    assert_eq!(attempts[0].turn_id, Some(orphan.id));
+    assert_eq!(
+        attempts[1].cause,
+        swage_protocol::client::workflow::WorkflowAttemptCause::AfterInterruption
+    );
+    assert!(
+        attempts[1].turn_id.is_some_and(|turn| turn != orphan.id),
+        "the re-dispatch ran its own turn"
+    );
+    let account: swage_protocol::client::workflow::WorkflowRunTerminalAccount =
+        serde_json::from_value(recovered.terminal_account.expect("terminal account"))
+            .expect("account");
+    let redispatched = account
+        .workers
+        .done
+        .iter()
+        .find(|worker| worker.journal_entry_id == started.id)
+        .expect("the continuation is done");
+    assert!(redispatched.redispatched_after_interruption);
+    assert!(
+        !account.workers.done[0].redispatched_after_interruption
+            || account.workers.done[0].journal_entry_id == started.id,
+        "the worker that settled before the death is not marked"
     );
 }
 
@@ -16545,6 +16614,48 @@ async fn declared_fallback_model_retries_only_before_output_and_records_the_serv
             .and_then(|result| result["served_model"].as_str()),
         Some("fallback")
     );
+    // The second attempt names the fallback as its cause and the primary's
+    // failure; nothing on the record reads as an interruption.
+    let attempts: Vec<swage_protocol::client::workflow::WorkflowAgentCallResolution> =
+        serde_json::from_value(call.dispatch_attempts.clone().expect("attempts"))
+            .expect("attempt records");
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(
+        attempts[0].cause,
+        swage_protocol::client::workflow::WorkflowAttemptCause::First
+    );
+    assert!(
+        matches!(
+            &attempts[1].cause,
+            swage_protocol::client::workflow::WorkflowAttemptCause::ProviderFallback { primary_failure }
+                if primary_failure.contains("pinned refused")
+        ),
+        "{:?}",
+        attempts[1].cause
+    );
+    assert!(run.interruptions.is_empty());
+    let account: swage_protocol::client::workflow::WorkflowRunTerminalAccount =
+        serde_json::from_value(run.terminal_account.clone().expect("terminal account"))
+            .expect("account");
+    assert!(!account.workers.done[0].redispatched_after_interruption);
+    // The rounds of the fallback's turn number as the record numbers the
+    // attempts — the second — even when the primary's attempt never
+    // resolved a turn.
+    let Json(detail) = get_run(State(state.clone()), Path(run_id))
+        .await
+        .expect("workflow detail");
+    let rounds = detail
+        .journal
+        .iter()
+        .find(|entry| entry.agent_call.is_some())
+        .and_then(|entry| entry.agent_call.as_ref())
+        .and_then(|call| call.provider_rounds.clone())
+        .expect("rounds");
+    assert_eq!(
+        rounds.iter().map(|round| round.attempt).collect::<Vec<_>>(),
+        vec![1, 2],
+        "the primary's round is attempt 1, the fallback's attempt 2"
+    );
     let requests = provider.requests.lock().expect("requests");
     assert_eq!(
         requests
@@ -18374,14 +18485,34 @@ async fn settle_round(
         .expect("settle the round");
 }
 
-fn attempt_on_turn(turn_id: Uuid) -> swage_protocol::client::workflow::WorkflowAgentCallResolution {
-    swage_protocol::client::workflow::WorkflowAgentCallResolution {
+fn attempt_on_turn(turn_id: Uuid) -> swage_protocol::client::workflow::WorkflowAttemptResolution {
+    swage_protocol::client::workflow::WorkflowAttemptResolution {
         model: Some("scripted-model".into()),
         effort: None,
         session_id: None,
         thread_id: None,
         turn_id: Some(turn_id),
     }
+}
+
+/// Open an attempt for `cause` and resolve it on `turn_id`, as the run and
+/// the turn do between them.
+async fn dispatch_attempt(
+    storage: &dyn Storage,
+    entry_id: Uuid,
+    cause: swage_protocol::client::workflow::WorkflowAttemptCause,
+    turn_id: Uuid,
+) {
+    open_agent_call_attempt(storage, entry_id, cause)
+        .await
+        .expect("open attempt");
+    resolve_agent_call_attempt(
+        storage,
+        entry_id,
+        serde_json::to_value(attempt_on_turn(turn_id)).expect("attempt"),
+    )
+    .await
+    .expect("resolve attempt");
 }
 
 fn only_agent_call(
@@ -18615,24 +18746,24 @@ async fn a_re_dispatched_call_keeps_the_interrupted_attempts_rounds() {
     )
     .await;
     open_round(&storage, interrupted, 2).await;
-    record_agent_call_attempt(
+    dispatch_attempt(
         storage.as_ref(),
         entry.id,
-        serde_json::to_value(attempt_on_turn(interrupted)).expect("attempt"),
+        swage_protocol::client::workflow::WorkflowAttemptCause::First,
+        interrupted,
     )
-    .await
-    .expect("first attempt");
+    .await;
 
     // Replay re-dispatches the same entry under a fresh turn.
     let resumed = worker_turn(&storage, run.topic_id, "resumed attempt").await;
     let interruption_not_before = chrono::Utc::now();
-    record_agent_call_attempt(
+    dispatch_attempt(
         storage.as_ref(),
         entry.id,
-        serde_json::to_value(attempt_on_turn(resumed)).expect("attempt"),
+        swage_protocol::client::workflow::WorkflowAttemptCause::AfterInterruption,
+        resumed,
     )
-    .await
-    .expect("second attempt");
+    .await;
     open_round(&storage, resumed, 1).await;
     settle_round(
         &storage,

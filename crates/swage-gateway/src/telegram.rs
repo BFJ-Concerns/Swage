@@ -1191,9 +1191,10 @@ mod tests {
         drop(state);
         drop(storage);
         let (rebuilt, storage) = file_state(&database, MockProvider::new(vec![]), client.clone());
-        let visible = crate::onboarding::list_channel_link_codes(&rebuilt)
-            .await
-            .unwrap();
+        let swage_protocol::client::channel::ChannelLinkCodeListResponse(visible) =
+            crate::onboarding::list_channel_link_codes(&rebuilt)
+                .await
+                .unwrap();
         assert_eq!(
             visible.len(),
             1,
@@ -1207,7 +1208,8 @@ mod tests {
         assert_eq!(
             crate::onboarding::list_channel_link_codes(&rebuilt)
                 .await
-                .unwrap()[0]
+                .unwrap()
+                .0[0]
                 .link_code,
             code
         );
@@ -1221,6 +1223,7 @@ mod tests {
             crate::onboarding::list_channel_link_codes(&rebuilt)
                 .await
                 .unwrap()
+                .0
                 .is_empty(),
             "redemption must remove a code from the readable view"
         );
@@ -1263,6 +1266,7 @@ mod tests {
             crate::onboarding::list_channel_link_codes(&state)
                 .await
                 .unwrap()
+                .0
                 .iter()
                 .map(|record| record.link_code.as_str())
                 .collect::<Vec<_>>(),

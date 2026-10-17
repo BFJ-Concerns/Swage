@@ -372,6 +372,11 @@ pub struct WorkflowWorkerAccount {
     pub worktree: Option<WorkflowWorktreeCompletion>,
     /// Absent for a worker that settled on its own account.
     pub termination: Option<WorkflowWorkerTermination>,
+    /// Whether any attempt of this worker followed a gateway interruption:
+    /// the interrupted attempt's outcome is unknown and the tool calls it
+    /// issued may have been applied, so this worker's effects may have been
+    /// repeated.
+    pub redispatched_after_interruption: bool,
 }
 
 /// Every worker the run dispatched, sorted by how it stood when the run
@@ -448,9 +453,35 @@ pub struct WorkflowRun {
     /// The run's terminal account: how it ended and where its workers stood.
     /// Absent only while the run is still going.
     pub terminal_account: Option<WorkflowRunTerminalAccount>,
+    /// Every gateway interruption the run lived through, oldest first: a
+    /// boot that found the run running (so it was marked interrupted and
+    /// relaunched by replay) or parked (its wait outlived the gateway).
+    pub interruptions: Vec<WorkflowRunInterruption>,
     pub error_message: Option<String>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// A gateway interruption a run lived through, recorded by the boot that
+/// found the run with no gateway alive to serve it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct WorkflowRunInterruption {
+    /// When the boot recorded it; the gateway's death itself left no stamp.
+    pub detected_at: DateTime<Utc>,
+    /// How the run stood when the gateway stopped.
+    pub run_state: WorkflowInterruptedRunState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowInterruptedRunState {
+    /// The run was executing: its workers in flight lost their process, and
+    /// replay re-dispatches the calls that had not settled.
+    Running,
+    /// The run was parked on a durable wait: nothing of it was executing,
+    /// and the waker relaunches it when its wake is due.
+    Parked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
@@ -654,11 +685,13 @@ pub struct WorkflowAgentCallDispatch {
     /// The call-scoped tool grants after intersection with the dispatching
     /// context's own authority. `None` means the call narrowed nothing.
     pub grants: Option<Vec<String>>,
-    /// Every attempt the call ran, oldest first, each stamped once its turn
-    /// resolved the options it actually ran with. A call interrupted and
-    /// re-dispatched by replay has more than one, and each names its own
-    /// turn — so the record keeps the interrupted attempt rather than only
-    /// the one that settled. Empty until the first turn resolves.
+    /// Every attempt the call was dispatched for, oldest first: opened by
+    /// the run with its cause before the turn starts, and resolved by the
+    /// turn with the options it actually ran with. A call interrupted and
+    /// re-dispatched by replay, or served by its declared fallback, has more
+    /// than one, each naming its own turn — so the record keeps the attempt
+    /// that was cut off beside the one that followed. An attempt with no
+    /// turn was opened and never resolved.
     pub attempts: Vec<WorkflowAgentCallResolution>,
 }
 
@@ -670,10 +703,44 @@ pub struct WorkflowWorkerPlacementRecord {
     pub can_write: bool,
 }
 
-/// The options a dispatched worker's turn resolved for itself.
+/// Why an attempt of an agent call was dispatched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(tag = "cause", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
+pub enum WorkflowAttemptCause {
+    /// The call's first dispatch.
+    First,
+    /// Replay re-dispatched the call after a gateway death cut the attempt
+    /// before it off: that attempt's outcome is unknown, and the tool calls
+    /// it issued may have been applied.
+    AfterInterruption,
+    /// The model the call named refused before any output, and the call's
+    /// declared fallback served it instead; no interruption occurred.
+    ProviderFallback { primary_failure: String },
+}
+
+/// One attempt of a dispatched call: why it was dispatched, when it was
+/// opened, and the options its turn resolved for itself. Opened by the run
+/// before the turn starts and resolved by the turn before any provider work,
+/// so an attempt the gateway dies between the two writes of stays in the
+/// record with its cause and no resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct WorkflowAgentCallResolution {
+    pub cause: WorkflowAttemptCause,
+    pub opened_at: DateTime<Utc>,
+    pub model: Option<String>,
+    pub effort: Option<Effort>,
+    pub session_id: Option<Uuid>,
+    pub thread_id: Option<Uuid>,
+    pub turn_id: Option<Uuid>,
+}
+
+/// What a turn resolved for the attempt it runs: written over the open
+/// attempt's record, beside the cause and opening time the run wrote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct WorkflowAttemptResolution {
     pub model: Option<String>,
     pub effort: Option<Effort>,
     pub session_id: Option<Uuid>,

@@ -153,14 +153,17 @@ const SESSION_SURFACES_AND_LIBRARY: &str = "
     );
     CREATE INDEX idx_surfaces_session ON surfaces(session_id, created_at);
     CREATE TABLE surface_modules (
-        id          TEXT NOT NULL PRIMARY KEY,
-        surface_id  TEXT NOT NULL REFERENCES surfaces(id) ON DELETE CASCADE,
-        kind        TEXT NOT NULL,
-        position    INTEGER NOT NULL,
-        source      TEXT NOT NULL,
-        revision    INTEGER NOT NULL DEFAULT 0,
-        created_at  TEXT NOT NULL,
-        updated_at  TEXT NOT NULL
+        id            TEXT NOT NULL PRIMARY KEY,
+        surface_id    TEXT NOT NULL REFERENCES surfaces(id) ON DELETE CASCADE,
+        kind          TEXT NOT NULL,
+        position      INTEGER NOT NULL,
+        source        TEXT NOT NULL,
+        revision      INTEGER NOT NULL DEFAULT 0,
+        created_at    TEXT NOT NULL,
+        updated_at    TEXT NOT NULL,
+        -- The run or turn that delivered the module, as JSON of the wire
+        -- shape; NULL for a module written by hand.
+        delivery_json TEXT
     );
     CREATE INDEX idx_surface_modules_surface ON surface_modules(surface_id);
     CREATE TABLE surface_annotations (
@@ -383,7 +386,11 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         -- recoverable from a run that never returned. Generic JSON like
         -- every other run blob; the contract lives in `swage-protocol` and
         -- is enforced at the wire boundary.
-        terminal_account_json TEXT
+        terminal_account_json TEXT,
+        -- Every gateway interruption the run lived through, as a JSON list
+        -- of { detected_at, run_state } entries written by the boot that
+        -- found it running or parked with no gateway alive to serve it.
+        interruptions_json   TEXT NOT NULL DEFAULT '[]'
     );
     INSERT INTO workflow_runs_parking_new (
         id, topic_id, script_version_id, inline_workflow_id,

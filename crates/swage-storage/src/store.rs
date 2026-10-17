@@ -7,22 +7,23 @@ use crate::model::{
     ActiveSkillRecord, AgentDefinition, AgentMessage, AppendMessage, ApprovalRequest,
     ApprovalState, Attachment, AttachmentStatus, AuditEvent, AuditEventFilter, BackgroundJob,
     ChannelInboundMessage, ChannelLink, ContextSnapshotRecord, CurationAssertion, DeliveryRecord,
-    DeviceRegistration, DrainedTurnQueue, ExtractionDerivation, InboundAudit, KnowledgeCitation,
-    KnowledgeSearchHit, LibraryEntry, LibraryEntryModule, LibrarySeeding, Material, Message,
-    ModuleSourceReplacement, NewAgentDefinition, NewAgentMessage, NewApprovalRequest,
-    NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelInboundMessage, NewChannelLink,
-    NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration, NewKnowledgeCitation,
-    NewLibraryEntry, NewLibraryEntryModule, NewMaterial, NewMessage, NewOrientationCard,
-    NewSchedule, NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation, NewSurface,
-    NewSurfaceAnnotation, NewSurfaceModule, NewTaskDefinition, NewThread, NewToolCall, NewTopic,
-    NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowRunHold,
-    NewWorkflowRunHoldRejection, NewWorkflowScript, NewWorkspaceAttachment, OrientationCard,
-    OrientationCardLifecycle, PendingChannelOrigin, ProviderRoundRecord, RemovedSurfaceModule,
-    Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SessionActivity,
-    SessionListing, SessionVariable, SourceCapture, SourceObservation, Surface, SurfaceAnnotation,
-    SurfaceModule, TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord, Topic,
-    TopicSlug, Turn, TurnIsolation, TurnState, UpdateSchedule, WorkflowHoldSettlement,
-    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
+    DeviceRegistration, DrainedTurnQueue, ExtractionDerivation, GatewayInterruptionCounts,
+    InboundAudit, KnowledgeCitation, KnowledgeSearchHit, LibraryEntry, LibraryEntryModule,
+    LibrarySeeding, Material, Message, ModuleDelivery, ModuleSourceReplacement, NewAgentDefinition,
+    NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob,
+    NewChannelInboundMessage, NewChannelLink, NewCurationAssertion, NewDeliveryRecord,
+    NewDeviceRegistration, NewKnowledgeCitation, NewLibraryEntry, NewLibraryEntryModule,
+    NewMaterial, NewMessage, NewOrientationCard, NewSchedule, NewScheduleRun, NewSecretRecord,
+    NewSession, NewSourceObservation, NewSurface, NewSurfaceAnnotation, NewSurfaceModule,
+    NewTaskDefinition, NewThread, NewToolCall, NewTopic, NewTurn, NewWorkflowJournalIntent,
+    NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowRunHold, NewWorkflowRunHoldRejection,
+    NewWorkflowScript, NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle,
+    PendingChannelOrigin, ProviderRoundRecord, RemovedSurfaceModule, Schedule, ScheduleRun,
+    ScheduleRunUpdate, SecretRecord, Session, SessionActivity, SessionListing, SessionVariable,
+    SourceCapture, SourceObservation, Surface, SurfaceAnnotation, SurfaceModule, TaskDefinition,
+    Thread, ThreadBranch, ThreadState, ToolCallRecord, Topic, TopicSlug, Turn, TurnIsolation,
+    TurnState, UpdateSchedule, WorkflowHoldSettlement, WorkflowJournalRecord,
+    WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
     WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
     WorkspaceAttachment,
 };
@@ -1273,7 +1274,15 @@ pub trait WorkflowStore: Send + Sync {
         journal_error: Option<&str>,
         journal_termination: Option<serde_json::Value>,
     ) -> Result<bool, StorageError>;
-    async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError>;
+    /// A boot's interruption pass, in one transaction: every run still
+    /// `running` is marked `interrupted` (the process that ran it is gone;
+    /// the waker relaunches it by replay), and every run that was running
+    /// or parked gets an interruption entry stamped `detected_at` — the
+    /// gateway's absence over a parked wait is a fact the record shows too.
+    async fn record_gateway_interruption(
+        &self,
+        detected_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<GatewayInterruptionCounts, StorageError>;
     /// Atomically move a run from one expected state to another. `false`
     /// means the run was no longer in `from` — the caller lost the race
     /// (a concurrent cancellation, another waker) and must not proceed.
@@ -1446,11 +1455,24 @@ pub trait WorkflowStore: Send + Sync {
         id: Uuid,
         dispatch: serde_json::Value,
     ) -> Result<(), StorageError>;
-    async fn record_workflow_call_attempt(
+    /// Append an attempt to the call's record before its turn starts: the
+    /// attempt's cause and opening time, with no resolution yet. Returns
+    /// the earlier attempts it supersedes, oldest first, so what they left
+    /// outstanding can end the moment nothing can answer it any more.
+    async fn open_workflow_call_attempt(
         &self,
         id: Uuid,
         attempt: serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, StorageError>;
+    /// Resolve the call's open attempt — the latest one with no turn — with
+    /// what its turn resolved, merged over the opened record. An entry with
+    /// no open attempt is an error: a turn nobody opened an attempt for
+    /// must not run.
+    async fn resolve_workflow_call_attempt(
+        &self,
+        id: Uuid,
+        resolution: serde_json::Value,
+    ) -> Result<(), StorageError>;
     async fn cut_short_workflow_journal_entry(
         &self,
         id: Uuid,
@@ -1520,12 +1542,14 @@ pub trait SurfaceStore: Send + Sync {
     ) -> Result<SurfaceModule, StorageError>;
     async fn get_surface_module(&self, id: Uuid) -> Result<Option<SurfaceModule>, StorageError>;
     /// Append a module instance after the surface's last one, its position
-    /// assigned under the connection lock so two appends never share one.
+    /// assigned under the connection lock so two appends never share one;
+    /// `delivery` records the run or turn whose output it is, when one is.
     async fn append_surface_module(
         &self,
         surface_id: Uuid,
         kind: &str,
         source: &str,
+        delivery: Option<ModuleDelivery>,
     ) -> Result<SurfaceModule, StorageError>;
     /// A surface's module instances in position order.
     async fn list_surface_modules(
@@ -1537,11 +1561,14 @@ pub trait SurfaceStore: Send + Sync {
     /// and returns it as it now stands. A landed replace advances the
     /// revision and the owning surface's updated_at. `None` when there is no
     /// such module.
+    /// `delivery` names the run or turn whose output the new source is;
+    /// `None` is an edit by hand, which keeps the delivery the module has.
     async fn replace_surface_module_source(
         &self,
         id: Uuid,
         expected_revision: i64,
         source: &str,
+        delivery: Option<ModuleDelivery>,
     ) -> Result<Option<ModuleSourceReplacement>, StorageError>;
     /// Remove a module instance and the notes hung on it, closing the gap in
     /// the surface's positions. `None` when there is no such module.
@@ -2548,6 +2575,7 @@ mod tests {
             _: Uuid,
             _: &str,
             _: &str,
+            _: Option<ModuleDelivery>,
         ) -> Result<SurfaceModule, StorageError> {
             unimplemented!()
         }
@@ -2559,6 +2587,7 @@ mod tests {
             _: Uuid,
             _: i64,
             _: &str,
+            _: Option<ModuleDelivery>,
         ) -> Result<Option<ModuleSourceReplacement>, StorageError> {
             unimplemented!()
         }
@@ -3127,7 +3156,10 @@ mod tests {
         ) -> Result<bool, StorageError> {
             unimplemented!()
         }
-        async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {
+        async fn record_gateway_interruption(
+            &self,
+            _: chrono::DateTime<chrono::Utc>,
+        ) -> Result<GatewayInterruptionCounts, StorageError> {
             unimplemented!()
         }
         async fn try_transition_workflow_run_state(
@@ -3306,11 +3338,18 @@ mod tests {
         ) -> Result<(), StorageError> {
             unimplemented!()
         }
-        async fn record_workflow_call_attempt(
+        async fn open_workflow_call_attempt(
             &self,
             _: Uuid,
             _: serde_json::Value,
         ) -> Result<Vec<serde_json::Value>, StorageError> {
+            unimplemented!()
+        }
+        async fn resolve_workflow_call_attempt(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
             unimplemented!()
         }
         async fn cut_short_workflow_journal_entry(
