@@ -55,6 +55,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Sessions can read shipped skills and their carried guidance without location approval, including after a gateway restart; other locations still require approval.
+
 - File search keeps scanning efficiently after the result window fills, preserving result bytes and total counts.
 
 - Tool-output creation refuses planted directory and file links, preventing sandboxed commands from redirecting gateway writes outside output storage.
