@@ -1046,12 +1046,15 @@ pub trait AgentMessageStore: Send + Sync {
         payload: serde_json::Value,
     ) -> Result<(), StorageError>;
 
-    /// The delegate message that started the child thread `thread_id` —
-    /// the one the executor annotated with that thread — or none when no
-    /// delegate names it.
+    /// The delegate message that started a turn on the child thread
+    /// `thread_id`: the newest delegate annotated with that thread and
+    /// created no later than `started_by` — a named child's thread is
+    /// reused across delegations, each starting its own turn after its own
+    /// delegate — or none when no delegate names it.
     async fn find_delegate_for_thread(
         &self,
         thread_id: Uuid,
+        started_by: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<AgentMessage>, StorageError>;
 
     /// List all messages sharing a correlation ID, ordered by creation time.
@@ -2971,6 +2974,7 @@ mod tests {
         async fn find_delegate_for_thread(
             &self,
             _: Uuid,
+            _: chrono::DateTime<chrono::Utc>,
         ) -> Result<Option<AgentMessage>, StorageError> {
             unimplemented!()
         }

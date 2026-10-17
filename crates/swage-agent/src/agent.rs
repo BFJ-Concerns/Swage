@@ -2581,11 +2581,24 @@ impl Agent {
                 };
 
                 // Suspend the parent turn — durable state so restart recovery
-                // can find it and transition to Interrupted.
-                let _ = self
+                // can find it and resume it. The mark is what selects the
+                // turn for resumption, so a delegation whose wait cannot be
+                // recorded is not started: the model is told, and the turn
+                // goes on as it was.
+                if let Err(error) = self
                     .storage
                     .update_turn_state(execution.turn_id, TurnState::Delegating)
-                    .await;
+                    .await
+                {
+                    return Ok((
+                        format!(
+                            "delegation not started: the turn's wait could not be recorded ({error}); a restart could not resume it"
+                        ),
+                        true,
+                        "error".to_string(),
+                    )
+                        .into());
+                }
 
                 // Emit DelegationStarted event so clients can track progress.
                 let _ = event_tx.send(AgentEvent::DelegationStarted {
@@ -2616,11 +2629,21 @@ impl Agent {
 
                 // Resume the parent turn — back to Processing regardless of
                 // outcome. The tool call result (success or error string) is
-                // what the LLM sees.
-                let _ = self
+                // what the LLM sees. A failed write leaves the turn marked
+                // as waiting: a later restart would resume it over a
+                // delegation that already answered, so the failure is
+                // named where a reader of the log will find it.
+                if let Err(error) = self
                     .storage
                     .update_turn_state(execution.turn_id, TurnState::Processing)
-                    .await;
+                    .await
+                {
+                    tracing::error!(
+                        %error,
+                        turn_id = %execution.turn_id,
+                        "the turn's return from delegating could not be recorded; a restart would treat it as still waiting"
+                    );
+                }
 
                 match delegation_result {
                     Ok(crate::delegation::DelegationOutcome::Completed(result)) => {

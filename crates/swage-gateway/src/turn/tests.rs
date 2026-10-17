@@ -5934,6 +5934,7 @@ impl swage_storage::store::AgentMessageStore for MockStorage {
     async fn find_delegate_for_thread(
         &self,
         thread_id: Uuid,
+        started_by: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<AgentMessage>, StorageError> {
         let thread = thread_id.to_string();
         let mut delegates: Vec<_> = self
@@ -5945,6 +5946,7 @@ impl swage_storage::store::AgentMessageStore for MockStorage {
             .filter(|message| {
                 message.kind == swage_core::MessageKind::Delegate
                     && message.payload.get("_thread_id").and_then(|v| v.as_str()) == Some(&thread)
+                    && message.created_at <= started_by
             })
             .cloned()
             .collect();

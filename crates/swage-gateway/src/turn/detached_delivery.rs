@@ -34,7 +34,22 @@ pub(super) async fn deliver_detached_results(
     let pending_results = swage_agent::mailbox::pending_results(&state.storage, agent_id)
         .await
         .map_err(|error| GatewayError::WebSocketError(error.to_string()))?;
-    for result in &pending_results {
+    // The mailbox is the agent's, and an agent may run several sessions: a
+    // Result that names the parent session it belongs to (recovery writes
+    // one so) is delivered only there; one that names none is the agent's
+    // to take in whichever of its sessions turns next.
+    let here = session_id.to_string();
+    let addressed_here = |result: &swage_storage::model::AgentMessage| {
+        result
+            .payload
+            .get("parent_session_id")
+            .and_then(|value| value.as_str())
+            .is_none_or(|parent| parent == here)
+    };
+    for result in pending_results
+        .iter()
+        .filter(|result| addressed_here(result))
+    {
         append_platform_message(
             state,
             PlatformMessage {
