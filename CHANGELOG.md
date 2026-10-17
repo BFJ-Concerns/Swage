@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- The turn context inspector opens complete recorded provider requests and element text, and shows effective model, provider, effort, budgets and request divergences.
 - Session surfaces can be renamed from their header or by the agent without changing the library entry or original surface.
 - Either party can resolve a surface note; it leaves the working view and remains in the surface record.
 - Agents can replace or remove a uniquely matched passage of a module without resubmitting unrelated content.
@@ -52,6 +53,15 @@ All notable changes to Swage are documented in this file.
 ### Fixed
 
 - A workflow run's record shows every gateway interruption it lived through — a boot that found it running, or parked — and the run view lists them. Each attempt of a worker call records why it was dispatched: the first dispatch, a redispatch after an interruption (whose earlier attempt's outcome is unknown and whose tool calls may have been applied), or the declared fallback serving after the primary failed; the run detail words the two apart instead of calling every redispatch an interruption. The run's Done summary marks workers redispatched after an interruption and discloses that their effects may have been repeated.
+- Cancelling a turn while its initial provider attempt is queued retains that attempt as interrupted in the turn record.
+
+- The turn inspector shows the final provider attempt’s full request for each round and keeps failed attempts’ requests beside their entries, including cross-protocol failover.
+
+- Provider attempt records and the turn inspector identify each attempt’s provider adapter, model and stable route through failover, so separate providers’ first attempts are distinguishable.
+
+- Turn inspector instruction summaries count each configured file at its original hierarchy level, including topic instructions.
+
+- Turn records retain every provider stream attempt, including the initial request and retries, with start and end times and redacted failure details.
 - Surface renames and note resolutions commit with their audit event; a failed audit write leaves the surface unchanged.
 
 - Surface reads by the agent omit resolved notes while the HTTP response and stored record retain them.

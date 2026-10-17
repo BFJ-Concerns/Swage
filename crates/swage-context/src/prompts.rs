@@ -25,6 +25,7 @@ use crate::tokeniser::Tokeniser;
 pub struct PromptsElement {
     // Pre-sorted prompt rules: highest priority first.
     rules: Vec<PromptRule>,
+    source_levels: Vec<HierarchyLevel>,
 }
 
 impl PromptsElement {
@@ -34,7 +35,41 @@ impl PromptsElement {
     /// as produced by the config loader). The element concatenates their content
     /// in this order.
     pub fn new(rules: Vec<PromptRule>) -> Self {
-        Self { rules }
+        let source_levels = rules.iter().map(|rule| rule.source_level.clone()).collect();
+        Self {
+            rules,
+            source_levels,
+        }
+    }
+
+    /// Keep resolved instruction bytes intact while counting their original
+    /// file sources separately from the appended operator-guidance rules.
+    pub fn from_resolved_instructions(
+        instructions: &str,
+        instruction_sources: &[HierarchyLevel],
+        guidance: Vec<PromptRule>,
+    ) -> Self {
+        let mut rules = Vec::new();
+        let mut source_levels = Vec::new();
+        if !instructions.is_empty() {
+            rules.push(PromptRule {
+                priority: 0,
+                content: instructions.to_string(),
+                source_level: HierarchyLevel::Global,
+                file_path: "resolved-instructions".into(),
+            });
+            if instruction_sources.is_empty() {
+                source_levels.push(HierarchyLevel::Global);
+            } else {
+                source_levels.extend_from_slice(instruction_sources);
+            }
+        }
+        source_levels.extend(guidance.iter().map(|rule| rule.source_level.clone()));
+        rules.extend(guidance);
+        Self {
+            rules,
+            source_levels,
+        }
     }
 }
 
@@ -85,11 +120,11 @@ impl ContextElement for PromptsElement {
         // Count rules per hierarchy level for the provenance summary.
         let mut counts: Vec<(HierarchyLevel, usize)> = Vec::new();
 
-        for rule in &self.rules {
-            if let Some(entry) = counts.iter_mut().find(|(lvl, _)| *lvl == rule.source_level) {
+        for level in &self.source_levels {
+            if let Some(entry) = counts.iter_mut().find(|(lvl, _)| lvl == level) {
                 entry.1 += 1;
             } else {
-                counts.push((rule.source_level.clone(), 1));
+                counts.push((level.clone(), 1));
             }
         }
 
@@ -99,7 +134,7 @@ impl ContextElement for PromptsElement {
             .collect::<Vec<_>>()
             .join(", ");
 
-        let total = self.rules.len();
+        let total = self.source_levels.len();
         format!("prompt rules ({total} total: {level_summary})")
     }
 }
