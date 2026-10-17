@@ -390,11 +390,23 @@ async fn persist_permanent_tool_approval_to_path(
     // a completed security save survives even if runtime state lags it.
     let config = swage_config::apply_overlay(resolve_config()?, partial.clone());
     let tools = partial.tools.get_or_insert_with(Default::default);
-    tools.require_approval = Some(require_approval_entries_without_tool(&config, tool_name));
+    let require_approval = require_approval_entries_without_tool(&config, tool_name);
+    tools.require_approval = Some(require_approval.clone());
 
     let body = toml::to_string_pretty(&partial)
         .map_err(|error| ApiError::validation(format!("failed to serialise settings: {error}")))?;
     write_config_atomically(&path, &body).await?;
+
+    if path == global_config_path(&state.config_root) {
+        let mut runtime_config = state.active_config();
+        runtime_config.tools.permissions.require_approval = require_approval;
+        let tool_dispatcher = crate::startup::build_tool_dispatcher(
+            &runtime_config,
+            state.storage.clone(),
+            &state.config_root,
+        );
+        state.replace_runtime(runtime_config, state.active_provider(), tool_dispatcher);
+    }
 
     Ok(())
 }
@@ -1307,6 +1319,59 @@ async fn discover_openrouter_models() -> Result<Vec<DiscoveredModel>, ApiError> 
 #[cfg(test)]
 mod tests {
     use crate::test_support::SwageHomeGuard;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn global_permanent_approval_updates_general_session_security_reading() {
+        use std::sync::Arc;
+        use swage_storage::{SessionStore, SqliteStorage, TopicStore};
+
+        let root = tempfile::tempdir().expect("config root");
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let general = storage.general_scope().await.expect("general scope");
+        let session = storage
+            .create_session(swage_storage::fixtures::new_session(general.id))
+            .await
+            .expect("session");
+        let mut config = swage_config::ResolvedConfig::default();
+        config.tools.permissions.require_approval = vec![
+            swage_config::model::RequireApprovalEntry::Simple("shell".into()),
+            swage_config::model::RequireApprovalEntry::Simple("file_write".into()),
+        ];
+        let state = AppState::new_with_config_root(
+            storage.clone(),
+            storage,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            root.path().to_path_buf(),
+        );
+        let before = crate::security_settings::security_settings_for_session(&state, session.id)
+            .await
+            .expect("initial session reading");
+        assert_eq!(before.effective.require_approval.len(), 2);
+
+        persist_permanent_tool_approval_globally(&state, "shell")
+            .await
+            .expect("global permanent approval");
+        let saved = read_partial_config(&global_config_path(root.path()))
+            .await
+            .unwrap();
+        assert_eq!(
+            saved.tools.unwrap().require_approval.unwrap(),
+            vec![swage_config::model::RequireApprovalEntry::Simple(
+                "file_write".into()
+            )]
+        );
+        let after = crate::security_settings::security_settings_for_session(&state, session.id)
+            .await
+            .expect("session reading after approval");
+        assert_eq!(
+            serde_json::to_value(after.effective.require_approval).unwrap(),
+            serde_json::json!(["file_write"]),
+            "general session security must stop requiring approval for the globally approved tool"
+        );
+    }
 
     fn succession_settings_request(context: Option<serde_json::Value>) -> SaveSettingsRequest {
         let mut value = serde_json::json!({
