@@ -594,6 +594,9 @@ pub trait TurnStore: Send + Sync {
 
     /// List all turns for a thread ordered by created_at ascending.
     async fn list_turns_by_thread(&self, thread_id: Uuid) -> Result<Vec<Turn>, StorageError>;
+    /// The turns a delegating turn started — its children by
+    /// `parent_turn_id` — in creation order.
+    async fn list_child_turns(&self, parent_turn_id: Uuid) -> Result<Vec<Turn>, StorageError>;
     /// Update a turn's state.
     ///
     /// State is consumer-driven — the storage layer records whatever state is
@@ -1053,6 +1056,27 @@ pub trait AgentMessageStore: Send + Sync {
         id: Uuid,
         payload: serde_json::Value,
     ) -> Result<(), StorageError>;
+
+    /// Reissue a pending message with a new payload, dated now: a message
+    /// written before a restart and readdressed by its recovery is as new
+    /// as the restart, so the startup expiry of stale messages does not
+    /// take it before the drain delivers it.
+    async fn reissue_agent_message(
+        &self,
+        id: Uuid,
+        payload: serde_json::Value,
+    ) -> Result<(), StorageError>;
+
+    /// The delegate message that started a turn on the child thread
+    /// `thread_id`: the newest delegate annotated with that thread and
+    /// created no later than `started_by` — a named child's thread is
+    /// reused across delegations, each starting its own turn after its own
+    /// delegate — or none when no delegate names it.
+    async fn find_delegate_for_thread(
+        &self,
+        thread_id: Uuid,
+        started_by: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<AgentMessage>, StorageError>;
 
     /// List all messages sharing a correlation ID, ordered by creation time.
     ///
@@ -2709,6 +2733,9 @@ mod tests {
         async fn list_turns_by_thread(&self, _thread_id: Uuid) -> Result<Vec<Turn>, StorageError> {
             unimplemented!()
         }
+        async fn list_child_turns(&self, _: Uuid) -> Result<Vec<Turn>, StorageError> {
+            unimplemented!()
+        }
         async fn update_turn_state(&self, _: Uuid, _: TurnState) -> Result<(), StorageError> {
             unimplemented!()
         }
@@ -3016,6 +3043,13 @@ mod tests {
 
     #[async_trait]
     impl AgentMessageStore for StubStorage {
+        async fn find_delegate_for_thread(
+            &self,
+            _: Uuid,
+            _: chrono::DateTime<chrono::Utc>,
+        ) -> Result<Option<AgentMessage>, StorageError> {
+            unimplemented!()
+        }
         async fn create_agent_message(
             &self,
             _: NewAgentMessage,
@@ -3037,6 +3071,13 @@ mod tests {
             unimplemented!()
         }
         async fn update_agent_message_payload(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn reissue_agent_message(
             &self,
             _: Uuid,
             _: serde_json::Value,

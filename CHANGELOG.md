@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- A turn interrupted by a gateway restart while waiting on a delegated agent resumes when the gateway comes back: each child's result, failure or cut-off note reaches the parent as a delegation notice and the parent's conversation continues from there.
 - `file_write` can append content without rewriting or replacing the existing file.
 - A module a scheduled run, a workflow run or a routed turn delivers to a surface records what delivered it and when, and the surface shows the attribution above the module.
 - Settings has a read-only Channels tab showing channel status, linked chats and unredeemed link codes verbatim with their expiry in local time.

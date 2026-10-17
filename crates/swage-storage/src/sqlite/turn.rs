@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use swage_core::StorageError;
 
-use crate::model::{InboundAudit, NewTurn, Turn, TurnIsolation, TurnState};
+use crate::model::{InboundAudit, NewTurn, Turn, TurnAttribution, TurnIsolation, TurnState};
 use crate::sqlite::SqliteStorage;
 use crate::store::TurnStore;
 
@@ -118,6 +118,30 @@ fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
                 })?
         },
         failure_message: row.get(18)?,
+        attribution: {
+            let attended: Option<bool> = row.get(19)?;
+            let targets: Option<String> = row.get(20)?;
+            attended
+                .map(|attended| -> rusqlite::Result<TurnAttribution> {
+                    let delivery_targets = targets
+                        .as_deref()
+                        .map(serde_json::from_str)
+                        .transpose()
+                        .map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                20,
+                                rusqlite::types::Type::Text,
+                                Box::new(ParseError(e.to_string())),
+                            )
+                        })?
+                        .unwrap_or_default();
+                    Ok(TurnAttribution {
+                        attended,
+                        delivery_targets,
+                    })
+                })
+                .transpose()?
+        },
         created_at: parse_dt(&created)?,
         completed_at: completed.as_deref().map(parse_dt).transpose()?,
     })
@@ -171,7 +195,8 @@ impl TurnStore for SqliteStorage {
                 delegated_output_tokens: None,
                 execution_isolation: None,
                 failure_message: None,
-            })
+                            attribution: None,
+})
         })
         .await
     }
@@ -193,7 +218,8 @@ impl TurnStore for SqliteStorage {
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
                         structured_output, parent_turn_id,
                         delegated_input_tokens, delegated_output_tokens,
-                        isolation_kind, isolation_detail, failure_message
+                        isolation_kind, isolation_detail, failure_message,
+                        attended, delivery_targets
                  FROM turns WHERE id = ?1",
                 params![id.to_string()],
                 |row| Ok((row_to_turn(row)?, chrono::Utc::now())),
@@ -210,11 +236,30 @@ impl TurnStore for SqliteStorage {
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
                         structured_output, parent_turn_id,
                         delegated_input_tokens, delegated_output_tokens,
-                        isolation_kind, isolation_detail, failure_message
+                        isolation_kind, isolation_detail, failure_message,
+                        attended, delivery_targets
                  FROM turns WHERE thread_id = ?1
                  ORDER BY created_at ASC",
             )?;
             let rows = stmt.query_map(params![thread_id.to_string()], row_to_turn)?;
+            rows.collect()
+        })
+        .await
+    }
+
+    async fn list_child_turns(&self, parent_turn_id: Uuid) -> Result<Vec<Turn>, StorageError> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, thread_id, agent_id, user_input, inbound_audit, assistant_response,
+                        input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
+                        structured_output, parent_turn_id,
+                        delegated_input_tokens, delegated_output_tokens,
+                        isolation_kind, isolation_detail, failure_message,
+                        attended, delivery_targets
+                 FROM turns WHERE parent_turn_id = ?1
+                 ORDER BY created_at ASC",
+            )?;
+            let rows = stmt.query_map(params![parent_turn_id.to_string()], row_to_turn)?;
             rows.collect()
         })
         .await
@@ -289,7 +334,8 @@ impl TurnStore for SqliteStorage {
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
                         structured_output, parent_turn_id,
                         delegated_input_tokens, delegated_output_tokens,
-                        isolation_kind, isolation_detail, failure_message
+                        isolation_kind, isolation_detail, failure_message,
+                        attended, delivery_targets
                  FROM turns WHERE state IN ('pending', 'processing', 'awaiting_approval', 'delegating') AND agent_id = ?1",
             )?;
             let rows = stmt.query_map(params![&agent_id], row_to_turn)?;
@@ -712,6 +758,50 @@ mod tests {
         assert_eq!(
             updated.assistant_response.as_deref(),
             Some("The assistant replied.")
+        );
+    }
+
+    /// A delegating turn's children are the turns that name it as parent,
+    /// in creation order, wherever their threads are; a turn with none has
+    /// none.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn child_turns_list_by_parent_in_creation_order() {
+        let (storage, session_id, parent_thread) = make_session_thread().await;
+        let parent = storage
+            .create_turn(NewTurn {
+                thread_id: parent_thread,
+                agent_id: "test-agent".into(),
+                state: TurnState::Delegating,
+                user_input: Some("delegate".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let mut children = Vec::new();
+        for name in ["child-a", "child-b"] {
+            let thread = insert_thread(&storage, session_id, name).await;
+            children.push(
+                storage
+                    .create_turn(NewTurn {
+                        thread_id: thread,
+                        agent_id: name.into(),
+                        state: TurnState::Processing,
+                        user_input: Some("the task".into()),
+                        parent_turn_id: Some(parent.id),
+                    })
+                    .await
+                    .unwrap()
+                    .id,
+            );
+        }
+        let listed = storage.list_child_turns(parent.id).await.unwrap();
+        assert_eq!(listed.iter().map(|t| t.id).collect::<Vec<_>>(), children);
+        assert!(
+            storage
+                .list_child_turns(children[0])
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 

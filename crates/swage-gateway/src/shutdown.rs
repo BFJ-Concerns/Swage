@@ -29,8 +29,11 @@ use std::time::Duration;
 use tokio::time;
 use tracing::{info, warn};
 
-use swage_core::{ApprovalTimeoutPolicy, StorageError};
-use swage_storage::model::{ApprovalState, ThreadState, TurnState};
+use swage_core::{ApprovalTimeoutPolicy, MessageKind, MessageStatus, Role, StorageError};
+use swage_storage::MessageOrigin;
+use swage_storage::model::{
+    ApprovalState, NewAgentMessage, NewQueuedTurnInput, Session, ThreadState, Turn, TurnState,
+};
 use swage_storage::store::{
     INTERRUPTED_TOOL_RESULT, INTERRUPTED_TOOL_STATUS, Storage, TOOL_RESULT_UNAVAILABLE,
     TOOL_RESULT_UNAVAILABLE_STATUS, TopicStore,
@@ -104,16 +107,27 @@ pub async fn recover_orphaned_turns(
 ) -> Result<usize, StorageError> {
     let mut recovered_turn_ids = HashSet::new();
     let mut seen_turn_ids = HashSet::new();
+    // Parents cut off while waiting on a delegated child: interrupted like
+    // any in-flight turn here, then resumed once every child's fate is
+    // settled by this same pass (resume_delegating_parent).
+    let mut delegating_parents: Vec<(Session, Turn, TurnOwner)> = Vec::new();
 
     for topic in topic_store.list_scopes().await? {
         for session in storage.list_by_topic(topic.id).await? {
             for thread in storage.list_by_session(session.id).await? {
                 for turn in storage.list_turns_by_thread(thread.id).await? {
-                    // A Delegating parent turn is interrupted here like any
-                    // other in-flight turn: no delegation correlation state
-                    // survives a restart, so the parent cannot resume.
                     if !seen_turn_ids.insert(turn.id) {
                         continue;
+                    }
+                    // A delegating turn that is itself a child — a middle tier
+                    // of a nested delegation — is its own parent's to return
+                    // to: that parent is told it was cut off, and resuming it
+                    // on its own would run beside the parent's return to it.
+                    let delegating =
+                        turn.state == TurnState::Delegating && turn.parent_turn_id.is_none();
+                    if delegating {
+                        let owner = turn_owner(storage, &turn).await?;
+                        delegating_parents.push((session.clone(), turn.clone(), owner));
                     }
 
                     // A settlement may have failed after a turn completed;
@@ -152,15 +166,353 @@ pub async fn recover_orphaned_turns(
                         storage.update_state(thread.id, ThreadState::Idle).await?;
                     }
 
-                    storage
-                        .update_turn_state(turn.id, TurnState::Interrupted)
-                        .await?;
+                    // A delegating parent keeps its state until its
+                    // resumption is on the record (below): `Delegating` is
+                    // the one durable mark that selects it for resumption,
+                    // so a failure before the hand-off leaves it for the
+                    // next startup rather than consuming the mark first.
+                    if !delegating {
+                        storage
+                            .update_turn_state(turn.id, TurnState::Interrupted)
+                            .await?;
+                    }
                 }
             }
         }
     }
 
+    for (session, parent, owner) in delegating_parents {
+        resume_delegating_parent(storage, &session, &parent, owner).await?;
+        storage
+            .update_turn_state(parent.id, TurnState::Interrupted)
+            .await?;
+    }
+
     Ok(recovered_turn_ids.len())
+}
+
+/// Whose turn a delegating parent was, by the origin of the input that
+/// started it: a person's (or a channel's, or a delegation notice's), or
+/// an automation's — a schedule's run or a workflow's agent call — whose
+/// own recovery settles the run and redispatches the call, and which must
+/// not be continued a second way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TurnOwner {
+    Person,
+    Automation,
+}
+
+/// Who the turn answers to, read from the inputs that started it: a turn
+/// started by a schedule or a workflow with no person's input beside it
+/// is theirs to recover; a turn with a person's input among its starters
+/// — a message batched with a scheduled brief — is the person's, and
+/// resumes. Rows the platform itself added to the turn — a delivered
+/// child's result, a notice — say nothing about who started it.
+async fn turn_owner(storage: &dyn Storage, turn: &Turn) -> Result<TurnOwner, StorageError> {
+    let origins: Vec<MessageOrigin> = storage
+        .list_messages_by_thread(turn.thread_id)
+        .await?
+        .iter()
+        .filter(|message| message.turn_id == Some(turn.id) && message.role == Role::User)
+        .map(|message| message.origin)
+        .collect();
+    let a_persons = origins
+        .iter()
+        .any(|origin| matches!(origin, MessageOrigin::User));
+    let an_automations = origins
+        .iter()
+        .any(|origin| matches!(origin, MessageOrigin::Schedule | MessageOrigin::Workflow));
+    let automated = an_automations && !a_persons;
+    Ok(if automated {
+        TurnOwner::Automation
+    } else {
+        TurnOwner::Person
+    })
+}
+
+/// Whether the parent's own tool call for a delegation — the call the
+/// delegate message names — settled with the delegation's own result in
+/// the parent's record. A delegate that names no call, a call with no
+/// result, and a call recovery itself settled with its placeholder for a
+/// cut-off or unavailable result (startup settles every started call
+/// before the parents resume) did not: only a result the delegation
+/// wrote counts.
+async fn delegate_call_settled(
+    storage: &dyn Storage,
+    parent: &Turn,
+    delegate_payload: &serde_json::Value,
+) -> Result<bool, StorageError> {
+    let Some(call_id) = delegate_payload.get("_call_id").and_then(|v| v.as_str()) else {
+        return Ok(false);
+    };
+    Ok(storage
+        .get_tool_call_by_turn_and_call_id(parent.id, call_id)
+        .await?
+        .is_some_and(|call| {
+            call.result.is_some()
+                && !matches!(
+                    call.status.as_deref(),
+                    Some(INTERRUPTED_TOOL_STATUS) | Some(TOOL_RESULT_UNAVAILABLE_STATUS)
+                )
+        }))
+}
+
+/// Why an incomplete child stopped, as its own record says: the account
+/// the runtime left on its thread when the response was cut short, or the
+/// turn's failure message, or that it stopped short.
+async fn incomplete_account(storage: &dyn Storage, child: &Turn) -> Result<String, StorageError> {
+    let account = storage
+        .list_messages_by_thread(child.thread_id)
+        .await?
+        .into_iter()
+        .rev()
+        .find(|message| {
+            message.turn_id == Some(child.id)
+                && message.origin == MessageOrigin::Platform
+                && message.content.starts_with("Response incomplete:")
+        })
+        .map(|message| message.content);
+    Ok(account
+        .or_else(|| child.failure_message.clone())
+        .unwrap_or_else(|| "the turn stopped short of completing".to_owned()))
+}
+
+/// Resume a parent cut off while waiting on a delegated child: the child's
+/// fate goes to the parent agent's mailbox as a pending Result under the
+/// delegate that started it — the child's own result when it completed
+/// before the restart, its failure when it failed, or a cut-off account
+/// with the child's session and thread when it was in flight — naming the
+/// parent's session so that session's next turn, and no other session of
+/// the same agent, delivers it; and a continuation input is queued on the
+/// parent's session, so the startup drain starts the parent's next turn
+/// with the Result delivered into its thread first. The parent stays
+/// `Delegating` until this returns, so a write that fails here leaves it
+/// for the next startup (which may then repeat a Result or continuation
+/// already written: at least once, each naming the same outcome). A child
+/// whose delegate message cannot be found is a gap in the record: recorded
+/// as such, the notice still naming the child.
+async fn resume_delegating_parent(
+    storage: &dyn Storage,
+    session: &Session,
+    parent: &Turn,
+    owner: TurnOwner,
+) -> Result<(), StorageError> {
+    let mut notices = Vec::new();
+    for child in storage.list_child_turns(parent.id).await? {
+        let child_session_id = storage
+            .get(child.thread_id)
+            .await?
+            .map(|thread| thread.session_id);
+        // The child's fate from its own row — what the record says it did,
+        // never an outcome invented for it: a turn that ended on its own
+        // keeps its ending; only a turn still in flight, or already cut
+        // off, was cut off by a restart.
+        let (mut payload, fate) = match child.state {
+            TurnState::Completed => (
+                serde_json::json!({
+                    "response": child.assistant_response.clone().unwrap_or_default(),
+                    "structured_output": child.structured_output,
+                }),
+                "completed before the restart; its result is delivered above",
+            ),
+            TurnState::Incomplete => (
+                serde_json::json!({
+                    "response": child.assistant_response.clone().unwrap_or_default(),
+                    "incomplete_reason": incomplete_account(storage, &child).await?,
+                    "structured_output": child.structured_output,
+                }),
+                "stopped short before the restart; what it produced is delivered above",
+            ),
+            TurnState::Refused => (
+                serde_json::json!({
+                    "error": "the delegated agent refused the task",
+                    "refused": true,
+                    "response": child.assistant_response,
+                }),
+                "refused the task before the restart",
+            ),
+            TurnState::Failed => (
+                serde_json::json!({
+                    "error": child
+                        .failure_message
+                        .clone()
+                        .unwrap_or_else(|| "the delegated turn failed".to_owned()),
+                }),
+                "failed before the restart; its failure is delivered above",
+            ),
+            TurnState::Interrupted
+            | TurnState::Pending
+            | TurnState::Processing
+            | TurnState::AwaitingApproval
+            | TurnState::Delegating => (
+                serde_json::json!({
+                    "error": "cut off by a gateway restart before completing; its work so far is on its thread",
+                }),
+                "was cut off by the restart; its work so far is on its own thread, and delegating to it again continues there",
+            ),
+        };
+        payload["child_session_id"] = serde_json::json!(child_session_id);
+        payload["child_thread_id"] = serde_json::json!(child.thread_id);
+        payload["parent_session_id"] = serde_json::json!(session.id);
+        payload["parent_turn_id"] = serde_json::json!(parent.id);
+        match storage
+            .find_delegate_for_thread(child.thread_id, child.created_at)
+            .await?
+        {
+            Some(delegate) => {
+                // A Result the child itself wrote is already the record of
+                // its fate: one delivered into the parent's thread before
+                // the restart needs nothing more, and one nothing has
+                // claimed yet — a detached child's, or an attended one's cut
+                // between its write and its claim — will be delivered; a
+                // second of either would read twice.
+                let own_results: Vec<_> = storage
+                    .list_by_correlation(delegate.id)
+                    .await?
+                    .into_iter()
+                    .filter(|message| message.kind == MessageKind::Result)
+                    .collect();
+                let own_result_failed = own_results
+                    .iter()
+                    .find(|message| message.status == MessageStatus::Failed);
+                let own_result_delivered = own_results
+                    .iter()
+                    .find(|message| message.status == MessageStatus::Delivered);
+                let own_result_waiting = own_results
+                    .iter()
+                    .find(|message| message.status == MessageStatus::Pending);
+                // The notice names the child's fate in words; the record's
+                // ids ride the Result's payload and the audit trail, not
+                // the model's text.
+                if let Some(failed) = own_result_failed {
+                    // A hook blocked the child's result on its way: that is
+                    // the result's end, and a fresh copy would carry the
+                    // blocked output past the hook.
+                    notices.push(format!(
+                        "Delegated agent {} {fate}; its result was blocked before delivery ({}).",
+                        child.agent_id,
+                        failed
+                            .failure_reason
+                            .as_deref()
+                            .unwrap_or("no reason recorded")
+                    ));
+                    continue;
+                }
+                if let Some(delivered) = own_result_delivered {
+                    // Delivered to the parent agent's mailbox; reached the
+                    // parent's thread only if the parent's own delegate call
+                    // settled with it — a crash between the two leaves the
+                    // mailbox saying delivered and the thread without it.
+                    if delegate_call_settled(storage, parent, &delegate.payload).await? {
+                        notices.push(format!(
+                            "Delegated agent {} {fate}; its result reached this thread before the restart.",
+                            child.agent_id
+                        ));
+                    } else {
+                        notices.push(format!(
+                            "Delegated agent {} {fate}; its result is delivered above.",
+                            child.agent_id
+                        ));
+                        let mut readdressed = delivered.payload.clone();
+                        readdressed["parent_session_id"] = serde_json::json!(session.id);
+                        readdressed["parent_turn_id"] = serde_json::json!(parent.id);
+                        storage
+                            .reissue_agent_message(delivered.id, readdressed)
+                            .await?;
+                    }
+                    continue;
+                }
+                notices.push(format!("Delegated agent {} {fate}.", child.agent_id));
+                if let Some(waiting) = own_result_waiting {
+                    // The child's own Result, written before the restart and
+                    // addressed to the agent alone: readdressed to the parent's
+                    // session, so no other session of the agent takes it, and
+                    // dated the restart, so the startup expiry leaves it.
+                    let mut readdressed = waiting.payload.clone();
+                    readdressed["parent_session_id"] = serde_json::json!(session.id);
+                    readdressed["parent_turn_id"] = serde_json::json!(parent.id);
+                    storage
+                        .reissue_agent_message(waiting.id, readdressed)
+                        .await?;
+                } else {
+                    storage
+                        .create_agent_message(NewAgentMessage {
+                            sender_agent_id: child.agent_id.clone(),
+                            recipient_agent_id: parent.agent_id.clone(),
+                            kind: MessageKind::Result,
+                            correlation_id: Some(delegate.id),
+                            payload,
+                        })
+                        .await?;
+                }
+            }
+            None => {
+                notices.push(format!("Delegated agent {} {fate}.", child.agent_id));
+                crate::record_durability::record_reconstruction_gap(
+                    storage,
+                    Some(session.id),
+                    parent.id,
+                    "delegation result after a restart",
+                    &format!(
+                        "no delegate message names the child thread {}; the child's outcome is in the continuation notice alone",
+                        child.thread_id
+                    ),
+                )
+                .await
+                .map_err(|error| StorageError::QueryFailed(error.to_string()))?;
+            }
+        }
+    }
+    if owner == TurnOwner::Automation {
+        // A schedule's run or a workflow's call: their own recovery fails the
+        // run or redispatches the call, and a continuation here would run
+        // the turn a second way outside their accounting. The children's
+        // fates are on the record for the session's next turn.
+        warn!(
+            parent_turn_id = %parent.id,
+            session_id = %session.id,
+            "An automation's turn was interrupted while delegating; its own recovery continues it"
+        );
+        return Ok(());
+    }
+    let content = if notices.is_empty() {
+        "The gateway restarted while this turn was waiting on a delegated agent, and no child turn of it is on the record. Continue from here.".to_owned()
+    } else {
+        format!(
+            "The gateway restarted while this turn was waiting on a delegated agent. {} Continue from here.",
+            notices.join(" ")
+        )
+    };
+    // The continuation runs as the original turn did — attended only if
+    // a person attended it, delivered to the channel destinations its
+    // inputs named — read from what the drain recorded on the turn. A
+    // turn created outside the queue (an API call's) recorded nothing and
+    // resumes unattended, delivering to no channel, as it ran.
+    let (attended, delivery_targets) = match &parent.attribution {
+        Some(attribution) => (attribution.attended, attribution.delivery_targets.clone()),
+        None => (false, Vec::new()),
+    };
+    storage
+        .enqueue_turn_input(NewQueuedTurnInput {
+            delivery_targets,
+            client_id: None,
+            attended,
+            session_id: session.id,
+            thread_id: parent.thread_id,
+            origin: MessageOrigin::Delegation,
+            content,
+            attachments: Vec::new(),
+            schedule_run_id: None,
+            channel_message_ids: Vec::new(),
+        })
+        .await?;
+    warn!(
+        parent_turn_id = %parent.id,
+        session_id = %session.id,
+        attended,
+        "Queued the resumption of a turn interrupted while delegating"
+    );
+    Ok(())
 }
 
 /// Counts returned by [`recover_orphaned_background_runs`].
@@ -321,6 +673,7 @@ mod tests {
 
     use super::*;
     use crate::turn::tests::MockStorage;
+    use uuid::Uuid;
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -550,6 +903,1244 @@ mod tests {
             "delegating turn should become Interrupted"
         );
         assert_eq!(n_delegating, 0, "no turns should remain Delegating");
+    }
+
+    /// A parent cut off while delegating resumes: each child's fate reaches
+    /// the parent agent's mailbox as a pending Result under the delegate that
+    /// started it — the child's own result when it completed, a cut-off
+    /// account when it was in flight — and a continuation input waits on the
+    /// parent's session for the startup drain.
+    #[tokio::test]
+    async fn recovery_resumes_a_delegating_parent_with_its_childrens_fates() {
+        use swage_core::{MessageKind, MessageStatus};
+        use swage_storage::model::NewAgentMessage;
+        use swage_storage::store::{AgentMessageStore, TurnQueueStore};
+
+        let storage = Arc::new(MockStorage::new());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                agent_id: "lead".to_string(),
+                ..swage_storage::fixtures::new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "lead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let parent = drained_delegating_parent(
+            &storage,
+            session.id,
+            thread.id,
+            &[(MessageOrigin::User, true, Vec::new())],
+        )
+        .await;
+
+        // Four children: one completed before the restart, one that stopped
+        // short, one cut off by the restart, and a detached one whose own
+        // Result still waits in the mailbox.
+        let mut delegates = Vec::new();
+        for (agent, state, response) in [
+            (
+                "surveyor",
+                TurnState::Completed,
+                Some("The survey: three findings."),
+            ),
+            ("drafter", TurnState::Incomplete, Some("Half the draft.")),
+            ("reviewer", TurnState::Processing, None),
+            ("scout", TurnState::Completed, Some("Scouted.")),
+            ("critic", TurnState::Refused, Some("I will not write that.")),
+            ("builder", TurnState::Failed, None),
+        ] {
+            let child_session = storage
+                .create_session(NewSession {
+                    agent_id: agent.to_string(),
+                    ..swage_storage::fixtures::new_session(topic.id)
+                })
+                .await
+                .unwrap();
+            let child_thread = ThreadStore::create(
+                &*storage,
+                NewThread {
+                    session_id: child_session.id,
+                    agent_id: agent.to_string(),
+                },
+            )
+            .await
+            .unwrap();
+            // The delegate starts the child: it is on the record before the
+            // child's turn, as the executor writes them.
+            let delegate = storage
+                .create_agent_message(NewAgentMessage {
+                    sender_agent_id: "lead".to_string(),
+                    recipient_agent_id: agent.to_string(),
+                    kind: MessageKind::Delegate,
+                    correlation_id: None,
+                    payload: serde_json::json!({
+                        "task": "the task",
+                        "_thread_id": child_thread.id.to_string(),
+                    }),
+                })
+                .await
+                .unwrap();
+            let child = storage
+                .create_turn(NewTurn {
+                    thread_id: child_thread.id,
+                    agent_id: agent.to_string(),
+                    state,
+                    user_input: Some("the task".to_string()),
+                    parent_turn_id: Some(parent.id),
+                })
+                .await
+                .unwrap();
+            if let Some(response) = response {
+                storage
+                    .db
+                    .lock()
+                    .await
+                    .turns
+                    .get_mut(&child.id)
+                    .unwrap()
+                    .assistant_response = Some(response.to_string());
+            }
+            if agent == "builder" {
+                storage
+                    .db
+                    .lock()
+                    .await
+                    .turns
+                    .get_mut(&child.id)
+                    .unwrap()
+                    .failure_message = Some("the build tool crashed".to_string());
+            }
+            if agent == "scout" {
+                // The detached child's own Result, written by its executor and
+                // not yet claimed: the record of its fate already.
+                storage
+                    .create_agent_message(NewAgentMessage {
+                        sender_agent_id: "scout".to_string(),
+                        recipient_agent_id: "lead".to_string(),
+                        kind: MessageKind::Result,
+                        correlation_id: Some(delegate.id),
+                        payload: serde_json::json!({ "response": "Scouted." }),
+                    })
+                    .await
+                    .unwrap();
+            }
+            delegates.push((agent, delegate.id, child_session.id, child_thread.id));
+        }
+
+        let recovered = recover_orphaned_turns(&*storage, &*storage)
+            .await
+            .expect("recovery should not fail");
+        assert_eq!(recovered, 2, "the parent and the in-flight child");
+        assert_eq!(
+            storage.get_turn(parent.id).await.unwrap().unwrap().state,
+            TurnState::Interrupted
+        );
+
+        // Each child's fate waits in the lead's mailbox under its delegate.
+        let pending = storage.list_pending_for_agent("lead").await.unwrap();
+        let results: Vec<_> = pending
+            .iter()
+            .filter(|m| m.kind == MessageKind::Result)
+            .collect();
+        assert_eq!(
+            results.len(),
+            6,
+            "one Result per child, the scout's its own: {pending:?}"
+        );
+        for (agent, delegate_id, child_session_id, child_thread_id) in &delegates {
+            let under: Vec<_> = results
+                .iter()
+                .filter(|m| m.correlation_id == Some(*delegate_id))
+                .collect();
+            assert_eq!(
+                under.len(),
+                1,
+                "exactly one Result under {agent}'s delegate"
+            );
+            let result = under[0];
+            if *agent == "scout" {
+                assert_eq!(
+                    result.payload["response"], "Scouted.",
+                    "the scout's own Result stands; recovery wrote no second"
+                );
+                assert_eq!(
+                    result.payload["parent_session_id"],
+                    serde_json::json!(session.id),
+                    "and is readdressed to the parent's session"
+                );
+                continue;
+            }
+            assert_eq!(result.sender_agent_id, *agent);
+            assert_eq!(result.status, MessageStatus::Pending);
+            assert_eq!(
+                result.payload["child_session_id"],
+                serde_json::json!(child_session_id)
+            );
+            assert_eq!(
+                result.payload["child_thread_id"],
+                serde_json::json!(child_thread_id)
+            );
+            assert_eq!(
+                result.payload["parent_session_id"],
+                serde_json::json!(session.id),
+                "the Result names the parent's session, so only that session's turn delivers it"
+            );
+            match *agent {
+                "surveyor" => {
+                    assert_eq!(result.payload["response"], "The survey: three findings.");
+                }
+                "drafter" => {
+                    assert_eq!(result.payload["response"], "Half the draft.");
+                    assert!(result.payload["incomplete_reason"].is_string());
+                }
+                "critic" => {
+                    assert_eq!(result.payload["refused"], true);
+                    assert_eq!(result.payload["response"], "I will not write that.");
+                    assert!(result.payload["error"].is_string());
+                }
+                "builder" => {
+                    assert_eq!(result.payload["error"], "the build tool crashed");
+                    assert!(result.payload.get("refused").is_none());
+                }
+                _ => assert!(
+                    result.payload["error"]
+                        .as_str()
+                        .is_some_and(|e| e.contains("cut off by a gateway restart")),
+                    "{:?}",
+                    result.payload
+                ),
+            }
+        }
+
+        // The continuation waits on the parent's session for the startup
+        // drain, attended: this is a person's session, not a worker's.
+        let queued = storage.list_queued_turn_inputs(session.id).await.unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].thread_id, thread.id);
+        assert_eq!(queued[0].origin, swage_storage::MessageOrigin::Delegation);
+        assert!(queued[0].attended);
+        assert!(
+            queued[0]
+                .content
+                .contains("The gateway restarted while this turn was waiting")
+        );
+        assert!(queued[0].content.contains("surveyor"));
+        assert!(queued[0].content.contains("critic refused the task"));
+        assert!(queued[0].content.contains("builder failed"));
+        assert!(queued[0].content.contains("drafter"));
+        assert!(queued[0].content.contains("stopped short"));
+        assert!(queued[0].content.contains("reviewer"));
+        assert!(
+            !queued[0].content.contains(&session.id.to_string())
+                && !queued[0].content.contains(&thread.id.to_string()),
+            "the notice names fates, not ids: {}",
+            queued[0].content
+        );
+    }
+
+    /// A parent turn started from the queue — as a person's or a channel's
+    /// turn is — from the inputs given as (origin, attended, delivery
+    /// targets), and left `Delegating` as a restart would find it.
+    async fn drained_delegating_parent(
+        storage: &MockStorage,
+        session_id: Uuid,
+        thread_id: Uuid,
+        inputs: &[(MessageOrigin, bool, Vec<serde_json::Value>)],
+    ) -> Turn {
+        use swage_storage::store::TurnQueueStore;
+        for (origin, attended, delivery_targets) in inputs {
+            storage
+                .enqueue_turn_input(NewQueuedTurnInput {
+                    delivery_targets: delivery_targets.clone(),
+                    client_id: None,
+                    attended: *attended,
+                    session_id,
+                    thread_id,
+                    origin: *origin,
+                    content: format!("an input of origin {origin:?}"),
+                    attachments: Vec::new(),
+                    schedule_run_id: None,
+                    channel_message_ids: Vec::new(),
+                })
+                .await
+                .unwrap();
+        }
+        let drained = storage
+            .drain_queued_turn_inputs(session_id, "lead")
+            .await
+            .unwrap()
+            .expect("the queued inputs drain into a turn");
+        storage
+            .update_turn_state(drained.turn.id, TurnState::Delegating)
+            .await
+            .unwrap();
+        storage.get_turn(drained.turn.id).await.unwrap().unwrap()
+    }
+
+    /// A child of `parent` on its own session: its delegate message, then
+    /// its turn in `state`, as the executor writes them.
+    async fn delegated_child(
+        storage: &MockStorage,
+        topic_id: Uuid,
+        parent: &Turn,
+        agent: &str,
+        state: TurnState,
+    ) -> (Turn, swage_storage::model::AgentMessage) {
+        use swage_storage::model::NewAgentMessage;
+        use swage_storage::store::AgentMessageStore;
+        let child_session = storage
+            .create_session(NewSession {
+                agent_id: agent.to_string(),
+                ..swage_storage::fixtures::new_session(topic_id)
+            })
+            .await
+            .unwrap();
+        let child_thread = ThreadStore::create(
+            storage,
+            NewThread {
+                session_id: child_session.id,
+                agent_id: agent.to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let delegate = storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: parent.agent_id.clone(),
+                recipient_agent_id: agent.to_string(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({
+                    "task": "work",
+                    "_thread_id": child_thread.id.to_string(),
+                    "_call_id": format!("call-{agent}"),
+                }),
+            })
+            .await
+            .unwrap();
+        let child = storage
+            .create_turn(NewTurn {
+                thread_id: child_thread.id,
+                agent_id: agent.to_string(),
+                state,
+                user_input: Some("work".to_string()),
+                parent_turn_id: Some(parent.id),
+            })
+            .await
+            .unwrap();
+        (child, delegate)
+    }
+
+    /// The parent's own record of its delegate call, settled with a result
+    /// — what the synchronous path writes once the child's result is in
+    /// the parent's thread.
+    async fn settle_delegate_call(storage: &MockStorage, parent: &Turn, agent: &str) {
+        use swage_storage::model::NewToolCall;
+        use swage_storage::store::ToolCallStore;
+        storage
+            .create_tool_call(NewToolCall {
+                turn_id: parent.id,
+                agent_id: parent.agent_id.clone(),
+                call_id: format!("call-{agent}"),
+                tool: "delegate".to_string(),
+                arguments: "{}".to_string(),
+                model_arguments: "{}".to_string(),
+                result: Some("the child's result".to_string()),
+                model_result: Some("the child's result".to_string()),
+                status: Some("ok".to_string()),
+                duration_ms: Some(1),
+                truncated: false,
+                total_bytes: None,
+                provider_round: 1,
+                position: 0,
+                parent_call_id: None,
+                display_summary: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    /// A channel's turn resumes where it was going: the continuation
+    /// carries the delivery targets the original input named and runs
+    /// unattended, as the channel's own turns do.
+    #[tokio::test]
+    async fn recovery_continues_a_channel_turn_to_its_own_destinations() {
+        use swage_storage::store::TurnQueueStore;
+
+        let storage = Arc::new(MockStorage::new());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                agent_id: "lead".to_string(),
+                ..swage_storage::fixtures::new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "lead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let target = serde_json::json!({
+            "integration": "telegram",
+            "account": "ops",
+            "conversation": "chat-7",
+        });
+        let parent = drained_delegating_parent(
+            &storage,
+            session.id,
+            thread.id,
+            &[(MessageOrigin::User, false, vec![target.clone()])],
+        )
+        .await;
+        delegated_child(&storage, topic.id, &parent, "worker", TurnState::Processing).await;
+
+        recover_orphaned_turns(&*storage, &*storage)
+            .await
+            .expect("recovery should not fail");
+
+        let queued = storage.list_queued_turn_inputs(session.id).await.unwrap();
+        assert_eq!(queued.len(), 1);
+        assert!(!queued[0].attended, "a channel's turn runs unattended");
+        assert_eq!(
+            queued[0].delivery_targets,
+            vec![target],
+            "the continuation delivers where the original input did"
+        );
+    }
+
+    /// A person's message batched with a scheduled brief is the person's
+    /// turn: it resumes, rather than being left to a schedule's recovery
+    /// that would never answer the person.
+    #[tokio::test]
+    async fn recovery_resumes_a_persons_turn_batched_with_a_scheduled_brief() {
+        use swage_storage::store::TurnQueueStore;
+
+        let storage = Arc::new(MockStorage::new());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                agent_id: "lead".to_string(),
+                ..swage_storage::fixtures::new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "lead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let parent = drained_delegating_parent(
+            &storage,
+            session.id,
+            thread.id,
+            &[
+                (MessageOrigin::Schedule, false, Vec::new()),
+                (MessageOrigin::User, true, Vec::new()),
+            ],
+        )
+        .await;
+        delegated_child(&storage, topic.id, &parent, "worker", TurnState::Processing).await;
+
+        recover_orphaned_turns(&*storage, &*storage)
+            .await
+            .expect("recovery should not fail");
+
+        let queued = storage.list_queued_turn_inputs(session.id).await.unwrap();
+        assert_eq!(queued.len(), 1, "the person's turn resumes");
+        assert!(
+            queued[0].attended,
+            "and attended, as the person's input was"
+        );
+    }
+
+    /// A child whose own result already reached the parent's thread before
+    /// the restart gets no second result: the notice says it was delivered,
+    /// and the record keeps the one delivered message.
+    #[tokio::test]
+    async fn recovery_writes_no_second_result_for_a_child_already_delivered() {
+        use swage_storage::model::NewAgentMessage;
+        use swage_storage::store::{AgentMessageStore, TurnQueueStore};
+
+        let storage = Arc::new(MockStorage::new());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                agent_id: "lead".to_string(),
+                ..swage_storage::fixtures::new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "lead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let parent = drained_delegating_parent(
+            &storage,
+            session.id,
+            thread.id,
+            &[(MessageOrigin::User, true, Vec::new())],
+        )
+        .await;
+        let (_, delegate) =
+            delegated_child(&storage, topic.id, &parent, "scout", TurnState::Completed).await;
+        settle_delegate_call(&storage, &parent, "scout").await;
+        let delivered = storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "scout".to_string(),
+                recipient_agent_id: "lead".to_string(),
+                kind: MessageKind::Result,
+                correlation_id: Some(delegate.id),
+                payload: serde_json::json!({ "response": "Scouted." }),
+            })
+            .await
+            .unwrap();
+        storage
+            .update_agent_message_status(delivered.id, MessageStatus::Delivered, None)
+            .await
+            .unwrap();
+
+        recover_orphaned_turns(&*storage, &*storage)
+            .await
+            .expect("recovery should not fail");
+
+        let results: Vec<_> = storage
+            .list_by_correlation(delegate.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.kind == MessageKind::Result)
+            .collect();
+        assert_eq!(results.len(), 1, "no second result: {results:?}");
+        assert_eq!(results[0].status, MessageStatus::Delivered);
+        let queued = storage.list_queued_turn_inputs(session.id).await.unwrap();
+        assert_eq!(queued.len(), 1);
+        assert!(
+            queued[0]
+                .content
+                .contains("its result reached this thread before the restart"),
+            "{}",
+            queued[0].content
+        );
+    }
+
+    /// A result the mailbox marked delivered that the parent's own record
+    /// never settled — the crash fell between the two — has not reached
+    /// the parent's thread: it is reissued to the parent's session, not
+    /// skipped.
+    #[tokio::test]
+    async fn recovery_reissues_a_delivered_result_the_parents_call_never_settled() {
+        use swage_storage::model::NewAgentMessage;
+        use swage_storage::store::{AgentMessageStore, TurnQueueStore};
+
+        let storage = Arc::new(MockStorage::new());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                agent_id: "lead".to_string(),
+                ..swage_storage::fixtures::new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "lead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let parent = drained_delegating_parent(
+            &storage,
+            session.id,
+            thread.id,
+            &[(MessageOrigin::User, true, Vec::new())],
+        )
+        .await;
+        let (_, delegate) =
+            delegated_child(&storage, topic.id, &parent, "scout", TurnState::Completed).await;
+        // The parent's delegate call was still started when the gateway
+        // stopped: startup settles it with its cut-off placeholder before
+        // the parent resumes, and that placeholder is not the delegation's
+        // result.
+        {
+            use swage_storage::model::NewToolCall;
+            use swage_storage::store::ToolCallStore;
+            storage
+                .create_tool_call(NewToolCall {
+                    turn_id: parent.id,
+                    agent_id: parent.agent_id.clone(),
+                    call_id: "call-scout".to_string(),
+                    tool: "delegate".to_string(),
+                    arguments: "{}".to_string(),
+                    model_arguments: "{}".to_string(),
+                    result: None,
+                    model_result: None,
+                    status: None,
+                    duration_ms: None,
+                    truncated: false,
+                    total_bytes: None,
+                    provider_round: 1,
+                    position: 0,
+                    parent_call_id: None,
+                    display_summary: None,
+                })
+                .await
+                .unwrap();
+        }
+        let delivered = storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "scout".to_string(),
+                recipient_agent_id: "lead".to_string(),
+                kind: MessageKind::Result,
+                correlation_id: Some(delegate.id),
+                payload: serde_json::json!({ "response": "Scouted." }),
+            })
+            .await
+            .unwrap();
+        storage
+            .update_agent_message_status(delivered.id, MessageStatus::Delivered, None)
+            .await
+            .unwrap();
+
+        recover_orphaned_turns(&*storage, &*storage)
+            .await
+            .expect("recovery should not fail");
+
+        let results: Vec<_> = storage
+            .list_by_correlation(delegate.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.kind == MessageKind::Result)
+            .collect();
+        assert_eq!(
+            results.len(),
+            1,
+            "the one result is reissued, not copied: {results:?}"
+        );
+        assert_eq!(results[0].status, MessageStatus::Pending);
+        {
+            use swage_storage::store::ToolCallStore;
+            let call = storage
+                .get_tool_call_by_turn_and_call_id(parent.id, "call-scout")
+                .await
+                .unwrap()
+                .expect("the delegate call is on the record");
+            assert_eq!(
+                call.status.as_deref(),
+                Some(INTERRUPTED_TOOL_STATUS),
+                "startup settled the started call with its placeholder, which is not the delegation's result"
+            );
+        }
+        assert_eq!(results[0].payload["response"], "Scouted.");
+        assert_eq!(
+            results[0].payload["parent_session_id"],
+            serde_json::json!(session.id)
+        );
+        let queued = storage.list_queued_turn_inputs(session.id).await.unwrap();
+        assert!(
+            queued[0].content.contains("its result is delivered above"),
+            "{}",
+            queued[0].content
+        );
+    }
+
+    /// A result a hook blocked on its way is the child's end: recovery
+    /// writes no fresh copy that would carry the blocked output past the
+    /// hook, and the notice says it was blocked.
+    #[tokio::test]
+    async fn recovery_writes_no_fresh_copy_of_a_result_a_hook_blocked() {
+        use swage_storage::model::NewAgentMessage;
+        use swage_storage::store::{AgentMessageStore, TurnQueueStore};
+
+        let storage = Arc::new(MockStorage::new());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                agent_id: "lead".to_string(),
+                ..swage_storage::fixtures::new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "lead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let parent = drained_delegating_parent(
+            &storage,
+            session.id,
+            thread.id,
+            &[(MessageOrigin::User, true, Vec::new())],
+        )
+        .await;
+        let (_, delegate) =
+            delegated_child(&storage, topic.id, &parent, "scout", TurnState::Completed).await;
+        let blocked = storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "scout".to_string(),
+                recipient_agent_id: "lead".to_string(),
+                kind: MessageKind::Result,
+                correlation_id: Some(delegate.id),
+                payload: serde_json::json!({ "response": "the blocked text" }),
+            })
+            .await
+            .unwrap();
+        storage
+            .update_agent_message_status(
+                blocked.id,
+                MessageStatus::Failed,
+                Some("blocked by the receive hook"),
+            )
+            .await
+            .unwrap();
+
+        recover_orphaned_turns(&*storage, &*storage)
+            .await
+            .expect("recovery should not fail");
+
+        let results: Vec<_> = storage
+            .list_by_correlation(delegate.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.kind == MessageKind::Result)
+            .collect();
+        assert_eq!(results.len(), 1, "{results:?}");
+        assert_eq!(results[0].status, MessageStatus::Failed);
+        let queued = storage.list_queued_turn_inputs(session.id).await.unwrap();
+        assert!(
+            queued[0]
+                .content
+                .contains("blocked before delivery (blocked by the receive hook)"),
+            "{}",
+            queued[0].content
+        );
+    }
+
+    /// A schedule's turn stays the schedule's when a detached child's
+    /// result was delivered into it before the restart: the platform's
+    /// delegation row says nothing about who started the turn.
+    #[tokio::test]
+    async fn a_delivered_detached_result_does_not_make_a_schedules_turn_a_persons() {
+        use swage_core::Role;
+        use swage_storage::model::AppendMessage;
+        use swage_storage::store::{MessageStore, TurnQueueStore};
+
+        let storage = Arc::new(MockStorage::new());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                agent_id: "lead".to_string(),
+                ..swage_storage::fixtures::new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "lead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let parent = drained_delegating_parent(
+            &storage,
+            session.id,
+            thread.id,
+            &[(MessageOrigin::Schedule, false, Vec::new())],
+        )
+        .await;
+        storage
+            .append_message(AppendMessage {
+                thread_id: thread.id,
+                turn_id: Some(parent.id),
+                role: Role::User,
+                origin: MessageOrigin::Delegation,
+                content: "Delegated agent scout completed:\nearlier".to_string(),
+                attachments: Vec::new(),
+                agent_id: "lead".to_string(),
+            })
+            .await
+            .unwrap();
+        delegated_child(&storage, topic.id, &parent, "worker", TurnState::Processing).await;
+
+        recover_orphaned_turns(&*storage, &*storage)
+            .await
+            .expect("recovery should not fail");
+
+        assert!(
+            storage
+                .list_queued_turn_inputs(session.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the schedule's own recovery continues its run"
+        );
+    }
+
+    /// An incomplete child's reason is the account its runtime left on its
+    /// thread, not a generic stand-in.
+    #[tokio::test]
+    async fn recovery_carries_an_incomplete_childs_recorded_reason() {
+        use swage_core::Role;
+        use swage_storage::model::AppendMessage;
+        use swage_storage::store::{AgentMessageStore, MessageStore};
+
+        let storage = Arc::new(MockStorage::new());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                agent_id: "lead".to_string(),
+                ..swage_storage::fixtures::new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "lead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let parent = drained_delegating_parent(
+            &storage,
+            session.id,
+            thread.id,
+            &[(MessageOrigin::User, true, Vec::new())],
+        )
+        .await;
+        let (child, delegate) = delegated_child(
+            &storage,
+            topic.id,
+            &parent,
+            "drafter",
+            TurnState::Incomplete,
+        )
+        .await;
+        storage
+            .append_message(AppendMessage {
+                thread_id: child.thread_id,
+                turn_id: Some(child.id),
+                role: Role::User,
+                origin: MessageOrigin::Platform,
+                content: "Response incomplete: output token limit reached (max_tokens)."
+                    .to_string(),
+                attachments: Vec::new(),
+                agent_id: "drafter".to_string(),
+            })
+            .await
+            .unwrap();
+
+        recover_orphaned_turns(&*storage, &*storage)
+            .await
+            .expect("recovery should not fail");
+
+        let result = storage
+            .list_by_correlation(delegate.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|message| message.kind == MessageKind::Result)
+            .expect("the child's fate is on the record");
+        assert_eq!(
+            result.payload["incomplete_reason"],
+            "Response incomplete: output token limit reached (max_tokens)."
+        );
+    }
+
+    /// A turn created outside the queue — an API call's — recorded no
+    /// attendance, and resumes as it ran: unattended, delivered nowhere.
+    #[tokio::test]
+    async fn recovery_resumes_a_turn_created_outside_the_queue_unattended() {
+        use swage_core::Role;
+        use swage_storage::model::AppendMessage;
+        use swage_storage::store::{MessageStore, TurnQueueStore};
+
+        let storage = Arc::new(MockStorage::new());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                agent_id: "lead".to_string(),
+                ..swage_storage::fixtures::new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "lead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let parent = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "lead".to_string(),
+                state: TurnState::Delegating,
+                user_input: Some("an API call's input".to_string()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        storage
+            .append_message(AppendMessage {
+                thread_id: thread.id,
+                turn_id: Some(parent.id),
+                role: Role::User,
+                origin: MessageOrigin::User,
+                content: "an API call's input".to_string(),
+                attachments: Vec::new(),
+                agent_id: "lead".to_string(),
+            })
+            .await
+            .unwrap();
+        delegated_child(&storage, topic.id, &parent, "worker", TurnState::Processing).await;
+
+        recover_orphaned_turns(&*storage, &*storage)
+            .await
+            .expect("recovery should not fail");
+
+        let queued = storage.list_queued_turn_inputs(session.id).await.unwrap();
+        assert_eq!(queued.len(), 1);
+        assert!(!queued[0].attended);
+        assert!(queued[0].delivery_targets.is_empty());
+    }
+
+    /// An automation's turn — a schedule's run, a workflow's call — that was
+    /// delegating is left to its own recovery: its children's fates reach
+    /// the record, and no continuation is queued beside the run's or the
+    /// call's own.
+    #[tokio::test]
+    async fn recovery_queues_no_continuation_for_an_automations_delegating_turn() {
+        use swage_core::{MessageKind, Role};
+        use swage_storage::model::{AppendMessage, NewAgentMessage};
+        use swage_storage::store::{AgentMessageStore, MessageStore, TurnQueueStore};
+
+        let storage = Arc::new(MockStorage::new());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                agent_id: "lead".to_string(),
+                ..swage_storage::fixtures::new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "lead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let parent = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "lead".to_string(),
+                state: TurnState::Delegating,
+                user_input: Some("the schedule's brief".to_string()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        storage
+            .append_message(AppendMessage {
+                thread_id: thread.id,
+                turn_id: Some(parent.id),
+                role: Role::User,
+                origin: swage_storage::MessageOrigin::Schedule,
+                content: "the schedule's brief".to_string(),
+                attachments: Vec::new(),
+                agent_id: "lead".to_string(),
+            })
+            .await
+            .unwrap();
+        let child_thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "worker".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "lead".to_string(),
+                recipient_agent_id: "worker".to_string(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({ "task": "work", "_thread_id": child_thread.id.to_string() }),
+            })
+            .await
+            .unwrap();
+        storage
+            .create_turn(NewTurn {
+                thread_id: child_thread.id,
+                agent_id: "worker".to_string(),
+                state: TurnState::Processing,
+                user_input: Some("work".to_string()),
+                parent_turn_id: Some(parent.id),
+            })
+            .await
+            .unwrap();
+
+        recover_orphaned_turns(&*storage, &*storage)
+            .await
+            .expect("recovery should not fail");
+
+        assert!(
+            storage
+                .list_queued_turn_inputs(session.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the schedule's own recovery continues its run"
+        );
+        assert_eq!(
+            storage
+                .list_pending_for_agent("lead")
+                .await
+                .unwrap()
+                .iter()
+                .filter(|m| m.kind == MessageKind::Result)
+                .count(),
+            1,
+            "the child's fate is still on the record"
+        );
+        assert_eq!(
+            storage.get_turn(parent.id).await.unwrap().unwrap().state,
+            TurnState::Interrupted
+        );
+    }
+
+    /// A middle tier of a nested delegation — a delegating turn that is
+    /// itself a child — is not resumed on its own: its parent is told it
+    /// was cut off and returns to it; only the top-level parent resumes.
+    #[tokio::test]
+    async fn recovery_resumes_only_the_top_of_a_nested_delegation() {
+        use swage_core::MessageKind;
+        use swage_storage::model::NewAgentMessage;
+        use swage_storage::store::{AgentMessageStore, TurnQueueStore};
+
+        let storage = Arc::new(MockStorage::new());
+        let topic = storage.general_scope().await.unwrap();
+        let mut tiers: Vec<(&str, Uuid, Uuid)> = Vec::new();
+        let mut parent_turn_id = None;
+        for (agent, state) in [
+            ("lead", TurnState::Delegating),
+            ("middle", TurnState::Delegating),
+            ("leaf", TurnState::Processing),
+        ] {
+            let session = storage
+                .create_session(NewSession {
+                    agent_id: agent.to_string(),
+                    ..swage_storage::fixtures::new_session(topic.id)
+                })
+                .await
+                .unwrap();
+            let thread = ThreadStore::create(
+                &*storage,
+                NewThread {
+                    session_id: session.id,
+                    agent_id: agent.to_string(),
+                },
+            )
+            .await
+            .unwrap();
+            if let Some((parent_agent, _, _)) = tiers.last() {
+                storage
+                    .create_agent_message(NewAgentMessage {
+                        sender_agent_id: parent_agent.to_string(),
+                        recipient_agent_id: agent.to_string(),
+                        kind: MessageKind::Delegate,
+                        correlation_id: None,
+                        payload: serde_json::json!({
+                            "task": "work",
+                            "_thread_id": thread.id.to_string(),
+                        }),
+                    })
+                    .await
+                    .unwrap();
+            }
+            let turn = storage
+                .create_turn(NewTurn {
+                    thread_id: thread.id,
+                    agent_id: agent.to_string(),
+                    state,
+                    user_input: Some("work".to_string()),
+                    parent_turn_id,
+                })
+                .await
+                .unwrap();
+            tiers.push((agent, session.id, turn.id));
+            parent_turn_id = Some(turn.id);
+        }
+
+        recover_orphaned_turns(&*storage, &*storage)
+            .await
+            .expect("recovery should not fail");
+
+        let (_, lead_session, _) = tiers[0];
+        let (_, middle_session, middle_turn) = tiers[1];
+        assert_eq!(
+            storage
+                .list_queued_turn_inputs(lead_session)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the lead resumes"
+        );
+        assert!(
+            storage
+                .list_queued_turn_inputs(middle_session)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the middle tier is its parent's to return to, not resumed on its own"
+        );
+        assert_eq!(
+            storage.get_turn(middle_turn).await.unwrap().unwrap().state,
+            TurnState::Interrupted
+        );
+        let lead_results: Vec<_> = storage
+            .list_pending_for_agent("lead")
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.kind == MessageKind::Result)
+            .collect();
+        assert_eq!(lead_results.len(), 1);
+        assert!(
+            lead_results[0].payload["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("cut off")),
+            "the lead is told its child was cut off"
+        );
+        assert!(
+            storage
+                .list_pending_for_agent("middle")
+                .await
+                .unwrap()
+                .iter()
+                .all(|m| m.kind != MessageKind::Result),
+            "no Result is written for the middle tier's own child"
+        );
+    }
+
+    /// A child whose delegate message cannot be found is a gap in the record:
+    /// recorded as a degraded turn record, the continuation still naming the
+    /// child, so the parent resumes with what the record holds.
+    #[tokio::test]
+    async fn recovery_records_a_gap_for_a_child_without_its_delegate_and_still_resumes() {
+        use swage_storage::store::TurnQueueStore;
+
+        let storage = Arc::new(MockStorage::new());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                agent_id: "lead".to_string(),
+                ..swage_storage::fixtures::new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "lead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let parent = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "lead".to_string(),
+                state: TurnState::Delegating,
+                user_input: Some("delegate".to_string()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let child_thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "worker".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        storage
+            .create_turn(NewTurn {
+                thread_id: child_thread.id,
+                agent_id: "worker".to_string(),
+                state: TurnState::Processing,
+                user_input: Some("the task".to_string()),
+                parent_turn_id: Some(parent.id),
+            })
+            .await
+            .unwrap();
+
+        recover_orphaned_turns(&*storage, &*storage)
+            .await
+            .expect("recovery should not fail");
+
+        let gaps: Vec<_> = storage
+            .db
+            .lock()
+            .await
+            .audit_events
+            .iter()
+            .filter(|event| event.event_kind == "turn_record_degraded")
+            .cloned()
+            .collect();
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].entity_id, parent.id.to_string());
+        assert_eq!(
+            gaps[0].metadata["record"],
+            "delegation result after a restart"
+        );
+        let queued = storage.list_queued_turn_inputs(session.id).await.unwrap();
+        assert_eq!(queued.len(), 1);
+        assert!(queued[0].content.contains("worker"));
     }
 
     #[tokio::test]
