@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, shell } from "electron";
 import { installPairing } from "./pairing.mjs";
 import { spawn } from "node:child_process";
 import http from "node:http";
@@ -117,16 +117,30 @@ async function createWindow() {
   });
 
   const gatewayOrigin = new URL(targetUrl).origin;
+  const openInBrowser = (url) => {
+    let destination;
+    try {
+      destination = new URL(url);
+    } catch { return; }
+    if (destination.protocol !== "http:" && destination.protocol !== "https:") return;
+    void shell.openExternal(destination.href).catch(() => {
+      console.error("Failed to open page in the system browser");
+    });
+  };
   const restrictNavigation = (event, url) => {
     try {
       if (new URL(url ?? event.url).origin === gatewayOrigin) return;
     } catch { /* Invalid destinations cannot be gateway pages. */ }
     event.preventDefault();
+    openInBrowser(url ?? event.url);
   };
   win.webContents.on("will-navigate", restrictNavigation);
   win.webContents.on("will-redirect", restrictNavigation);
   win.webContents.on("will-frame-navigate", restrictNavigation);
-  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    openInBrowser(url);
+    return { action: "deny" };
+  });
 
   win.once("ready-to-show", () => {
     if (!isHeadlessShell) {

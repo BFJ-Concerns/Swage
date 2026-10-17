@@ -82,27 +82,52 @@ test("desktop does not lend paired authority to a foreign or missing initiating 
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 });
 
-test("desktop window refuses navigation and redirects away from the gateway", async () => {
+async function windowBoundary() {
   // Exercise createWindow with Electron's window boundary replaced by a test double.
   const source = await fs.readFile(new URL("../src/main.mjs", import.meta.url), "utf8");
   const body = source.slice(source.indexOf("async function createWindow()"), source.indexOf("\napp.isQuitting = false"));
   const handlers = {};
+  const externalUrls = [];
+  let windowCount = 0;
   let openHandler;
   const contents = { on: (event, handler) => handlers[event] = handler,
     setWindowOpenHandler: (handler) => openHandler = handler };
-  const create = new Function("BrowserWindow", "launchManagedGateway", "installPairing", "waitForGateway", "app", "targetUrl", "preloadPath", "isHeadlessShell",
+  const create = new Function("BrowserWindow", "launchManagedGateway", "installPairing", "waitForGateway", "app", "targetUrl", "preloadPath", "isHeadlessShell", "shell",
     `let gatewayProcess; ${body}; return createWindow;`)(
-      class { constructor() { this.webContents = contents; } once() {} async loadURL() {} },
+      class { constructor() { windowCount++; this.webContents = contents; } once() {} async loadURL() {} },
       () => null, async () => ({}), async () => {}, { getPath: () => "unused" },
-      "http://gateway.example", "unused", true);
+      "http://gateway.example", "unused", true,
+      { openExternal: async (url) => externalUrls.push(url) });
   await create();
+  return { handlers, externalUrls, openHandler, windowCount: () => windowCount };
+}
+
+test("desktop opens foreign navigation externally and keeps gateway navigation in its window", async () => {
+  const { handlers, externalUrls } = await windowBoundary();
   for (const event of ["will-navigate", "will-redirect", "will-frame-navigate"]) {
     let prevented = false;
     handlers[event]?.({ url: "https://other.example/", preventDefault: () => prevented = true }, "https://other.example/");
     assert.equal(prevented, true, `${event} must refuse a foreign origin`);
+    assert.deepEqual(externalUrls.splice(0), ["https://other.example/"], `${event} must open the foreign page in the system browser`);
     prevented = false;
     handlers[event]?.({ url: "http://gateway.example/topic", preventDefault: () => prevented = true }, "http://gateway.example/topic");
     assert.equal(prevented, false, `${event} must allow the gateway origin`);
+    assert.deepEqual(externalUrls, [], "gateway navigation must stay in the shell");
   }
+});
+
+test("desktop opens HTTP popups in the system browser without opening a shell window", async () => {
+  const { openHandler, externalUrls, handlers, windowCount } = await windowBoundary();
   assert.equal(openHandler?.({ url: "https://other.example/" }).action, "deny", "foreign popup must be refused");
+  assert.deepEqual(externalUrls.splice(0), ["https://other.example/"], "window.open must open the HTTPS page in the system browser");
+  assert.equal(openHandler?.({ url: "http://other.example/" }).action, "deny");
+  assert.deepEqual(externalUrls.splice(0), ["http://other.example/"]);
+  for (const url of ["file:///etc/passwd", "javascript:alert(1)", "custom:action", "invalid"]) {
+    assert.equal(openHandler?.({ url }).action, "deny");
+    let prevented = false;
+    handlers["will-navigate"]({ preventDefault: () => prevented = true }, url);
+    assert.equal(prevented, true, "non-HTTP navigation must be refused");
+  }
+  assert.deepEqual(externalUrls, [], "non-HTTP destinations must not reach the system browser");
+  assert.equal(windowCount(), 1, "popups must never create another shell window");
 });
