@@ -89,8 +89,15 @@ impl CredentialServer {
         config
             .environment
             .insert(SOCKET_ENV.into(), self.socket.path().display().to_string());
-        // Reset inherited helpers: commands must not invoke a helper which
-        // reads the token files hidden by the mount policy.
+        // Replace command configuration before injecting the governed chain.
+        // The leading empty helper resets helpers from system/global files;
+        // GIT_CONFIG_PARAMETERS would otherwise take precedence over COUNT.
+        config.environment.retain(|key, _| {
+            key != "GIT_CONFIG_PARAMETERS"
+                && key != "GIT_CONFIG_COUNT"
+                && !key.starts_with("GIT_CONFIG_KEY_")
+                && !key.starts_with("GIT_CONFIG_VALUE_")
+        });
         let binary = swage_sandbox::resolve_agent_binary()?;
         let quoted = format!("'{}'", binary.display().to_string().replace('\'', "'\\''"));
         config.environment.extend([

@@ -109,6 +109,17 @@ pub fn policy_command(
     for key in crate::CREDENTIAL_ENV_VARS {
         cmd.env_remove(key);
     }
+    // Git's inherited command configuration can override the governed helper
+    // chain. Remove it before applying the policy's environment below.
+    cmd.env_remove("GIT_CONFIG_PARAMETERS");
+    cmd.env_remove("GIT_CONFIG_COUNT");
+    for (key, _) in std::env::vars_os() {
+        if key.as_encoded_bytes().starts_with(b"GIT_CONFIG_KEY_")
+            || key.as_encoded_bytes().starts_with(b"GIT_CONFIG_VALUE_")
+        {
+            cmd.env_remove(key);
+        }
+    }
 
     // Isolate all namespaces (PID, network, mount, user, IPC, UTS).
     cmd.arg("--unshare-all");
