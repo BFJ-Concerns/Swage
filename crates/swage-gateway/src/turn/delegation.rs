@@ -889,6 +889,11 @@ impl DelegationHandler for GatewayDelegationHandler {
         if let Some(context) = context {
             payload["context"] = context;
         }
+        // The parent's own tool call for this delegation, so a reader of
+        // the record — recovery after a restart — can tell whether the
+        // child's result reached the parent's thread as that call's
+        // result, not only its mailbox.
+        payload["_call_id"] = serde_json::json!(delegate_call_id);
 
         let delegate_msg = match router
             .send_message(NewAgentMessage {

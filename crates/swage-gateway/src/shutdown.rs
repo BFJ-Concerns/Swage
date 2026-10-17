@@ -203,9 +203,11 @@ enum TurnOwner {
 }
 
 /// Who the turn answers to, read from the inputs that started it: a turn
-/// every one of whose inputs came from a schedule or a workflow is theirs
-/// to recover; a turn with a person's input among them — a message
-/// batched with a scheduled brief — is the person's, and resumes.
+/// started by a schedule or a workflow with no person's input beside it
+/// is theirs to recover; a turn with a person's input among its starters
+/// — a message batched with a scheduled brief — is the person's, and
+/// resumes. Rows the platform itself added to the turn — a delivered
+/// child's result, a notice — say nothing about who started it.
 async fn turn_owner(storage: &dyn Storage, turn: &Turn) -> Result<TurnOwner, StorageError> {
     let origins: Vec<MessageOrigin> = storage
         .list_messages_by_thread(turn.thread_id)
@@ -214,15 +216,55 @@ async fn turn_owner(storage: &dyn Storage, turn: &Turn) -> Result<TurnOwner, Sto
         .filter(|message| message.turn_id == Some(turn.id) && message.role == Role::User)
         .map(|message| message.origin)
         .collect();
-    let automated = !origins.is_empty()
-        && origins
-            .iter()
-            .all(|origin| matches!(origin, MessageOrigin::Schedule | MessageOrigin::Workflow));
+    let a_persons = origins
+        .iter()
+        .any(|origin| matches!(origin, MessageOrigin::User));
+    let an_automations = origins
+        .iter()
+        .any(|origin| matches!(origin, MessageOrigin::Schedule | MessageOrigin::Workflow));
+    let automated = an_automations && !a_persons;
     Ok(if automated {
         TurnOwner::Automation
     } else {
         TurnOwner::Person
     })
+}
+
+/// Whether the parent's own tool call for a delegation — the call the
+/// delegate message names — settled with a result in the parent's record.
+/// A delegate that names no call, or a call with no result, did not.
+async fn delegate_call_settled(
+    storage: &dyn Storage,
+    parent: &Turn,
+    delegate_payload: &serde_json::Value,
+) -> Result<bool, StorageError> {
+    let Some(call_id) = delegate_payload.get("_call_id").and_then(|v| v.as_str()) else {
+        return Ok(false);
+    };
+    Ok(storage
+        .get_tool_call_by_turn_and_call_id(parent.id, call_id)
+        .await?
+        .is_some_and(|call| call.result.is_some()))
+}
+
+/// Why an incomplete child stopped, as its own record says: the account
+/// the runtime left on its thread when the response was cut short, or the
+/// turn's failure message, or that it stopped short.
+async fn incomplete_account(storage: &dyn Storage, child: &Turn) -> Result<String, StorageError> {
+    let account = storage
+        .list_messages_by_thread(child.thread_id)
+        .await?
+        .into_iter()
+        .rev()
+        .find(|message| {
+            message.turn_id == Some(child.id)
+                && message.origin == MessageOrigin::Platform
+                && message.content.starts_with("Response incomplete:")
+        })
+        .map(|message| message.content);
+    Ok(account
+        .or_else(|| child.failure_message.clone())
+        .unwrap_or_else(|| "the turn stopped short of completing".to_owned()))
 }
 
 /// Resume a parent cut off while waiting on a delegated child: the child's
@@ -266,10 +308,7 @@ async fn resume_delegating_parent(
             TurnState::Incomplete => (
                 serde_json::json!({
                     "response": child.assistant_response.clone().unwrap_or_default(),
-                    "incomplete_reason": child
-                        .failure_message
-                        .clone()
-                        .unwrap_or_else(|| "the turn stopped short of completing".to_owned()),
+                    "incomplete_reason": incomplete_account(storage, &child).await?,
                     "structured_output": child.structured_output,
                 }),
                 "stopped short before the restart; what it produced is delivered above",
@@ -317,22 +356,60 @@ async fn resume_delegating_parent(
                 // claimed yet — a detached child's, or an attended one's cut
                 // between its write and its claim — will be delivered; a
                 // second of either would read twice.
-                let own_results = storage.list_by_correlation(delegate.id).await?;
-                let own_result_delivered = own_results.iter().any(|message| {
-                    message.kind == MessageKind::Result
-                        && message.status == MessageStatus::Delivered
-                });
-                let own_result_waiting = own_results.into_iter().find(|message| {
-                    message.kind == MessageKind::Result && message.status == MessageStatus::Pending
-                });
+                let own_results: Vec<_> = storage
+                    .list_by_correlation(delegate.id)
+                    .await?
+                    .into_iter()
+                    .filter(|message| message.kind == MessageKind::Result)
+                    .collect();
+                let own_result_failed = own_results
+                    .iter()
+                    .find(|message| message.status == MessageStatus::Failed);
+                let own_result_delivered = own_results
+                    .iter()
+                    .find(|message| message.status == MessageStatus::Delivered);
+                let own_result_waiting = own_results
+                    .iter()
+                    .find(|message| message.status == MessageStatus::Pending);
                 // The notice names the child's fate in words; the record's
                 // ids ride the Result's payload and the audit trail, not
                 // the model's text.
-                if own_result_delivered {
+                if let Some(failed) = own_result_failed {
+                    // A hook blocked the child's result on its way: that is
+                    // the result's end, and a fresh copy would carry the
+                    // blocked output past the hook.
                     notices.push(format!(
-                        "Delegated agent {} {fate}; its result reached this thread before the restart.",
-                        child.agent_id
+                        "Delegated agent {} {fate}; its result was blocked before delivery ({}).",
+                        child.agent_id,
+                        failed
+                            .failure_reason
+                            .as_deref()
+                            .unwrap_or("no reason recorded")
                     ));
+                    continue;
+                }
+                if let Some(delivered) = own_result_delivered {
+                    // Delivered to the parent agent's mailbox; reached the
+                    // parent's thread only if the parent's own delegate call
+                    // settled with it — a crash between the two leaves the
+                    // mailbox saying delivered and the thread without it.
+                    if delegate_call_settled(storage, parent, &delegate.payload).await? {
+                        notices.push(format!(
+                            "Delegated agent {} {fate}; its result reached this thread before the restart.",
+                            child.agent_id
+                        ));
+                    } else {
+                        notices.push(format!(
+                            "Delegated agent {} {fate}; its result is delivered above.",
+                            child.agent_id
+                        ));
+                        let mut readdressed = delivered.payload.clone();
+                        readdressed["parent_session_id"] = serde_json::json!(session.id);
+                        readdressed["parent_turn_id"] = serde_json::json!(parent.id);
+                        storage
+                            .reissue_agent_message(delivered.id, readdressed)
+                            .await?;
+                    }
                     continue;
                 }
                 notices.push(format!("Delegated agent {} {fate}.", child.agent_id));
@@ -1109,7 +1186,11 @@ mod tests {
                 recipient_agent_id: agent.to_string(),
                 kind: MessageKind::Delegate,
                 correlation_id: None,
-                payload: serde_json::json!({ "task": "work", "_thread_id": child_thread.id.to_string() }),
+                payload: serde_json::json!({
+                    "task": "work",
+                    "_thread_id": child_thread.id.to_string(),
+                    "_call_id": format!("call-{agent}"),
+                }),
             })
             .await
             .unwrap();
@@ -1124,6 +1205,35 @@ mod tests {
             .await
             .unwrap();
         (child, delegate)
+    }
+
+    /// The parent's own record of its delegate call, settled with a result
+    /// — what the synchronous path writes once the child's result is in
+    /// the parent's thread.
+    async fn settle_delegate_call(storage: &MockStorage, parent: &Turn, agent: &str) {
+        use swage_storage::model::NewToolCall;
+        use swage_storage::store::ToolCallStore;
+        storage
+            .create_tool_call(NewToolCall {
+                turn_id: parent.id,
+                agent_id: parent.agent_id.clone(),
+                call_id: format!("call-{agent}"),
+                tool: "delegate".to_string(),
+                arguments: "{}".to_string(),
+                model_arguments: "{}".to_string(),
+                result: Some("the child's result".to_string()),
+                model_result: Some("the child's result".to_string()),
+                status: Some("ok".to_string()),
+                duration_ms: Some(1),
+                truncated: false,
+                total_bytes: None,
+                provider_round: 1,
+                position: 0,
+                parent_call_id: None,
+                display_summary: None,
+            })
+            .await
+            .unwrap();
     }
 
     /// A channel's turn resumes where it was going: the continuation
@@ -1263,6 +1373,7 @@ mod tests {
         .await;
         let (_, delegate) =
             delegated_child(&storage, topic.id, &parent, "scout", TurnState::Completed).await;
+        settle_delegate_call(&storage, &parent, "scout").await;
         let delivered = storage
             .create_agent_message(NewAgentMessage {
                 sender_agent_id: "scout".to_string(),
@@ -1299,6 +1410,298 @@ mod tests {
                 .contains("its result reached this thread before the restart"),
             "{}",
             queued[0].content
+        );
+    }
+
+    /// A result the mailbox marked delivered that the parent's own record
+    /// never settled — the crash fell between the two — has not reached
+    /// the parent's thread: it is reissued to the parent's session, not
+    /// skipped.
+    #[tokio::test]
+    async fn recovery_reissues_a_delivered_result_the_parents_call_never_settled() {
+        use swage_storage::model::NewAgentMessage;
+        use swage_storage::store::{AgentMessageStore, TurnQueueStore};
+
+        let storage = Arc::new(MockStorage::new());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                agent_id: "lead".to_string(),
+                ..swage_storage::fixtures::new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "lead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let parent = drained_delegating_parent(
+            &storage,
+            session.id,
+            thread.id,
+            &[(MessageOrigin::User, true, Vec::new())],
+        )
+        .await;
+        let (_, delegate) =
+            delegated_child(&storage, topic.id, &parent, "scout", TurnState::Completed).await;
+        let delivered = storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "scout".to_string(),
+                recipient_agent_id: "lead".to_string(),
+                kind: MessageKind::Result,
+                correlation_id: Some(delegate.id),
+                payload: serde_json::json!({ "response": "Scouted." }),
+            })
+            .await
+            .unwrap();
+        storage
+            .update_agent_message_status(delivered.id, MessageStatus::Delivered, None)
+            .await
+            .unwrap();
+
+        recover_orphaned_turns(&*storage, &*storage)
+            .await
+            .expect("recovery should not fail");
+
+        let results: Vec<_> = storage
+            .list_by_correlation(delegate.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.kind == MessageKind::Result)
+            .collect();
+        assert_eq!(
+            results.len(),
+            1,
+            "the one result is reissued, not copied: {results:?}"
+        );
+        assert_eq!(results[0].status, MessageStatus::Pending);
+        assert_eq!(results[0].payload["response"], "Scouted.");
+        assert_eq!(
+            results[0].payload["parent_session_id"],
+            serde_json::json!(session.id)
+        );
+        let queued = storage.list_queued_turn_inputs(session.id).await.unwrap();
+        assert!(
+            queued[0].content.contains("its result is delivered above"),
+            "{}",
+            queued[0].content
+        );
+    }
+
+    /// A result a hook blocked on its way is the child's end: recovery
+    /// writes no fresh copy that would carry the blocked output past the
+    /// hook, and the notice says it was blocked.
+    #[tokio::test]
+    async fn recovery_writes_no_fresh_copy_of_a_result_a_hook_blocked() {
+        use swage_storage::model::NewAgentMessage;
+        use swage_storage::store::{AgentMessageStore, TurnQueueStore};
+
+        let storage = Arc::new(MockStorage::new());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                agent_id: "lead".to_string(),
+                ..swage_storage::fixtures::new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "lead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let parent = drained_delegating_parent(
+            &storage,
+            session.id,
+            thread.id,
+            &[(MessageOrigin::User, true, Vec::new())],
+        )
+        .await;
+        let (_, delegate) =
+            delegated_child(&storage, topic.id, &parent, "scout", TurnState::Completed).await;
+        let blocked = storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "scout".to_string(),
+                recipient_agent_id: "lead".to_string(),
+                kind: MessageKind::Result,
+                correlation_id: Some(delegate.id),
+                payload: serde_json::json!({ "response": "the blocked text" }),
+            })
+            .await
+            .unwrap();
+        storage
+            .update_agent_message_status(
+                blocked.id,
+                MessageStatus::Failed,
+                Some("blocked by the receive hook"),
+            )
+            .await
+            .unwrap();
+
+        recover_orphaned_turns(&*storage, &*storage)
+            .await
+            .expect("recovery should not fail");
+
+        let results: Vec<_> = storage
+            .list_by_correlation(delegate.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.kind == MessageKind::Result)
+            .collect();
+        assert_eq!(results.len(), 1, "{results:?}");
+        assert_eq!(results[0].status, MessageStatus::Failed);
+        let queued = storage.list_queued_turn_inputs(session.id).await.unwrap();
+        assert!(
+            queued[0]
+                .content
+                .contains("blocked before delivery (blocked by the receive hook)"),
+            "{}",
+            queued[0].content
+        );
+    }
+
+    /// A schedule's turn stays the schedule's when a detached child's
+    /// result was delivered into it before the restart: the platform's
+    /// delegation row says nothing about who started the turn.
+    #[tokio::test]
+    async fn a_delivered_detached_result_does_not_make_a_schedules_turn_a_persons() {
+        use swage_core::Role;
+        use swage_storage::model::AppendMessage;
+        use swage_storage::store::{MessageStore, TurnQueueStore};
+
+        let storage = Arc::new(MockStorage::new());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                agent_id: "lead".to_string(),
+                ..swage_storage::fixtures::new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "lead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let parent = drained_delegating_parent(
+            &storage,
+            session.id,
+            thread.id,
+            &[(MessageOrigin::Schedule, false, Vec::new())],
+        )
+        .await;
+        storage
+            .append_message(AppendMessage {
+                thread_id: thread.id,
+                turn_id: Some(parent.id),
+                role: Role::User,
+                origin: MessageOrigin::Delegation,
+                content: "Delegated agent scout completed:\nearlier".to_string(),
+                attachments: Vec::new(),
+                agent_id: "lead".to_string(),
+            })
+            .await
+            .unwrap();
+        delegated_child(&storage, topic.id, &parent, "worker", TurnState::Processing).await;
+
+        recover_orphaned_turns(&*storage, &*storage)
+            .await
+            .expect("recovery should not fail");
+
+        assert!(
+            storage
+                .list_queued_turn_inputs(session.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the schedule's own recovery continues its run"
+        );
+    }
+
+    /// An incomplete child's reason is the account its runtime left on its
+    /// thread, not a generic stand-in.
+    #[tokio::test]
+    async fn recovery_carries_an_incomplete_childs_recorded_reason() {
+        use swage_core::Role;
+        use swage_storage::model::AppendMessage;
+        use swage_storage::store::{AgentMessageStore, MessageStore};
+
+        let storage = Arc::new(MockStorage::new());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                agent_id: "lead".to_string(),
+                ..swage_storage::fixtures::new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "lead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let parent = drained_delegating_parent(
+            &storage,
+            session.id,
+            thread.id,
+            &[(MessageOrigin::User, true, Vec::new())],
+        )
+        .await;
+        let (child, delegate) = delegated_child(
+            &storage,
+            topic.id,
+            &parent,
+            "drafter",
+            TurnState::Incomplete,
+        )
+        .await;
+        storage
+            .append_message(AppendMessage {
+                thread_id: child.thread_id,
+                turn_id: Some(child.id),
+                role: Role::User,
+                origin: MessageOrigin::Platform,
+                content: "Response incomplete: output token limit reached (max_tokens)."
+                    .to_string(),
+                attachments: Vec::new(),
+                agent_id: "drafter".to_string(),
+            })
+            .await
+            .unwrap();
+
+        recover_orphaned_turns(&*storage, &*storage)
+            .await
+            .expect("recovery should not fail");
+
+        let result = storage
+            .list_by_correlation(delegate.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|message| message.kind == MessageKind::Result)
+            .expect("the child's fate is on the record");
+        assert_eq!(
+            result.payload["incomplete_reason"],
+            "Response incomplete: output token limit reached (max_tokens)."
         );
     }
 
