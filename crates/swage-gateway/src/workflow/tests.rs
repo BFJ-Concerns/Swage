@@ -19376,6 +19376,100 @@ async fn a_usage_record_outside_the_contract_is_rejected_not_passed_through() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn session_agent_names_cover_platform_and_topic_definitions() {
+    let storage = SqliteStorage::in_memory().expect("storage");
+    let first = TopicStore::create(
+        &storage,
+        swage_storage::NewTopic {
+            name: "First".into(),
+            slug: "first".into(),
+        },
+    )
+    .await
+    .expect("first topic");
+    let second = TopicStore::create(
+        &storage,
+        swage_storage::NewTopic {
+            name: "Second".into(),
+            slug: "second".into(),
+        },
+    )
+    .await
+    .expect("second topic");
+    for (topic_id, name) in [(first.id, "First reader"), (second.id, "Second reader")] {
+        storage
+            .upsert_agent_definition(swage_storage::NewAgentDefinition {
+                id: "shared-reader".into(),
+                topic_id: Some(topic_id),
+                display_name: name.into(),
+                description: String::new(),
+                instructions: String::new(),
+                model_id: None,
+                tool_permissions: None,
+                skills: Vec::new(),
+                output_schema: None,
+                output_max_retries: None,
+            })
+            .await
+            .expect("definition");
+        assert_eq!(
+            session_agent_display_name(&storage, "shared-reader", topic_id)
+                .await
+                .expect("name"),
+            name
+        );
+    }
+    assert_eq!(
+        session_agent_display_name(&storage, swage_config::RESERVED_WORKFLOW_AGENT_ID, first.id)
+            .await
+            .expect("worker name"),
+        "Workflow worker"
+    );
+    assert_eq!(
+        session_agent_display_name(&storage, "gateway", first.id)
+            .await
+            .expect("default name"),
+        "Swage default"
+    );
+    assert_eq!(
+        session_agent_display_name(&storage, crate::memory::MEMORY_CURATOR_AGENT_ID, first.id)
+            .await
+            .expect("curator name"),
+        "Memory curator"
+    );
+    assert_eq!(
+        session_agent_display_name(&storage, "removed", first.id)
+            .await
+            .expect("fallback"),
+        "Unavailable agent"
+    );
+    let storage = Arc::new(storage);
+    let conversations = crate::service::ConversationService::new(storage.clone(), storage.clone());
+    for (agent_id, expected) in [
+        (swage_config::RESERVED_WORKFLOW_AGENT_ID, "Workflow worker"),
+        ("shared-reader", "Second reader"),
+    ] {
+        let created = conversations
+            .create_session_in_topic_for_agent(
+                second.id,
+                agent_id,
+                swage_storage::SessionOrigin::WorkflowWorker {
+                    run_id: Uuid::new_v4(),
+                },
+                None,
+            )
+            .await
+            .expect("session");
+        assert_eq!(created.agent_display_name, expected);
+        let loaded = conversations
+            .get_conversation(created.id)
+            .await
+            .expect("reload");
+        assert_eq!(loaded.agent_display_name, expected);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn run_accounts_start_observes_immediate_outcomes() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");

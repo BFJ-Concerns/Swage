@@ -66,6 +66,24 @@ use crate::{
 const CARRIED_WORKFLOW_ID_DOMAIN: &[u8] = b"swage skill carried workflow";
 const BARE_WORKFLOW_AGENT_ID: &str = swage_config::RESERVED_WORKFLOW_AGENT_ID;
 
+/// Resolve the name of any session agent in its own scope, including workers
+/// whose definition belongs to their workflow rather than the registry.
+pub(crate) async fn session_agent_display_name(
+    storage: &dyn swage_storage::Storage,
+    agent_id: &str,
+    topic_id: Uuid,
+) -> Result<String, swage_core::GatewayError> {
+    if agent_id == BARE_WORKFLOW_AGENT_ID {
+        return Ok("Workflow worker".into());
+    }
+    Ok(
+        crate::service::resolve_effective_agent_definition(storage, agent_id, topic_id)
+            .await?
+            .map(|agent| agent.definition.display_name)
+            .unwrap_or_else(|| "Unavailable agent".into()),
+    )
+}
+
 fn store_worker_placement(placement: ResolvedWorkerDirectory) -> WorkflowRunWorkerPlacement {
     WorkflowRunWorkerPlacement {
         path: placement.path.to_string_lossy().into_owned(),
