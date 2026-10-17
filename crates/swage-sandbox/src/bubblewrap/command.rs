@@ -106,20 +106,41 @@ pub fn policy_command(
     egress_socket: Option<&Path>,
 ) -> Result<Command, SandboxError> {
     let mut cmd = Command::new(bwrap_path);
-    for key in crate::CREDENTIAL_ENV_VARS {
-        cmd.env_remove(key);
-    }
-    // Git's inherited command configuration can override the governed helper
-    // chain. Remove it before applying the policy's environment below.
-    cmd.env_remove("GIT_CONFIG_PARAMETERS");
-    cmd.env_remove("GIT_CONFIG_COUNT");
-    for (key, _) in std::env::vars_os() {
-        if key.as_encoded_bytes().starts_with(b"GIT_CONFIG_KEY_")
-            || key.as_encoded_bytes().starts_with(b"GIT_CONFIG_VALUE_")
-        {
-            cmd.env_remove(key);
+    // Only named development settings cross the process boundary. In
+    // particular, no inherited Git selector, command configuration, askpass,
+    // HTTP proxy or provider credential can become a second authority.
+    cmd.env_clear();
+    for key in [
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "LANGUAGE",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LC_MESSAGES",
+        "TERM",
+        "COLORTERM",
+        "TZ",
+        "TMPDIR",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_RUNTIME_DIR",
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "RUSTUP_TOOLCHAIN",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
         }
     }
+    // HOME and XDG remain useful to development tools, but neither is a Git
+    // configuration source. Repository configuration stays readable.
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
 
     // Isolate all namespaces (PID, network, mount, user, IPC, UTS).
     cmd.arg("--unshare-all");

@@ -89,18 +89,16 @@ impl CredentialServer {
         config
             .environment
             .insert(SOCKET_ENV.into(), self.socket.path().display().to_string());
-        // Replace command configuration before injecting the governed chain.
-        // The leading empty helper resets helpers from system/global files;
-        // GIT_CONFIG_PARAMETERS would otherwise take precedence over COUNT.
-        config.environment.retain(|key, _| {
-            key != "GIT_CONFIG_PARAMETERS"
-                && key != "GIT_CONFIG_COUNT"
-                && !key.starts_with("GIT_CONFIG_KEY_")
-                && !key.starts_with("GIT_CONFIG_VALUE_")
-        });
+        // This is the complete Git environment owned by the gateway. Drop
+        // existing selectors and command configuration before supplying it;
+        // the sandbox separately allowlists the inherited host environment.
+        config.environment.retain(|key, _| !key.starts_with("GIT_"));
         let binary = swage_sandbox::resolve_agent_binary()?;
         let quoted = format!("'{}'", binary.display().to_string().replace('\'', "'\\''"));
         config.environment.extend([
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+            ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+            // Command scope resets ordinary and URL-scoped repository helpers.
             ("GIT_CONFIG_COUNT".into(), "3".into()),
             ("GIT_CONFIG_KEY_0".into(), "credential.helper".into()),
             ("GIT_CONFIG_VALUE_0".into(), String::new()),
@@ -144,13 +142,9 @@ async fn resolve(
             continue;
         }
         let username = record.metadata["username"].as_str().unwrap_or("oauth2");
-        if request
-            .username
-            .as_deref()
-            .is_some_and(|requested| requested != username)
-        {
-            continue;
-        }
+        // The stored account is authoritative for this host and path. A URL
+        // username is a hint, not a reason to refuse the governed account;
+        // the helper returns the canonical username alongside its password.
         if let Some(path) = record.metadata["path"].as_str()
             && request.path.as_deref() != Some(path)
         {

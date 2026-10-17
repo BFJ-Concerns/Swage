@@ -325,6 +325,51 @@ async fn sandboxed_git_fetch_resets_inherited_file_helpers() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn sandboxed_git_boundary_global_file() {
+    check_inherited_git_configuration("global_file", true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sandboxed_git_boundary_system_enabled() {
+    check_inherited_git_configuration("system_enabled", true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sandboxed_git_boundary_system_default() {
+    check_inherited_git_configuration("system_default", true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sandboxed_git_boundary_home_file() {
+    check_inherited_git_configuration("home_file", true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sandboxed_git_boundary_xdg_file() {
+    check_inherited_git_configuration("xdg_file", true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sandboxed_git_boundary_include_file() {
+    check_inherited_git_configuration("include_file", true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sandboxed_git_boundary_git_dir() {
+    check_inherited_git_configuration("git_dir", true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sandboxed_git_boundary_http_header() {
+    check_inherited_git_configuration("http_header", false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sandboxed_git_boundary_url_username() {
+    check_inherited_git_configuration("url_username", false).await;
+}
+
 async fn check_inherited_git_configuration(source: &str, config_first: bool) {
     use std::os::unix::fs::PermissionsExt;
     use swage_sandbox::Sandbox;
@@ -339,6 +384,13 @@ async fn check_inherited_git_configuration(source: &str, config_first: bool) {
     env.remove_var("GIT_CONFIG_NOSYSTEM");
     env.remove_var("GIT_CONFIG_PARAMETERS");
     env.set_var("GIT_CONFIG_COUNT", "0");
+    env.set_var("INHERITED_UNLISTED_SETTING", "must-not-cross");
+    env.set_var("GIT_FUTURE_SETTING", "must-not-cross");
+    env.set_var("HOME", root.path());
+    env.set_var("XDG_CONFIG_HOME", root.path().join("xdg"));
+    for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"] {
+        env.remove_var(key);
+    }
     let helper = root.path().join("marker-helper");
     std::fs::write(
         &helper,
@@ -362,6 +414,63 @@ touch "$(dirname "$0")/marker-invoked"
             env.set_var("GIT_CONFIG_VALUE_0", "");
             env.set_var("GIT_CONFIG_KEY_1", "credential.helper");
             env.set_var("GIT_CONFIG_VALUE_1", &marker);
+        }
+        "global_file" | "system_enabled" | "system_default" | "home_file" | "xdg_file"
+        | "include_file" | "git_dir" | "http_header" | "url_username" => {
+            let file = root.path().join("inherited-config");
+            let mut contents = format!("[credential]\nhelper = {marker}\n");
+            if source != "url_username" {
+                contents += &format!(
+                    "[credential \"https://unlisted.invalid\"]\nusername = inherited-user\nhelper = {marker}\n[credential \"https://localhost:18443\"]\nusername = inherited-user\n[http]\nextraHeader = Authorization: inherited-header\n[http \"https://127.0.0.1:18443\"]\nextraHeader = X-Inherited: inherited-scoped-header\n"
+                );
+            }
+            std::fs::write(&file, contents).unwrap();
+            match source {
+                "system_enabled" | "system_default" => {
+                    env.set_var("GIT_CONFIG_SYSTEM", &file);
+                    if source == "system_enabled" {
+                        env.set_var("GIT_CONFIG_NOSYSTEM", "0");
+                    }
+                }
+                "home_file" => {
+                    env.remove_var("GIT_CONFIG_GLOBAL");
+                    std::fs::rename(&file, root.path().join(".gitconfig")).unwrap();
+                }
+                "xdg_file" => {
+                    env.remove_var("GIT_CONFIG_GLOBAL");
+                    let git = root.path().join("xdg/git");
+                    std::fs::create_dir_all(&git).unwrap();
+                    std::fs::rename(&file, git.join("config")).unwrap();
+                }
+                "include_file" => {
+                    let including = root.path().join("including-config");
+                    std::fs::write(
+                        &including,
+                        format!("[include]\npath = {}\n", file.display()),
+                    )
+                    .unwrap();
+                    env.set_var("GIT_CONFIG_GLOBAL", including);
+                }
+                "git_dir" => {
+                    let dir = root.path().join("inherited.git");
+                    let init = tokio::process::Command::new("git")
+                        .args(["init", "--bare"])
+                        .arg(&dir)
+                        .output()
+                        .await
+                        .unwrap();
+                    assert!(init.status.success());
+                    use std::io::Write;
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(dir.join("config"))
+                        .unwrap()
+                        .write_all(&std::fs::read(&file).unwrap())
+                        .unwrap();
+                    env.set_var("GIT_DIR", &dir);
+                }
+                _ => env.set_var("GIT_CONFIG_GLOBAL", &file),
+            }
         }
         "global" | "system" => {
             let file = root.path().join("gitconfig");
@@ -428,12 +537,14 @@ def git(*args):
     return subprocess.run(['git', *args], capture_output=True, text=True, timeout=15)
 
 headers = []
+extra_headers = []
 class Handler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *args):
         pass
     def do_GET(self):
         auth = self.headers.get('Authorization')
         headers.append(auth)
+        extra_headers.append(self.headers.get('X-Inherited'))
         if auth != 'Basic ' + base64.b64encode(b'operator:governed-password').decode():
             self.send_response(401)
             self.send_header('WWW-Authenticate', 'Basic realm="fixture"')
@@ -441,11 +552,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         super().do_GET()
 
-assert git('init', 'seed').returncode == 0
-assert git('-C', 'seed', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+def setup_git(*args):
+    environment = dict(os.environ)
+    for key in ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR']:
+        environment.pop(key, None)
+    return subprocess.run(['git', *args], env=environment, capture_output=True, text=True, timeout=15)
+
+assert setup_git('init', 'seed').returncode == 0
+assert setup_git('-C', 'seed', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
            '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'fixture').returncode == 0
-assert git('clone', '--bare', 'seed', 'repo.git').returncode == 0
-assert git('--git-dir=repo.git', 'update-server-info').returncode == 0
+assert setup_git('clone', '--bare', 'seed', 'repo.git').returncode == 0
+assert setup_git('--git-dir=repo.git', 'update-server-info').returncode == 0
 server = http.server.HTTPServer(('127.0.0.1', 18443), Handler)
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.load_cert_chain('cert.pem', 'key.pem')
@@ -453,21 +570,46 @@ server.socket = context.wrap_socket(server.socket, server_side=True)
 thread = threading.Thread(target=server.serve_forever)
 thread.start()
 try:
-    assert git('init', 'client').returncode == 0
+    assert setup_git('init', 'client').returncode == 0
+    # Repository settings stay readable, but their helpers must be reset.
+    marker = '!' + os.path.join(os.getcwd(), 'marker-helper')
+    assert setup_git('-C', 'client', 'config', 'user.name', 'Repository Fixture').returncode == 0
+    assert setup_git('-C', 'client', 'config', '--add', 'credential.helper', marker).returncode == 0
+    for host in ['127.0.0.1:18443', 'localhost:18443']:
+        assert setup_git('-C', 'client', 'config', '--add', f'credential.https://{host}.helper', marker).returncode == 0
+    repository_name = setup_git('-C', 'client', 'config', 'user.name').stdout.strip()
     results = []
-    for host in ['127.0.0.1', 'localhost']:
+    for host in ['127.0.0.1', 'localhost', 'url-user@localhost']:
         headers.clear()
+        extra_headers.clear()
         fetched = git('-C', 'client', '-c', 'http.sslVerify=false', 'fetch',
                       f'https://{host}:18443/repo.git')
         results.append({'success': fetched.returncode == 0,
-                        'authenticated': any(headers), 'error': fetched.stderr,
+                        'authenticated': any(headers), 'extra_header': any(extra_headers), 'error': fetched.stderr,
                         'governed': any(h == 'Basic ' + base64.b64encode(b'operator:governed-password').decode()
                                         for h in headers)})
+    credential = subprocess.run(['git', 'credential', 'fill'],
+                                input='url=https://url-user@localhost:18443/repo.git\n\n',
+                                capture_output=True, text=True, timeout=15)
+    username = git('config', '--get-urlmatch', 'credential.username', 'https://unlisted.invalid/repo.git')
+    scoped_header = git('config', '--get-urlmatch', 'http.extraHeader', 'https://127.0.0.1:18443/repo.git')
     configured = git('config', '--get-all', 'credential.helper')
     assert configured.returncode == 0
-    print(json.dumps({'fetches': results, 'helpers': configured.stdout.splitlines(),
-                      'stale': [k for k in os.environ if k.startswith(('GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_'))
-                                and k.rsplit('_', 1)[-1] not in ['0', '1', '2']]}))
+    foreign_keys = ['INHERITED_UNLISTED_SETTING', 'GIT_FUTURE_SETTING', 'GIT_DIR',
+                    'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_SYSTEM']
+    print(json.dumps({
+        'fetches': results,
+        'url_username_resolved': (credential.returncode == 0
+                                  and 'username=operator\n' in credential.stdout
+                                  and 'password=governed-password\n' in credential.stdout),
+        'repository_name': repository_name,
+        'foreign_env': [k for k in foreign_keys if k in os.environ],
+        'username': username.stdout.strip(),
+        'header': scoped_header.stdout.strip(),
+        'helpers': configured.stdout.splitlines(),
+        'stale': [k for k in os.environ if k.startswith(('GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_'))
+                  and k.rsplit('_', 1)[-1] not in ['0', '1', '2']],
+    }))
 finally:
     server.shutdown()
     thread.join()
@@ -517,19 +659,33 @@ finally:
     let output = result.output["output"].as_str().unwrap();
     let observed: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
     let check_config = || {
+        assert_eq!(
+            observed["repository_name"], "Repository Fixture",
+            "workspace repository configuration must stay readable"
+        );
+        assert_eq!(
+            observed["username"], "",
+            "inherited {source} must not supply a username"
+        );
+        assert_eq!(
+            observed["header"], "",
+            "inherited {source} must not supply an HTTP header"
+        );
         let helpers: Vec<_> = observed["helpers"]
             .as_array()
             .unwrap()
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        // Git reports file values as well as command values. The last empty
-        // helper resets all preceding file-configured helpers.
-        let reset = helpers.iter().rposition(|v| v.is_empty()).unwrap();
         assert_eq!(
-            &helpers[reset + 1..],
-            &[governed.as_str()],
-            "inherited {source} must not replace the governed helper chain"
+            helpers,
+            ["", governed.as_str()],
+            "inherited {source} must not appear in raw helper configuration"
+        );
+        assert_eq!(
+            observed["foreign_env"],
+            json!([]),
+            "unlisted inherited environment must not cross the boundary"
         );
         assert_eq!(
             observed["stale"],
@@ -545,6 +701,12 @@ finally:
         "unlisted fetch must get no credentials from inherited {source}"
     );
     assert_eq!(observed["fetches"][0]["success"], false);
+    for fetched in observed["fetches"].as_array().unwrap() {
+        assert_eq!(
+            fetched["extra_header"], false,
+            "inherited URL-scoped HTTP headers must not reach either host"
+        );
+    }
     assert_eq!(
         observed["fetches"][1]["governed"], true,
         "listed fetch must authenticate through the governed helper despite {source}"
@@ -553,6 +715,19 @@ finally:
         observed["fetches"][1]["success"], true,
         "{}",
         observed["fetches"][1]["error"]
+    );
+    assert_eq!(
+        observed["fetches"][2]["governed"], true,
+        "listed URL with a username must authenticate through the governed helper"
+    );
+    assert_eq!(
+        observed["fetches"][2]["success"], true,
+        "{}",
+        observed["fetches"][2]["error"]
+    );
+    assert_eq!(
+        observed["url_username_resolved"], true,
+        "listed credential URL username must resolve to the governed account"
     );
     if !config_first {
         check_config();
