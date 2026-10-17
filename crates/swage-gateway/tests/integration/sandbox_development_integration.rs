@@ -160,6 +160,149 @@ async fn git_get_resolves_over_ipc_and_unknown_hosts_receive_nothing() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn sandboxed_git_refuses_inherited_askpass_and_audits_governed_credentials() {
+    use std::os::unix::fs::PermissionsExt;
+    use swage_sandbox::Sandbox;
+    use tokio::io::AsyncWriteExt;
+
+    let mut env = ProcessEnvGuard::new();
+    env.set_managed_secret_key(11);
+    env.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    let root = tempfile::tempdir().unwrap();
+    env.set_var("XDG_RUNTIME_DIR", root.path());
+    let askpass = root.path().join("askpass");
+    std::fs::write(
+        &askpass,
+        "#!/bin/sh\ncase \"$1\" in *Username*) echo inherited-user;; *) echo inherited-password;; esac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&askpass, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let gitconfig = root.path().join("gitconfig");
+    std::fs::write(
+        &gitconfig,
+        format!("[core]\naskPass = {}\n", askpass.display()),
+    )
+    .unwrap();
+    env.set_var("GIT_CONFIG_NOSYSTEM", "1");
+    env.set_var("GIT_TERMINAL_PROMPT", "0");
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let manager = Arc::new(SecretManager::new(storage.clone()));
+    manager
+        .create_secret(CreateSecretRequest {
+            name: "scratch forge".into(),
+            material_kind: "git_credential".into(),
+            owner_kind: "operator".into(),
+            backend_kind: "managed".into(),
+            scope_kind: "gateway".into(),
+            scope_id: None,
+            metadata: Some(json!({"host": "scratch.example", "username": "operator"})),
+            value: Some("governed-token".into()),
+            external_reference: None,
+        })
+        .await
+        .unwrap();
+    let server = CredentialServer::start(manager, storage.clone(), None, None).unwrap();
+
+    for source in ["GIT_ASKPASS", "SSH_ASKPASS", "core.askPass"] {
+        env.remove_var("GIT_ASKPASS");
+        env.remove_var("SSH_ASKPASS");
+        if source == "core.askPass" {
+            env.set_var("GIT_CONFIG_GLOBAL", &gitconfig);
+        } else {
+            env.set_var("GIT_CONFIG_GLOBAL", "/dev/null");
+            env.set_var(source, &askpass);
+        }
+        // Local credential-echoing control: Git really obtains both fields
+        // from this inherited fallback without any remote connection.
+        let mut control = tokio::process::Command::new("git")
+            .args(["-c", "credential.helper=", "credential", "fill"])
+            .current_dir(root.path())
+            .env("GIT_CONFIG_COUNT", "0")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        control
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"url=https://unlisted.example/repo.git\n\n")
+            .await
+            .unwrap();
+        let output = control.wait_with_output().await.unwrap();
+        assert!(output.status.success(), "{source}: {output:?}");
+        let answer = String::from_utf8_lossy(&output.stdout);
+        assert!(answer.contains("username=inherited-user\n"), "{answer}");
+        assert!(answer.contains("password=inherited-password\n"), "{answer}");
+
+        let mut policy = SandboxConfig::builder()
+            .working_directory(root.path())
+            .write_path(root.path())
+            .build()
+            .unwrap();
+        server.configure(&mut policy).unwrap();
+        policy
+            .environment
+            .insert("HOME".into(), root.path().display().to_string());
+        let mut sandbox = swage_sandbox::BubblewrapSandbox::new(
+            policy,
+            swage_sandbox::llm_handler::HostLlmHandler::new(|_| async {
+                unreachable!("git uses no model")
+            }),
+        );
+        sandbox.spawn_agent().await.unwrap();
+        for (host, expected) in [("scratch.example", true), ("unlisted.example", false)] {
+            let result = sandbox
+                .execute_tool(
+                    "shell",
+                    json!({"command": format!(
+                        "printf 'url=https://{host}/repo.git\\n\\n' | git credential fill"
+                    )}),
+                )
+                .await
+                .unwrap();
+            assert!(result.error.is_none(), "{:?}", result.error);
+            let output = result.output["output"].as_str().unwrap_or_default();
+            assert_eq!(
+                result.output["exit_code"] == 0,
+                expected,
+                "sandboxed git must refuse unlisted credentials despite {source}: {output}"
+            );
+            assert!(!output.contains("inherited-user"), "{source}: {output}");
+            assert!(!output.contains("inherited-password"), "{source}: {output}");
+            assert_eq!(
+                output.contains("password=governed-token"),
+                expected,
+                "{output}"
+            );
+        }
+        sandbox.shutdown().await.unwrap();
+    }
+    let events = storage.list_audit_events().await.unwrap();
+    for (host, outcome) in [
+        ("scratch.example", "resolved"),
+        ("unlisted.example", "absent"),
+    ] {
+        let lookups: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.event_kind == "git_credential_lookup" && event.metadata["host"] == host
+            })
+            .collect();
+        assert_eq!(lookups.len(), 3, "every {host} lookup must be audited");
+        for event in lookups {
+            assert_eq!(event.session_id, None);
+            assert!(event.metadata["turn_id"].is_null());
+            assert_eq!(event.metadata["outcome"], outcome);
+        }
+    }
+    let audit = serde_json::to_string(&events).unwrap();
+    assert!(!audit.contains("governed-token"));
+    assert!(!audit.contains("inherited-password"));
+}
+
 struct NoTools;
 #[async_trait::async_trait]
 impl swage_python::NestedToolHost for NoTools {

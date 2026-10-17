@@ -105,6 +105,10 @@ impl CredentialServer {
             ("GIT_CONFIG_KEY_2".into(), "credential.useHttpPath".into()),
             ("GIT_CONFIG_VALUE_2".into(), "true".into()),
             ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+            // Git tries askpass before checking GIT_TERMINAL_PROMPT. Override
+            // both inherited programs and core.askPass after a helper refusal.
+            ("GIT_ASKPASS".into(), "/bin/false".into()),
+            ("SSH_ASKPASS".into(), "/bin/false".into()),
         ]);
         Ok(())
     }
