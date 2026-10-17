@@ -203,7 +203,11 @@ const SHARED_CACHE_PATHS: &[&str] = &[".cache", ".cargo", ".npm", ".local/share/
 /// Where a workspace's git metadata lives when it is not under the
 /// workspace: a linked worktree's `.git` is a file naming its gitdir, whose
 /// `commondir` names the repository the worktree belongs to. Both must be
-/// writable for the worktree to commit.
+/// writable for the worktree to commit. The pointer is content of the
+/// workspace, which the sandbox writes, so only a directory that is git
+/// metadata — one holding a `HEAD`, and for the common directory its
+/// `objects` too — and that does not contain the workspace is listed; a
+/// pointer at anything else names nothing.
 pub(crate) fn git_metadata_outside(workspace: &Path) -> Vec<PathBuf> {
     let dot_git = workspace.join(".git");
     let Ok(pointer) = std::fs::read_to_string(&dot_git) else {
@@ -213,17 +217,55 @@ pub(crate) fn git_metadata_outside(workspace: &Path) -> Vec<PathBuf> {
         return Vec::new();
     };
     let gitdir = sandbox_path(&workspace.join(gitdir.trim()));
+    let is_git_metadata = |path: &Path, common: bool| {
+        path.join("HEAD").is_file()
+            && (!common || path.join("objects").is_dir())
+            && !workspace.starts_with(path)
+    };
     let mut paths = Vec::new();
     if !gitdir.starts_with(workspace) {
+        if !is_git_metadata(&gitdir, false) {
+            tracing::warn!(
+                path = %gitdir.display(),
+                "ignoring a workspace .git pointer at a directory that is not git metadata"
+            );
+            return paths;
+        }
         paths.push(gitdir.clone());
     }
     if let Ok(common) = std::fs::read_to_string(gitdir.join("commondir")) {
         let common = sandbox_path(&gitdir.join(common.trim()));
         if !common.starts_with(workspace) && !paths.contains(&common) {
+            if !is_git_metadata(&common, true) {
+                tracing::warn!(
+                    path = %common.display(),
+                    "ignoring a worktree's commondir at a directory that is not a repository"
+                );
+                return paths;
+            }
             paths.push(common);
         }
     }
     paths
+}
+
+/// The masked private path a placement would reopen, when it would: a
+/// worker placed by the model inside a person's grant is the model's
+/// reach, not the person's. A placement within the operator's private
+/// home paths reopens their keys and credentials and is refused anywhere
+/// beneath them; one at the gateway's data root itself reopens the whole
+/// instance and is refused, while a subtree beneath the root is the
+/// managed workspaces' own home and reopens only itself (C64, C67).
+pub(crate) fn private_path_covering(path: &Path, roots: &PolicyRoots) -> Option<PathBuf> {
+    let path = sandbox_path(path);
+    let data_root = sandbox_path(&roots.data_root);
+    masked_paths(roots).into_iter().find(|private| {
+        if sandbox_path(private) == data_root {
+            path == data_root
+        } else {
+            path.starts_with(private)
+        }
+    })
 }
 
 /// The policy a turn's sandbox runs under: reads everywhere but the masked
@@ -253,8 +295,12 @@ pub(crate) fn build_sandbox_config(
             }
             // The pointer is read from the workspace, which the sandbox
             // writes, so it is never the operator's deliberate reach into a
-            // private path (C64): metadata under a mask stays masked.
-            if let Some(private) = masked.iter().find(|private| path.starts_with(private)) {
+            // private path (C64): metadata under a mask stays masked, and
+            // a directory above one is not granted over it.
+            if let Some(private) = masked
+                .iter()
+                .find(|private| path.starts_with(private) || private.starts_with(&path))
+            {
                 tracing::warn!(
                     path = %path.display(),
                     private = %private.display(),
@@ -569,6 +615,10 @@ async fn build_turn_sandbox_for_backend_selection(
         degradation_reason = "bubblewrap_unavailable".into();
     }
 
+    // The fallback has no mount layer, so it hides nothing: the private
+    // paths the policy masks are readable to this turn, and the record
+    // of its degraded isolation says which.
+    let degradation_reason = degraded_reason(degradation_reason, &sandbox_config.masked_paths);
     let mut fallback =
         swage_sandbox::FallbackSandbox::new(sandbox_config, make_llm_handler()).with_egress(egress);
     if spawn_fallback {
@@ -581,6 +631,24 @@ async fn build_turn_sandbox_for_backend_selection(
         },
         backend: SandboxBackend::Fallback,
     })
+}
+
+/// The degraded isolation's reason with the private paths left unmasked
+/// named, so a reader of the turn's record learns what was open.
+fn degraded_reason(reason: String, masked_paths: &[PathBuf]) -> String {
+    if masked_paths.is_empty() {
+        return reason;
+    }
+    tracing::warn!(
+        unmasked = ?masked_paths,
+        "degraded sandbox cannot mask private paths; they are readable to this turn"
+    );
+    let unmasked = masked_paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{reason}; unmasked: {unmasked}")
 }
 
 pub(crate) async fn build_gateway_dispatcher(

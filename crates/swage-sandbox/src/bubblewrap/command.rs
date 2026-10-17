@@ -52,8 +52,9 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 ///
 /// `--ro-bind / /` is emitted before any specific bind mounts so that the
 /// write set, the read-only overlays and the masks take precedence over the
-/// read-only root; masks come last so a private path inside a writable tree
-/// is still hidden.
+/// read-only root. The specific mounts bind in depth order, so a private
+/// path inside a writable tree is still hidden and a grant that names a
+/// masked path exactly reopens it; see [`bind_order`].
 ///
 /// `egress_socket` is the host proxy's socket to bind into the sandbox and
 /// name in the child's environment; `None` leaves the sandbox with no route
@@ -207,10 +208,10 @@ enum PolicyMount {
     MaskFile,
 }
 
-/// The policy's mounts ordered shallowest first, so bubblewrap applies the
-/// deepest last and it wins. Ties keep the policy's own order: masks after
-/// grants at the same depth, so an identical path masked and granted reads
-/// as masked.
+/// The policy's mounts in the order they bind, deepest last so it wins;
+/// at one path the order is [`bind_order`]'s: a mask, then a write grant,
+/// then a read-only grant, so a grant that names a masked path reopens it
+/// and a read-only grant of a written path holds it read-only.
 fn policy_mounts<'a>(
     config: &'a SandboxConfig,
     sockets: &[&'a Path],
@@ -275,13 +276,19 @@ fn policy_mounts<'a>(
 
 /// The order the policy's mounts bind in, and so which of two mounts over
 /// one path wins: depth first, so a deeper mount shows through the one
-/// above it; at one depth a mask before a grant, so a grant that names
-/// exactly a masked path — a workspace at `~/.ssh`, the data root under
-/// C64 — reopens what it names, while a grant above the mask (the home
-/// directory) still leaves the mask in place, being a shallower mount.
-fn bind_order(path: &Path, kind: PolicyMount) -> (usize, bool) {
-    let masks = matches!(kind, PolicyMount::MaskDirectory | PolicyMount::MaskFile);
-    (path.components().count(), !masks)
+/// above it; at one depth a mask, then a write grant, then a read-only
+/// grant. So a grant that names exactly a masked path — a workspace at
+/// `~/.ssh`, the data root under C64 — reopens what it names, while a
+/// grant above the mask (the home directory) still leaves the mask in
+/// place, being a shallower mount; and a path both written and held
+/// read-only is read-only, the overlay binding last.
+fn bind_order(path: &Path, kind: PolicyMount) -> (usize, u8) {
+    let rank = match kind {
+        PolicyMount::MaskDirectory | PolicyMount::MaskFile => 0,
+        PolicyMount::Write => 1,
+        PolicyMount::ReadOnly => 2,
+    };
+    (path.components().count(), rank)
 }
 
 // ---------------------------------------------------------------------------
@@ -448,6 +455,47 @@ mod tests {
         assert!(
             home_bind < positions(&ssh)[0],
             "the home grant above the mask leaves the mask after it"
+        );
+    }
+
+    /// A path both in the write set and held read-only binds read-only
+    /// last, whatever order the policy listed them in: the bind order,
+    /// not the builder's collection order, decides.
+    #[test]
+    fn a_read_only_grant_of_a_written_path_binds_after_the_write() {
+        let config = SandboxConfig::builder()
+            .working_directory("/tmp/agent-workspace")
+            .write_path("/tmp/agent-workspace/vendored")
+            .read_only_path("/tmp/agent-workspace/vendored")
+            .build()
+            .unwrap();
+        let cmd = build_bwrap_command_with_path(
+            Path::new("/usr/bin/bwrap"),
+            &config,
+            Path::new("/run/swage/agent.sock"),
+            None,
+            Path::new("/usr/bin/swage-agent"),
+        )
+        .unwrap();
+        let args = args_of(&cmd);
+        let flag_before = |needle: &str| -> Vec<usize> {
+            args.iter()
+                .enumerate()
+                .filter(|(i, a)| {
+                    *i > 0
+                        && **a == OsStr::new("/tmp/agent-workspace/vendored")
+                        && args[*i - 1] == OsStr::new(needle)
+                })
+                .map(|(i, _)| i)
+                .collect()
+        };
+        let write = flag_before("--bind");
+        let read_only = flag_before("--ro-bind");
+        assert_eq!(write.len(), 1, "{args:?}");
+        assert_eq!(read_only.len(), 1, "{args:?}");
+        assert!(
+            write[0] < read_only[0],
+            "the read-only overlay binds after the write grant: {args:?}"
         );
     }
 

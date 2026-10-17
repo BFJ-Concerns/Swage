@@ -15917,6 +15917,124 @@ fn a_grant_equal_to_a_masked_path_is_carried_beside_its_mask() {
         !policy.write_paths.contains(&sandbox_path(&ssh)),
         "a grant above the mask names the home, not the private path"
     );
+
+    // The grant's own route: a trusted workspace at `~/.ssh` held read-only
+    // reopens it read-only beside its mask, and writes nothing.
+    let read_only_policy = TrustedWorkspacePolicy {
+        permissions: WorkspacePermissionSummary {
+            has_read: true,
+            has_write: false,
+        },
+        active_workspace: Some(TrustedWorkspacePath {
+            path: ssh.clone(),
+            is_trusted: true,
+            can_read: true,
+            can_write: false,
+        }),
+        attachments: Vec::new(),
+    };
+    let policy = build_sandbox_config(&at_ssh, Some(&read_only_policy), &roots).unwrap();
+    assert!(policy.masked_paths.contains(&sandbox_path(&ssh)));
+    assert!(
+        policy.read_only_paths.contains(&sandbox_path(&ssh)),
+        "{:?}",
+        policy.read_only_paths
+    );
+    assert!(!policy.write_paths.contains(&sandbox_path(&ssh)));
+    assert!(!policy.working_directory_is_writable());
+}
+
+/// A `.git` pointer names git metadata or nothing: a directory with no
+/// `HEAD` — the home, say — is not granted, and neither is a directory
+/// above a masked path, however it is dressed.
+#[test]
+fn a_git_pointer_at_a_directory_that_is_not_git_metadata_grants_nothing() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path().join("home");
+    std::fs::create_dir_all(home.join(".ssh")).unwrap();
+    let data_root = home.join(".swage");
+    std::fs::create_dir_all(&data_root).unwrap();
+    let roots = PolicyRoots {
+        home: home.clone(),
+        data_root: data_root.clone(),
+    };
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    // The home: no HEAD, and above the masks.
+    std::fs::write(
+        workspace.join(".git"),
+        format!("gitdir: {}\n", home.display()),
+    )
+    .unwrap();
+    assert!(git_metadata_outside(&sandbox_path(&workspace)).is_empty());
+    let agent_config =
+        AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
+    let policy = build_sandbox_config(&agent_config, None, &roots).unwrap();
+    assert!(
+        !policy.write_paths.contains(&sandbox_path(&home)),
+        "{:?}",
+        policy.write_paths
+    );
+
+    // A HEAD file dressing the home as metadata still leaves it above the
+    // masks, so the policy grants nothing over them.
+    std::fs::write(home.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    let policy = build_sandbox_config(&agent_config, None, &roots).unwrap();
+    assert!(
+        !policy.write_paths.contains(&sandbox_path(&home)),
+        "{:?}",
+        policy.write_paths
+    );
+    assert!(
+        policy
+            .masked_paths
+            .contains(&sandbox_path(&home.join(".ssh")))
+    );
+}
+
+/// A worker placement never lands in a masked private path: the model
+/// chose the directory within a person's grant, and the person's grant of
+/// the home is not a grant of the keys under it.
+#[test]
+fn a_placement_within_a_masked_private_path_is_named_for_refusal() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path().join("home");
+    let ssh = home.join(".ssh");
+    std::fs::create_dir_all(ssh.join("deeper")).unwrap();
+    let data_root = home.join(".swage");
+    std::fs::create_dir_all(&data_root).unwrap();
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let roots = PolicyRoots {
+        home: home.clone(),
+        data_root: data_root.clone(),
+    };
+    assert_eq!(
+        private_path_covering(&ssh, &roots).as_deref(),
+        Some(sandbox_path(&ssh).as_path())
+    );
+    assert_eq!(
+        private_path_covering(&ssh.join("deeper"), &roots).as_deref(),
+        Some(sandbox_path(&ssh).as_path())
+    );
+    assert_eq!(
+        private_path_covering(&data_root, &roots).as_deref(),
+        Some(sandbox_path(&data_root).as_path())
+    );
+    let scratch = data_root.join("scratch").join("general");
+    std::fs::create_dir_all(&scratch).unwrap();
+    assert_eq!(
+        private_path_covering(&scratch, &roots),
+        None,
+        "a managed workspace beneath the data root reopens only itself"
+    );
+    assert_eq!(private_path_covering(&project, &roots), None);
+    assert_eq!(
+        private_path_covering(&home, &roots),
+        None,
+        "the home is above the masks, not within one"
+    );
 }
 
 #[test]
