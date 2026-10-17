@@ -129,6 +129,7 @@ impl swage_python::NestedToolHost for NestedToolRuntime {
             tool_name,
             &arguments,
             &gateway_ctx,
+            false,
         )
         .await
         {

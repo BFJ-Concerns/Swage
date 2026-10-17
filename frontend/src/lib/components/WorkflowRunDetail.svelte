@@ -15,6 +15,7 @@
   import type { WorkflowCallUsage } from "../protocol/WorkflowCallUsage";
   import type { WorkflowWorkerTermination } from "../protocol/WorkflowWorkerTermination";
   import type { WorkflowProviderRound } from "../protocol/WorkflowProviderRound";
+  import type { WorkflowAgentCallResolution } from "../protocol/WorkflowAgentCallResolution";
 
   interface Props {
     detail: WorkflowRunDetailResponse | null;
@@ -89,11 +90,31 @@
     }
   }
 
+  // Each attempt after the first says why it was dispatched, in the record's
+  // own words — a cause, never an outcome: a fallback attempt was dispatched
+  // because the primary failed, and whether it served is the round's
+  // result, read from the rounds beside it; an interruption leaves the
+  // attempt before it with an unknown outcome.
+  function attemptLine(attempt: WorkflowAgentCallResolution, index: number): string {
+    const ordinal = `attempt ${index + 1}`;
+    switch (attempt.cause.cause) {
+      case "first":
+        return `${ordinal} — the first dispatch`;
+      case "after_interruption":
+        return `${ordinal} — dispatched again after a gateway interruption: attempt ${index}'s outcome is unknown and the tool calls it issued may have been applied twice`;
+      case "provider_fallback":
+        return `${ordinal} — dispatched to the declared fallback because the primary failed (${attempt.cause.primary_failure})`;
+    }
+  }
+
   // The last attempt is the one the call ended on; the earlier ones are the
-  // attempts an interruption cut off before it.
+  // attempts a fallback or an interruption superseded. An attempt the run
+  // opened that no turn has resolved yet has no turn, and says so rather
+  // than reading as defaults.
   function resolvedLabel(call: WorkflowAgentCallDetail): string {
     const resolved = call.dispatch?.attempts.at(-1);
     if (!resolved) return "not yet resolved";
+    if (resolved.turn_id === null) return "opened, not yet resolved by a turn";
     return [resolved.model ?? "default model", resolved.effort ?? "default effort"].join(
       ", ",
     );
@@ -133,8 +154,11 @@
               {#if call.dispatch.attempts.length > 1}
                 <dt>Attempts</dt>
                 <dd class="attempts">
-                  {call.dispatch.attempts.length} — an earlier attempt was
-                  interrupted and the call dispatched again
+                  <ol class="plain">
+                    {#each call.dispatch.attempts as attempt, index (index)}
+                      <li>{attemptLine(attempt, index)}</li>
+                    {/each}
+                  </ol>
                 </dd>
               {/if}
               {#if call.dispatch.placement}

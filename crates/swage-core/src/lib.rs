@@ -63,3 +63,5 @@ pub use tool::{
     compact_tool_result_for_model_with_reference, extract_tool_result_metadata,
     parse_tool_result_reference, tool_result_reference,
 };
+
+pub use swage_protocol::client::context::{ProviderAttemptOutcome, ProviderAttemptRecord};
