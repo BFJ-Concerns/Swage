@@ -370,6 +370,7 @@ impl SurfaceStore for SqliteStorage {
         id: Uuid,
         expected_revision: i64,
         source: &str,
+        delivery: Option<ModuleDelivery>,
     ) -> Result<Option<ModuleSourceReplacement>, StorageError> {
         let source = source.to_owned();
         self.with_conn(move |conn| {
@@ -377,12 +378,20 @@ impl SurfaceStore for SqliteStorage {
             let now_str = Utc::now().to_rfc3339();
             // The revision is the guard: the update lands only on the row the
             // writer read. A zero-row update is either the stale case or a
-            // missing module — the read-back tells the two apart.
+            // missing module — the read-back tells the two apart. A delivery
+            // replaces the recorded one; an edit by hand leaves it standing.
             let changed = tx.execute(
                 "UPDATE surface_modules
-                 SET source = ?1, revision = revision + 1, updated_at = ?2
+                 SET source = ?1, revision = revision + 1, updated_at = ?2,
+                     delivery_json = COALESCE(?5, delivery_json)
                  WHERE id = ?3 AND revision = ?4",
-                params![&source, &now_str, id.to_string(), expected_revision],
+                params![
+                    &source,
+                    &now_str,
+                    id.to_string(),
+                    expected_revision,
+                    encode_delivery(delivery.as_ref()),
+                ],
             )?;
             if changed == 1 {
                 tx.execute(
@@ -808,8 +817,41 @@ mod tests {
         assert_eq!(by_hand.delivery, None);
 
         let listed = storage.list_surface_modules(surface.id).await.unwrap();
-        assert_eq!(listed[0].delivery, Some(delivery));
+        assert_eq!(listed[0].delivery, Some(delivery.clone()));
         assert_eq!(listed[1].delivery, None);
+
+        // An edit by hand keeps the delivery; a replace that is itself a
+        // delivery records the new one.
+        let edited = match storage
+            .replace_surface_module_source(delivered.id, delivered.revision, "# Edited", None)
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            ModuleSourceReplacement::Replaced(module) => module,
+            ModuleSourceReplacement::Stale(_) => panic!("the revision was the one read"),
+        };
+        assert_eq!(edited.delivery, Some(delivery));
+        let again = ModuleDelivery::ScheduleRun {
+            run_id: Uuid::new_v4(),
+            schedule_id: Uuid::new_v4(),
+            delivered_at: Utc::now(),
+        };
+        let redelivered = match storage
+            .replace_surface_module_source(
+                edited.id,
+                edited.revision,
+                "# Fresh",
+                Some(again.clone()),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            ModuleSourceReplacement::Replaced(module) => module,
+            ModuleSourceReplacement::Stale(_) => panic!("the revision was the one read"),
+        };
+        assert_eq!(redelivered.delivery, Some(again));
     }
 
     /// Save a surface the way the gateway does: its modules copied in order.
@@ -873,7 +915,7 @@ mod tests {
         assert_eq!(module.revision, 0, "a new module starts at revision 0");
 
         let outcome = storage
-            .replace_surface_module_source(module.id, module.revision, "after")
+            .replace_surface_module_source(module.id, module.revision, "after", None)
             .await
             .unwrap()
             .expect("the module exists");
@@ -895,13 +937,13 @@ mod tests {
         let surface = surface_with_modules(&storage, session, &["draft"]).await;
         let module = storage.list_surface_modules(surface.id).await.unwrap()[0].clone();
         storage
-            .replace_surface_module_source(module.id, 0, "the agent's edit")
+            .replace_surface_module_source(module.id, 0, "the agent's edit", None)
             .await
             .unwrap();
 
         // An editor opened at revision 0 saves after the agent's edit landed.
         let outcome = storage
-            .replace_surface_module_source(module.id, 0, "the person's edit")
+            .replace_surface_module_source(module.id, 0, "the person's edit", None)
             .await
             .unwrap()
             .expect("the module exists");
@@ -922,7 +964,7 @@ mod tests {
 
         assert!(
             storage
-                .replace_surface_module_source(Uuid::new_v4(), 0, "x")
+                .replace_surface_module_source(Uuid::new_v4(), 0, "x", None)
                 .await
                 .unwrap()
                 .is_none(),
@@ -1182,7 +1224,7 @@ mod tests {
         // entry nor the other.
         let module = storage.list_surface_modules(with_content.id).await.unwrap()[0].clone();
         storage
-            .replace_surface_module_source(module.id, module.revision, "## Today")
+            .replace_surface_module_source(module.id, module.revision, "## Today", None)
             .await
             .unwrap();
         assert_eq!(

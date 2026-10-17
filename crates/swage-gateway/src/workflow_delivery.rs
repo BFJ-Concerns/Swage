@@ -131,29 +131,36 @@ impl DeliveryCapability for SurfaceDeliveryCapability {
 
     async fn deliver(
         &self,
-        _key: Uuid,
+        key: Uuid,
         payload: EffectPayload,
         effect_seq: u64,
         cancellation: CancellationToken,
     ) -> Result<EffectReceipt, String> {
-        tokio::select! {
-            result = crate::surface::write_surface_module(
-                &self.state,
-                self.surface_id,
-                WriteSurfaceModuleRequest {
-                    module_id: None,
-                    kind: Some("document".into()),
-                    source: payload.content,
-                    expected_revision: None,
-                },
-                "workflow delivery",
-                Some(ModuleDelivery::WorkflowRun {
-                    run_id: self.run_id,
-                    delivered_at: chrono::Utc::now(),
-                }),
-            ) => result.map_err(|error| error.to_string())?,
-            () = cancellation.cancelled() => return Err("WorkflowCancelledError: delivery cancelled".into()),
-        };
+        // Cancellation is honoured before the write, never inside it: the
+        // write lands the row, its audit event and its signal in sequence,
+        // and a future dropped between them would leave a module that
+        // nothing recorded or announced.
+        if cancellation.is_cancelled() {
+            return Err("WorkflowCancelledError: delivery cancelled".into());
+        }
+        crate::surface::write_surface_module(
+            &self.state,
+            self.surface_id,
+            WriteSurfaceModuleRequest {
+                module_id: None,
+                kind: Some("document".into()),
+                source: payload.content,
+                expected_revision: None,
+            },
+            "workflow delivery",
+            Some(ModuleDelivery::WorkflowRun {
+                run_id: self.run_id,
+                effect_key: key,
+                delivered_at: chrono::Utc::now(),
+            }),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         Ok(EffectReceipt {
             delivered: true,
             target: self.kind().into(),
@@ -161,12 +168,34 @@ impl DeliveryCapability for SurfaceDeliveryCapability {
         })
     }
 
+    /// A module this run already wrote under `key` is the delivery's
+    /// receipt: the module's recorded delivery names the run and the effect
+    /// key, so a recovered effect is answered from the surface rather than
+    /// delivered twice. `effect_seq` is not on the module; the receipt
+    /// carries the sequence the recovery asks about, as the webhook's would.
     async fn probe(
         &self,
-        _key: Uuid,
+        key: Uuid,
         _payload: &EffectPayload,
     ) -> Result<Option<EffectReceipt>, String> {
-        Ok(None)
+        let modules = self
+            .state
+            .storage
+            .list_surface_modules(self.surface_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let delivered = modules.iter().any(|module| {
+            matches!(
+                module.delivery,
+                Some(ModuleDelivery::WorkflowRun { run_id, effect_key, .. })
+                    if run_id == self.run_id && effect_key == key
+            )
+        });
+        Ok(delivered.then(|| EffectReceipt {
+            delivered: true,
+            target: self.kind().into(),
+            effect_seq: 0,
+        }))
     }
 }
 
@@ -407,9 +436,10 @@ mod tests {
 
         assert_eq!(capability.kind(), "surface");
         assert_eq!(capability.effect_kind(), EffectKind::CheckBeforeRedo);
+        let key = Uuid::new_v4();
         let receipt = capability
             .deliver(
-                Uuid::new_v4(),
+                key,
                 EffectPayload {
                     content: "# Delivered\n\nThe scheduled result".into(),
                     metadata: None,
@@ -429,10 +459,38 @@ mod tests {
         assert!(
             matches!(
                 modules[0].delivery,
-                Some(ModuleDelivery::WorkflowRun { run_id: by, .. }) if by == run_id
+                Some(ModuleDelivery::WorkflowRun { run_id: by, effect_key, .. })
+                    if by == run_id && effect_key == key
             ),
-            "the module records the run that delivered it: {:?}",
+            "the module records the run and the effect that delivered it: {:?}",
             modules[0].delivery
+        );
+        // A recovery asking after the same effect finds it delivered; a
+        // different effect of the same run is not.
+        let payload = EffectPayload {
+            content: "# Delivered\n\nThe scheduled result".into(),
+            metadata: None,
+            target: Some("daily-surface".into()),
+        };
+        assert!(
+            capability.probe(key, &payload).await.unwrap().is_some(),
+            "the written module answers the probe"
+        );
+        assert!(
+            capability
+                .probe(Uuid::new_v4(), &payload)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            storage
+                .list_surface_modules(surface.id)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "probing writes nothing"
         );
         let event = events
             .recv()

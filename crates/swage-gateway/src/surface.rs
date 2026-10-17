@@ -648,7 +648,12 @@ pub async fn write_surface_module(
             })?;
             let outcome = state
                 .storage
-                .replace_surface_module_source(existing.id, expected_revision, &request.source)
+                .replace_surface_module_source(
+                    existing.id,
+                    expected_revision,
+                    &request.source,
+                    delivery,
+                )
                 .await?
                 .ok_or_else(|| {
                     GatewayError::ValidationError(format!(

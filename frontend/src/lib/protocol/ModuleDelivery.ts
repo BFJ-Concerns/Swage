@@ -5,4 +5,4 @@
  * written: the run or turn whose output it is, and when. A module a person
  * or an agent writes by hand carries none.
  */
-export type ModuleDelivery = { "by": "schedule_run", run_id: string, schedule_id: string, delivered_at: string, } | { "by": "workflow_run", run_id: string, delivered_at: string, } | { "by": "turn", turn_id: string, delivered_at: string, };
+export type ModuleDelivery = { "by": "schedule_run", run_id: string, schedule_id: string, delivered_at: string, } | { "by": "workflow_run", run_id: string, effect_key: string, delivered_at: string, } | { "by": "turn", turn_id: string, delivered_at: string, };

@@ -1511,11 +1511,14 @@ pub trait SurfaceStore: Send + Sync {
     /// and returns it as it now stands. A landed replace advances the
     /// revision and the owning surface's updated_at. `None` when there is no
     /// such module.
+    /// `delivery` names the run or turn whose output the new source is;
+    /// `None` is an edit by hand, which keeps the delivery the module has.
     async fn replace_surface_module_source(
         &self,
         id: Uuid,
         expected_revision: i64,
         source: &str,
+        delivery: Option<ModuleDelivery>,
     ) -> Result<Option<ModuleSourceReplacement>, StorageError>;
     /// Remove a module instance and the notes hung on it, closing the gap in
     /// the surface's positions. `None` when there is no such module.
@@ -2534,6 +2537,7 @@ mod tests {
             _: Uuid,
             _: i64,
             _: &str,
+            _: Option<ModuleDelivery>,
         ) -> Result<Option<ModuleSourceReplacement>, StorageError> {
             unimplemented!()
         }

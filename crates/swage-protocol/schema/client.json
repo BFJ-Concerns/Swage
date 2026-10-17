@@ -3215,7 +3215,7 @@
           ]
         },
         {
-          "description": "A workflow run's delivery to its granted surface target.",
+          "description": "A workflow run's delivery to its granted surface target; the effect\nkey is the run's durable name for that one delivery, so a recovery\nafter a crash finds the module already written instead of writing\nit again.",
           "type": "object",
           "properties": {
             "by": {
@@ -3226,6 +3226,10 @@
               "type": "string",
               "format": "date-time"
             },
+            "effect_key": {
+              "type": "string",
+              "format": "uuid"
+            },
             "run_id": {
               "type": "string",
               "format": "uuid"
@@ -3234,6 +3238,7 @@
           "required": [
             "by",
             "run_id",
+            "effect_key",
             "delivered_at"
           ]
         },

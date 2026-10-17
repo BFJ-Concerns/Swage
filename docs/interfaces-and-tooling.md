@@ -263,7 +263,8 @@ individual modules with notes. A module a run delivers records what
 delivered it — the schedule and its run, the workflow run, or the turn
 whose response was routed there — and when; the surface shows that line
 above the module, so repeated deliveries read apart, and a module written
-by hand carries none.
+by hand carries none. A run that refreshes a standing module records the
+new delivery; an edit by hand keeps the one the module has.
 
 ### The shared library
 

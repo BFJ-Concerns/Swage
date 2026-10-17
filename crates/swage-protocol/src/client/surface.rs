@@ -206,9 +206,13 @@ pub enum ModuleDelivery {
         schedule_id: Uuid,
         delivered_at: DateTime<Utc>,
     },
-    /// A workflow run's delivery to its granted surface target.
+    /// A workflow run's delivery to its granted surface target; the effect
+    /// key is the run's durable name for that one delivery, so a recovery
+    /// after a crash finds the module already written instead of writing
+    /// it again.
     WorkflowRun {
         run_id: Uuid,
+        effect_key: Uuid,
         delivered_at: DateTime<Utc>,
     },
     /// A conversation turn's response, routed to the surface.
