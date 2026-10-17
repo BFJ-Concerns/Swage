@@ -2369,20 +2369,34 @@ async fn run_account(
 }
 
 /// A delivery record as the run's account shows it. The no-delivery
-/// record's target is a marker outside the target vocabulary, so it reads
-/// as no destination; a status outside the record's vocabulary is a
-/// corrupt record and refused rather than guessed.
+/// record's target is the `no_delivery` marker, read as no destination by
+/// its kind; any other target is read as the destination it names, and one
+/// that cannot be — like a status outside the record's vocabulary — is a
+/// corrupt record the store wrote, refused as such rather than shown as
+/// something it is not.
 fn delivery_view(
     record: swage_storage::DeliveryRecord,
 ) -> Result<wire::ScheduleRunDelivery, GatewayError> {
-    let outcome = wire::DeliveryOutcome::from_recorded(&record.status).ok_or_else(|| {
-        GatewayError::ValidationError(format!(
-            "delivery record {} carries an unknown status '{}'",
-            record.id, record.status
-        ))
-    })?;
+    let corrupt = |what: &str, detail: String| {
+        GatewayError::Storage(swage_core::StorageError::Corruption {
+            message: format!("delivery record {} carries {what}: {detail}", record.id),
+        })
+    };
+    let outcome = wire::DeliveryOutcome::from_recorded(&record.status)
+        .ok_or_else(|| corrupt("an unknown status", record.status.clone()))?;
+    let target = match record
+        .target
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("no_delivery") => None,
+        _ => Some(
+            serde_json::from_value(record.target.clone())
+                .map_err(|error| corrupt("an unreadable target", error.to_string()))?,
+        ),
+    };
     Ok(wire::ScheduleRunDelivery {
-        target: serde_json::from_value(record.target).ok(),
+        target,
         outcome,
         error: record.error,
         delivered_at: record.delivered_at,
@@ -2531,6 +2545,30 @@ mod tests {
             wire::DeliveryOutcome::NotDelivered
         );
         assert_eq!(second.deliveries[0].error.as_deref(), Some("gate skip"));
+
+        // A record whose target the store cannot read is refused as corrupt,
+        // never shown as a run that delivered nowhere.
+        storage
+            .create_delivery_record(swage_storage::NewDeliveryRecord {
+                session_id: Some(session.id),
+                run_id: Some(delivered.id),
+                turn_id: None,
+                target: serde_json::json!({"kind": "channel", "integration": "dev_dm"}),
+                content: "the digest".into(),
+                status: "sent".into(),
+                error: None,
+            })
+            .await
+            .unwrap();
+        let refused = list_schedule_runs(&state, schedule.id).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(GatewayError::Storage(swage_core::StorageError::Corruption { message }))
+                    if message.contains("unreadable target")
+            ),
+            "{refused:?}"
+        );
     }
 
     #[test]

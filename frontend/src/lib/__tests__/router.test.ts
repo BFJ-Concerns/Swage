@@ -259,6 +259,26 @@ describe("navigate", () => {
     expect(router.currentRoute.conversationId).toBe("nav-test");
   });
 
+  it("selects the conversation a path names when it is not the active one, and leaves the active one alone", async () => {
+    const selectConversation = vi.fn(async () => {});
+    const router = createRouter({
+      conversationStore: {
+        activeConversationId: "active-conv",
+        checkConversationExists: async () => {},
+        clearActiveConversation: vi.fn(),
+        selectConversation,
+      },
+    });
+
+    router.navigate("/conversations/active-conv/surfaces/s-1");
+    await Promise.resolve();
+    expect(selectConversation).not.toHaveBeenCalled();
+
+    router.navigate("/conversations/other-conv/turns/turn-9");
+    await vi.waitFor(() => expect(selectConversation).toHaveBeenCalledWith("other-conv"));
+    expect(router.currentRoute.turnId).toBe("turn-9");
+  });
+
   it("pushes an entry to browser history", () => {
     const router = createRouter();
     const before = window.history.length;

@@ -634,6 +634,8 @@ const CREATE_DELIVERY_AND_AUDIT_TABLES: &str = "
 
     CREATE INDEX IF NOT EXISTS idx_delivery_records_session_id
         ON delivery_records(session_id, delivered_at);
+    CREATE INDEX IF NOT EXISTS idx_delivery_records_run
+        ON delivery_records(run_id, delivered_at);
 
     CREATE TABLE IF NOT EXISTS audit_events (
         id           TEXT NOT NULL PRIMARY KEY,
@@ -1207,6 +1209,8 @@ const COMPLETE_SCHEMA: &str = "
 
     CREATE INDEX IF NOT EXISTS idx_delivery_records_session_id
         ON delivery_records(session_id, delivered_at);
+    CREATE INDEX IF NOT EXISTS idx_delivery_records_run
+        ON delivery_records(run_id, delivered_at);
 
     CREATE TABLE IF NOT EXISTS audit_events (
         id           TEXT NOT NULL PRIMARY KEY,

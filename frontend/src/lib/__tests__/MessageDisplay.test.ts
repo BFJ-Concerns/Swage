@@ -188,6 +188,16 @@ describe("turn context inspector trigger", () => {
     Element.prototype.scrollIntoView = function () {
       scrolled.push(this);
     };
+    // The end-follow queues its scroll for the next frame; hold the frames
+    // so the test can run them after the focus and see what they do.
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    onTestFinished(() => {
+      vi.unstubAllGlobals();
+    });
     const first: MessageView = { role: "user", origin: "user", content: "First ask.", timestamp: "2026-10-05T12:00:00Z", turn_id: "turn-a" };
     const firstReply: MessageView = { role: "assistant", origin: "assistant", content: "First answer.", timestamp: "2026-10-05T12:00:01Z", turn_id: "turn-a" };
     const second: MessageView = { role: "user", origin: "schedule", content: "Daily digest", timestamp: "2026-10-05T13:00:00Z", turn_id: "turn-b" };
@@ -201,6 +211,21 @@ describe("turn context inspector trigger", () => {
     expect(scrolled).toHaveLength(1);
     expect(scrolled[0].getAttribute("data-turn-id")).toBe("turn-b");
     expect(scrolled[0].textContent).toContain("Daily digest");
+
+    // The frames queued before the focus run now; following the end has
+    // stopped, so none of them moves the transcript.
+    const display = document.querySelector<HTMLDivElement>(".message-display")!;
+    const endScrolls: number[] = [];
+    Object.defineProperty(display, "scrollTop", {
+      configurable: true,
+      get: () => 0,
+      set: (value: number) => {
+        endScrolls.push(value);
+      },
+    });
+    expect(frames.length).toBeGreaterThan(0);
+    for (const frame of frames.splice(0)) frame(0);
+    expect(endScrolls).toEqual([]);
   });
 
   it("shows the refusal account and retries the person's request from recorded messages", async () => {

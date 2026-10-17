@@ -164,8 +164,10 @@
     void streamedContent.length;
 
     if (!userScrolledUp && scrollEl) {
+      // The frame re-reads the pause: a focus on a named turn between the
+      // queueing and the frame must not be overruled by a scroll to the end.
       requestAnimationFrame(() => {
-        if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+        if (scrollEl && !userScrolledUp) scrollEl.scrollTop = scrollEl.scrollHeight;
       });
     }
   });
