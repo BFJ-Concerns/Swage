@@ -20388,14 +20388,11 @@ async fn a_shadow_branch_is_absent_where_experimentation_is_off_for_its_location
     );
     state.turn_graph.load().await.expect("revision 0");
     let mut graph = TurnGraph::shipped();
-    // No plugin is installed here: the kernel's own summariser is the live
-    // step, and the branch shadows it.
-    graph
-        .steps
-        .iter_mut()
-        .find(|step| step.slot == TurnSlot::Succession)
-        .expect("succession step")
-        .filler = StepFiller::Builtin;
+    // No plugin is installed here: use the kernel's fillers on the live
+    // path, and shadow its summariser in the branch.
+    for step in &mut graph.steps {
+        step.filler = StepFiller::Builtin;
+    }
     graph.branches.push(TurnBranch {
         id: "trial".into(),
         from: TurnSlot::Succession.as_str().into(),
