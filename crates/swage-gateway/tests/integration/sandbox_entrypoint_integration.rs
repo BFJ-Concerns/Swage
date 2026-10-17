@@ -228,7 +228,17 @@ async fn bubblewrap_sandbox_reads_broadly_masks_private_paths_and_reaches_the_ne
 
     // A home with a key directory and a token file to mask, a workspace to
     // write, and a sibling directory outside the write set.
-    let home = tempfile::tempdir().unwrap();
+    // Ungranted host /tmp contents are intentionally hidden. Put the home
+    // fixture beside the runtime, as in the development sandbox tests, so
+    // notes exercise broad host reads rather than private temporary storage.
+    let home = tempfile::Builder::new()
+        .prefix("t")
+        .tempdir_in(
+            std::env::var_os("XDG_RUNTIME_DIR")
+                .filter(|path| !std::path::Path::new(path).starts_with("/tmp"))
+                .unwrap_or_else(|| env!("CARGO_MANIFEST_DIR").into()),
+        )
+        .unwrap();
     let ssh = home.path().join(".ssh");
     std::fs::create_dir(&ssh).unwrap();
     std::fs::write(ssh.join("id_ed25519"), "PRIVATE KEY").unwrap();
@@ -243,12 +253,17 @@ async fn bubblewrap_sandbox_reads_broadly_masks_private_paths_and_reaches_the_ne
     let outside = home.path().join("outside");
     std::fs::create_dir(&outside).unwrap();
 
+    let granted = ssh.join("granted");
+    std::fs::create_dir(&granted).unwrap();
+    std::fs::write(granted.join("visible"), "granted subtree").unwrap();
+
     let (port, server) = host_http_server();
     let recorded = std::sync::Arc::new(Recorded::default());
     let config = SandboxConfig::builder()
         .working_directory(&workspace)
         .write_path(&workspace)
         .masked_path(&ssh)
+        .read_only_path(&granted)
         .masked_path(home.path().join(".netrc"))
         .tool_call_timeout(std::time::Duration::from_secs(15))
         .llm_request_timeout(std::time::Duration::from_secs(10))
@@ -280,26 +295,57 @@ async fn bubblewrap_sandbox_reads_broadly_masks_private_paths_and_reaches_the_ne
         }
     };
 
-    // Reads are broad: a file beside the masks is readable; the masks are not.
-    let reads = shell(format!(
-        "cat {notes}; echo; ls -A {ssh} | wc -l; cat {netrc} | wc -c; cat {ssh}/id_ed25519 2>&1 || true",
-        notes = home.path().join("notes.txt").display(),
-        ssh = ssh.display(),
-        netrc = home.path().join(".netrc").display(),
+    // Keep observations separate: an empty token must not satisfy the
+    // assertion about hidden directory entries.
+    let notes = shell(format!("cat {}", home.path().join("notes.txt").display())).await;
+    assert_eq!(notes.trim(), "readable", "reads beside masks remain broad");
+    let siblings = shell(format!(
+        "find {} -mindepth 1 -maxdepth 1 ! -name granted -printf '%f\\n'",
+        ssh.display(),
     ))
     .await;
-    assert!(reads.contains("readable"), "{reads}");
-    assert!(
-        reads.lines().any(|line| line.trim() == "0"),
-        "the masked key directory must read as empty: {reads}"
+    assert_eq!(
+        siblings.trim(),
+        "",
+        "masked sibling entries must stay hidden even if their contents are unreadable"
     );
-    assert!(
-        !reads.contains("PRIVATE KEY"),
-        "the key must not be readable: {reads}"
+    let token_bytes = shell(format!(
+        "cat {} 2>/dev/null | wc -c",
+        home.path().join(".netrc").display()
+    ))
+    .await;
+    assert_eq!(
+        token_bytes.trim(),
+        "0",
+        "the masked token must yield no readable bytes"
     );
-    assert!(
-        !reads.contains("secret"),
-        "the token file must read as empty: {reads}"
+
+    let reopened = shell(format!("cat {}/visible", granted.display())).await;
+    assert_eq!(
+        reopened.trim(),
+        "granted subtree",
+        "grant beneath mask must reopen"
+    );
+    let sibling_state = shell(format!(
+        "if test -e {}/id_ed25519; then printf present; else printf absent; fi",
+        ssh.display(),
+    ))
+    .await;
+    assert_eq!(
+        sibling_state.trim(),
+        "absent",
+        "the granted subtree must not expose its private sibling's name"
+    );
+
+    let sibling_contents = shell(format!(
+        "cat {}/id_ed25519 2>/dev/null || true",
+        ssh.display(),
+    ))
+    .await;
+    assert_eq!(
+        sibling_contents.trim(),
+        "",
+        "the granted subtree must not reveal its private sibling's contents"
     );
 
     // Writes: the workspace yes, the sibling outside the write set no.

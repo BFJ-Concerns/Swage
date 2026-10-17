@@ -292,6 +292,32 @@ pub async fn run_agent_loop(tools: Vec<Box<dyn Tool>>) -> Result<(), SandboxErro
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Run a child command under the same Landlock and network bridge as tools.
+pub async fn run_sandboxed_command(args: Vec<std::ffi::OsString>) -> Result<i32, SandboxError> {
+    apply_child_landlock_from_env()?;
+    let bridge = crate::egress::start_egress_bridge();
+    let (program, arguments) = args
+        .split_first()
+        .ok_or_else(|| SandboxError::SpawnFailed {
+            message: "sandbox command is missing".into(),
+        })?;
+    let mut command = tokio::process::Command::new(program);
+    command.args(arguments);
+    if let Some(bridge) = &bridge {
+        command.envs(bridge.environment());
+    }
+    let status = command
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .await
+        .map_err(|error| SandboxError::SpawnFailed {
+            message: error.to_string(),
+        })?;
+    Ok(status.code().unwrap_or(1))
+}
+
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;

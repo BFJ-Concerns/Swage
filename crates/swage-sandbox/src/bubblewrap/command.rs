@@ -85,7 +85,62 @@ pub(crate) fn build_bwrap_command_with_path(
     egress_socket: Option<&Path>,
     agent_binary: &Path,
 ) -> Result<Command, SandboxError> {
+    let mut cmd = policy_command(
+        bwrap_path,
+        config,
+        &[socket_path],
+        &[agent_binary],
+        egress_socket,
+    )?;
+    cmd.arg("--setenv").arg("SWAGE_IPC_SOCKET").arg(socket_path);
+    cmd.arg("--").arg(agent_binary).arg("--sandbox-mode");
+    Ok(cmd)
+}
+
+/// Construct the shared namespace and filesystem boundary for a child.
+pub fn policy_command(
+    bwrap_path: &Path,
+    config: &SandboxConfig,
+    sockets: &[&Path],
+    executables: &[&Path],
+    egress_socket: Option<&Path>,
+) -> Result<Command, SandboxError> {
     let mut cmd = Command::new(bwrap_path);
+    // Only named development settings cross the process boundary. In
+    // particular, no inherited Git selector, command configuration, askpass,
+    // HTTP proxy or provider credential can become a second authority.
+    cmd.env_clear();
+    for key in [
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "LANGUAGE",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LC_MESSAGES",
+        "TERM",
+        "COLORTERM",
+        "TZ",
+        "TMPDIR",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_RUNTIME_DIR",
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "RUSTUP_TOOLCHAIN",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
+    // HOME and XDG remain useful to development tools, but neither is a Git
+    // configuration source. Repository configuration stays readable.
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
 
     // Isolate all namespaces (PID, network, mount, user, IPC, UTS).
     cmd.arg("--unshare-all");
@@ -106,17 +161,7 @@ pub(crate) fn build_bwrap_command_with_path(
     cmd.args(["--proc", "/proc"]);
     cmd.args(["--tmpfs", "/tmp"]);
 
-    // The host IPC socket may live under /tmp (a relocated or over-long
-    // runtime directory), where the tmpfs above hides it. Bind the socket
-    // file itself — never its directory — after the overlay so the agent can
-    // connect and sees nothing else of the host's socket root.
-    let socket = socket_path.as_os_str();
-    cmd.arg("--bind").arg(socket).arg(socket);
-
-    // The egress proxy's socket, bound the same way: the one route out.
     if let Some(egress) = egress_socket {
-        let egress = egress.as_os_str();
-        cmd.arg("--bind").arg(egress).arg(egress);
         cmd.arg("--setenv")
             .arg(crate::egress::EGRESS_SOCKET_ENV)
             .arg(egress);
@@ -129,7 +174,7 @@ pub(crate) fn build_bwrap_command_with_path(
     // read-only paths overlay, and a mask makes a directory an empty tmpfs
     // and a file read as /dev/null. A masked path absent on the host needs
     // no mask.
-    for (path, kind) in policy_mounts(config) {
+    for (path, kind) in policy_mounts(config, sockets, executables, egress_socket) {
         let p = path.as_os_str();
         match kind {
             PolicyMount::Write => cmd.arg("--bind").arg(p).arg(p),
@@ -139,10 +184,6 @@ pub(crate) fn build_bwrap_command_with_path(
         };
     }
 
-    // Expose the IPC socket path to the agent process via the environment.
-    cmd.arg("--setenv")
-        .arg("SWAGE_IPC_SOCKET")
-        .arg(socket_path.as_os_str());
     let config_json = serde_json::to_string(config).map_err(|error| SandboxError::SpawnFailed {
         message: format!("failed to serialise sandbox config for child Landlock setup: {error}"),
     })?;
@@ -150,8 +191,9 @@ pub(crate) fn build_bwrap_command_with_path(
         .arg("SWAGE_SANDBOX_CONFIG_JSON")
         .arg(config_json);
 
-    // Separator then the agent binary, instructing it to enter sandbox mode.
-    cmd.arg("--").arg(agent_binary).arg("--sandbox-mode");
+    for (key, value) in &config.environment {
+        cmd.arg("--setenv").arg(key).arg(value);
+    }
 
     Ok(cmd)
 }
@@ -169,8 +211,21 @@ enum PolicyMount {
 /// deepest last and it wins. Ties keep the policy's own order: masks after
 /// grants at the same depth, so an identical path masked and granted reads
 /// as masked.
-fn policy_mounts(config: &SandboxConfig) -> Vec<(&Path, PolicyMount)> {
-    let mut mounts: Vec<(&Path, PolicyMount)> = Vec::new();
+fn policy_mounts<'a>(
+    config: &'a SandboxConfig,
+    sockets: &[&'a Path],
+    executables: &[&'a Path],
+    egress_socket: Option<&'a Path>,
+) -> Vec<(&'a Path, PolicyMount)> {
+    // Service sockets can sit beneath a private data root or /tmp. They
+    // reopen only their own file after the containing mask, just as a grant
+    // does; binding them before the masks would hide the transport itself.
+    let mut mounts: Vec<(&Path, PolicyMount)> = sockets
+        .iter()
+        .copied()
+        .chain(egress_socket)
+        .map(|path| (path, PolicyMount::Write))
+        .collect();
     mounts.extend(
         config
             .write_paths
@@ -190,6 +245,27 @@ fn policy_mounts(config: &SandboxConfig) -> Vec<(&Path, PolicyMount)> {
             mounts.push((path.as_path(), PolicyMount::MaskFile));
         }
     }
+    // Only reopen executables hidden by an overlay. Binding an already
+    // visible executable is unnecessary and fails for symlink destinations
+    // such as /usr/bin/python3. An exact mask still wins over an executable.
+    let executable_mounts: Vec<_> = executables
+        .iter()
+        .filter(|path| {
+            let covering = mounts
+                .iter()
+                .filter(|(parent, _)| path.starts_with(parent))
+                .max_by_key(|(parent, _)| parent.components().count());
+            match covering {
+                Some((parent, kind)) => {
+                    parent != *path
+                        && matches!(kind, PolicyMount::MaskDirectory | PolicyMount::MaskFile)
+                }
+                None => path.starts_with("/tmp"),
+            }
+        })
+        .map(|path| (*path, PolicyMount::ReadOnly))
+        .collect();
+    mounts.extend(executable_mounts);
     mounts.sort_by_key(|(path, _)| path.components().count());
     mounts
 }
@@ -654,19 +730,15 @@ mod tests {
 
         let args = args_of(&cmd);
 
-        let setenv_pos = args
-            .iter()
-            .position(|a| *a == OsStr::new("--setenv"))
-            .expect("--setenv must appear");
-
+        let assignment = args
+            .windows(3)
+            .find(|args| {
+                args[0] == OsStr::new("--setenv") && args[1] == OsStr::new("SWAGE_IPC_SOCKET")
+            })
+            .expect("the IPC socket environment assignment must be present");
         assert_eq!(
-            args.get(setenv_pos + 1),
-            Some(&OsStr::new("SWAGE_IPC_SOCKET")),
-            "env var name must be SWAGE_IPC_SOCKET"
-        );
-        assert_eq!(
-            args.get(setenv_pos + 2),
-            Some(&OsStr::new("/run/swage/test.sock")),
+            assignment[2],
+            OsStr::new("/run/swage/test.sock"),
             "socket path must be set correctly"
         );
     }

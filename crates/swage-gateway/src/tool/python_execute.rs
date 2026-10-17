@@ -10,13 +10,12 @@ use swage_python::{PythonWorkerRuntime, WorkerPool};
 use swage_storage::store::Storage;
 use swage_tool::context::{ToolContext, serialise_tool_context};
 
-use super::{Tool, ToolDispatcher};
+use super::Tool;
 use crate::tool::nested_tool_runtime::NestedToolRuntime;
 
 pub struct PythonExecuteTool {
     runtime: Arc<PythonWorkerRuntime>,
     pool: Arc<WorkerPool>,
-    sub_dispatcher: Arc<ToolDispatcher>,
     storage: Arc<dyn Storage>,
 }
 
@@ -24,13 +23,11 @@ impl PythonExecuteTool {
     pub fn new(
         runtime: Arc<PythonWorkerRuntime>,
         pool: Arc<WorkerPool>,
-        sub_dispatcher: Arc<ToolDispatcher>,
         storage: Arc<dyn Storage>,
     ) -> Self {
         Self {
             runtime,
             pool,
-            sub_dispatcher,
             storage,
         }
     }
@@ -87,8 +84,16 @@ impl Tool for PythonExecuteTool {
             "python_execute requires gateway execution context",
         )?;
 
+        let execution =
+            gateway_ctx
+                .python_execution
+                .as_ref()
+                .ok_or_else(|| ToolError::ExecutionFailed {
+                    name: self.name().into(),
+                    message: "Python execution requires the calling turn's policy".into(),
+                })?;
         let nested_runtime = NestedToolRuntime::new(
-            Arc::clone(&self.sub_dispatcher),
+            Arc::clone(&execution.dispatcher),
             gateway_ctx.ws_tx().clone(),
             Arc::clone(&self.storage),
             turn_id,
@@ -98,7 +103,7 @@ impl Tool for PythonExecuteTool {
 
         let mut lease = self
             .pool
-            .acquire()
+            .acquire_for_turn(execution.sandbox.clone(), execution.egress.clone())
             .await
             .map_err(|error| ToolError::ExecutionFailed {
                 name: self.name().to_owned(),

@@ -1,5 +1,7 @@
 //! Hosting and operator control-plane contract.
 
+pub mod sandbox;
+
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -363,6 +365,9 @@ pub struct KnowledgeMirrorRegenerateResponse {
 #[derive(JsonSchema)]
 #[allow(dead_code)]
 pub struct HostingSurface {
+    pub sandbox: sandbox::SandboxPolicy,
+    pub git_credential_request: GitCredentialRequest,
+    pub git_credential_response: GitCredentialResponse,
     presence: PresenceSnapshotResponse,
     approvals: ApprovalListResponse,
     approval_decision: ApprovalDecisionRequest,
@@ -377,4 +382,22 @@ pub struct HostingSurface {
     agent_definition_mutation: AgentDefinitionMutationResponse,
     devices: device::DeviceListResponse,
     knowledge_mirror: KnowledgeMirrorRegenerateResponse,
+}
+
+/// One HTTPS git credential lookup on the turn's private IPC socket.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct GitCredentialRequest {
+    pub protocol: String,
+    pub host: String,
+    pub path: Option<String>,
+    pub username: Option<String>,
+}
+
+/// An absent credential makes git continue without this helper's answer.
+#[derive(Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct GitCredentialResponse {
+    pub username: Option<String>,
+    pub password: Option<String>,
 }

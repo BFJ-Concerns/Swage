@@ -25,8 +25,18 @@ use crate::secret::SecretManager;
 use crate::state::AppState;
 use crate::websocket::ServerEvent;
 
+#[derive(Clone)]
+pub struct PythonExecution {
+    pub sandbox: Option<swage_sandbox::SandboxConfig>,
+    pub egress: swage_sandbox::EgressSetup,
+    pub dispatcher: Arc<swage_tool::dispatch::ToolDispatcher>,
+    // Keep the private IPC service alive through nested calls and workers.
+    pub credentials: Arc<crate::git_credential::CredentialServer>,
+}
+
 pub struct GatewayToolContext {
     base: SerializableToolContext,
+    pub(crate) python_execution: Option<PythonExecution>,
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     storage: Arc<dyn Storage>,
     /// The full gateway state, present when the tool runs inside a live host
@@ -45,6 +55,7 @@ impl GatewayToolContext {
     ) -> Self {
         Self {
             base: serialise_tool_context(ctx),
+            python_execution: None,
             ws_tx,
             storage,
             app_state: None,
@@ -166,6 +177,7 @@ impl ToolExecutionStrategy for SandboxedExecutor {
 pub struct GatewayExecutionStrategy {
     /// Optional inner strategy — e.g. `SandboxedExecutor` when sandbox is enabled.
     inner: Option<Arc<dyn ToolExecutionStrategy>>,
+    python_execution: Option<PythonExecution>,
     /// WebSocket sender for sub-tool lifecycle events inside Python.
     ws_tx: mpsc::UnboundedSender<ServerEvent>,
     /// Resolved device for the current turn.
@@ -191,12 +203,17 @@ impl GatewayExecutionStrategy {
     ) -> Self {
         Self {
             inner,
+            python_execution: None,
             ws_tx,
             device,
             secret_manager,
             storage,
             app_state,
         }
+    }
+    pub fn with_python_execution(mut self, execution: PythonExecution) -> Self {
+        self.python_execution = Some(execution);
+        self
     }
 }
 
@@ -214,9 +231,10 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
         } else {
             resolve_secret_params(params, tool.device_secret_keys(), &self.secret_manager).await?
         };
-        let gateway_ctx =
+        let mut gateway_ctx =
             GatewayToolContext::new(ctx, self.ws_tx.clone(), Arc::clone(&self.storage))
                 .with_app_state(self.app_state.clone());
+        gateway_ctx.python_execution = self.python_execution.clone();
 
         if let Some(device) = self
             .device

@@ -6,6 +6,8 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Sandboxed git commands use an HTTPS credential helper over private IPC, resolving host-scoped credentials through the governed secret store while forge token files remain hidden.
+
 - Settings has a Memory tab listing every memory page, general and per topic, to read; a chat box there changes memory by instructing the curator, showing its reply and each page it changed. The curator's notice links open the page they name.
 - Settings edits the web search provider and applies saved changes to new turns.
 - The compaction threshold is configurable: `[context] compaction_threshold = { messages = N }` or `{ tokens = N }`, resolved through the configuration cascade (default: 100 messages). A session that keeps hitting walls — the same tool call failing again and again, or failed tool calls and failed turns piling up across its recent turns, provider timeouts and rate limits excluded — continues on a successor built from a blind diagnosis: separate readers each locate what went wrong in part of the history, a synthesis names the problems, and the successor starts from those notes with only the newest message kept verbatim. Every turn runs on such a successor while the walls remain among the recent turns: a turn whose recent walls are the ones the previous diagnosis answered starts from that diagnosis again, with every message since its split kept verbatim, new walls get a fresh diagnosis, and a turn with no wall left in view gets its full history back. The readers and the synthesis run on the session's model unless `[context] diagnosis_reader_model` or `diagnosis_synthesis_model` names a model entry or alias. The turn-context inspector shows the pass as a compaction with requested strategy `succession-degradation`, its diagnosis recording the walls answered and each model call's model, usage and report. It retains compaction decisions from the first assembly and the successor in pass order, even when their names match. Transient provider failures, including HTTP 5xx responses and malformed streams, do not trigger wall succession; provider refusals of the agent’s request still count as walls. If any diagnosis reader or the synthesis fails or returns an empty report, the turn falls back to the threshold path and compacts only when its context exceeds the threshold, retaining the failed diagnosis and call in its context record. Settings saves reject invalid compaction thresholds and diagnosis model names, including retained references to a removed model, before writing the configuration.
@@ -19,6 +21,8 @@ All notable changes to Swage are documented in this file.
 - Surfaces belong to the session that created them and stay with its record. A surface can be saved to a shared library with a name, a description of what it does and when to use it, and tags; any session in any topic or the general scope can add a library entry as a surface of its own, receiving the saved content only within the entry's origin topic and the bare shape elsewhere. A topic can designate library entries as defaults that open in each of its new sessions, and carries tags that narrow the catalogue for its sessions. Agents browse the catalogue (descriptions and tags, never content) and add entries through the new `surface_library` tool, and save surfaces through `surface_write`.
 
 ### Changed
+
+- Python execution uses the calling turn’s sandbox policy and recording proxy; nested tool calls honour that turn’s tool permissions.
 
 - Swage is licensed under the GNU Affero General Public License, version 3 or any later version (`AGPL-3.0-or-later`), with the full text in `LICENSE` and the licence recorded in every crate and npm package manifest. Pull requests are welcome, contributed under the same licence.
 - A continuation schedule firing during a running turn queues its brief for the next turn, and channel messages for a busy session wait in the same durable queue. The web UI shows queued inputs once, labels them queued, and displays recorded inputs and the drained reply live.
@@ -42,6 +46,18 @@ All notable changes to Swage are documented in this file.
 - The terminal client (`swage chat`) and its `swage-tui` crate; the web UI and desktop shell are the conversation interfaces.
 
 ### Fixed
+
+- Unsandboxed Python workers use the calling turn’s recording proxy for HTTP requests.
+
+- Python calls inside a declared execution boundary no longer require bubblewrap unless Python sandboxing is explicitly required.
+
+- Turns with both sandbox settings disabled can run without `HOME`, including when Python is disabled.
+
+- Sandboxed Python workers can use runtime libraries beneath masked directories or `/tmp`, with the runtime mounted read-only.
+
+- Sandboxed HTTPS git commands can resolve credentials restricted to a repository path.
+
+- Sandboxed agents and Python workers can launch executables stored under `/tmp` while keeping other host temporary files private.
 
 - Session previews in the recent list, sidebar, conversation selector, delete controls and Operator deck show plain text without Markdown formatting or link destinations. Operator session summaries are limited to three lines.
 - The workflow-authoring skill states event-kind names as the gateway accepts them: segments are joined by `.`, `:` or `/` only, with `_` and `-` allowed inside a segment but never separating one.

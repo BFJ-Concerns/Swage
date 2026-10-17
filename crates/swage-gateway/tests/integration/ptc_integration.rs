@@ -92,6 +92,13 @@ impl LlmProvider for MultiRoundProvider {
 async fn start_ptc_test_server(
     provider: impl LlmProvider + 'static,
 ) -> (Router, SocketAddr, Arc<SqliteStorage>, tempfile::TempDir) {
+    start_ptc_test_server_with_denied_tools(provider, vec![]).await
+}
+
+async fn start_ptc_test_server_with_denied_tools(
+    provider: impl LlmProvider + 'static,
+    deny: Vec<String>,
+) -> (Router, SocketAddr, Arc<SqliteStorage>, tempfile::TempDir) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let workspace = tempfile::tempdir().expect("PTC workspace should be created");
 
@@ -99,11 +106,6 @@ async fn start_ptc_test_server(
     // This prevents recursion when Python code dispatches sub-tool calls.
     let echo_tool: Arc<dyn swage_gateway::tool::Tool> = Arc::new(EchoTool);
     let shell_tool: Arc<dyn swage_gateway::tool::Tool> = Arc::new(MockShellTool);
-    let sub_dispatcher = Arc::new(swage_gateway::tool::ToolDispatcher::allow_all(vec![
-        Arc::clone(&echo_tool),
-        Arc::clone(&shell_tool),
-    ]));
-
     // Create the PythonExecuteTool with access to sub-tools and storage.
     let runtime =
         swage_python::PythonWorkerRuntime::new(swage_config::model::PythonExecuteToolConfig {
@@ -116,7 +118,6 @@ async fn start_ptc_test_server(
     let ptc_tool = swage_gateway::tool::python_execute::PythonExecuteTool::new(
         Arc::clone(pool.runtime()),
         Arc::clone(&pool),
-        sub_dispatcher,
         Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
     );
 
@@ -132,6 +133,9 @@ async fn start_ptc_test_server(
     // python_execute ungated and grant the topic full workspace permissions
     // in this harness.
     config.tools.permissions.require_approval = vec![];
+    config.sandbox.enabled = false;
+    config.tools.python_execute.require_sandbox = false;
+    config.tools.permissions.deny = deny;
 
     let default_topic = storage
         .general_scope()
@@ -713,5 +717,66 @@ async fn ptc_sub_tool_calls_persist_with_parent_id() {
     assert_eq!(
         parent_id, "ptc_004",
         "Sub-tool parent_call_id should match the python_execute call_id"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ptc_nested_shell_obeys_the_calling_turns_denial() {
+    let provider = MultiRoundProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "denied_parent".into(),
+                name: "python_execute".into(),
+                arguments: json!({"code": "swage.shell('echo should-not-run')"}),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "Done.".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]);
+    let (_, addr, _, _workspace) =
+        start_ptc_test_server_with_denied_tools(provider, vec!["shell".into()]).await;
+    let body: Value = reqwest::Client::new()
+        .post(format!("http://{addr}/api/conversations"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let (mut write, mut read) = connect_ws(addr, body["id"].as_str().unwrap()).await;
+    ws_send(
+        &mut write,
+        json!({"type": "subscribe", "channels": ["tools"]}),
+    )
+    .await;
+    ws_send(
+        &mut write,
+        json!({"type": "send_message", "content": "Try the denied shell"}),
+    )
+    .await;
+    let events = collect_events_until_complete(&mut read).await;
+    let nested = events
+        .iter()
+        .find(|event| event["type"] == "tool_end" && event["tool"] == "shell")
+        .expect("Python must actually attempt the nested shell call");
+    assert_eq!(
+        nested["status"], "error",
+        "nested shell bypassed the calling turn's denial: {nested}"
+    );
+    assert!(
+        nested["result"]
+            .to_string()
+            .to_lowercase()
+            .contains("denied"),
+        "{nested}"
     );
 }

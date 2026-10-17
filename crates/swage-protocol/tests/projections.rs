@@ -25,6 +25,9 @@ fn repo_root() -> PathBuf {
 fn typescript_bindings_are_regenerated() {
     let cfg = ts_rs::Config::new().with_out_dir(repo_root().join("frontend/src/lib/protocol"));
 
+    hosting::sandbox::SandboxPolicy::export_all(&cfg).expect("export sandbox policy");
+    hosting::GitCredentialRequest::export_all(&cfg).expect("export git credential request");
+    hosting::GitCredentialResponse::export_all(&cfg).expect("export git credential response");
     // Exporting the top-level types pulls in every dependency they
     // reference, so the full surface lands in one pass.
     client::channel::CreateChannelLinkCodeRequest::export_all(&cfg)
