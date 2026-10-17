@@ -299,10 +299,12 @@ pub(crate) fn build_sandbox_config(
             builder = builder.masked_path(sandbox_path(&path));
         }
     }
-    // The gateway's own data root — its store, secrets and token — is always
-    // masked. A grant beneath it (the managed scratch workspace lives there)
-    // reopens only its own subtree: the mount layer applies the deeper path
-    // last, so the grant shows through the mask without the rest of the root.
+    // The gateway's own data root — its store, secrets and token — is masked
+    // unless a grant names it (C64). A grant beneath it (the managed scratch
+    // workspace lives there) reopens only its own subtree: the mount layer
+    // applies the deeper path last, so the grant shows through the mask
+    // without the rest of the root; a grant equal to the root, or to any
+    // masked private path, binds after the mask and reopens what it names.
     if roots.data_root.exists() {
         builder = builder.masked_path(&roots.data_root);
     }

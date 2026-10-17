@@ -266,7 +266,16 @@ fn policy_mounts<'a>(
         .map(|path| (*path, PolicyMount::ReadOnly))
         .collect();
     mounts.extend(executable_mounts);
-    mounts.sort_by_key(|(path, _)| path.components().count());
+    // Depth order, so a deeper mount shows through the one above it. At one
+    // depth a mask binds before a grant, so a grant that names exactly a
+    // masked path — a workspace at `~/.ssh`, the data root under C64 —
+    // reopens what it names: the grant wins over the mask for the named
+    // path and everything beneath, and a grant above the mask (the home
+    // directory) still leaves the mask in place, being a shallower mount.
+    mounts.sort_by_key(|(path, kind)| {
+        let masks = matches!(kind, PolicyMount::MaskDirectory | PolicyMount::MaskFile);
+        (path.components().count(), !masks)
+    });
     mounts
 }
 
@@ -370,6 +379,71 @@ mod tests {
             .position(|w| w == [OsStr::new("--proc"), OsStr::new("/proc")])
             .expect("the sandbox mounts its own /proc over the host's");
         assert!(root < proc_, "the procfs must overlay the root bind");
+    }
+
+    /// A grant that names exactly a masked path reopens it: the grant binds
+    /// after the mask at that path, while a grant above the mask does not
+    /// disturb it.
+    #[test]
+    fn a_grant_equal_to_a_masked_path_binds_after_the_mask() {
+        let home = tempfile::tempdir().unwrap();
+        let ssh = home.path().join(".ssh");
+        std::fs::create_dir(&ssh).unwrap();
+        let data_root = home.path().join(".swage");
+        std::fs::create_dir(&data_root).unwrap();
+        let config = SandboxConfig::builder()
+            .working_directory(home.path())
+            .write_path(home.path())
+            .read_only_path(&ssh)
+            .write_path(&data_root)
+            .masked_path(&ssh)
+            .masked_path(&data_root)
+            .build()
+            .unwrap();
+        let cmd = build_bwrap_command_with_path(
+            Path::new("/usr/bin/bwrap"),
+            &config,
+            Path::new("/run/swage/agent.sock"),
+            None,
+            Path::new("/usr/bin/swage-agent"),
+        )
+        .unwrap();
+        let args = args_of(&cmd);
+        let positions = |needle: &Path| -> Vec<usize> {
+            args.iter()
+                .enumerate()
+                .filter(|(_, a)| **a == needle.as_os_str())
+                .map(|(i, _)| i)
+                .collect()
+        };
+        // A directory mask is `--tmpfs <p>`; a grant binds `<p>` onto `<p>`,
+        // naming the path twice. The mask comes first, the grant after it.
+        for (path, grant_flag) in [(&ssh, "--ro-bind"), (&data_root, "--bind")] {
+            let found = positions(path);
+            assert_eq!(
+                found.len(),
+                3,
+                "{} is masked once and bound once (source and target): {args:?}",
+                path.display()
+            );
+            assert_eq!(
+                args[found[0] - 1],
+                "--tmpfs",
+                "the mask binds first at {}",
+                path.display()
+            );
+            assert_eq!(
+                args[found[1] - 1],
+                grant_flag,
+                "the grant binds after the mask at {}",
+                path.display()
+            );
+        }
+        let home_bind = positions(home.path())[0];
+        assert!(
+            home_bind < positions(&ssh)[0],
+            "the home grant above the mask leaves the mask after it"
+        );
     }
 
     #[test]

@@ -15827,6 +15827,51 @@ fn a_linked_worktree_writes_its_gitdir_and_the_repository_it_belongs_to() {
     assert!(sandbox_config.write_paths.contains(&repo_git));
 }
 
+/// A grant that names a masked private path reopens exactly what it names:
+/// the policy carries both the mask and the grant for that path, and the
+/// mount layer binds the grant after the mask (the sandbox crate's own
+/// test), so a workspace at `~/.ssh` is readable and writable inside while
+/// a grant above the mask — the home directory — leaves it masked.
+#[test]
+fn a_grant_equal_to_a_masked_path_is_carried_beside_its_mask() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path().join("home");
+    let ssh = home.join(".ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    let data_root = home.join(".swage");
+    std::fs::create_dir_all(&data_root).unwrap();
+    let roots = PolicyRoots {
+        home: home.clone(),
+        data_root: data_root.clone(),
+    };
+
+    let at_ssh = AgentConfig::new("worker").with_workspace(&ssh, vec![ssh.clone()]);
+    let policy = build_sandbox_config(&at_ssh, None, &roots).unwrap();
+    assert!(
+        policy.masked_paths.contains(&sandbox_path(&ssh)),
+        "{:?}",
+        policy.masked_paths
+    );
+    assert!(
+        policy.write_paths.contains(&sandbox_path(&ssh)),
+        "{:?}",
+        policy.write_paths
+    );
+
+    let at_root = AgentConfig::new("worker").with_workspace(&data_root, vec![data_root.clone()]);
+    let policy = build_sandbox_config(&at_root, None, &roots).unwrap();
+    assert!(policy.masked_paths.contains(&sandbox_path(&data_root)));
+    assert!(policy.write_paths.contains(&sandbox_path(&data_root)));
+
+    let above = AgentConfig::new("worker").with_workspace(&home, vec![home.clone()]);
+    let policy = build_sandbox_config(&above, None, &roots).unwrap();
+    assert!(policy.masked_paths.contains(&sandbox_path(&ssh)));
+    assert!(
+        !policy.write_paths.contains(&sandbox_path(&ssh)),
+        "a grant above the mask names the home, not the private path"
+    );
+}
+
 #[test]
 fn the_policy_masks_private_home_paths_and_the_data_root_and_opens_the_shared_caches() {
     let temp_dir = tempfile::tempdir().unwrap();
