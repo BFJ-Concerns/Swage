@@ -246,9 +246,13 @@ describe("ambient channel control path", () => {
   it("routes a workflow run URL into the run view and requests that run", async () => {
     window.history.replaceState({}, "", "/workflow-runs/run-route");
     const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ run: { id: "run-route", state: "running" }, journal: [] }), {
-        status: 200,
-      }),
+      new Response(
+        JSON.stringify({
+          run: { id: "run-route", state: "running", interruptions: [] },
+          journal: [],
+        }),
+        { status: 200 },
+      ),
     );
     component = mount(App, { target: document.body });
 

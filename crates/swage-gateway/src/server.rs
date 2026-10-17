@@ -456,18 +456,17 @@ mod tests {
     use swage_storage::store::{Storage, TopicStore};
 
     use super::build_router;
-    use crate::{
-        state::AppState,
-        turn::tests::{MockProvider, MockStorage},
-    };
+    use crate::{state::AppState, turn::tests::MockProvider};
 
     /// Every route the protocol manifest names is registered on the router
     /// with the same method and path template. The probe substitutes a nil
     /// UUID for each path parameter and asks only whether the router
     /// matched: a 404 or 405 means the manifest and the router disagree.
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn every_manifest_route_is_registered_on_the_router() {
-        let storage = Arc::new(MockStorage::new());
+        let root = tempfile::tempdir().unwrap();
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::open(&root.path().join("router.db")).unwrap());
         let state = AppState::new(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
