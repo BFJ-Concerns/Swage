@@ -13,6 +13,9 @@
 //! enable the plugin — as a platform agent's held tool is withheld from
 //! other agents.
 
+mod composition;
+#[cfg(test)]
+mod context_contract;
 pub mod process;
 pub mod slot;
 pub mod tool;

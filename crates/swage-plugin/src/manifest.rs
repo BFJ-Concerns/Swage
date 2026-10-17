@@ -40,6 +40,9 @@ pub enum HostGrant {
     /// Ask the session's model for a completion through the host, recorded
     /// as the plugin's: `swage.complete({ messages, model? })`.
     Model,
+    /// Compose context through the host: token counting, history compaction,
+    /// and the configured named assembly.
+    Context,
 }
 
 impl HostGrant {
@@ -48,6 +51,7 @@ impl HostGrant {
         match self {
             Self::Tools => "tools",
             Self::Model => "model",
+            Self::Context => "context",
         }
     }
 }

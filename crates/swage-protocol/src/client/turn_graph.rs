@@ -146,9 +146,12 @@ pub struct TurnGraph {
 /// gateway's startup with provenance `shipped`.
 pub const SHIPPED_SUCCESSION_SUMMARISER: &str = "succession-summariser";
 
+/// The shipped context composition plugin.
+pub const SHIPPED_CONTEXT_PROGRAM: &str = "context-program";
+
 impl TurnGraph {
-    /// The graph the kernel ships with: the succession step filled by the
-    /// shipped summariser plugin, every other slot the kernel's own, no
+    /// The graph the kernel ships with: context composition and succession
+    /// filled by their shipped plugins, every other slot the kernel's own, no
     /// hooks, no branches. Revision 0 on every install.
     pub fn shipped() -> Self {
         Self {
@@ -158,6 +161,9 @@ impl TurnGraph {
                     id: slot.as_str().to_owned(),
                     slot: *slot,
                     filler: match slot {
+                        TurnSlot::ContextProgram => StepFiller::Plugin {
+                            name: SHIPPED_CONTEXT_PROGRAM.to_owned(),
+                        },
                         TurnSlot::Succession => StepFiller::Plugin {
                             name: SHIPPED_SUCCESSION_SUMMARISER.to_owned(),
                         },

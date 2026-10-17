@@ -20686,3 +20686,162 @@ fn the_summariser_served_only_where_the_succession_step_requested_the_compaction
         swage_context::succession::THRESHOLD_STRATEGY
     )]));
 }
+
+/// The real coordinator resolves the shipped part and its topic variant,
+/// then records both resolution and execution failures as kernel fallback.
+#[tokio::test(flavor = "multi_thread")]
+async fn shipped_context_program_serves_turns_and_topic_variants_with_recorded_fallback() {
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let state = AppState::new_with_config_root(
+        storage.clone() as Arc<dyn swage_storage::store::Storage>,
+        storage.clone() as Arc<dyn TopicStore>,
+        Arc::new(MultiRoundMockProvider::new(vec![
+            provider_witness_chunks();
+            4
+        ])),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_owned(),
+    );
+    crate::shipped_plugins::regenerate(root.path())
+        .await
+        .unwrap();
+    let packages = crate::shipped_plugins::root(root.path());
+    let names = ["context-program", "succession-summariser"];
+    state.plugins.install_shipped(&packages, &names, &[]).await;
+    let summary = state.plugins.summary("context-program");
+    assert!(
+        summary.is_some(),
+        "startup must install the shipped context program"
+    );
+    let summary = summary.unwrap();
+    assert_eq!(
+        summary.provenance,
+        swage_protocol::client::plugin::PluginProvenance::Shipped
+    );
+    assert!(summary.enabled_for_install);
+    assert!(
+        state
+            .plugins
+            .install_shipped(&packages, &names, &[])
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        state.plugins.summary("context-program").unwrap().revision,
+        1
+    );
+    state.turn_graph.load().await.unwrap();
+    let alternate = root.path().join("alternate");
+    std::fs::create_dir_all(&alternate).unwrap();
+    std::fs::write(alternate.join("plugin.toml"),
+        "name = \"alternate-context\"\nversion = \"1\"\ndescription = \"Composes context.\"\nscript = \"plugin.js\"\ngrants = [\"context\"]\nvariant_of = \"slot.context_program\"\n[[provides.slots]]\nname = \"context_program\"\n").unwrap();
+    std::fs::write(
+        alternate.join("plugin.js"),
+        include_str!("../../../../shipped/plugins/context-program/plugin.js"),
+    )
+    .unwrap();
+    state.plugins.install(&alternate, &[], None).await.unwrap();
+    state
+        .plugins
+        .set_enablement("alternate-context", Some(topic.id), true, None)
+        .await
+        .unwrap();
+    let agent = ScopeLocation::General.agent_dir(root.path(), "gateway");
+    std::fs::create_dir_all(&agent).unwrap();
+    for (mode, served, reason) in [
+        ("shipped", "plugin context-program", None),
+        ("variant", "plugin alternate-context", None),
+        ("disabled", "builtin", Some("context-program")),
+        ("throws", "builtin", Some("composition broke")),
+    ] {
+        state
+            .plugins
+            .set_enablement("alternate-context", Some(topic.id), mode == "variant", None)
+            .await
+            .unwrap();
+        if mode == "variant" {
+            std::fs::write(agent.join("config.toml"),
+                "[experimentation.locations.\"slot.context_program\"]\nforced_variant = \"alternate-context\"\n").unwrap();
+        } else {
+            std::fs::write(agent.join("config.toml"), "").unwrap();
+        }
+        if mode == "disabled" {
+            state
+                .plugins
+                .set_enablement("context-program", None, false, None)
+                .await
+                .unwrap();
+        }
+        if mode == "throws" {
+            state
+                .plugins
+                .set_enablement("context-program", None, true, None)
+                .await
+                .unwrap();
+            let replacement = root.path().join("broken");
+            std::fs::create_dir_all(&replacement).unwrap();
+            std::fs::copy(
+                packages.join("context-program/plugin.toml"),
+                replacement.join("plugin.toml"),
+            )
+            .unwrap();
+            std::fs::write(replacement.join("plugin.js"),
+                "swage.provide.slot('context_program', () => { throw new Error('composition broke'); });").unwrap();
+            state
+                .plugins
+                .install(&replacement, &[], None)
+                .await
+                .unwrap();
+        }
+        // Fresh sessions avoid a prior session's recorded variant choice.
+        let session = storage.create_session(new_session(topic.id)).await.unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session.id,
+            None,
+            TurnInput::from("Hello"),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .unwrap();
+        let thread = storage.list_by_session(session.id).await.unwrap()[0].id;
+        let turn = storage.list_turns_by_thread(thread).await.unwrap()[0].id;
+        let report: serde_json::Value =
+            serde_json::from_str(&storage.get_snapshot(turn).await.unwrap().unwrap()).unwrap();
+        let slot = &report["turn_graph"]["context_program"];
+        assert_eq!(slot["served"], served, "{mode}: {slot}");
+        match reason {
+            Some(reason) => assert!(
+                slot["fallback"]
+                    .as_str()
+                    .is_some_and(|s| s.contains(reason)),
+                "{mode}: {slot}"
+            ),
+            None => assert!(slot["fallback"].is_null(), "{mode}: {slot}"),
+        }
+        assert!(
+            report["elements"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["name"] == "history")
+        );
+        let draws = storage
+            .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                session_id: Some(session.id),
+                entity_id: Some("slot.context_program".into()),
+                event_kind: Some("variant_selected".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(draws.len(), 1, "the slot draw is recorded for {mode}");
+    }
+}

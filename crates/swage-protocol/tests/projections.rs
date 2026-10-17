@@ -25,6 +25,10 @@ fn repo_root() -> PathBuf {
 fn typescript_bindings_are_regenerated() {
     let cfg = ts_rs::Config::new().with_out_dir(repo_root().join("frontend/src/lib/protocol"));
 
+    plugin::ContextCompactionOutput::export_all(&cfg).expect("export context compaction");
+    plugin::ContextOperation::export_all(&cfg).expect("export context operations");
+    plugin::ContextProgramInput::export_all(&cfg).expect("export context input");
+    plugin::ContextProgramOutput::export_all(&cfg).expect("export context output");
     // Exporting the top-level types pulls in every dependency they
     // reference, so the full surface lands in one pass.
     client::channel::CreateChannelLinkCodeRequest::export_all(&cfg)

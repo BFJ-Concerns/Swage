@@ -25,13 +25,22 @@ macro_rules! shipped_plugin_file {
     };
 }
 
-pub(crate) const SHIPPED_PLUGINS: &[ShippedPlugin] = &[ShippedPlugin {
-    name: "succession-summariser",
-    files: &[
-        shipped_plugin_file!("succession-summariser/plugin.toml"),
-        shipped_plugin_file!("succession-summariser/plugin.js"),
-    ],
-}];
+pub(crate) const SHIPPED_PLUGINS: &[ShippedPlugin] = &[
+    ShippedPlugin {
+        name: "succession-summariser",
+        files: &[
+            shipped_plugin_file!("succession-summariser/plugin.toml"),
+            shipped_plugin_file!("succession-summariser/plugin.js"),
+        ],
+    },
+    ShippedPlugin {
+        name: "context-program",
+        files: &[
+            shipped_plugin_file!("context-program/plugin.toml"),
+            shipped_plugin_file!("context-program/plugin.js"),
+        ],
+    },
+];
 
 const PROJECTION_DIR: &str = "generated/shipped-plugins";
 

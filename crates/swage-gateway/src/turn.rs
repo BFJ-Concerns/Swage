@@ -715,7 +715,14 @@ pub(super) async fn process_turn_with_composition_and_focus(
         };
         match &context_program_plugin {
             Some(slot) => {
-                match slot.context_program(elements, &session_variables, &tokeniser, kernel) {
+                match slot.context_program(
+                    elements,
+                    &session_variables,
+                    &tokeniser,
+                    &assembly_name,
+                    &config.context,
+                    kernel,
+                ) {
                     Ok(output) => {
                         context_program_served
                             .lock()
