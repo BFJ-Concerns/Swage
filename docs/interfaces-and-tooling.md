@@ -4,6 +4,9 @@ description: Provider setup and credentials, protocol selection, network access,
 
 # Interfaces and tooling
 
+For a source build, follow the [README quick start](../README.md#quick-start),
+including its `PATH` step, before running the CLI examples on this page.
+
 ## Network binding
 
 The gateway listens on a single TCP address configured through `ServerConfig`
@@ -754,58 +757,6 @@ use the [credential reference](#provider-credentials) for those requests. The
 [JSON Schemas](../crates/swage-protocol/schema/) describe the client,
 hosting, device and channel contracts. HTTP failures follow the
 [API error contract](#api-error-contract).
-
-## Verification gate
-
-Development's fast, pre-test static gate is `just check-gate`; the full gate
-is `just verify` (aliased as `just ci`). The Justfile dispatches into `xtask`,
-a workspace crate that orchestrates the gate. Most logic is Rust, but `xtask`
-shells out for some checks — for example, the tracked-local-state check runs
-`scripts/check-tracked-local-state.sh`.
-
-The gate runs eight stages in order. The first six abort immediately on
-failure — a formatting problem or a type error is not worth running the
-full test suite against. The last two always run, and their results are
-combined:
-
-1. **Tracked-local-state check** — catches runtime state directories that were
-   accidentally committed.
-2. **Format check** — Rust formatting and Justfile formatting.
-3. **Type check** — `cargo check` across the workspace plus the frontend's
-   type checker.
-4. **Frontend design-token check** — rejects literal visual values in
-   components where a semantic design token is required.
-5. **Shipped-workflow parse check** — verifies that every shipped workflow
-   script parses without error.
-6. **Clippy** — with warnings treated as errors.
-7. **Test suite** — Rust tests, frontend tests, and the desktop smoke test.
-   Individual failures are collected rather than aborting on the first. The
-   Rust test runner is selected by the `SWAGE_TEST_RUNNER` environment
-   variable, which the Justfile defaults to `nextest`. Under `nextest`
-   (the default), tests run under `cargo nextest run` with a `ci` profile
-   (which retries flaky tests) plus a separate doctest stage; setting
-   `SWAGE_TEST_RUNNER=cargo` runs `cargo test --workspace --no-fail-fast`
-   instead.
-8. **Projection freshness** — a `git diff` that verifies the committed
-   TypeScript bindings and JSON Schemas match what the tests just regenerated.
-
-When both the test suite and the projection check fail, the gate reports both
-sets of errors in a single message. CI runs the same `just verify` recipe, so
-a green local run means CI will pass.
-
-The gateway integration tests and the browser end-to-end runs create their
-disposable state under the system temporary directory. Set
-`SWAGE_TEST_SCRATCH_DIR` to another directory when the temporary filesystem
-is too small for that state.
-
-Other useful recipes:
-
-- `just check-gate` — the first six static stages above, before any tests.
-- `just check` — the narrower Rust and frontend type check only.
-- `just test` — the test suite alone, with the same failure-aggregation
-  behaviour as the verify gate.
-- `just build-dev-embedded` — a debug build with the current frontend baked
-  into the gateway binary.
 
 ## Client-side route handling
 
