@@ -70,23 +70,42 @@ things those tend to leave out:
 
 ## Quick start
 
-Swage targets Linux. You need the Rust toolchain (pinned by
-`rust-toolchain.toml`), Node 24, and
-[bubblewrap](https://github.com/containers/bubblewrap), which the per-turn
-sandbox runs on.
+Swage targets Linux. Install the Rust toolchain with
+[rustup](https://rustup.rs/) (the version is pinned by
+`rust-toolchain.toml`) and **Node 24 with npm**. The frontend dependencies
+support Node 22 from **22.13.0**, or **24 and later**; Node 24 is recommended.
+
+Building needs a C toolchain, `pkg-config`, and OpenSSL development headers.
+The per-turn sandbox needs
+[bubblewrap](https://github.com/containers/bubblewrap). On Debian/Ubuntu,
+install these packages, plus Git for cloning the repository:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libssl-dev bubblewrap git ca-certificates
+```
+
+Clone the repository, build the binary, and add its directory to this
+terminal's `PATH`:
 
 ```bash
 git clone https://github.com/BFJ-Concerns/Swage.git && cd Swage
 cargo build --bin swage
+export PATH="$PWD/target/debug:$PATH"
 ```
+
+The `PATH` change applies to this terminal only. In each new terminal,
+repeat the `export PATH` command from the repository root. Examples using
+`./target/debug/swage` also assume the repository root.
 
 Start the gateway; it can run before a provider is configured:
 
 ```bash
 ./target/debug/swage gateway start          # listens on 127.0.0.1:3000
 
-# In another terminal: the web UI on http://localhost:5173
-cd frontend && npm install && npm run dev
+# In another terminal, from the repository root:
+# install and build the frontend, then serve the web UI on http://localhost:5173
+(cd frontend && npm ci && npm run build && npm run dev)
 ```
 
 Open `http://localhost:5173`, then **Settings → Providers**:
@@ -263,7 +282,7 @@ gives it its own metadata file:
 SWAGE_HOME=/tmp/swage-dev ./target/debug/swage gateway start --port 3100
 
 # Point the dev web UI at it
-SWAGE_GATEWAY_URL=http://127.0.0.1:3100 npm run dev
+(cd frontend && SWAGE_GATEWAY_URL=http://127.0.0.1:3100 npm run dev)
 ```
 
 ## Licence

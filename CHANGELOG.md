@@ -28,6 +28,8 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- The README names Debian/Ubuntu build prerequisites, supported Node versions, and the binary path setup, with frontend install and build commands.
+
 - Provider setup documentation uses governed credentials through Settings → Providers, distinguishes GPT Responses from Chat Completions, and explains model-bound routing and the disabled Codex integration.
 
 - Browser clicks, typing, selections and scrolling no longer ask for approval by default.
