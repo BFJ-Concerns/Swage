@@ -795,6 +795,60 @@ JSON Schema contracts for the client, hosting, device and channel surfaces
 are in [`crates/swage-protocol/schema/`](../crates/swage-protocol/schema/).
 HTTP failures use the [wire error contract](#wire-error-contract).
 
+## Verification gate
+
+`xtask` (`xtask/src/main.rs`) orchestrates the verification gate; the
+`Justfile` is a thin dispatch into `cargo run -p xtask -- <subcommand>`.
+Most logic is Rust, but `xtask` shells out for some checks (e.g.
+`scripts/check-tracked-local-state.sh`).
+
+### Recipes
+
+| Recipe | What it runs |
+|---|---|
+| `just check-gate` | The six static stages below; no tests |
+| `just check` | `cargo check --workspace` + frontend type check (`npm run check`) |
+| `just test` | Full test suite with failure aggregation (see below) |
+| `just verify` (alias: `just ci`) | `check-gate`, then the test and projection stages below; the gate CI runs |
+
+### Verify stages
+
+`check-gate` runs stages 1–6 and aborts on the first failure (`?` operator).
+Stages 7–8 run regardless; their results are combined.
+
+| # | Stage | Short-circuits? |
+|---|---|---|
+| 1 | Tracked-local-state check (`scripts/check-tracked-local-state.sh`) | Yes |
+| 2 | Format check (`cargo fmt --all -- --check` + `just --fmt --check`) | Yes |
+| 3 | Type check (`cargo check --workspace` + frontend) | Yes |
+| 4 | Frontend design-token check | Yes |
+| 5 | Shipped-workflow parse check (`check_shipped_workflows_parse`) | Yes |
+| 6 | Clippy (`-D warnings`) | Yes |
+| 7 | Test suite (Rust, frontend, desktop smoke) | No |
+| 8 | Projection freshness (`git diff --exit-code` on generated files) | No |
+
+The Rust test runner is selected by the `SWAGE_TEST_RUNNER` environment
+variable. The Justfile defaults it to `nextest`, so `just verify` runs
+nextest unless overridden. When set to `nextest` (the default), Rust tests
+run under `cargo nextest run` with a `ci` profile (which retries flaky
+tests), followed by a separate `cargo test --workspace --doc` stage for
+doctests (nextest cannot run doctests). When set to `cargo`, Rust tests run
+under `cargo test --workspace --no-fail-fast`.
+
+Gateway integration tests (`scratch_tempdir` in
+`crates/swage-gateway/tests/integration/support.rs`) and the browser E2E
+launchers (`frontend/e2e/scratch-root.mjs`) create their disposable roots
+under `SWAGE_TEST_SCRATCH_DIR` when it is set, otherwise under the system
+temporary directory.
+
+When both tests and projections fail, both errors surface in one message.
+The test suite aggregates Rust, frontend, and desktop-smoke failures rather
+than aborting on the first.
+
+The verify body runs inside `run_with_final_sweep`, which runs
+`cargo sweep` after the gate (even on failure) and reports the artefact
+budget.
+
 ## Client-side route preservation
 
 Conversation links use `/conversations/{id}` and
