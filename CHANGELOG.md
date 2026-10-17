@@ -60,6 +60,10 @@ All notable changes to Swage are documented in this file.
 ### Fixed
 
 - Workflow run pages refresh until completion and show parked waits, shared placements, provenance links, attempt options, liveness and returned source outcomes.
+- Session agent names come from the session’s own topic, including when topic definitions cannot load; missing definitions display “Unavailable agent”.
+
+- Open conversations show their recorded agent definition, including after reopening or reloading, rather than the agent selected for a new conversation.
+- Workflow worker conversations identify their agent as a workflow worker rather than Swage default.
 - Sessions can read shipped skills and their carried guidance without location approval, including after a gateway restart; other locations still require approval.
 
 - Queued scheduled turns acknowledge workflow endings only after successful settlement; failed turns leave them available.

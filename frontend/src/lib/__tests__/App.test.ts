@@ -225,6 +225,7 @@ describe("ambient channel control path", () => {
     vi.mocked(createConversation).mockResolvedValueOnce({
       id: "conv-new",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: topic.id,
       selected_model_id: null,
       created_at: "2026-08-29T10:10:00Z",

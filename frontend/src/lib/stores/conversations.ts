@@ -315,6 +315,7 @@ export function createConversationStore(): ConversationStore {
         id: resp.id,
         topic_id: resp.topic_id ?? undefined,
         agent_id: resp.agent_id,
+        agent_display_name: resp.agent_display_name,
         selected_model_id: resp.selected_model_id ?? null,
         created_at: resp.created_at,
         last_activity: resp.last_activity,
