@@ -241,7 +241,7 @@ impl TurnStore for SqliteStorage {
         // below — "first terminal state wins" without a read-then-write race.
         let is_terminal = new_state.is_terminal();
 
-        self.with_conn(move |conn| {
+        let wait_blocked = self.with_conn(move |conn| {
             let state_str = new_state.to_string();
             // The WHERE excludes terminal states so a concurrent Interrupted
             // write can't be overwritten by a late Completed transition.
@@ -253,13 +253,74 @@ impl TurnStore for SqliteStorage {
                     params![&state_str, &now_str, id.to_string()],
                 )?;
             } else {
-                conn.execute(
+                let changed = conn.execute(
                     "UPDATE turns SET state = ?1
-                     WHERE id = ?2 AND state NOT IN ('completed', 'refused', 'incomplete', 'failed', 'interrupted')",
+                     WHERE id = ?2 AND state NOT IN ('completed', 'refused', 'incomplete', 'failed', 'interrupted')
+                       AND (state != 'delegating' OR ?1 = 'delegating')",
                     params![&state_str, id.to_string()],
                 )?;
+                if changed == 0 {
+                    return conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM turns WHERE id = ?1 AND state = 'delegating')",
+                        params![id.to_string()],
+                        |row| row.get(0),
+                    );
+                }
             }
-            Ok(())
+            Ok(false)
+        })
+        .await?;
+        if wait_blocked {
+            return Err(StorageError::QueryFailed(
+                "a delegating turn must settle its owning tool result before changing to another non-terminal state".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn settle_delegation_result(
+        &self,
+        call: crate::model::ToolCallRecord,
+    ) -> Result<(), StorageError> {
+        let (Some(result), Some(model_result), Some(status), Some(duration_ms)) = (
+            call.result,
+            call.model_result,
+            call.status,
+            call.duration_ms,
+        ) else {
+            return Err(StorageError::QueryFailed(
+                "delegation settlement requires a complete tool result".into(),
+            ));
+        };
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let recorded = tx.execute(
+                "UPDATE tool_calls
+                 SET result = ?1, model_result = ?2, status = ?3, duration_ms = ?4,
+                     truncated = ?5, total_bytes = ?6
+                 WHERE id = ?7 AND turn_id = ?8 AND result IS NULL",
+                params![
+                    result,
+                    model_result,
+                    status,
+                    duration_ms,
+                    call.truncated,
+                    call.total_bytes,
+                    call.id.to_string(),
+                    call.turn_id.to_string()
+                ],
+            )?;
+            if recorded != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            let resumed = tx.execute(
+                "UPDATE turns SET state = 'processing' WHERE id = ?1 AND state = 'delegating'",
+                params![call.turn_id.to_string()],
+            )?;
+            if resumed != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            tx.commit()
         })
         .await
     }
@@ -613,6 +674,47 @@ mod tests {
         let updated = storage.get_turn(turn.id).await.unwrap().unwrap();
         assert_eq!(updated.state, TurnState::Processing);
         assert!(updated.completed_at.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delegation_wait_rejects_non_terminal_transitions_until_settlement() {
+        let (storage, thread_id) = make_thread().await;
+        for terminal in [
+            TurnState::Completed,
+            TurnState::Refused,
+            TurnState::Incomplete,
+            TurnState::Failed,
+            TurnState::Interrupted,
+        ] {
+            let turn = storage.create_turn(new_turn(thread_id)).await.unwrap();
+            storage
+                .update_turn_state(turn.id, TurnState::Delegating)
+                .await
+                .unwrap();
+            for state in [
+                TurnState::Pending,
+                TurnState::Processing,
+                TurnState::AwaitingApproval,
+            ] {
+                let error = storage.update_turn_state(turn.id, state).await.unwrap_err();
+                assert!(error.to_string().contains("owning tool result"));
+                assert_eq!(
+                    storage.get_turn(turn.id).await.unwrap().unwrap().state,
+                    TurnState::Delegating
+                );
+            }
+            storage
+                .update_turn_state(turn.id, TurnState::Delegating)
+                .await
+                .unwrap();
+            storage
+                .update_turn_state(turn.id, terminal.clone())
+                .await
+                .unwrap();
+            let ended = storage.get_turn(turn.id).await.unwrap().unwrap();
+            assert_eq!(ended.state, terminal);
+            assert!(ended.completed_at.is_some());
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

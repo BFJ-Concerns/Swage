@@ -259,16 +259,20 @@ impl AgentMessageStore for SqliteStorage {
     async fn find_delegate_for_thread(
         &self,
         thread_id: Uuid,
+        started_by: DateTime<Utc>,
     ) -> Result<Option<AgentMessage>, StorageError> {
+        let started_by = started_by.to_rfc3339();
         self.with_conn(move |conn| {
             conn.query_row(
                 "SELECT id, sender_agent_id, recipient_agent_id, kind, correlation_id,
                         payload, status, failure_reason, created_at, delivered_at
                  FROM agent_messages
-                 WHERE kind = 'delegate' AND json_extract(payload, '$._thread_id') = ?1
+                 WHERE kind = 'delegate'
+                   AND json_extract(payload, '$._thread_id') = ?1
+                   AND created_at <= ?2
                  ORDER BY created_at DESC
                  LIMIT 1",
-                params![thread_id.to_string()],
+                params![thread_id.to_string(), started_by],
                 row_to_agent_message,
             )
             .optional()
@@ -372,14 +376,52 @@ mod tests {
             .await
             .unwrap();
 
-        let found = storage.find_delegate_for_thread(thread_id).await.unwrap();
+        let after = delegate.created_at + chrono::Duration::seconds(1);
+        let found = storage
+            .find_delegate_for_thread(thread_id, after)
+            .await
+            .unwrap();
         assert_eq!(found.map(|m| m.id), Some(delegate.id));
         assert!(
             storage
-                .find_delegate_for_thread(Uuid::new_v4())
+                .find_delegate_for_thread(Uuid::new_v4(), after)
                 .await
                 .unwrap()
                 .is_none()
+        );
+
+        // A named child's thread is reused: a second delegation to it is a
+        // newer delegate, and a turn started before it still resolves to
+        // the first.
+        let later = storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "parent".into(),
+                recipient_agent_id: "child".into(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({ "task": "look again", "_thread_id": thread_id.to_string() }),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .find_delegate_for_thread(thread_id, delegate.created_at)
+                .await
+                .unwrap()
+                .map(|m| m.id),
+            Some(delegate.id),
+            "a turn started at the first delegate's moment belongs to it"
+        );
+        assert_eq!(
+            storage
+                .find_delegate_for_thread(
+                    thread_id,
+                    later.created_at + chrono::Duration::seconds(1)
+                )
+                .await
+                .unwrap()
+                .map(|m| m.id),
+            Some(later.id)
         );
     }
 

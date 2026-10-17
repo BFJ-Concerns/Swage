@@ -275,8 +275,11 @@ mod tests {
         async fn find_delegate_for_thread(
             &self,
             thread_id: Uuid,
+            started_by: chrono::DateTime<chrono::Utc>,
         ) -> Result<Option<AgentMessage>, StorageError> {
-            self.inner.find_delegate_for_thread(thread_id).await
+            self.inner
+                .find_delegate_for_thread(thread_id, started_by)
+                .await
         }
 
         async fn list_pending_for_agent(

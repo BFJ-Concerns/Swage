@@ -478,9 +478,11 @@ where
             return None;
         }
     };
-    let records: Vec<CompactionRecord> = match serde_json::from_value(
-        report.get("compaction_applied")?.clone(),
-    ) {
+    let Some(compaction) = report.get("compaction_applied") else {
+        tracing::warn!(%turn_id, "wall signal: the earlier report carries no compaction records; diagnosing afresh");
+        return None;
+    };
+    let records: Vec<CompactionRecord> = match serde_json::from_value(compaction.clone()) {
         Ok(records) => records,
         Err(error) => {
             tracing::warn!(%error, %turn_id, "wall signal: the earlier report's compaction records do not read; diagnosing afresh");

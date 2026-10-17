@@ -818,26 +818,35 @@ pub(super) async fn process_turn_with_composition_and_focus(
     let final_turn_id = turn_id.unwrap_or(prepared_turn_id);
     let final_state = match state.storage.get_turn(final_turn_id).await {
         Ok(Some(turn)) => turn.state,
-        Ok(None) => {
-            crate::record_durability::record_reconstruction_gap(
+        unreadable => {
+            let reason = match unreadable {
+                Ok(_) => "the turn's row is gone at the end of the turn".to_owned(),
+                Err(error) => error.to_string(),
+            };
+            if let Err(gap_error) = crate::record_durability::record_reconstruction_gap(
                 state.storage.as_ref(),
                 Some(session_id),
                 final_turn_id,
                 "final turn state",
-                &"the turn's row is gone at the end of the turn",
+                &reason,
             )
-            .await?;
-            TurnState::Completed
-        }
-        Err(error) => {
-            crate::record_durability::record_reconstruction_gap(
-                state.storage.as_ref(),
-                Some(session_id),
-                final_turn_id,
-                "final turn state",
-                &error,
-            )
-            .await?;
+            .await
+            {
+                // The gap itself cannot be recorded: past the point of no
+                // return, the contract's escalation — the turn marked
+                // failed through the sanctioned override and the client
+                // told — not an error out of a turn that already answered.
+                tracing::error!(turn_id = %final_turn_id, %reason, error = %gap_error, "turn record integrity lost at the final-state read");
+                if let Err(error) = state.storage.force_turn_failure(final_turn_id).await {
+                    tracing::error!(error = %error, "failed to mark record-degraded turn as failed");
+                }
+                let _ = ws_tx.send(ServerEvent::Error {
+                    code: "turn_record_lost".to_string(),
+                    message: format!(
+                        "The turn's audit record is incomplete: the final state could not be read ({reason}) and the gap could not be recorded ({gap_error})"
+                    ),
+                });
+            }
             TurnState::Completed
         }
     };

@@ -122,7 +122,13 @@ pub async fn recover_orphaned_turns(
                     if !seen_turn_ids.insert(turn.id) {
                         continue;
                     }
-                    if turn.state == TurnState::Delegating {
+                    // A delegating turn that is itself a child — a middle tier
+                    // of a nested delegation — is its own parent's to return
+                    // to: that parent is told it was cut off, and resuming it
+                    // on its own would run beside the parent's return to it.
+                    let delegating =
+                        turn.state == TurnState::Delegating && turn.parent_turn_id.is_none();
+                    if delegating {
                         delegating_parents.push((session.clone(), turn.clone()));
                     }
 
@@ -162,9 +168,16 @@ pub async fn recover_orphaned_turns(
                         storage.update_state(thread.id, ThreadState::Idle).await?;
                     }
 
-                    storage
-                        .update_turn_state(turn.id, TurnState::Interrupted)
-                        .await?;
+                    // A delegating parent keeps its state until its
+                    // resumption is on the record (below): `Delegating` is
+                    // the one durable mark that selects it for resumption,
+                    // so a failure before the hand-off leaves it for the
+                    // next startup rather than consuming the mark first.
+                    if !delegating {
+                        storage
+                            .update_turn_state(turn.id, TurnState::Interrupted)
+                            .await?;
+                    }
                 }
             }
         }
@@ -172,6 +185,9 @@ pub async fn recover_orphaned_turns(
 
     for (session, parent) in delegating_parents {
         resume_delegating_parent(storage, router, &session, &parent).await?;
+        storage
+            .update_turn_state(parent.id, TurnState::Interrupted)
+            .await?;
     }
 
     Ok(recovered_turn_ids.len())
@@ -181,11 +197,16 @@ pub async fn recover_orphaned_turns(
 /// fate goes to the parent agent's mailbox as a pending Result under the
 /// delegate that started it — the child's own result when it completed
 /// before the restart, its failure when it failed, or a cut-off account
-/// with the child's session and thread when it was in flight — and a
-/// continuation input is queued on the parent's session, so the startup
-/// drain starts the parent's next turn with the Result delivered into its
-/// thread first. A child whose delegate message cannot be found is a gap in
-/// the record: recorded as such, the notice still naming the child.
+/// with the child's session and thread when it was in flight — naming the
+/// parent's session so that session's next turn, and no other session of
+/// the same agent, delivers it; and a continuation input is queued on the
+/// parent's session, so the startup drain starts the parent's next turn
+/// with the Result delivered into its thread first. The parent stays
+/// `Delegating` until this returns, so a write that fails here leaves it
+/// for the next startup (which may then repeat a Result or continuation
+/// already written: at least once, each naming the same outcome). A child
+/// whose delegate message cannot be found is a gap in the record: recorded
+/// as such, the notice still naming the child.
 async fn resume_delegating_parent(
     storage: &dyn Storage,
     router: &MessageRouter,
@@ -198,60 +219,109 @@ async fn resume_delegating_parent(
             .get(child.thread_id)
             .await?
             .map(|thread| thread.session_id);
-        let mut payload = match child.state {
-            TurnState::Completed => serde_json::json!({
-                "response": child.assistant_response.clone().unwrap_or_default(),
-                "structured_output": child.structured_output,
-            }),
-            TurnState::Failed => serde_json::json!({
-                "error": child
-                    .failure_message
-                    .clone()
-                    .unwrap_or_else(|| "the delegated turn failed".to_owned()),
-            }),
-            _ => serde_json::json!({
-                "error": "cut off by a gateway restart before completing; its work so far is on its thread",
-            }),
+        // The child's fate from its own row — what the record says it did,
+        // never an outcome invented for it: a turn that ended on its own
+        // keeps its ending; only a turn still in flight, or already cut
+        // off, was cut off by a restart.
+        let (mut payload, fate) = match child.state {
+            TurnState::Completed => (
+                serde_json::json!({
+                    "response": child.assistant_response.clone().unwrap_or_default(),
+                    "structured_output": child.structured_output,
+                }),
+                "completed before the restart; its result is delivered above",
+            ),
+            TurnState::Incomplete => (
+                serde_json::json!({
+                    "response": child.assistant_response.clone().unwrap_or_default(),
+                    "incomplete_reason": child
+                        .failure_message
+                        .clone()
+                        .unwrap_or_else(|| "the turn stopped short of completing".to_owned()),
+                    "structured_output": child.structured_output,
+                }),
+                "stopped short before the restart; what it produced is delivered above",
+            ),
+            TurnState::Refused => (
+                serde_json::json!({
+                    "error": "the delegated agent refused the task",
+                    "response": child.assistant_response,
+                }),
+                "refused the task before the restart",
+            ),
+            TurnState::Failed => (
+                serde_json::json!({
+                    "error": child
+                        .failure_message
+                        .clone()
+                        .unwrap_or_else(|| "the delegated turn failed".to_owned()),
+                }),
+                "failed before the restart; its failure is delivered above",
+            ),
+            TurnState::Interrupted
+            | TurnState::Pending
+            | TurnState::Processing
+            | TurnState::AwaitingApproval
+            | TurnState::Delegating => (
+                serde_json::json!({
+                    "error": "cut off by a gateway restart before completing; its work so far is on its thread",
+                }),
+                "was cut off by the restart; its work so far is on its thread",
+            ),
         };
         payload["child_session_id"] = serde_json::json!(child_session_id);
         payload["child_thread_id"] = serde_json::json!(child.thread_id);
-        let fate = match child.state {
-            TurnState::Completed => "completed before the restart; its result is delivered above",
-            TurnState::Failed => "failed before the restart; its failure is delivered above",
-            _ => "was cut off by the restart; its work so far is on its thread",
-        };
-        match storage.find_delegate_for_thread(child.thread_id).await? {
+        payload["parent_session_id"] = serde_json::json!(session.id);
+        payload["parent_turn_id"] = serde_json::json!(parent.id);
+        match storage
+            .find_delegate_for_thread(child.thread_id, child.created_at)
+            .await?
+        {
             Some(delegate) => {
-                // The live send path checks MessageSend before inserting:
-                // a veto leaves no Result for any mailbox reader to take.
-                match router
-                    .send_message(NewAgentMessage {
-                        sender_agent_id: child.agent_id.clone(),
-                        recipient_agent_id: parent.agent_id.clone(),
-                        kind: MessageKind::Result,
-                        correlation_id: Some(delegate.id),
-                        payload,
-                    })
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(AgentError::HookBlocked { reason, .. }) => {
-                        let fate = fate.split(';').next().unwrap_or(fate);
-                        warn!(
-                            parent_turn_id = %parent.id,
-                            child_turn_id = %child.id,
-                            delegate_message_id = %delegate.id,
-                            %reason,
-                            "Reconstructed delegation result refused before sending"
-                        );
-                        notices.push(format!(
-                            "Delegated agent {} {fate}; its result was refused before sending.",
-                            child.agent_id
-                        ));
-                        continue;
+                // A Result the child itself wrote and nothing has claimed
+                // yet — a detached child's, or an attended one's cut between
+                // its write and its claim — is already the record of its
+                // fate and will be delivered; a second would read twice.
+                let own_result_waiting = storage
+                    .list_by_correlation(delegate.id)
+                    .await?
+                    .iter()
+                    .any(|message| {
+                        message.kind == MessageKind::Result
+                            && message.status == swage_core::MessageStatus::Pending
+                    });
+                if !own_result_waiting {
+                    // The live send path checks MessageSend before inserting:
+                    // a veto leaves no Result for any mailbox reader to take.
+                    match router
+                        .send_message(NewAgentMessage {
+                            sender_agent_id: child.agent_id.clone(),
+                            recipient_agent_id: parent.agent_id.clone(),
+                            kind: MessageKind::Result,
+                            correlation_id: Some(delegate.id),
+                            payload,
+                        })
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(AgentError::HookBlocked { reason, .. }) => {
+                            let fate = fate.split(';').next().unwrap_or(fate);
+                            warn!(
+                                parent_turn_id = %parent.id,
+                                child_turn_id = %child.id,
+                                delegate_message_id = %delegate.id,
+                                %reason,
+                                "Reconstructed delegation result refused before sending"
+                            );
+                            notices.push(format!(
+                                "Delegated agent {} {fate}; its result was refused before sending.",
+                                child.agent_id
+                            ));
+                            continue;
+                        }
+                        Err(AgentError::StorageFailed(error)) => return Err(error),
+                        Err(error) => return Err(StorageError::QueryFailed(error.to_string())),
                     }
-                    Err(AgentError::StorageFailed(error)) => return Err(error),
-                    Err(error) => return Err(StorageError::QueryFailed(error.to_string())),
                 }
             }
             None => {
@@ -284,7 +354,7 @@ async fn resume_delegating_parent(
             notices.join(" ")
         )
     };
-    let attended = session_is_a_persons(session);
+    let attended = continuation_is_attended(session);
     storage
         .enqueue_turn_input(NewQueuedTurnInput {
             delivery_targets: Vec::new(),
@@ -308,14 +378,16 @@ async fn resume_delegating_parent(
     Ok(())
 }
 
-/// Whether a session is a person's conversation rather than a dispatched
-/// worker's: a worker carries its dispatching ancestry in its metadata, and
-/// its turns run unattended.
-fn session_is_a_persons(session: &Session) -> bool {
+/// Whether a resumed turn runs attended: only a person's own conversation
+/// is. A dispatched worker carries its dispatching ancestry in its session
+/// metadata, and a channel-linked session its channel origin; both run
+/// their turns unattended, as their own inputs do.
+fn continuation_is_attended(session: &Session) -> bool {
     !session.metadata.as_ref().is_some_and(|metadata| {
         metadata
             .get(crate::turn::DISPATCH_BOUND_METADATA_KEY)
             .is_some()
+            || metadata.get("channel_origin").is_some()
     })
 }
 
@@ -477,6 +549,7 @@ mod tests {
 
     use super::*;
     use crate::turn::tests::MockStorage;
+    use uuid::Uuid;
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -764,7 +837,9 @@ mod tests {
             .await
             .unwrap();
 
-        // Two children: one completed before the restart, one cut off by it.
+        // Four children: one completed before the restart, one that stopped
+        // short, one cut off by the restart, and a detached one whose own
+        // Result still waits in the mailbox.
         let mut delegates = Vec::new();
         for (agent, state, response) in [
             (
@@ -772,7 +847,9 @@ mod tests {
                 TurnState::Completed,
                 Some("The survey: three findings."),
             ),
+            ("drafter", TurnState::Incomplete, Some("Half the draft.")),
             ("reviewer", TurnState::Processing, None),
+            ("scout", TurnState::Completed, Some("Scouted.")),
         ] {
             let child_session = storage
                 .create_session(NewSession {
@@ -790,6 +867,21 @@ mod tests {
             )
             .await
             .unwrap();
+            // The delegate starts the child: it is on the record before the
+            // child's turn, as the executor writes them.
+            let delegate = storage
+                .create_agent_message(NewAgentMessage {
+                    sender_agent_id: "lead".to_string(),
+                    recipient_agent_id: agent.to_string(),
+                    kind: MessageKind::Delegate,
+                    correlation_id: None,
+                    payload: serde_json::json!({
+                        "task": "the task",
+                        "_thread_id": child_thread.id.to_string(),
+                    }),
+                })
+                .await
+                .unwrap();
             let child = storage
                 .create_turn(NewTurn {
                     thread_id: child_thread.id,
@@ -810,19 +902,20 @@ mod tests {
                     .unwrap()
                     .assistant_response = Some(response.to_string());
             }
-            let delegate = storage
-                .create_agent_message(NewAgentMessage {
-                    sender_agent_id: "lead".to_string(),
-                    recipient_agent_id: agent.to_string(),
-                    kind: MessageKind::Delegate,
-                    correlation_id: None,
-                    payload: serde_json::json!({
-                        "task": "the task",
-                        "_thread_id": child_thread.id.to_string(),
-                    }),
-                })
-                .await
-                .unwrap();
+            if agent == "scout" {
+                // The detached child's own Result, written by its executor and
+                // not yet claimed: the record of its fate already.
+                storage
+                    .create_agent_message(NewAgentMessage {
+                        sender_agent_id: "scout".to_string(),
+                        recipient_agent_id: "lead".to_string(),
+                        kind: MessageKind::Result,
+                        correlation_id: Some(delegate.id),
+                        payload: serde_json::json!({ "response": "Scouted." }),
+                    })
+                    .await
+                    .unwrap();
+            }
             delegates.push((agent, delegate.id, child_session.id, child_thread.id));
         }
 
@@ -845,12 +938,29 @@ mod tests {
             .iter()
             .filter(|m| m.kind == MessageKind::Result)
             .collect();
-        assert_eq!(results.len(), 2, "{pending:?}");
+        assert_eq!(
+            results.len(),
+            4,
+            "one Result per child, the scout's its own: {pending:?}"
+        );
         for (agent, delegate_id, child_session_id, child_thread_id) in &delegates {
-            let result = results
+            let under: Vec<_> = results
                 .iter()
-                .find(|m| m.correlation_id == Some(*delegate_id))
-                .unwrap_or_else(|| panic!("a Result under {agent}'s delegate"));
+                .filter(|m| m.correlation_id == Some(*delegate_id))
+                .collect();
+            assert_eq!(
+                under.len(),
+                1,
+                "exactly one Result under {agent}'s delegate"
+            );
+            let result = under[0];
+            if *agent == "scout" {
+                assert!(
+                    result.payload.get("parent_session_id").is_none(),
+                    "the scout's own Result stands; recovery wrote no second"
+                );
+                continue;
+            }
             assert_eq!(result.sender_agent_id, *agent);
             assert_eq!(result.status, MessageStatus::Pending);
             assert_eq!(
@@ -861,16 +971,26 @@ mod tests {
                 result.payload["child_thread_id"],
                 serde_json::json!(child_thread_id)
             );
-            if *agent == "surveyor" {
-                assert_eq!(result.payload["response"], "The survey: three findings.");
-            } else {
-                assert!(
+            assert_eq!(
+                result.payload["parent_session_id"],
+                serde_json::json!(session.id),
+                "the Result names the parent's session, so only that session's turn delivers it"
+            );
+            match *agent {
+                "surveyor" => {
+                    assert_eq!(result.payload["response"], "The survey: three findings.");
+                }
+                "drafter" => {
+                    assert_eq!(result.payload["response"], "Half the draft.");
+                    assert!(result.payload["incomplete_reason"].is_string());
+                }
+                _ => assert!(
                     result.payload["error"]
                         .as_str()
                         .is_some_and(|e| e.contains("cut off by a gateway restart")),
                     "{:?}",
                     result.payload
-                );
+                ),
             }
         }
 
@@ -887,7 +1007,128 @@ mod tests {
                 .contains("The gateway restarted while this turn was waiting")
         );
         assert!(queued[0].content.contains("surveyor"));
+        assert!(queued[0].content.contains("drafter"));
+        assert!(queued[0].content.contains("stopped short"));
         assert!(queued[0].content.contains("reviewer"));
+    }
+
+    /// A middle tier of a nested delegation — a delegating turn that is
+    /// itself a child — is not resumed on its own: its parent is told it
+    /// was cut off and returns to it; only the top-level parent resumes.
+    #[tokio::test]
+    async fn recovery_resumes_only_the_top_of_a_nested_delegation() {
+        use swage_core::MessageKind;
+        use swage_storage::model::NewAgentMessage;
+        use swage_storage::store::{AgentMessageStore, TurnQueueStore};
+
+        let storage = Arc::new(MockStorage::new());
+        let topic = storage.general_scope().await.unwrap();
+        let mut tiers: Vec<(&str, Uuid, Uuid)> = Vec::new();
+        let mut parent_turn_id = None;
+        for (agent, state) in [
+            ("lead", TurnState::Delegating),
+            ("middle", TurnState::Delegating),
+            ("leaf", TurnState::Processing),
+        ] {
+            let session = storage
+                .create_session(NewSession {
+                    agent_id: agent.to_string(),
+                    ..swage_storage::fixtures::new_session(topic.id)
+                })
+                .await
+                .unwrap();
+            let thread = ThreadStore::create(
+                &*storage,
+                NewThread {
+                    session_id: session.id,
+                    agent_id: agent.to_string(),
+                },
+            )
+            .await
+            .unwrap();
+            if let Some((parent_agent, _, _)) = tiers.last() {
+                storage
+                    .create_agent_message(NewAgentMessage {
+                        sender_agent_id: parent_agent.to_string(),
+                        recipient_agent_id: agent.to_string(),
+                        kind: MessageKind::Delegate,
+                        correlation_id: None,
+                        payload: serde_json::json!({
+                            "task": "work",
+                            "_thread_id": thread.id.to_string(),
+                        }),
+                    })
+                    .await
+                    .unwrap();
+            }
+            let turn = storage
+                .create_turn(NewTurn {
+                    thread_id: thread.id,
+                    agent_id: agent.to_string(),
+                    state,
+                    user_input: Some("work".to_string()),
+                    parent_turn_id,
+                })
+                .await
+                .unwrap();
+            tiers.push((agent, session.id, turn.id));
+            parent_turn_id = Some(turn.id);
+        }
+
+        recover_orphaned_turns(
+            &*storage,
+            &*storage,
+            &MessageRouter::new(storage.clone(), None),
+        )
+        .await
+        .expect("recovery should not fail");
+
+        let (_, lead_session, _) = tiers[0];
+        let (_, middle_session, middle_turn) = tiers[1];
+        assert_eq!(
+            storage
+                .list_queued_turn_inputs(lead_session)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the lead resumes"
+        );
+        assert!(
+            storage
+                .list_queued_turn_inputs(middle_session)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the middle tier is its parent's to return to, not resumed on its own"
+        );
+        assert_eq!(
+            storage.get_turn(middle_turn).await.unwrap().unwrap().state,
+            TurnState::Interrupted
+        );
+        let lead_results: Vec<_> = storage
+            .list_pending_for_agent("lead")
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.kind == MessageKind::Result)
+            .collect();
+        assert_eq!(lead_results.len(), 1);
+        assert!(
+            lead_results[0].payload["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("cut off")),
+            "the lead is told its child was cut off"
+        );
+        assert!(
+            storage
+                .list_pending_for_agent("middle")
+                .await
+                .unwrap()
+                .iter()
+                .all(|m| m.kind != MessageKind::Result),
+            "no Result is written for the middle tier's own child"
+        );
     }
 
     /// A child whose delegate message cannot be found is a gap in the record:
@@ -971,6 +1212,31 @@ mod tests {
         let queued = storage.list_queued_turn_inputs(session.id).await.unwrap();
         assert_eq!(queued.len(), 1);
         assert!(queued[0].content.contains("worker"));
+    }
+
+    /// Only a person's own conversation resumes attended: a dispatched
+    /// worker's and a channel-linked session's turns run unattended, as
+    /// their own inputs do.
+    #[test]
+    fn a_continuation_is_attended_only_for_a_persons_session() {
+        let session = |metadata: Option<serde_json::Value>| Session {
+            metadata,
+            ..swage_storage::fixtures::session(Uuid::new_v4())
+        };
+        assert!(continuation_is_attended(&session(None)));
+        assert!(continuation_is_attended(&session(Some(
+            serde_json::json!({ "other": 1 })
+        ))));
+        assert!(!continuation_is_attended(&session(Some(
+            serde_json::json!({
+                crate::turn::DISPATCH_BOUND_METADATA_KEY: ["lead"]
+            })
+        ))));
+        assert!(!continuation_is_attended(&session(Some(
+            serde_json::json!({
+                "channel_origin": { "integration": "telegram" }
+            })
+        ))));
     }
 
     #[tokio::test]

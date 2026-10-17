@@ -4580,6 +4580,44 @@ impl TurnStore for MockStorage {
         Ok(t)
     }
 
+    async fn settle_delegation_result(&self, call: ToolCallRecord) -> Result<(), StorageError> {
+        let write = self.turn_state_write_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_tool_call_settlement.load(Ordering::SeqCst)
+            || self.fail_turn_state_writes.load(Ordering::SeqCst)
+            || self.fail_turn_state_write_at.load(Ordering::SeqCst) == write
+        {
+            return Err(StorageError::QueryFailed(
+                "delegation settlement refused by the test".into(),
+            ));
+        }
+        let mut db = self.db.lock().await;
+        let valid = call.result.is_some()
+            && call.model_result.is_some()
+            && call.status.is_some()
+            && call.duration_ms.is_some()
+            && db
+                .turns
+                .get(&call.turn_id)
+                .is_some_and(|turn| turn.state == TurnState::Delegating);
+        let index = db.tool_calls.iter().position(|stored| {
+            stored.id == call.id && stored.turn_id == call.turn_id && stored.result.is_none()
+        });
+        if !valid || index.is_none() {
+            return Err(StorageError::QueryFailed(
+                "delegation settlement has no matching wait and started call".into(),
+            ));
+        }
+        let stored = &mut db.tool_calls[index.unwrap()];
+        stored.result = call.result;
+        stored.model_result = call.model_result;
+        stored.status = call.status;
+        stored.duration_ms = call.duration_ms;
+        stored.truncated = call.truncated;
+        stored.total_bytes = call.total_bytes;
+        db.turns.get_mut(&call.turn_id).unwrap().state = TurnState::Processing;
+        Ok(())
+    }
+
     async fn update_structured_output(
         &self,
         id: Uuid,
@@ -4641,6 +4679,14 @@ impl TurnStore for MockStorage {
         }
         let mut db = self.db.lock().await;
         if let Some(turn) = db.turns.get_mut(&id) {
+            if turn.state == TurnState::Delegating
+                && !state.is_terminal()
+                && state != TurnState::Delegating
+            {
+                return Err(StorageError::QueryFailed(
+                    "a delegating turn must settle its owning tool result before changing to another non-terminal state".into(),
+                ));
+            }
             if state.is_terminal() {
                 turn.completed_at = Some(chrono::Utc::now());
             }
@@ -5934,6 +5980,7 @@ impl swage_storage::store::AgentMessageStore for MockStorage {
     async fn find_delegate_for_thread(
         &self,
         thread_id: Uuid,
+        started_by: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<AgentMessage>, StorageError> {
         let thread = thread_id.to_string();
         let mut delegates: Vec<_> = self
@@ -5945,6 +5992,7 @@ impl swage_storage::store::AgentMessageStore for MockStorage {
             .filter(|message| {
                 message.kind == swage_core::MessageKind::Delegate
                     && message.payload.get("_thread_id").and_then(|v| v.as_str()) == Some(&thread)
+                    && message.created_at <= started_by
             })
             .cloned()
             .collect();

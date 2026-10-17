@@ -588,9 +588,23 @@ pub trait TurnStore: Send + Sync {
     async fn list_child_turns(&self, parent_turn_id: Uuid) -> Result<Vec<Turn>, StorageError>;
     /// Update a turn's state.
     ///
-    /// State is consumer-driven — the storage layer records whatever state is
-    /// provided. No state-machine enforcement is applied here.
+    /// A Delegating turn can only leave its wait through atomic result
+    /// settlement or a terminal state. Other non-terminal transitions are
+    /// refused, so a later tool's approval cannot consume an unsettled wait.
     async fn update_turn_state(&self, id: Uuid, state: TurnState) -> Result<(), StorageError>;
+    /// Record a delegating turn's tool result and return it to Processing in
+    /// one transaction. The caller must supply the call that owns the wait.
+    /// Only the result fields of the named, unsettled call
+    /// are changed. A missing call, a call owned by another turn, or a turn
+    /// no longer Delegating fails without changing either record.
+    ///
+    /// Stores that cannot provide this atomic hand-over reject it rather
+    /// than exposing a restart window between the result and the state.
+    async fn settle_delegation_result(&self, _call: ToolCallRecord) -> Result<(), StorageError> {
+        Err(StorageError::QueryFailed(
+            "atomic delegation settlement is not supported by this store".into(),
+        ))
+    }
     /// Force a turn to `Failed`, overriding the first-terminal-wins guard.
     ///
     /// The one sanctioned terminal-to-terminal transition: the record
@@ -1046,12 +1060,15 @@ pub trait AgentMessageStore: Send + Sync {
         payload: serde_json::Value,
     ) -> Result<(), StorageError>;
 
-    /// The delegate message that started the child thread `thread_id` —
-    /// the one the executor annotated with that thread — or none when no
-    /// delegate names it.
+    /// The delegate message that started a turn on the child thread
+    /// `thread_id`: the newest delegate annotated with that thread and
+    /// created no later than `started_by` — a named child's thread is
+    /// reused across delegations, each starting its own turn after its own
+    /// delegate — or none when no delegate names it.
     async fn find_delegate_for_thread(
         &self,
         thread_id: Uuid,
+        started_by: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<AgentMessage>, StorageError>;
 
     /// List all messages sharing a correlation ID, ordered by creation time.
@@ -2971,6 +2988,7 @@ mod tests {
         async fn find_delegate_for_thread(
             &self,
             _: Uuid,
+            _: chrono::DateTime<chrono::Utc>,
         ) -> Result<Option<AgentMessage>, StorageError> {
             unimplemented!()
         }
