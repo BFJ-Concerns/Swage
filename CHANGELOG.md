@@ -52,6 +52,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Give session surfaces bordered controls and edge spacing, wider modules, a surface list above creation, and direct module navigation.
+
 - A workflow run's record shows every gateway interruption it lived through — a boot that found it running, or parked — and the run view lists them. Each attempt of a worker call records why it was dispatched: the first dispatch, a redispatch after an interruption (whose earlier attempt's outcome is unknown and whose tool calls may have been applied), or the declared fallback serving after the primary failed; the run detail words the two apart instead of calling every redispatch an interruption. The run's Done summary marks workers redispatched after an interruption and discloses that their effects may have been repeated.
 - Cancelling a turn while its initial provider attempt is queued retains that attempt as interrupted in the turn record.
 
