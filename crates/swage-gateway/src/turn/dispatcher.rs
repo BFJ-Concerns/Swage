@@ -1173,9 +1173,12 @@ mod tests {
             )
             .await
             .expect("opted-in fallback dispatcher must build");
-            assert_eq!(
-                build.isolation,
-                ExecutionIsolation::Degraded { reason: "bubblewrap_unavailable".into() }
+            let ExecutionIsolation::Degraded { reason } = &build.isolation else {
+                panic!("{:?}", build.isolation);
+            };
+            assert!(
+                reason.starts_with("bubblewrap_unavailable"),
+                "{reason}"
             );
             assert!(build.sandbox_guard.is_some());
             let server = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -1435,12 +1438,13 @@ mod tests {
         .expect("the explicit opt-in should select the fallback sandbox");
         assert_eq!(build.backend, SandboxBackend::Fallback);
         assert!(build.sandbox.is_some());
-        assert_eq!(
-            build.isolation,
-            ExecutionIsolation::Degraded {
-                reason: "bubblewrap_unavailable".into(),
-            }
-        );
+        // The reason names the private paths the fallback leaves readable,
+        // so the record says what was open.
+        let ExecutionIsolation::Degraded { reason } = &build.isolation else {
+            panic!("{:?}", build.isolation);
+        };
+        assert!(reason.starts_with("bubblewrap_unavailable"), "{reason}");
+        assert!(reason.contains("; unmasked: "), "{reason}");
 
         let turn_id = Uuid::new_v4();
         record_degraded_execution(
@@ -1455,7 +1459,9 @@ mod tests {
         let events = state.storage.list_audit_events().await.unwrap();
         assert!(events.iter().any(|event| {
             event.entity_id == turn_id.to_string()
-                && event.metadata["reason"] == "bubblewrap_unavailable"
+                && event.metadata["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.starts_with("bubblewrap_unavailable"))
         }));
     }
 
