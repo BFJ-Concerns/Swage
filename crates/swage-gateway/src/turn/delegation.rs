@@ -1064,7 +1064,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                     }
                 });
 
-                let detached = started_rx.await.map_err(|_| {
+                let mut detached = started_rx.await.map_err(|_| {
                     AgentError::InvalidConfig(
                         "detached delegation stopped before child turn startup".to_string(),
                     )
@@ -1082,6 +1082,24 @@ impl DelegationHandler for GatewayDelegationHandler {
                 {
                     tracing::warn!(%error, child = name, "could not record the named child");
                 }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                #[cfg(test)]
+                crate::workflow::workflow_pause_test_hook::pause(
+                    "detached-snapshot-pending",
+                    sender_session_id,
+                )
+                .await;
+                let (observed, status_as_of) = self
+                    .state
+                    .storage
+                    .get_turn_observation(detached.child_turn_id)
+                    .await?
+                    .ok_or_else(|| {
+                        AgentError::InvalidConfig("delegated child turn disappeared".into())
+                    })?;
+                detached.status = Some(observed.state.to_string());
+                detached.error_message = observed.failure_message;
+                detached.status_as_of = Some(status_as_of);
                 Ok(DelegationOutcome::Detached(detached))
             }
         }
