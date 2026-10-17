@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
 import { UNSETTLED_RUN_REFRESH_MS } from "../one-shot-runs";
 import App from "../../App.svelte";
+import * as operatorApi from "../api/operator";
 import { createConversation, getConversation } from "../api/conversations";
 import type { WebSocketClient } from "../api/websocket";
 
@@ -348,6 +349,54 @@ describe("ambient channel control path", () => {
       await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS * 3);
       expect(fetch).toHaveBeenCalledTimes(2);
     } finally { vi.useRealTimers(); }
+  });
+
+  it.each([
+    ["launching conversation", ".run header a", "parent-session"],
+    ["terminal worker", ".workers .worker a", "worker-session"],
+    ["worker detail", ".call > a", "worker-session"],
+    ["earlier attempt", ".attempts li:first-child a", "earlier-session"],
+  ])("opens the %s from a run page as its conversation", async (_label, selector, sessionId) => {
+    window.history.replaceState({}, "", "/workflow-runs/linked-run");
+    const returned = JSON.parse(await runResponse("linked-run", "completed").text());
+    returned.run.dispatching_session_id = "parent-session";
+    returned.run.terminal_account.workers.done = [{ journal_entry_id: "entry-worker", seq: 0, label: "Recorded worker", redispatched_after_interruption: false }];
+    returned.journal = [{ id: "entry-worker", kind: "agent_call", status: "completed", agent_call: {
+      session_id: "worker-session", termination: { termination: "settled" },
+      usage: { availability: "unavailable", reason: "provider_reported_no_usage" },
+      dispatch: { prompt: "Recorded prompt", grants: null, attempts: [
+        { cause: { cause: "first" }, opened_at: "2026-09-02T10:00:00Z", model: "earlier-model", effort: "low", session_id: "earlier-session", turn_id: "earlier-turn" },
+        { cause: { cause: "after_interruption" }, opened_at: "2026-09-02T10:01:00Z", model: "later-model", effort: "high", session_id: "worker-session", turn_id: "worker-turn" },
+      ] }, provider_rounds: [],
+    } }];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify(returned), { status: 200 }));
+    component = mount(App, { target: document.body });
+    await vi.waitFor(() => expect(document.querySelector(selector)).not.toBeNull());
+    (document.querySelector(selector) as HTMLAnchorElement).click();
+    await vi.waitFor(() => expect(document.querySelector('main.conversation [aria-label="Conversation"]')?.textContent ?? "").toContain(`History of ${sessionId}`));
+    expect(window.location.pathname).toBe(`/conversations/${sessionId}`);
+    expect(getConversation).toHaveBeenCalledWith(sessionId);
+    expect(wsClient.connect).toHaveBeenCalledWith(sessionId);
+    expect(document.querySelector("main.landing")).toBeNull();
+  });
+
+  it("returns to an already selected launching conversation from the operator surface", async () => {
+    component = await mountAppOnConversation();
+    // The destination selection must work even if the operator read fails.
+    vi.spyOn(operatorApi, "fetchOperatorOverview").mockRejectedValue(new Error("operator service unavailable"));
+    surfaceButton("Operator").click();
+    window.history.pushState({}, "", "/workflow-runs/existing-parent");
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      const returned = JSON.parse(await runResponse("existing-parent", "completed").text());
+      returned.run.dispatching_session_id = "conv-1";
+      return new Response(JSON.stringify(returned), { status: 200 });
+    });
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    await vi.waitFor(() => expect(document.querySelector(".run header a")).not.toBeNull());
+    (document.querySelector(".run header a") as HTMLAnchorElement).click();
+    await vi.waitFor(() => expect(document.querySelector('main.conversation [aria-label="Conversation"]')?.textContent ?? "").toContain("History of conv-1"));
+    expect(window.location.pathname).toBe("/conversations/conv-1");
+    expect(document.querySelector("main.operator")).toBeNull();
   });
 
 });
