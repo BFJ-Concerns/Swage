@@ -1,0 +1,8 @@
+name = "context-program"
+version = "1.0.0"
+description = "Composes the context for a turn from its elements and configured assembly."
+script = "plugin.js"
+grants = ["context"]
+
+[[provides.slots]]
+name = "context_program"

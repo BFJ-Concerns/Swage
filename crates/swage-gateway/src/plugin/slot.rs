@@ -164,9 +164,9 @@ impl PluginHost for SlotHost {
 #[derive(Clone)]
 pub struct PluginSlot {
     pub plugin: String,
-    runtime: Arc<PluginRuntime>,
-    host: Arc<dyn PluginHost>,
-    context: InvocationContext,
+    pub(super) runtime: Arc<PluginRuntime>,
+    pub(super) host: Arc<dyn PluginHost>,
+    pub(super) context: InvocationContext,
 }
 
 /// What a hook decided about an event.
@@ -234,9 +234,15 @@ impl PluginSlot {
     /// `{ messages }` — each a message handed back as given, or a fresh
     /// `{ role: system | user | assistant, content: text }`. A message in
     /// neither shape, or a `tool` message without its call, is the slot's
-    /// failure, never a silent recast. The report is the kernel's over the
-    /// same elements — the elements the program was given — with the
-    /// messages the plugin composed and their own token count.
+    /// failure, never a silent recast. Elements also carry priority, rendered
+    /// messages and safe report metadata. Under the context grant the plugin
+    /// can count tokens, compact history or run the configured named assembly.
+    /// It may return element accounting in a composition report; otherwise
+    /// the report accounts for the supplied elements. The host always records
+    /// the configured budget and every compaction it performed, in order:
+    /// direct history compactions and the records of a named assembly it ran
+    /// on the plugin's behalf. Plugin claims cannot add compaction records.
+    /// Token totals, remaining budget and elapsed duration are host-computed.
     ///
     /// The assembly runs on the turn's thread synchronously, so the isolate
     /// is awaited from here through `block_in_place`, which the
@@ -248,7 +254,9 @@ impl PluginSlot {
         elements: &[Box<dyn ContextElement>],
         variables: &std::collections::BTreeMap<String, String>,
         tokeniser: &dyn Tokeniser,
-        report_of: impl FnOnce() -> AssemblyOutput,
+        assembly_name: &str,
+        config: &swage_config::model::ContextConfig,
+        named_assembly: impl FnOnce() -> AssemblyOutput,
     ) -> Result<AssemblyOutput, String> {
         let handle = tokio::runtime::Handle::try_current()
             .map_err(|_| format!("{}: no async runtime to run the slot on", self.plugin))?;
@@ -258,29 +266,64 @@ impl PluginSlot {
                 self.plugin
             ));
         }
-        let input = json!({
-            "elements": elements
-                .iter()
-                .map(|element| json!({
-                    "name": element.name(),
-                    "messages": element.content(),
-                }))
-                .collect::<Vec<_>>(),
-            "variables": variables,
-        });
-        let output = tokio::task::block_in_place(|| {
-            handle.block_on(self.runtime.invoke_slot(
-                "context_program",
-                &input,
-                &self.context,
-                Arc::clone(&self.host),
-            ))
+        let started = std::time::Instant::now();
+        let descriptors = elements
+            .iter()
+            .map(|element| {
+                let messages = swage_context::js_assembly::rendered_content(&**element, variables);
+                let source = element.source();
+                let report = swage_context::report::ElementReport {
+                    name: element.name().to_owned(),
+                    source: source.clone(),
+                    priority: element.priority(),
+                    token_count: if element.renders_session_values() {
+                        tokeniser.count_messages(&messages)
+                    } else {
+                        element.token_count(tokeniser)
+                    },
+                    preview: element.report_preview().or_else(|| {
+                        swage_context::assembly::safe_metadata_preview(element.name(), &source)
+                    }),
+                    named_assembly: None,
+                };
+                swage_protocol::plugin::ContextProgramElement {
+                    name: element.name().to_owned(),
+                    priority: element.priority(),
+                    messages: element
+                        .content()
+                        .iter()
+                        .map(|message| serde_json::to_value(message).expect("message"))
+                        .collect(),
+                    rendered_messages: messages
+                        .iter()
+                        .map(|message| serde_json::to_value(message).expect("message"))
+                        .collect(),
+                    report,
+                }
+            })
+            .collect::<Vec<_>>();
+        let input = serde_json::to_value(swage_protocol::plugin::ContextProgramInput {
+            elements: descriptors.clone(),
+            variables: variables.clone(),
+            assembly_name: assembly_name.to_owned(),
+            budget: config.budget,
         })
-        .map_err(|error| format!("{}: {error}", self.plugin))?;
+        .expect("context input");
+        let (output, compactions) = tokio::task::block_in_place(|| {
+            handle.block_on(super::composition::compose(
+                self,
+                input,
+                tokeniser,
+                named_assembly,
+                !crate::turn::is_default_context_assembly(assembly_name),
+            ))
+        })?;
+        let output: swage_protocol::plugin::ContextProgramOutput = serde_json::from_value(output)
+            .map_err(|error| {
+            format!("{}: invalid context composition: {error}", self.plugin)
+        })?;
         let messages = output
-            .get("messages")
-            .and_then(Value::as_array)
-            .ok_or_else(|| format!("{}: the slot answered without messages", self.plugin))?
+            .messages
             .iter()
             .enumerate()
             .map(|(index, message)| {
@@ -295,10 +338,25 @@ impl PluginSlot {
         if messages.is_empty() {
             return Err(format!("{}: the slot composed no messages", self.plugin));
         }
-        let mut assembled = report_of();
-        assembled.report.total_tokens = tokeniser.count_messages(&messages);
-        assembled.messages = messages;
-        Ok(assembled)
+        let mut report = match output.report {
+            Some(report) => report,
+            None => {
+                let mut report = swage_context::report::AssemblyReport::new(assembly_name);
+                report.elements = descriptors
+                    .into_iter()
+                    .map(|element| element.report)
+                    .collect();
+                report
+            }
+        };
+        report.budget = config.budget;
+        report.compaction_applied = compactions;
+        report.total_tokens = tokeniser.count_messages(&messages);
+        report.budget_remaining = report
+            .budget
+            .map(|budget| budget as isize - report.total_tokens as isize);
+        report.duration = started.elapsed();
+        AssemblyOutput::new(messages, report)
     }
 
     /// A hook over `event` at `point`, read against the attachment's `mode`:
@@ -913,6 +971,260 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn the_shipped_context_program_matches_kernel_messages_and_reports() {
+        use swage_context::{briefing::BriefingElement, named_element::ResolvedNamedElement};
+        let manifest = PluginManifest::parse(include_str!(
+            "../../../../shipped/plugins/context-program/plugin.toml"
+        ))
+        .unwrap();
+        let runtime = PluginRuntime::start(
+            manifest,
+            include_str!("../../../../shipped/plugins/context-program/plugin.js").to_owned(),
+        )
+        .await
+        .unwrap();
+        let slot = PluginSlot::new(
+            "context-program".into(),
+            runtime,
+            Arc::new(SummarisingHost::default()),
+            context(),
+        );
+        let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("gpt-4o");
+        let variables = std::collections::BTreeMap::from([("owner".into(), "Ben".into())]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ordered.js");
+        std::fs::write(
+            &path,
+            "for (const e of [...elements].reverse()) add(e.render ? e.render() : e);",
+        )
+        .unwrap();
+        for (name, budget, enriched) in [
+            ("default", None, false),
+            ("default", Some(50), false),
+            ("default", Some(100), true),
+            ("ordered", Some(50), true),
+            ("missing", None, true),
+            ("missing", Some(50), true),
+        ] {
+            let mut elements: Vec<Box<dyn ContextElement>> = vec![
+                Box::new(History(vec![
+                    ChatMessage::new(Role::User, "old conversation ".repeat(80)),
+                    ChatMessage::new(Role::Assistant, "old answer ".repeat(80)),
+                    ChatMessage::new(Role::User, "latest question"),
+                    if name == "default" {
+                        ChatMessage::tool_result("call-1", "tool answer")
+                    } else {
+                        ChatMessage::new(Role::Assistant, "an ordinary history entry")
+                    },
+                    ChatMessage::new(Role::Assistant, "latest answer"),
+                ])),
+                Box::new(swage_context::prompts::PromptsElement::new(vec![
+                    swage_config::prompt_rule::PromptRule {
+                        priority: 100,
+                        content: "instructions".into(),
+                        source_level: swage_config::HierarchyLevel::Global,
+                        file_path: "instructions.md".into(),
+                    },
+                ])),
+                Box::new(swage_context::skills::SkillsElement::new(vec![
+                    swage_context::skills::ActiveSkill {
+                        name: "review".into(),
+                        instructions: "Review for correctness.".into(),
+                        source_directory: "skills/review".into(),
+                        level: swage_config::HierarchyLevel::Global,
+                        is_agent_level: true,
+                        activation_order: 0,
+                    },
+                ])),
+            ];
+            if enriched {
+                elements.push(Box::new(swage_context::memory::MemoryIndexElement::new(
+                    Some("memory content".into()),
+                    vec![],
+                )));
+                elements.push(Box::new(Element("surfaces", "surface content")));
+                elements.push(Box::new(BriefingElement::new(ResolvedNamedElement {
+                    name: "briefing".into(),
+                    level: swage_config::HierarchyLevel::Global,
+                    path: "briefing.md".into(),
+                    content: "Owner {{owner}}; {{unset}}".into(),
+                })));
+            }
+            let config = swage_config::model::ContextConfig {
+                budget,
+                ..Default::default()
+            };
+            let kernel = || {
+                if name == "default" {
+                    swage_context::assembly::default_assembly_with_variables(
+                        &elements, &config, &tokeniser, &variables,
+                    )
+                } else {
+                    swage_context::js_assembly::assemble_named(
+                        name,
+                        (name == "ordered").then_some(path.as_path()),
+                        &elements,
+                        &config,
+                        &tokeniser,
+                        &variables,
+                    )
+                }
+            };
+            let expected = kernel();
+            let actual = slot
+                .context_program(&elements, &variables, &tokeniser, name, &config, || {
+                    assert_ne!(
+                        name, "default",
+                        "the shipped default must compose without the kernel"
+                    );
+                    kernel()
+                })
+                .expect("the shipped handler serves");
+            // Constructors stamp assembly-local identities and timestamps.
+            // Compare every provider-facing field, including structured content,
+            // tool correlation and assistant tool calls, rather than those stamps.
+            let messages = |messages: &[ChatMessage]| {
+                messages
+                    .iter()
+                    .map(|message| {
+                        let mut value = serde_json::to_value(message).unwrap();
+                        let object = value.as_object_mut().unwrap();
+                        object.remove("id");
+                        object.remove("created_at");
+                        value
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                messages(&actual.messages),
+                messages(&expected.messages),
+                "{name}, budget={budget:?}"
+            );
+            let report = |mut report: swage_context::report::AssemblyReport| {
+                report.duration = std::time::Duration::ZERO;
+                serde_json::to_value(report).unwrap()
+            };
+            assert_eq!(
+                report(actual.report),
+                report(expected.report),
+                "{name}, budget={budget:?}"
+            );
+        }
+    }
+
+    async fn context_report_slot(script: &str) -> PluginSlot {
+        let manifest = PluginManifest::parse(
+            r#"
+            name = "report-composer"
+            version = "1"
+            description = "Composes context."
+            script = "plugin.js"
+            grants = ["context"]
+            [[provides.slots]]
+            name = "context_program"
+            "#,
+        )
+        .unwrap();
+        let runtime = PluginRuntime::start(manifest, script.to_owned())
+            .await
+            .unwrap();
+        PluginSlot::new(
+            "report-composer".into(),
+            runtime,
+            Arc::new(SummarisingHost::default()),
+            context(),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn context_report_retains_host_compactions_without_a_plugin_report() {
+        let composer = context_report_slot(
+            r#"swage.provide.slot("context_program", async (input) => {
+                let messages = input.elements[0].messages;
+                for (const budget of [1, 1000]) {
+                    const result = await swage.context({ operation: "compact_history", messages, budget });
+                    messages = result.messages;
+                }
+                return { messages };
+            });"#,
+        )
+        .await;
+        let history = vec![
+            ChatMessage::new(Role::User, "old question"),
+            ChatMessage::new(Role::Assistant, "old answer"),
+            ChatMessage::new(Role::User, "recent question"),
+            ChatMessage::new(Role::Assistant, "recent answer"),
+        ];
+        let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("gpt-4o");
+        let compactor = swage_context::compaction::TruncationCompactor::new();
+        let (compacted, first) = compactor.compact(history.clone(), 1, &tokeniser);
+        let (_, second) = compactor.compact(compacted, 1000, &tokeniser);
+        assert!(first.messages_removed > 0);
+        let output = composer
+            .context_program(
+                &[Box::new(History(history))],
+                &Default::default(),
+                &tokeniser,
+                "default",
+                &Default::default(),
+                || panic!("no named assembly requested"),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&output.report.compaction_applied).unwrap(),
+            serde_json::to_value([first, second]).unwrap(),
+            "the report records every host compaction in call order, even without a plugin report"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn context_report_replaces_plugin_claims_with_host_facts() {
+        let mut claimed = swage_context::report::AssemblyReport::new("default");
+        claimed.budget = Some(999);
+        let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("gpt-4o");
+        let (_, invented) = swage_context::compaction::TruncationCompactor::new().compact(
+            vec![ChatMessage::new(Role::User, "never submitted to the host")],
+            1,
+            &tokeniser,
+        );
+        claimed.compaction_applied.push(invented);
+        let composer = context_report_slot(&format!(
+            r#"swage.provide.slot("context_program", () => ({{
+                messages: [{{ role: "user", content: "hello" }}], report: {}
+            }}));"#,
+            serde_json::to_string(&claimed).unwrap(),
+        ))
+        .await;
+        let config = swage_config::model::ContextConfig {
+            budget: Some(50),
+            ..Default::default()
+        };
+        let output = composer
+            .context_program(
+                &[],
+                &Default::default(),
+                &tokeniser,
+                "default",
+                &config,
+                || panic!("no named assembly requested"),
+            )
+            .unwrap();
+        assert_eq!(
+            json!({ "budget": output.report.budget, "compaction_applied": output.report.compaction_applied }),
+            json!({ "budget": 50, "compaction_applied": [] }),
+            "configured budget and served compactions override plugin claims"
+        );
+        assert_eq!(
+            output.report.total_tokens,
+            tokeniser.count_messages(&output.messages)
+        );
+        assert_eq!(
+            output.report.budget_remaining,
+            Some(50 - output.report.total_tokens as isize)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_plugin_context_program_composes_the_messages_over_the_elements() {
         let composer = slot(
             "composer",
@@ -945,7 +1257,14 @@ mod tests {
             )
         };
         let output = composer
-            .context_program(&elements, &variables, &tokeniser, kernel)
+            .context_program(
+                &elements,
+                &variables,
+                &tokeniser,
+                "default",
+                &swage_config::ResolvedConfig::default().context,
+                kernel,
+            )
             .expect("composes");
         assert_eq!(output.messages.len(), 4);
         assert_eq!(output.messages[0].role(), Role::System);
@@ -976,7 +1295,14 @@ mod tests {
         )
         .await;
         let error = lossy
-            .context_program(&elements, &variables, &tokeniser, kernel)
+            .context_program(
+                &elements,
+                &variables,
+                &tokeniser,
+                "default",
+                &swage_config::ResolvedConfig::default().context,
+                kernel,
+            )
             .expect_err("refused");
         assert!(
             error.contains("message 1 of the composition is a tool result without its call"),
@@ -997,7 +1323,14 @@ mod tests {
         let variables = std::collections::BTreeMap::new();
         let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("gpt-4o");
         let error = slot
-            .context_program(&elements, &variables, &tokeniser, || unreachable!())
+            .context_program(
+                &elements,
+                &variables,
+                &tokeniser,
+                "default",
+                &swage_config::ResolvedConfig::default().context,
+                || unreachable!(),
+            )
             .expect_err("declines");
         assert!(error.contains("needs the multi-thread runtime"), "{error}");
     }

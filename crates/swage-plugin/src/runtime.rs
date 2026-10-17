@@ -56,6 +56,15 @@ pub trait PluginHost: Send + Sync {
             message: "this host answers no completions".into(),
         })
     }
+    /// Context composition operations, under the `context` grant. Hosts
+    /// without a turn's assembly inputs refuse the operation.
+    async fn context(&self, request: Value) -> Result<Value, HostCallFailure> {
+        let _ = request;
+        Err(HostCallFailure {
+            name: "HostCapabilityError".into(),
+            message: "this host answers no context operations".into(),
+        })
+    }
     /// A line the plugin wants in the host's log.
     fn log(&self, message: &str);
 }
@@ -454,6 +463,10 @@ fn host_shim(manifest: &PluginManifest) -> String {
         swage.complete = async (request) =>
             unwrap(await door.call("complete", JSON.stringify(request === undefined ? {} : request)));
     }
+    if (__GRANT_CONTEXT__) {
+        swage.context = async (request) =>
+            unwrap(await door.call("context", JSON.stringify(request)));
+    }
     Object.defineProperty(globalThis, "swage", {
         value: Object.freeze(swage), configurable: false, enumerable: false, writable: false,
     });
@@ -491,6 +504,14 @@ fn host_shim(manifest: &PluginManifest) -> String {
     SHIM.replace(
         "__GRANT_TOOLS__",
         if manifest.grants(HostGrant::Tools) {
+            "true"
+        } else {
+            "false"
+        },
+    )
+    .replace(
+        "__GRANT_CONTEXT__",
+        if manifest.grants(HostGrant::Context) {
             "true"
         } else {
             "false"
@@ -621,6 +642,16 @@ pub(crate) async fn answer_host_call(
                 Err(refusal) => failure(&refusal.name, refusal.message),
             }
         }
+        "context" if grants.contains(&HostGrant::Context) => {
+            let request: Value = match serde_json::from_str(payload) {
+                Ok(request) => request,
+                Err(error) => return failure("TypeError", error.to_string()),
+            };
+            match host.context(request).await {
+                Ok(value) => ok(value),
+                Err(refusal) => failure(&refusal.name, refusal.message),
+            }
+        }
         "log" => {
             let message: String =
                 serde_json::from_str(payload).unwrap_or_else(|_| payload.to_owned());
@@ -743,6 +774,53 @@ mod tests {
             .await
             .expect("starts");
         (runtime, Arc::new(RecordingHost::default()))
+    }
+
+    #[tokio::test]
+    async fn context_operations_require_a_grant_at_both_doors() {
+        struct ContextHost;
+        #[async_trait]
+        impl PluginHost for ContextHost {
+            async fn call_tool(&self, _: &str, _: Value) -> Result<Value, HostCallFailure> {
+                unreachable!()
+            }
+            async fn context(&self, request: Value) -> Result<Value, HostCallFailure> {
+                Ok(json!({ "operation": request["operation"] }))
+            }
+            fn log(&self, _: &str) {}
+        }
+        for (grants, available) in [("", false), ("\"context\"", true)] {
+            let runtime = PluginRuntime::start(
+                manifest(grants, ""),
+                r#"swage.provide.tool("probe", async () => ({
+                    available: typeof swage.context === "function",
+                    answer: typeof swage.context === "function"
+                        ? await swage.context({ operation: "count_messages", messages: [] }) : null,
+                }));"#
+                    .to_owned(),
+            )
+            .await
+            .unwrap();
+            let result = runtime
+                .invoke_tool("probe", &json!({}), &context(), Arc::new(ContextHost))
+                .await
+                .unwrap();
+            assert_eq!(result["available"], available);
+            if available {
+                assert_eq!(result["answer"]["operation"], "count_messages");
+            }
+        }
+        let refused: Value = serde_json::from_str(
+            &answer_host_call(
+                &[],
+                &ContextHost,
+                "context",
+                r#"{"operation":"count_messages","messages":[]}"#,
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(refused["error"]["name"], "HostCapabilityError");
     }
 
     #[tokio::test]

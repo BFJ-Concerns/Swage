@@ -16,6 +16,67 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ts_rs::TS;
 
+/// Pure context operations available through the `context` host grant.
+/// A named assembly is the one selected by the turn, never a path supplied
+/// by the plugin. Messages use the conversation's lossless JSON shape.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ContextOperation {
+    CountMessages {
+        #[ts(type = "unknown[]")]
+        messages: Vec<Value>,
+    },
+    CompactHistory {
+        #[ts(type = "unknown[]")]
+        messages: Vec<Value>,
+        budget: usize,
+    },
+    NamedAssembly,
+}
+
+/// The result of compacting history through the context host function.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct ContextCompactionOutput {
+    #[ts(type = "unknown[]")]
+    pub messages: Vec<Value>,
+    pub record: crate::client::context::CompactionRecord,
+}
+
+/// One context element, with its original and session-rendered messages.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct ContextProgramElement {
+    pub name: String,
+    pub priority: i32,
+    #[ts(type = "unknown[]")]
+    pub messages: Vec<Value>,
+    #[ts(type = "unknown[]")]
+    pub rendered_messages: Vec<Value>,
+    pub report: crate::client::context::ElementReport,
+}
+
+/// The input of a plugin's context-program slot.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct ContextProgramInput {
+    pub elements: Vec<ContextProgramElement>,
+    pub variables: std::collections::BTreeMap<String, String>,
+    pub assembly_name: String,
+    pub budget: Option<usize>,
+}
+
+/// A context program's composition and optional account of that composition.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct ContextProgramOutput {
+    #[ts(type = "unknown[]")]
+    pub messages: Vec<Value>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub report: Option<crate::client::context::AssemblyReport>,
+}
+
 /// The environment variable that names the socket the process connects to.
 pub const PLUGIN_SOCKET_ENV: &str = "SWAGE_PLUGIN_SOCKET";
 
@@ -122,4 +183,8 @@ pub enum PluginProcessMessage {
 pub struct PluginProcessSurface {
     request: PluginProcessRequest,
     message: PluginProcessMessage,
+    context_operation: ContextOperation,
+    context_compaction_output: ContextCompactionOutput,
+    context_program_input: ContextProgramInput,
+    context_program_output: ContextProgramOutput,
 }
