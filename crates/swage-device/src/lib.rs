@@ -454,6 +454,7 @@ mod tests {
             session_id: "s".into(),
             working_directory: workspace.to_path_buf(),
             allowed_paths: vec![],
+            tool_output_directory: None,
             user_info: None,
             call_id: None,
             turn_id: None,

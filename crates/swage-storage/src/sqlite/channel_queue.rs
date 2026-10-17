@@ -146,6 +146,22 @@ impl ChannelQueueStore for SqliteStorage {
         .await
     }
 
+    async fn list_pending_channel_messages(
+        &self,
+    ) -> Result<Vec<ChannelInboundMessage>, StorageError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, integration, account, conversation, external_id, sender, content,
+                        state, discard_reason, turn_id, received_at, presented_at
+                 FROM channel_inbound_messages
+                 WHERE state = 'pending'
+                   AND NOT EXISTS (SELECT 1 FROM turn_queue_channel_messages q WHERE q.message_id = channel_inbound_messages.id)
+                 ORDER BY received_at ASC, rowid ASC",
+            )?;
+            stmt.query_map([], row_to_channel_message)?.collect()
+        }).await
+    }
+
     async fn list_pending_channel_origins(
         &self,
     ) -> Result<Vec<PendingChannelOrigin>, StorageError> {

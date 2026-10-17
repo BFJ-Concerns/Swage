@@ -1235,6 +1235,7 @@ async fn run_body(
                 Some(run.id),
                 Vec::new(),
                 crate::turn::TurnAttendance::Unattended,
+                Vec::new(),
             )
             .await?;
             return Ok(RunOutcome::Queued);
@@ -1459,7 +1460,10 @@ async fn deliver_run_output(
         state,
         session_id,
         crate::channel_gateway::DeliveryAttribution {
-            run_id: Some(run_id),
+            schedule_run: Some(crate::channel_gateway::ScheduleRunAttribution {
+                run_id,
+                schedule_id: schedule.id,
+            }),
             turn_id: Some(turn_id),
         },
         &targets,

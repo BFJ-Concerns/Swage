@@ -704,6 +704,15 @@ pub async fn create_channel_link_code(
     ))
 }
 
+/// `GET /api/onboarding/channels/link-codes` — read valid unredeemed codes.
+pub async fn list_channel_link_codes(
+    State(state): State<AppState>,
+) -> Result<Json<channel_wire::ChannelLinkCodeListResponse>, ApiError> {
+    Ok(Json(
+        crate::onboarding::list_channel_link_codes(&state).await?,
+    ))
+}
+
 /// `POST /api/onboarding/devices/pairing-codes` — issue a one-time device pairing code.
 pub async fn create_device_pairing_code(
     State(state): State<AppState>,
@@ -2190,6 +2199,61 @@ mod tests {
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn channel_link_code_list_uses_declared_response_and_preserves_array_body() {
+        let root = tempfile::tempdir().unwrap();
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::open(&root.path().join("codes.db")).unwrap());
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            Arc::new(MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let helper_response: channel_wire::ChannelLinkCodeListResponse =
+            crate::onboarding::list_channel_link_codes(&state)
+                .await
+                .unwrap();
+        assert!(helper_response.0.is_empty());
+        let response: Json<channel_wire::ChannelLinkCodeListResponse> =
+            list_channel_link_codes(State(state.clone())).await.unwrap();
+        assert_eq!(
+            body_json(response.into_response()).await,
+            serde_json::json!([])
+        );
+
+        let issued = crate::onboarding::create_channel_link_code(
+            &state,
+            channel_wire::CreateChannelLinkCodeRequest {
+                integration: swage_protocol::client::delivery::ExternalChannelIntegration::Telegram,
+                topic_id: None,
+                agent_id: None,
+                home_target: None,
+            },
+        )
+        .await
+        .unwrap();
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/onboarding/channels/link-codes")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(response).await,
+            serde_json::json!([{
+                "link_code": issued.link_code,
+                "expires_at": issued.expires_at,
+            }]),
+        );
     }
 
     #[test]
