@@ -716,9 +716,11 @@ pub async fn list_schedule_runs(
     schedule_id: Uuid,
 ) -> Result<wire::ScheduleRunListResponse, GatewayError> {
     let runs = state.storage.list_schedule_runs(schedule_id).await?;
-    Ok(wire::ScheduleRunListResponse {
-        runs: runs.into_iter().map(map_run).collect(),
-    })
+    let mut accounts = Vec::with_capacity(runs.len());
+    for run in runs {
+        accounts.push(run_account(state, run).await?);
+    }
+    Ok(wire::ScheduleRunListResponse { runs: accounts })
 }
 
 /// Fire a schedule immediately, regardless of its next occurrence.
@@ -732,7 +734,9 @@ pub async fn trigger_schedule(
 ) -> Result<wire::TriggerScheduleResponse, GatewayError> {
     let schedule = get_schedule(state, schedule_id).await?;
     let run = execute_schedule(state, &schedule, ScheduleRunTrigger::Manual, None).await?;
-    Ok(wire::TriggerScheduleResponse { run: map_run(run) })
+    Ok(wire::TriggerScheduleResponse {
+        run: run_account(state, run).await?,
+    })
 }
 
 async fn get_schedule(state: &AppState, schedule_id: Uuid) -> Result<Schedule, GatewayError> {
@@ -2366,8 +2370,61 @@ fn declared_criteria(gate: &GateConfig) -> Option<&str> {
         .filter(|criteria| !criteria.is_empty())
 }
 
-fn map_run(run: ScheduleRun) -> wire::ScheduleRun {
+/// A run as the API answers it: the record, with the delivery records it
+/// left read back under its id — every routed destination with its
+/// outcome, so a reader sees where the output went without the store.
+async fn run_account(
+    state: &AppState,
+    run: ScheduleRun,
+) -> Result<wire::ScheduleRun, GatewayError> {
+    let deliveries = state
+        .storage
+        .list_delivery_records_by_run(run.id)
+        .await?
+        .into_iter()
+        .map(delivery_view)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(map_run(run, deliveries))
+}
+
+/// A delivery record as the run's account shows it. The no-delivery
+/// record's target is the `no_delivery` marker, read as no destination by
+/// its kind; any other target is read as the destination it names, and one
+/// that cannot be — like a status outside the record's vocabulary — is a
+/// corrupt record the store wrote, refused as such rather than shown as
+/// something it is not.
+fn delivery_view(
+    record: swage_storage::DeliveryRecord,
+) -> Result<wire::ScheduleRunDelivery, GatewayError> {
+    let corrupt = |what: &str, detail: String| {
+        GatewayError::Storage(swage_core::StorageError::Corruption {
+            message: format!("delivery record {} carries {what}: {detail}", record.id),
+        })
+    };
+    let outcome = wire::DeliveryOutcome::from_recorded(&record.status)
+        .ok_or_else(|| corrupt("an unknown status", record.status.clone()))?;
+    let target = match record
+        .target
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("no_delivery") => None,
+        _ => Some(
+            serde_json::from_value(record.target.clone())
+                .map_err(|error| corrupt("an unreadable target", error.to_string()))?,
+        ),
+    };
+    Ok(wire::ScheduleRunDelivery {
+        target,
+        outcome,
+        error: record.error,
+        delivered_at: record.delivered_at,
+    })
+}
+
+fn map_run(run: ScheduleRun, deliveries: Vec<wire::ScheduleRunDelivery>) -> wire::ScheduleRun {
     wire::ScheduleRun {
+        deliveries,
         overlap_policy: run.overlap_policy,
         task_outcome: run.task_outcome,
         id: run.id,
@@ -2391,6 +2448,147 @@ fn map_run(run: ScheduleRun) -> wire::ScheduleRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The run listing answers each run with the delivery records it left:
+    /// every destination with its outcome, or the one no-delivery record.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_run_listing_carries_each_runs_delivery_records() {
+        use swage_storage::{DeliveryStore, ScheduleStore, SessionStore, TopicStore};
+        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let state = crate::test_support::state(Arc::clone(&storage));
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(swage_storage::fixtures::new_session(topic.id))
+            .await
+            .unwrap();
+        let schedule = storage
+            .create_schedule(NewSchedule {
+                id: Uuid::new_v4(),
+                message: "Deliver the digest.".into(),
+                overlap_policy: swage_storage::model::OverlapPolicy::Skip,
+                pending_cap: 1,
+                status: ScheduleStatus::Active,
+                kind: ScheduleKind::Interval,
+                expression: "every 5 minutes".into(),
+                session_policy: SessionPolicy::Continuation {
+                    session_id: session.id,
+                },
+                creator: ScheduleCreator::User,
+                delivery_routing: serde_json::json!({}),
+                gate: None,
+                next_run_at: None,
+                last_run_at: None,
+            })
+            .await
+            .unwrap();
+        let delivered = storage
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule.id,
+                ScheduleRunTrigger::Tick,
+                None,
+                "Deliver the digest.",
+            ))
+            .await
+            .unwrap();
+        // One run of a schedule is in flight at a time: settle the first
+        // before the next is recorded.
+        storage
+            .update_schedule_run(
+                delivered.id,
+                swage_storage::model::ScheduleRunUpdate {
+                    state: Some(ScheduleRunState::Completed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let undelivered = storage
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule.id,
+                ScheduleRunTrigger::Tick,
+                None,
+                "Deliver the digest.",
+            ))
+            .await
+            .unwrap();
+        for (run_id, target, status, error) in [
+            (
+                delivered.id,
+                serde_json::json!({"kind": "local_storage"}),
+                "sent",
+                None,
+            ),
+            (
+                delivered.id,
+                serde_json::json!({"kind": "webhook", "url": "https://example.test/hook"}),
+                "failed",
+                Some("connection refused"),
+            ),
+        ] {
+            storage
+                .create_delivery_record(swage_storage::NewDeliveryRecord {
+                    session_id: Some(session.id),
+                    run_id: Some(run_id),
+                    turn_id: None,
+                    target,
+                    content: "the digest".into(),
+                    status: status.into(),
+                    error: error.map(str::to_owned),
+                })
+                .await
+                .unwrap();
+        }
+        crate::channel_gateway::record_no_delivery(&state, undelivered.id, "gate skip")
+            .await
+            .unwrap();
+
+        let listing = list_schedule_runs(&state, schedule.id).await.unwrap();
+        let account = |id: Uuid| listing.runs.iter().find(|run| run.id == id).unwrap();
+        let first = account(delivered.id);
+        assert_eq!(first.deliveries.len(), 2);
+        assert_eq!(
+            first.deliveries[0].target,
+            Some(swage_protocol::client::delivery::DeliveryTarget::LocalStorage)
+        );
+        assert_eq!(first.deliveries[0].outcome, wire::DeliveryOutcome::Sent);
+        assert_eq!(first.deliveries[1].outcome, wire::DeliveryOutcome::Failed);
+        assert_eq!(
+            first.deliveries[1].error.as_deref(),
+            Some("connection refused")
+        );
+        let second = account(undelivered.id);
+        assert_eq!(second.deliveries.len(), 1);
+        assert_eq!(second.deliveries[0].target, None);
+        assert_eq!(
+            second.deliveries[0].outcome,
+            wire::DeliveryOutcome::NotDelivered
+        );
+        assert_eq!(second.deliveries[0].error.as_deref(), Some("gate skip"));
+
+        // A record whose target the store cannot read is refused as corrupt,
+        // never shown as a run that delivered nowhere.
+        storage
+            .create_delivery_record(swage_storage::NewDeliveryRecord {
+                session_id: Some(session.id),
+                run_id: Some(delivered.id),
+                turn_id: None,
+                target: serde_json::json!({"kind": "channel", "integration": "dev_dm"}),
+                content: "the digest".into(),
+                status: "sent".into(),
+                error: None,
+            })
+            .await
+            .unwrap();
+        let refused = list_schedule_runs(&state, schedule.id).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(GatewayError::Storage(swage_core::StorageError::Corruption { message }))
+                    if message.contains("unreadable target")
+            ),
+            "{refused:?}"
+        );
+    }
 
     #[test]
     fn parses_natural_language_interval() {

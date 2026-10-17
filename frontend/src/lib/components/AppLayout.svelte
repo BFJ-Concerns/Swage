@@ -185,6 +185,8 @@
   // The surface the URL names, if any: the pane opens it and keeps the
   // address in step when the user opens another.
   const routedSurfaceId = $derived(route?.surfaceId ?? null);
+  // The turn the URL names, if any: the transcript opens at it.
+  const routedTurnId = $derived(route?.turnId ?? null);
 
   function closeSettings(): void {
     onNavigate?.(activeConversation?.id ? conversationPath(activeConversation.id) : "/");
@@ -291,7 +293,7 @@
     {#if settingsTopicSlug}
       <TopicSettingsPage topic={settingsTopic} tab={settingsTopicTab ?? undefined} {onNavigate} onTopicsChanged={() => topicStore?.loadTopics()} />
     {:else}
-      <SettingsPage tab={settingsTab ?? undefined} topicId={currentTopic?.id ?? null} topics={topicStore?.topics ?? []} memoryPage={route?.settingsMemoryPage ?? null} {onSettingsSaved} />
+      <SettingsPage tab={settingsTab ?? undefined} topicId={currentTopic?.id ?? null} topics={topicStore?.topics ?? []} memoryPage={route?.settingsMemoryPage ?? null} {onSettingsSaved} {onNavigate} />
     {/if}
   </div>
 {:else if libraryMode}
@@ -342,7 +344,7 @@
     />
   </main>
 {:else if activeSurface === "operator"}
-  <main class="operator"><OperatorDashboard /></main>
+  <main class="operator"><OperatorDashboard {onNavigate} /></main>
 {:else if activeSurface === "surfaces"}
   <!--
     The work surface carries the control channel: the same channel markup and
@@ -363,12 +365,12 @@
         <p class="no-session">Surfaces belong to a session: send the first message to start one, then its surfaces open here.</p>
       {/if}
     </div>
-    <ConversationChannel {conversationStore} {connectionStore} {streamingStore} {onRetry} {displayPreferences} {modelOptions} {modelCatalogueReady} {defaultModelId} {agentDefinitions} bind:selectedAgentId {onNavigate} {onNewConversation} />
+    <ConversationChannel {conversationStore} {connectionStore} {streamingStore} {onRetry} {displayPreferences} {modelOptions} {modelCatalogueReady} {defaultModelId} {agentDefinitions} bind:selectedAgentId {onNavigate} {onNewConversation} focusTurnId={routedTurnId} />
   </main>
 {:else}
   <main class="conversation">
     <aside><ConversationList store={conversationStore} onNewConversation={() => onNewConversation?.(selectedAgentId || undefined)} /></aside>
-    <ConversationChannel {conversationStore} {connectionStore} {streamingStore} {onRetry} {displayPreferences} {modelOptions} {modelCatalogueReady} {defaultModelId} {agentDefinitions} bind:selectedAgentId {onNavigate} {onNewConversation} />
+    <ConversationChannel {conversationStore} {connectionStore} {streamingStore} {onRetry} {displayPreferences} {modelOptions} {modelCatalogueReady} {defaultModelId} {agentDefinitions} bind:selectedAgentId {onNavigate} {onNewConversation} focusTurnId={routedTurnId} />
   </main>
 {/if}
 

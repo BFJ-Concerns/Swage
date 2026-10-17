@@ -1426,6 +1426,31 @@
         ],
         "type": "object"
       },
+      "DeliveryOutcome": {
+        "description": "How one routed destination of a run's output ended, as the delivery\npath recorded it.",
+        "oneOf": [
+          {
+            "const": "sent",
+            "description": "The destination took the output.",
+            "type": "string"
+          },
+          {
+            "const": "not_sent",
+            "description": "The destination is a deliberate no-op (a development channel).",
+            "type": "string"
+          },
+          {
+            "const": "failed",
+            "description": "The attempt failed; `error` says how.",
+            "type": "string"
+          },
+          {
+            "const": "not_delivered",
+            "description": "The run delivered nowhere; `error` says why.",
+            "type": "string"
+          }
+        ]
+      },
       "DeliveryRoutingRequest": {
         "description": "Where output should be routed once a run completes.\n\n`deliver_to_origin` defaults to true for channel-initiated turns, where\nan origin always exists. Callers without an origin (schedules, manual\nAPI calls) must set it false or target resolution errors.",
         "properties": {
@@ -4011,6 +4036,13 @@
             "format": "date-time",
             "type": "string"
           },
+          "deliveries": {
+            "description": "Every destination the run's output was routed to with its outcome,\nin delivery order, or the one record of a run that delivered\nnowhere; empty while the run has not delivered.",
+            "items": {
+              "$ref": "#/components/schemas/ScheduleRunDelivery"
+            },
+            "type": "array"
+          },
           "error_message": {
             "type": [
               "string",
@@ -4109,7 +4141,43 @@
           "trigger",
           "state",
           "executed_message",
-          "created_at"
+          "created_at",
+          "deliveries"
+        ],
+        "type": "object"
+      },
+      "ScheduleRunDelivery": {
+        "description": "One destination of a run's output and how it ended — a delivery record\nread back under the run it belongs to.",
+        "properties": {
+          "delivered_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "error": {
+            "description": "Why the output was not sent, failed, or was not delivered.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/DeliveryOutcome"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeliveryTarget"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The destination; absent for the record a run leaves when it\ndelivered nowhere."
+          }
+        },
+        "required": [
+          "outcome",
+          "delivered_at"
         ],
         "type": "object"
       },

@@ -18,6 +18,8 @@
   import type { Schedule } from "../protocol/Schedule";
   import type { ScheduleRun } from "../protocol/ScheduleRun";
   import { passedOneShot, runUnsettled, UNSETTLED_RUN_REFRESH_MS } from "../one-shot-runs";
+  import { describeDeliveryDestination, describeDeliveryOutcome } from "../run-deliveries";
+  import { conversationPath, turnPath } from "../router";
   import type { ScheduleCreator } from "../protocol/ScheduleCreator";
   import type { ScheduleSpec } from "../protocol/ScheduleSpec";
   import type { SessionPolicy } from "../protocol/SessionPolicy";
@@ -27,9 +29,24 @@
     topicId: string | null;
     sessionId: string | null;
     topics?: Topic[];
+    /** Opens an address in the app; absent, a run's link is a plain link. */
+    onNavigate?: (path: string) => void;
   }
 
-  let { topicId, sessionId, topics = [] }: Props = $props();
+  let { topicId, sessionId, topics = [], onNavigate }: Props = $props();
+
+  // A run that reached a session links to that conversation, at the run's
+  // turn when the turn is recorded.
+  function runLink(run: ScheduleRun): string | null {
+    if (!run.session_id) return null;
+    return run.turn_id ? turnPath(run.session_id, run.turn_id) : conversationPath(run.session_id);
+  }
+
+  function followLink(event: MouseEvent, path: string): void {
+    if (!onNavigate) return;
+    event.preventDefault();
+    onNavigate(path);
+  }
 
   let overlapPolicy = $state<"skip" | "queue" | "overlap">("skip");
   let pendingCap = $state(1);
@@ -595,6 +612,7 @@
         </div>
         <div class="run-history" aria-label={`Run history for ${schedule.message}`}>
           {#each runHistory(schedule.id) as run (run.id)}
+            {@const link = runLink(run)}
             <div class="run-row">
               <div class="run-head">
                 <span class="status status-run-{run.task_outcome ? "failed" : run.state}">{describeRunState(run)}</span>
@@ -607,6 +625,14 @@
               {#if run.output_text}<p class="run-detail">{run.output_text}</p>{/if}
               {#if run.task_outcome}<p class="run-detail error">{run.task_outcome}</p>{/if}
               {#if run.error_message}<p class="run-detail error">{run.error_message}</p>{/if}
+              {#if run.deliveries.length > 0}
+                <ul class="run-deliveries" aria-label="Deliveries">
+                  {#each run.deliveries as delivery, index (index)}
+                    <li class="run-delivery outcome-{delivery.outcome}">{describeDeliveryDestination(delivery.target)} — {describeDeliveryOutcome(delivery)}</li>
+                  {/each}
+                </ul>
+              {/if}
+              {#if link}<a class="run-link" href={link} onclick={(event) => followLink(event, link)}>Open conversation</a>{/if}
               <span class="run-time">{formatTime(run.created_at)}</span>
             </div>
           {:else}

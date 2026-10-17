@@ -259,6 +259,7 @@ describe("OperatorDashboard", () => {
           state: "skipped",
           skip_reason: "gate",
           executed_message: "Daily digest",
+          deliveries: [],
           scheduled_for: "2026-04-07T12:05:00Z",
           session_id: null,
           turn_id: null,
@@ -305,6 +306,7 @@ describe("OperatorDashboard", () => {
       state: "completed" as const,
       skip_reason: null,
       executed_message: "Daily digest",
+      deliveries: [],
       scheduled_for: "2026-04-07T12:05:00Z",
       session_id: "session-1",
       turn_id: null,
@@ -335,6 +337,56 @@ describe("OperatorDashboard", () => {
     const current = entries.find((node) => node.textContent?.includes("current output"));
     expect(earlier?.textContent).toContain("Ran an earlier brief: Review the inbox.");
     expect(current?.textContent).not.toContain("Ran an earlier brief");
+  });
+
+  it("shows a run's deliveries with their outcomes and links the run to its conversation", async () => {
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOverview());
+    const onNavigate = vi.fn();
+    vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValueOnce({
+      runs: [
+        {
+          id: "run-delivered",
+          overlap_policy: "skip" as const,
+          schedule_id: "schedule-1",
+          trigger: "tick" as const,
+          state: "completed" as const,
+          skip_reason: null,
+          executed_message: "Daily digest",
+          deliveries: [
+            { target: { kind: "local_storage" }, outcome: "sent", error: null, delivered_at: "2026-04-07T12:05:01Z" },
+            { target: { kind: "webhook", url: "https://example.test/hook" }, outcome: "failed", error: "connection refused", delivered_at: "2026-04-07T12:05:02Z" },
+          ],
+          scheduled_for: "2026-04-07T12:05:00Z",
+          session_id: "session-1",
+          turn_id: "turn-7",
+          gate: null,
+          output_text: "current output",
+          error_message: null,
+          created_at: "2026-04-07T12:05:00Z",
+          started_at: "2026-04-07T12:05:00Z",
+          completed_at: "2026-04-07T12:05:01Z",
+        },
+      ],
+    });
+
+    component = mount(OperatorDashboard, { target: document.body, props: { onNavigate } });
+    await settleUi();
+    const runsButton = Array.from(document.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Runs",
+    );
+    flushSync(() => runsButton!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await settleUi();
+
+    const entry = document.querySelector(".run-entry")!;
+    const outcomes = [...entry.querySelectorAll(".run-delivery")].map((node) => node.textContent?.replace(/\s+/g, " ").trim());
+    expect(outcomes).toEqual([
+      "local storage — sent",
+      "webhook https://example.test/hook — failed: connection refused",
+    ]);
+    const link = entry.querySelector<HTMLAnchorElement>("a.run-link")!;
+    expect(link.getAttribute("href")).toBe("/conversations/session-1/turns/turn-7");
+    link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    expect(onNavigate).toHaveBeenCalledWith("/conversations/session-1/turns/turn-7");
   });
 
   it("explains an empty devices card and how to pair a device", async () => {
@@ -390,6 +442,7 @@ describe("OperatorDashboard", () => {
           state: "completed_empty",
           skip_reason: null,
           executed_message: "Daily digest",
+          deliveries: [],
           scheduled_for: "2026-04-07T12:05:00Z",
           session_id: "session-1",
           turn_id: "turn-1",
@@ -418,7 +471,7 @@ describe("OperatorDashboard", () => {
   });
   it("schedule outcomes renders completed tool errors with an attention badge", async () => {
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOverview());
-    vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValue({ runs: [{ id: "errored-run", schedule_id: "schedule-1", trigger: "tick", state: "completed", executed_message: "Daily digest", overlap_policy: "skip", task_outcome: "Completed with errors: file_write (call-refused): rejected", output_text: "Prepared the digest; saving it failed.", created_at: "2026-04-07T12:05:00Z" }] });
+    vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValue({ runs: [{ id: "errored-run", schedule_id: "schedule-1", trigger: "tick", state: "completed", executed_message: "Daily digest", deliveries: [], overlap_policy: "skip", task_outcome: "Completed with errors: file_write (call-refused): rejected", output_text: "Prepared the digest; saving it failed.", created_at: "2026-04-07T12:05:00Z" }] });
     component = mount(OperatorDashboard, { target: document.body });
     await settleUi();
     const button = [...document.querySelectorAll("button")].find(node => node.textContent?.trim() === "Runs");
@@ -548,6 +601,7 @@ describe("passed one-shot cards", () => {
     overlap_policy: "skip",
     id: "older", schedule_id: schedule.id, trigger: "tick", state: "completed",
     executed_message: schedule.message, created_at: "2026-01-01T00:00:00Z",
+    deliveries: [],
   };
   const latest: ScheduleRun = {
     ...older, id: "latest", state: "failed", created_at: "2026-01-01T00:01:00Z",

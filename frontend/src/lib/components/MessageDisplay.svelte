@@ -125,9 +125,20 @@
     /** Injected by App.svelte — provides streaming state. */
     streamingStore?: StreamingStore;
     displayPreferences?: DisplayPreferences;
+    /**
+     * The turn the address names. The transcript scrolls to that turn's
+     * first message once it is on the page, and stops following the end
+     * so the reader stays there.
+     */
+    focusTurnId?: string | null;
   }
 
-  let { store, streamingStore, displayPreferences = DEFAULT_DISPLAY_PREFERENCES }: Props = $props();
+  let {
+    store,
+    streamingStore,
+    displayPreferences = DEFAULT_DISPLAY_PREFERENCES,
+    focusTurnId = null,
+  }: Props = $props();
 
   // ---- Auto-scroll ----------------------------------------------------------
 
@@ -153,10 +164,29 @@
     void streamedContent.length;
 
     if (!userScrolledUp && scrollEl) {
+      // The frame re-reads the pause: a focus on a named turn between the
+      // queueing and the frame must not be overruled by a scroll to the end.
       requestAnimationFrame(() => {
-        if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+        if (scrollEl && !userScrolledUp) scrollEl.scrollTop = scrollEl.scrollHeight;
       });
     }
+  });
+
+  // Open the transcript at the named turn: once its first message is on the
+  // page, scroll it into view and stop following the end. Each turn is
+  // focused once, so a later message arriving does not pull the reader back.
+  let focusedTurnId: string | null = null;
+  $effect(() => {
+    const turnId = focusTurnId;
+    void (store?.activeConversation?.messages?.length ?? 0);
+    if (!turnId || !scrollEl || focusedTurnId === turnId) return;
+    const target = Array.from(scrollEl.querySelectorAll<HTMLElement>("[data-turn-id]")).find(
+      (element) => element.getAttribute("data-turn-id") === turnId,
+    );
+    if (!target) return;
+    focusedTurnId = turnId;
+    userScrolledUp = true;
+    if (typeof target.scrollIntoView === "function") target.scrollIntoView({ block: "start" });
   });
 
   // ---- Derived display state ------------------------------------------------
@@ -306,6 +336,7 @@
         class:user={isPersonsMessage(message)}
         class:assistant={!isPersonsMessage(message)}
         class:platform={!isPersonsMessage(message) && message.role === "user"}
+        data-turn-id={message.turn_id ?? undefined}
         aria-label={isPersonsMessage(message) ? "Your message" : `${authorLabel(message)} message`}
       >
         <!-- The author label is real DOM text, not a CSS ::before — so it

@@ -5220,6 +5220,13 @@ impl swage_storage::store::DeliveryStore for MockStorage {
     ) -> Result<Vec<swage_storage::DeliveryRecord>, StorageError> {
         Ok(Vec::new())
     }
+
+    async fn list_delivery_records_by_run(
+        &self,
+        _run_id: Uuid,
+    ) -> Result<Vec<swage_storage::DeliveryRecord>, StorageError> {
+        Ok(Vec::new())
+    }
 }
 
 #[async_trait]

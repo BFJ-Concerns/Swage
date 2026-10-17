@@ -364,6 +364,49 @@ pub struct Schedule {
     pub updated_at: DateTime<Utc>,
 }
 
+/// How one routed destination of a run's output ended, as the delivery
+/// path recorded it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryOutcome {
+    /// The destination took the output.
+    Sent,
+    /// The destination is a deliberate no-op (a development channel).
+    NotSent,
+    /// The attempt failed; `error` says how.
+    Failed,
+    /// The run delivered nowhere; `error` says why.
+    NotDelivered,
+}
+
+impl DeliveryOutcome {
+    /// The outcome a delivery record's status names; `None` for a status
+    /// outside the record's vocabulary.
+    pub fn from_recorded(status: &str) -> Option<Self> {
+        match status {
+            "sent" => Some(Self::Sent),
+            "not_sent" => Some(Self::NotSent),
+            "failed" => Some(Self::Failed),
+            "not_delivered" => Some(Self::NotDelivered),
+            _ => None,
+        }
+    }
+}
+
+/// One destination of a run's output and how it ended — a delivery record
+/// read back under the run it belongs to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct ScheduleRunDelivery {
+    /// The destination; absent for the record a run leaves when it
+    /// delivered nowhere.
+    pub target: Option<crate::client::delivery::DeliveryTarget>,
+    pub outcome: DeliveryOutcome,
+    /// Why the output was not sent, failed, or was not delivered.
+    pub error: Option<String>,
+    pub delivered_at: DateTime<Utc>,
+}
+
 /// A recorded run: everything needed to reconstruct what happened.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
@@ -392,6 +435,10 @@ pub struct ScheduleRun {
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+    /// Every destination the run's output was routed to with its outcome,
+    /// in delivery order, or the one record of a run that delivered
+    /// nowhere; empty while the run has not delivered.
+    pub deliveries: Vec<ScheduleRunDelivery>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
