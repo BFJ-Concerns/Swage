@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use swage_core::StorageError;
 
-use crate::model::{InboundAudit, NewTurn, Turn, TurnIsolation, TurnState};
+use crate::model::{InboundAudit, NewTurn, Turn, TurnAttribution, TurnIsolation, TurnState};
 use crate::sqlite::SqliteStorage;
 use crate::store::TurnStore;
 
@@ -118,6 +118,30 @@ fn row_to_turn(row: &rusqlite::Row<'_>) -> rusqlite::Result<Turn> {
                 })?
         },
         failure_message: row.get(18)?,
+        attribution: {
+            let attended: Option<bool> = row.get(19)?;
+            let targets: Option<String> = row.get(20)?;
+            attended
+                .map(|attended| -> rusqlite::Result<TurnAttribution> {
+                    let delivery_targets = targets
+                        .as_deref()
+                        .map(serde_json::from_str)
+                        .transpose()
+                        .map_err(|e| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                20,
+                                rusqlite::types::Type::Text,
+                                Box::new(ParseError(e.to_string())),
+                            )
+                        })?
+                        .unwrap_or_default();
+                    Ok(TurnAttribution {
+                        attended,
+                        delivery_targets,
+                    })
+                })
+                .transpose()?
+        },
         created_at: parse_dt(&created)?,
         completed_at: completed.as_deref().map(parse_dt).transpose()?,
     })
@@ -171,7 +195,8 @@ impl TurnStore for SqliteStorage {
                 delegated_output_tokens: None,
                 execution_isolation: None,
                 failure_message: None,
-            })
+                            attribution: None,
+})
         })
         .await
     }
@@ -183,7 +208,8 @@ impl TurnStore for SqliteStorage {
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
                         structured_output, parent_turn_id,
                         delegated_input_tokens, delegated_output_tokens,
-                        isolation_kind, isolation_detail, failure_message
+                        isolation_kind, isolation_detail, failure_message,
+                        attended, delivery_targets
                  FROM turns WHERE id = ?1",
                 params![id.to_string()],
                 row_to_turn,
@@ -200,7 +226,8 @@ impl TurnStore for SqliteStorage {
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
                         structured_output, parent_turn_id,
                         delegated_input_tokens, delegated_output_tokens,
-                        isolation_kind, isolation_detail, failure_message
+                        isolation_kind, isolation_detail, failure_message,
+                        attended, delivery_targets
                  FROM turns WHERE thread_id = ?1
                  ORDER BY created_at ASC",
             )?;
@@ -217,7 +244,8 @@ impl TurnStore for SqliteStorage {
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
                         structured_output, parent_turn_id,
                         delegated_input_tokens, delegated_output_tokens,
-                        isolation_kind, isolation_detail, failure_message
+                        isolation_kind, isolation_detail, failure_message,
+                        attended, delivery_targets
                  FROM turns WHERE parent_turn_id = ?1
                  ORDER BY created_at ASC",
             )?;
@@ -296,7 +324,8 @@ impl TurnStore for SqliteStorage {
                         input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
                         structured_output, parent_turn_id,
                         delegated_input_tokens, delegated_output_tokens,
-                        isolation_kind, isolation_detail, failure_message
+                        isolation_kind, isolation_detail, failure_message,
+                        attended, delivery_targets
                  FROM turns WHERE state IN ('pending', 'processing', 'awaiting_approval', 'delegating') AND agent_id = ?1",
             )?;
             let rows = stmt.query_map(params![&agent_id], row_to_turn)?;

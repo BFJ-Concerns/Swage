@@ -306,6 +306,14 @@ mod tests {
             unimplemented!()
         }
 
+        async fn reissue_agent_message(
+            &self,
+            _id: Uuid,
+            _payload: serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+
         async fn list_by_correlation(
             &self,
             _correlation_id: Uuid,

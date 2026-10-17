@@ -4589,6 +4589,7 @@ impl TurnStore for MockStorage {
             delegated_output_tokens: None,
             execution_isolation: None,
             failure_message: None,
+            attribution: None,
         };
         self.db.lock().await.turns.insert(t.id, t.clone());
         Ok(t)
@@ -5495,6 +5496,24 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
                 parent_turn_id: None,
             })
             .await?;
+        // The drain records how the batch was started on the turn, as the
+        // real one does.
+        let attribution = swage_storage::model::TurnAttribution {
+            attended: queued.iter().any(|input| input.attended),
+            delivery_targets: queued
+                .iter()
+                .flat_map(|input| input.delivery_targets.clone())
+                .collect(),
+        };
+        let turn = {
+            let mut db = self.db.lock().await;
+            let stored = db
+                .turns
+                .get_mut(&turn.id)
+                .expect("the turn was just created");
+            stored.attribution = Some(attribution.clone());
+            stored.clone()
+        };
         let mut messages = Vec::new();
         for item in &queued {
             messages.push(
@@ -5517,11 +5536,8 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
             .turn_queue
             .retain(|item| item.session_id != session_id);
         Ok(Some(swage_storage::DrainedTurnQueue {
-            delivery_targets: queued
-                .iter()
-                .flat_map(|input| input.delivery_targets.clone())
-                .collect(),
-            attended: queued.iter().any(|input| input.attended),
+            delivery_targets: attribution.delivery_targets,
+            attended: attribution.attended,
             turn,
             messages,
             queued_ids,
@@ -5943,6 +5959,25 @@ impl swage_storage::store::AgentMessageStore for MockStorage {
                 id: id.to_string(),
             })?;
         message.payload = payload;
+        Ok(())
+    }
+    async fn reissue_agent_message(
+        &self,
+        id: Uuid,
+        payload: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let mut db = self.db.lock().await;
+        let message = db
+            .agent_messages
+            .get_mut(&id)
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "agent_message".into(),
+                id: id.to_string(),
+            })?;
+        message.payload = payload;
+        message.status = swage_core::MessageStatus::Pending;
+        message.failure_reason = None;
+        message.created_at = chrono::Utc::now();
         Ok(())
     }
     async fn find_delegate_for_thread(
@@ -21015,4 +21050,51 @@ async fn image_scheme_refusal_survives_an_audit_write_failure() {
         "{error}"
     );
     assert!(storage.db.lock().await.audit_events.is_empty());
+}
+
+/// A child's result is read from its fate, the error before any text it
+/// carries: a refusal that carried text reads as refused, a failure as
+/// failed, and only a result with no error as completed.
+#[tokio::test]
+async fn a_delegation_result_reads_its_fate_before_its_text() {
+    use swage_core::MessageKind;
+    use swage_storage::model::NewAgentMessage;
+    use swage_storage::store::AgentMessageStore;
+
+    let storage = MockStorage::new();
+    let result = |payload: serde_json::Value| async {
+        storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "worker".to_string(),
+                recipient_agent_id: "lead".to_string(),
+                kind: MessageKind::Result,
+                correlation_id: Some(Uuid::new_v4()),
+                payload,
+            })
+            .await
+            .unwrap()
+    };
+    let refused = result(serde_json::json!({
+        "error": "the delegated agent refused the task",
+        "refused": true,
+        "response": "I will not do that.",
+    }))
+    .await;
+    let rendered = super::detached_delivery::render_delegation_result(&refused);
+    assert!(
+        rendered.starts_with("Delegated agent worker refused the task:\nI will not do that."),
+        "{rendered}"
+    );
+    let failed =
+        result(serde_json::json!({ "error": "the tool broke", "response": "partial" })).await;
+    let rendered = super::detached_delivery::render_delegation_result(&failed);
+    assert!(
+        rendered.starts_with("Delegated agent worker failed: the tool broke:\npartial"),
+        "{rendered}"
+    );
+    let completed = result(serde_json::json!({ "response": "done" })).await;
+    assert!(
+        super::detached_delivery::render_delegation_result(&completed)
+            .starts_with("Delegated agent worker completed:\ndone")
+    );
 }

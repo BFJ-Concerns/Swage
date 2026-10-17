@@ -256,6 +256,23 @@ impl AgentMessageStore for SqliteStorage {
         .await
     }
 
+    async fn reissue_agent_message(
+        &self,
+        id: Uuid,
+        payload: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let payload_str = payload.to_string();
+        let now = Utc::now().to_rfc3339();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE agent_messages SET payload = ?1, created_at = ?2, status = 'pending', failure_reason = NULL WHERE id = ?3",
+                params![&payload_str, &now, id.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn find_delegate_for_thread(
         &self,
         thread_id: Uuid,
@@ -581,6 +598,46 @@ mod tests {
 
         let correlated = storage.list_by_correlation(correlation).await.unwrap();
         assert_eq!(correlated.len(), 2);
+    }
+
+    /// A message reissued at a restart is dated the restart, so an expiry
+    /// window its original time had already left does not take it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reissued_message_is_dated_now_and_outlives_its_original_expiry() {
+        let storage = make_storage().await;
+        let original = storage.create_agent_message(delegate_msg()).await.unwrap();
+        let id = original.id;
+        storage
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE agent_messages SET created_at = ?1 WHERE id = ?2",
+                    params![
+                        (Utc::now() - chrono::Duration::hours(2)).to_rfc3339(),
+                        id.to_string()
+                    ],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        storage
+            .reissue_agent_message(original.id, serde_json::json!({"task": "readdressed"}))
+            .await
+            .unwrap();
+        let expired = storage
+            .expire_stale_messages(std::time::Duration::from_secs(3600))
+            .await
+            .unwrap();
+        assert_eq!(expired, 0, "the reissued message is newer than the window");
+        let reissued = storage
+            .get_agent_message(original.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reissued.status, MessageStatus::Pending);
+        assert_eq!(reissued.payload["task"], "readdressed");
+        assert!(reissued.created_at > original.created_at);
     }
 
     #[tokio::test(flavor = "multi_thread")]
