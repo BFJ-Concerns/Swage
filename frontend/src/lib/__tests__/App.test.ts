@@ -11,6 +11,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
+import { UNSETTLED_RUN_REFRESH_MS } from "../one-shot-runs";
 import App from "../../App.svelte";
 import { createConversation, getConversation } from "../api/conversations";
 import type { WebSocketClient } from "../api/websocket";
@@ -154,6 +155,7 @@ describe("ambient channel control path", () => {
       unmount(component);
       component = undefined;
     }
+    vi.restoreAllMocks();
     document.body.replaceChildren();
     window.history.replaceState({}, "", "/");
   });
@@ -261,4 +263,91 @@ describe("ambient channel control path", () => {
     });
     expect(fetch).toHaveBeenCalledWith("/api/workflow-runs/run-route");
   });
+  function runResponse(id: string, state = "running") {
+    const ended = ["completed", "failed", "cancelled"].includes(state);
+    return new Response(JSON.stringify({ run: { id, state, interruptions: [], created_at: "2026-09-02T10:00:00Z", terminal_account: ended ? { ending: state === "failed" ? { ending: "threw", error: "timer threw" } : state === "cancelled" ? { ending: "cancelled" } : { ending: "returned" }, workers: { done: [], failed: [], cut_short: [], unsettled: [] }, settled_at: "2026-09-02T10:05:00Z" } : null }, journal: [] }), { status: 200 });
+  }
+
+  async function startRunView() {
+    window.history.replaceState({}, "", "/workflow-runs/run-polled");
+    component = mount(App, { target: document.body });
+    await vi.waitFor(() => expect(document.querySelector(".run .state")).not.toBeNull(), { timeout: 5000 });
+    vi.useFakeTimers();
+  }
+
+  it.each([["parked", "failed"], ["running", "cancelled"], ["running", "completed"]])("run view refreshes %s to %s and stops at its account", async (initial, terminal) => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(runResponse("run-polled", initial)).mockImplementation(async () => runResponse("run-polled", terminal));
+    try {
+      await startRunView();
+      // The initial read scheduled its timeout under the real clock.
+      // Re-entering the route below lets fake time own the refresh timer.
+      window.history.pushState({}, "", "/workflow-runs/run-polled-again");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+      fetch.mockReset().mockResolvedValueOnce(runResponse("run-polled-again", initial)).mockImplementation(async () => runResponse("run-polled-again", terminal));
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS);
+      expect(document.querySelector(".run .state")?.textContent).toBe(terminal);
+      expect(document.querySelector(".ending-line")?.textContent).toBe(terminal === "failed" ? "Threw — timer threw" : terminal === "cancelled" ? "Cancelled" : "Returned");
+      expect(document.body.textContent).not.toContain("This run has not ended yet");
+      const calls = fetch.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS * 3);
+      expect(fetch).toHaveBeenCalledTimes(calls);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("run view retries a failed refresh and receives the terminal account", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => runResponse("run-polled"));
+    try {
+      await startRunView();
+      window.history.pushState({}, "", "/workflow-runs/run-retry");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+      fetch.mockReset().mockResolvedValueOnce(runResponse("run-retry")).mockRejectedValueOnce(new Error("refresh unavailable")).mockImplementation(async () => runResponse("run-retry", "completed"));
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS);
+      expect(document.querySelector('.run [role="alert"]')?.textContent ?? "").toContain("refresh unavailable");
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS);
+      expect(document.querySelector(".ending-line")?.textContent).toBe("Returned");
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("run view drops an old route's pending read and clears its timer", async () => {
+    let release!: (response: Response) => void;
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => runResponse("run-polled"));
+    try {
+      await startRunView();
+      window.history.pushState({}, "", "/workflow-runs/run-pending");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+      fetch.mockReset().mockResolvedValueOnce(runResponse("run-pending")).mockImplementationOnce(() => new Promise<Response>((resolve) => { release = resolve; })).mockImplementation(async () => runResponse("new-run", "completed"));
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      window.history.pushState({}, "", "/workflow-runs/new-run");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+      await vi.advanceTimersByTimeAsync(0);
+      release(runResponse("run-pending"));
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS * 3);
+      expect(document.querySelector(".run .identity")?.textContent).toContain("new-run");
+      expect(document.querySelector(".run .state")?.textContent).toBe("completed");
+      expect(fetch).toHaveBeenCalledTimes(3);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("run view stops refreshing after unmount even with a read pending", async () => {
+    let release!: (response: Response) => void;
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => runResponse("run-polled"));
+    try {
+      await startRunView();
+      window.history.pushState({}, "", "/workflow-runs/run-unmounted");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+      fetch.mockReset().mockResolvedValueOnce(runResponse("run-unmounted")).mockImplementationOnce(() => new Promise<Response>((resolve) => { release = resolve; })).mockImplementation(async () => runResponse("run-unmounted"));
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      await unmount(component!); component = undefined;
+      release(runResponse("run-unmounted"));
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS * 3);
+      expect(fetch).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); }
+  });
+
 });

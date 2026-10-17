@@ -1760,6 +1760,7 @@ impl GatewayWorkflowLauncher {
                 + workers.unsettled.len()) as u32
         });
         serde_json::to_value(swage_protocol::client::workflow::WorkflowRunStartResult {
+            view_url: format!("/workflow-runs/{}", run.id),
             run,
             workers_dispatched,
             status_as_of,
@@ -8129,11 +8130,18 @@ fn budget_wire(value: &Value) -> WorkflowBudget {
 }
 
 pub(crate) fn run_wire(record: WorkflowRunRecord) -> Result<WorkflowRun, ApiError> {
+    let script_name = match (record.script_name, record.source.as_deref()) {
+        (Some(name), _) => Some(name),
+        (None, Some(source)) => swage_workflow::script_meta(source).map_err(internal)?.name,
+        (None, None) => None,
+    };
     Ok(WorkflowRun {
+        dispatching_session_id: record.dispatching_session_id,
+        wake_at: record.wake_at,
         id: record.id,
         topic_id: record.topic_id,
         script_id: record.script_id,
-        script_name: record.script_name,
+        script_name,
         script_version: record.script_version,
         carrying_skill: record.carrying_skill,
         task: record.task,

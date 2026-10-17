@@ -491,3 +491,11 @@ describe("expired approval result", () => {
     expect(root?.querySelector(".result-content")?.textContent).toBe("Tool call rejected: approval timed out");
   });
 });
+
+describe("recorded result navigation", () => {
+  it.each([false, true])("links a run result in live and persisted form (string=%s)", (asString) => {
+    const result = { id: "run-linked", view_url: "/workflow-runs/run-linked" };
+    component = mount(ToolCallDisplay, { target: document.body, props: { toolCall: makeCompletedCall({ result: asString ? JSON.stringify(result) : result }), isLive: !asString } });
+    expect(document.querySelector("a.result-link")?.getAttribute("href")).toBe("/workflow-runs/run-linked");
+  });
+});

@@ -283,3 +283,68 @@ describe("WorkflowRunView", () => {
     expect(document.querySelector('[role="alert"]')?.textContent).toContain("read failed");
   });
 });
+
+describe("run page completeness", () => {
+  let page: MountedComponent | undefined;
+  afterEach(() => { if (page) unmount(page); document.body.replaceChildren(); });
+
+  it("shows identity, timing and the launching conversation", () => {
+    page = render({ ...run(emptyAccount({ ending: "returned" }), "run-own", "three-whys"),
+      dispatching_session_id: "parent-session", completed_at: "2026-09-02T10:05:00Z" });
+    const header = document.querySelector(".run header")!;
+    expect(header.textContent).toContain("three-whys");
+    expect(header.textContent).toContain("run-own");
+    expect(header.textContent).toContain("2026-09-02T10:00:00Z");
+    expect(header.textContent).toContain("2026-09-02T10:05:00Z");
+    expect(header.querySelector("a")?.getAttribute("href")).toBe("/conversations/parent-session");
+  });
+
+  it("groups workers sharing a placement once and preserves its case", () => {
+    const account = emptyAccount({ ending: "returned" });
+    account.workers.done = [0, 1].map((seq) => ({ journal_entry_id: `worker-${seq}`, seq,
+      label: `worker ${seq}`, placement: "/Worktrees/MyRun", worktree: null, termination: null,
+      redispatched_after_interruption: false }));
+    const shared = detail(run(account));
+    shared.journal = account.workers.done.map((worker, index) => ({ id: worker.journal_entry_id, result: { kind: "agent_call", output: `Worker output ${index}` } } as unknown as WorkflowRunDetailResponse["journal"][number]));
+    page = mount(WorkflowRunView, { target: document.body, props: { detail: shared, loadState: "loaded", errorMessage: "" } });
+    expect(document.body.textContent?.split("/Worktrees/MyRun")).toHaveLength(2);
+    const placement = document.querySelector(".placement")!;
+    expect(getComputedStyle(placement).textTransform).toBe("none");
+    expect(placement.parentElement?.textContent).toContain("worker 0");
+    expect(placement.parentElement?.textContent).toContain("worker 1");
+    expect(placement.parentElement?.textContent).toContain("Worker output 0");
+    expect(placement.parentElement?.textContent).toContain("Worker output 1");
+  });
+
+  it.each(["timer", "hold", "event"])("names a parked %s wait read-only", (kind) => {
+    const parked = detail({ ...run(null), state: "parked", wake_at: kind === "timer" ? "2026-09-03T10:00:00Z" : null });
+    if (kind === "hold") parked.holds = [{ id: "decision", run_id: "run-1", seq: 0, content: "Ship the findings?", verdicts: ["approve", "postpone"], state: "open", raised_at: "2026-09-02T10:00:00Z", rejections: [] }];
+    if (kind === "event") parked.journal = [{ id: "wait", kind: "await_event", status: "started", request: { kinds: ["review.finished"] } } as unknown as WorkflowRunDetailResponse["journal"][number]];
+    page = mount(WorkflowRunView, { target: document.body, props: { detail: parked, loadState: "loaded", errorMessage: "" } });
+    const awaited = document.querySelector(".awaited")!;
+    expect(awaited).not.toBeNull();
+    if (kind === "timer") expect(awaited.textContent).toContain("2026-09-03T10:00:00Z");
+    if (kind === "hold") {
+      expect(awaited.textContent).toContain("Ship the findings?");
+      expect(awaited.textContent).toContain("approve, postpone");
+      expect(awaited.textContent).toContain("An agent answers");
+    }
+    if (kind === "event") expect(awaited.textContent).toContain("review.finished");
+    expect(awaited.querySelector("button, input, select")).toBeNull();
+  });
+
+  it("shows recorded and failed sources from the returned result independently of workers", () => {
+    const completed = run(emptyAccount({ ending: "returned" }));
+    completed.final_output = { gathered: [{ url: "https://source.invalid/good", observation_id: "observation-1" }], failed_sources: [{ url: "https://source.invalid/bad", reason: "The source refused access" }], organised: { orientation_cards: 1, note: "Two subjects indexed" } };
+    page = render(completed);
+    const result = document.querySelector('[aria-label="Run result"]')!;
+    expect(result).not.toBeNull();
+    const items = result.querySelectorAll("li");
+    expect(items[0].textContent).toContain("https://source.invalid/good");
+    expect(items[0].textContent).toContain("observation-1");
+    expect(items[1].textContent).toContain("https://source.invalid/bad");
+    expect(items[1].textContent).toContain("The source refused access");
+    expect(result.textContent).toContain("organised");
+    expect(result.textContent).toContain("Two subjects indexed");
+  });
+});

@@ -57,6 +57,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Workflow run pages refresh until completion and show parked waits, shared placements, provenance links, attempt options, liveness and returned source outcomes.
+
 - Queued scheduled turns acknowledge workflow endings only after successful settlement; failed turns leave them available.
 - Schedule gates retain workflow runs that complete while their digest is being read.
 - Workflow status and open accounts include active workers' start and first-output times.

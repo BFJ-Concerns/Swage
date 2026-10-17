@@ -410,3 +410,31 @@ describe("WorkflowRunDetail", () => {
     );
   });
 });
+
+describe("complete worker detail", () => {
+  it("shows every attempt's options and session, liveness and null-grant meaning", async () => {
+    await render(runWith({ ...baseCall, session_id: "worker-session", liveness: { started_at: "2026-09-02T11:00:00Z", first_evidence_at: "2026-09-02T11:00:04Z" }, dispatch: { ...baseCall.dispatch!, grants: null, placement: { path: "/Worktree/ExactCase", can_write: false }, attempts: [
+      { cause: { cause: "first" }, opened_at: "2026-09-02T10:00:00Z", model: "earlier-model", effort: "high", session_id: "earlier-session", turn_id: "earlier-turn" },
+      { cause: { cause: "after_interruption" }, opened_at: "2026-09-02T10:01:00Z", model: "later-model", effort: "low", session_id: "later-session", turn_id: "later-turn" },
+    ] } }));
+    const attempts = document.querySelectorAll(".attempts li");
+    expect(attempts[0].textContent).toContain("earlier-model, high");
+    expect(attempts[1].textContent).toContain("later-model, low");
+    expect(attempts[0].querySelector("a")?.getAttribute("href")).toBe("/conversations/earlier-session");
+    expect(attempts[1].querySelector("a")?.getAttribute("href")).toBe("/conversations/later-session");
+    expect(document.querySelector(".liveness")?.textContent).toContain("2026-09-02T11:00:00Z");
+    expect(document.querySelector(".liveness")?.textContent).toContain("2026-09-02T11:00:04Z");
+    expect(document.body.textContent).toContain("narrowed nothing");
+    expect(document.body.textContent).toContain("/Worktree/ExactCase");
+    expect(document.querySelector('a[href="/conversations/worker-session"]')).not.toBeNull();
+  });
+
+  it("reads an outstanding journal worker through its terminal account", async () => {
+    const detail = runWith({ ...baseCall, termination: { termination: "outstanding" } });
+    detail.run.state = "completed";
+    detail.run.terminal_account = { ending: { ending: "returned" }, settled_at: "2026-09-02T10:05:00Z", workers: { done: [], failed: [], unsettled: [], cut_short: [{ journal_entry_id: "entry-1", seq: 0, redispatched_after_interruption: false, termination: { termination: "cut_short", cause: "run_returned", detail: "The script returned" } }] } };
+    await render(detail);
+    expect(document.querySelector(".termination")?.textContent).toBe("Cut short");
+    expect(document.body.textContent).not.toContain("Still working");
+  });
+});
