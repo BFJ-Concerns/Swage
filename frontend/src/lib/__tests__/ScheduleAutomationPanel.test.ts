@@ -154,6 +154,22 @@ describe("ScheduleAutomationPanel", () => {
     });
   });
 
+  it.each([false, true])("sends explicit routing after changing local logging to %s", async (keepLocalLog) => {
+    vi.mocked(workflowApi.createSchedule).mockResolvedValue(SCHEDULE);
+    component = mount(ScheduleAutomationPanel, { target: document.body, props: { topicId: null, sessionId: null } });
+    await flushUi();
+    setFieldValue(document.querySelector<HTMLTextAreaElement>('textarea[placeholder="Run the review checklist."]')!, "Review the queue");
+    const localLog = document.querySelector<HTMLInputElement>('input[aria-label="Keep a local log"]')!;
+    localLog.click();
+    if (keepLocalLog) localLog.click();
+    clickButton("Create schedule");
+    await flushUi();
+
+    expect(workflowApi.createSchedule).toHaveBeenCalledWith(expect.objectContaining({
+      routing: { deliver_to_origin: false, store_local_output: keepLocalLog, explicit_targets: [] },
+    }));
+  });
+
   it("sends the chosen topic, effective agent and webhook plus local delivery from the form", async () => {
     vi.mocked(agentApi.listEffectiveAgentDefinitions).mockImplementation(async (topic) => [
       makeAgentDefinition("gateway", "built_in"),

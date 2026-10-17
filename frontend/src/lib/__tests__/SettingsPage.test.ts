@@ -859,6 +859,37 @@ describe("SettingsPage", () => {
     expect(document.body.textContent).not.toContain("Select a topic before scheduling work.");
   });
 
+  it("sends an added webhook route when creating a fresh schedule", async () => {
+    vi.mocked(workflowApi.createSchedule).mockResolvedValue(createdSchedule("selected-topic"));
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", topicId: "selected-topic" },
+    });
+    await flushUi();
+
+    const prompt = document.querySelector<HTMLTextAreaElement>(".schedule-automation textarea");
+    if (!prompt) throw new Error("Schedule prompt was not rendered");
+    prompt.value = "Review the queue.";
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    buttonNamed("Add destination").click();
+    await flushUi();
+    const webhook = document.querySelector<HTMLInputElement>('input[aria-label="Webhook URL"]');
+    if (!webhook) throw new Error("Webhook URL was not rendered");
+    webhook.value = "https://example.test/results";
+    webhook.dispatchEvent(new Event("input", { bubbles: true }));
+    buttonNamed("Create schedule").click();
+    await flushUi();
+
+    expect(workflowApi.createSchedule).toHaveBeenCalledWith(expect.objectContaining({
+      session: { policy: "fresh", topic_id: "selected-topic", agent_id: "gateway" },
+      routing: {
+        deliver_to_origin: false,
+        store_local_output: true,
+        explicit_targets: [{ kind: "webhook", url: "https://example.test/results" }],
+      },
+    }));
+  });
+
   it("autosaves edited image reference schemes from Automation", async () => {
     component = mount(SettingsPage, { target: document.body, props: { tab: "automation" } });
     await flushUi();

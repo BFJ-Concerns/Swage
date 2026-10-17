@@ -64,6 +64,7 @@
   let agentLoadError = $state<string | null>(null);
   let agentsLoading = $state(false);
   let agentLoadGeneration = 0;
+  let routingChanged = $state(false);
   let storeLocalOutput = $state(true);
   let deliveryTargets = $state<DeliveryTarget[]>([]);
   let deliverySurfaces = $state<SurfaceSummary[]>([]);
@@ -120,7 +121,8 @@
     }
   }
 
-  function buildRouting(): DeliveryRoutingRequest {
+  function buildRouting(): DeliveryRoutingRequest | null {
+    if (!routingChanged) return null;
     const explicitTargets = deliveryTargets.map((target): DeliveryTarget => {
       switch (target.kind) {
         case "channel": {
@@ -257,7 +259,7 @@
 
     let spec: ScheduleSpec;
     let session: SessionPolicy;
-    let routing: DeliveryRoutingRequest;
+    let routing: DeliveryRoutingRequest | null;
     try {
       spec = buildScheduleSpec();
       session = buildSessionPolicy();
@@ -501,7 +503,7 @@
     <fieldset class="delivery-settings">
       <legend>Delivery destinations</legend>
       <label class="gate-toggle">
-        <input type="checkbox" bind:checked={storeLocalOutput} aria-label="Keep a local log" />
+        <input type="checkbox" bind:checked={storeLocalOutput} onchange={() => { routingChanged = true; }} aria-label="Keep a local log" />
         <span>Keep a local log</span>
       </label>
       {#each deliveryTargets as target, index}
@@ -532,10 +534,10 @@
             {#if surfaceLoadError}<p class="error" role="alert">{surfaceLoadError}</p>{/if}
             {#if !surfacesLoading && !surfaceLoadError && deliverySurfaces.length === 0}<p class="empty">This conversation has no surfaces yet.</p>{/if}
           {/if}
-          <button type="button" onclick={() => { deliveryTargets = deliveryTargets.filter((_, i) => i !== index); }}>Remove destination</button>
+          <button type="button" onclick={() => { routingChanged = true; deliveryTargets = deliveryTargets.filter((_, i) => i !== index); }}>Remove destination</button>
         </div>
       {/each}
-      <button type="button" onclick={() => { deliveryTargets = [...deliveryTargets, newDeliveryTarget("webhook")]; }}>Add destination</button>
+      <button type="button" onclick={() => { routingChanged = true; deliveryTargets = [...deliveryTargets, newDeliveryTarget("webhook")]; }}>Add destination</button>
     </fieldset>
     <button
       type="button"
