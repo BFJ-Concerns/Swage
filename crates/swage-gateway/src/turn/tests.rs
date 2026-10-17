@@ -4613,6 +4613,20 @@ impl TurnStore for MockStorage {
         Ok(turns)
     }
 
+    async fn list_child_turns(&self, parent_turn_id: Uuid) -> Result<Vec<Turn>, StorageError> {
+        let mut turns: Vec<Turn> = self
+            .db
+            .lock()
+            .await
+            .turns
+            .values()
+            .filter(|t| t.parent_turn_id == Some(parent_turn_id))
+            .cloned()
+            .collect();
+        turns.sort_by_key(|t| t.created_at);
+        Ok(turns)
+    }
+
     async fn update_turn_state(&self, id: Uuid, state: TurnState) -> Result<(), StorageError> {
         if state == TurnState::Interrupted {
             self.interrupted_turn_writes.fetch_add(1, Ordering::SeqCst);
@@ -5917,6 +5931,27 @@ impl swage_storage::store::AgentMessageStore for MockStorage {
         message.payload = payload;
         Ok(())
     }
+    async fn find_delegate_for_thread(
+        &self,
+        thread_id: Uuid,
+    ) -> Result<Option<AgentMessage>, StorageError> {
+        let thread = thread_id.to_string();
+        let mut delegates: Vec<_> = self
+            .db
+            .lock()
+            .await
+            .agent_messages
+            .values()
+            .filter(|message| {
+                message.kind == swage_core::MessageKind::Delegate
+                    && message.payload.get("_thread_id").and_then(|v| v.as_str()) == Some(&thread)
+            })
+            .cloned()
+            .collect();
+        delegates.sort_by_key(|message| message.created_at);
+        Ok(delegates.pop())
+    }
+
     async fn list_by_correlation(
         &self,
         correlation_id: Uuid,

@@ -256,6 +256,26 @@ impl AgentMessageStore for SqliteStorage {
         .await
     }
 
+    async fn find_delegate_for_thread(
+        &self,
+        thread_id: Uuid,
+    ) -> Result<Option<AgentMessage>, StorageError> {
+        self.with_conn(move |conn| {
+            conn.query_row(
+                "SELECT id, sender_agent_id, recipient_agent_id, kind, correlation_id,
+                        payload, status, failure_reason, created_at, delivered_at
+                 FROM agent_messages
+                 WHERE kind = 'delegate' AND json_extract(payload, '$._thread_id') = ?1
+                 ORDER BY created_at DESC
+                 LIMIT 1",
+                params![thread_id.to_string()],
+                row_to_agent_message,
+            )
+            .optional()
+        })
+        .await
+    }
+
     async fn list_by_correlation(
         &self,
         correlation_id: Uuid,
@@ -327,6 +347,40 @@ mod tests {
             correlation_id: None,
             payload: serde_json::json!({"task": "summarise report"}),
         }
+    }
+
+    /// The delegate that started a child thread is found by the thread the
+    /// executor annotated it with; a thread no delegate names has none.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_delegate_is_found_by_the_child_thread_it_was_annotated_with() {
+        let storage = make_storage().await;
+        let delegate = storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "parent".into(),
+                recipient_agent_id: "child".into(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({ "task": "look into it" }),
+            })
+            .await
+            .unwrap();
+        let thread_id = Uuid::new_v4();
+        let mut payload = delegate.payload.clone();
+        payload["_thread_id"] = serde_json::json!(thread_id.to_string());
+        storage
+            .update_agent_message_payload(delegate.id, payload)
+            .await
+            .unwrap();
+
+        let found = storage.find_delegate_for_thread(thread_id).await.unwrap();
+        assert_eq!(found.map(|m| m.id), Some(delegate.id));
+        assert!(
+            storage
+                .find_delegate_for_thread(Uuid::new_v4())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

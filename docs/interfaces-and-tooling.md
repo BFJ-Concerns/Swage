@@ -587,6 +587,19 @@ its metadata (for example after a metadata directory was cleaned), the
 start command probes the configured address, recovers the metadata, and
 reports the gateway as already running rather than starting a duplicate.
 
+Turns the previous gateway left in flight are interrupted at startup. A
+turn that was waiting on a delegated agent resumes from the record: each
+child's fate — its result if it finished before the restart, its failure,
+or a note that it was cut off with its session and thread named — goes to
+the parent agent's mailbox under the delegation that started it, and a
+continuation is queued on the parent's conversation saying the gateway
+restarted while the turn waited and what became of each child. The
+startup drain starts that turn, the child's result enters the thread
+first (labelled as a delegation notice), and the parent carries on or
+returns to a cut-off child's thread. A child whose delegation record
+cannot be found is noted as a degraded turn record in the audit trail;
+the continuation still names it.
+
 ## API error contract
 
 Every failed HTTP response from a client-surface route carries the same

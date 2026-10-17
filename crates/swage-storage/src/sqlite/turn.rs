@@ -210,6 +210,23 @@ impl TurnStore for SqliteStorage {
         .await
     }
 
+    async fn list_child_turns(&self, parent_turn_id: Uuid) -> Result<Vec<Turn>, StorageError> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, thread_id, agent_id, user_input, inbound_audit, assistant_response,
+                        input_tokens, output_tokens, state, created_at, completed_at, cost_microcents,
+                        structured_output, parent_turn_id,
+                        delegated_input_tokens, delegated_output_tokens,
+                        isolation_kind, isolation_detail, failure_message
+                 FROM turns WHERE parent_turn_id = ?1
+                 ORDER BY created_at ASC",
+            )?;
+            let rows = stmt.query_map(params![parent_turn_id.to_string()], row_to_turn)?;
+            rows.collect()
+        })
+        .await
+    }
+
     async fn update_turn_state(&self, id: Uuid, new_state: TurnState) -> Result<(), StorageError> {
         // Verify the turn exists before updating.
         let _current = self
@@ -702,6 +719,50 @@ mod tests {
         assert_eq!(
             updated.assistant_response.as_deref(),
             Some("The assistant replied.")
+        );
+    }
+
+    /// A delegating turn's children are the turns that name it as parent,
+    /// in creation order, wherever their threads are; a turn with none has
+    /// none.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn child_turns_list_by_parent_in_creation_order() {
+        let (storage, session_id, parent_thread) = make_session_thread().await;
+        let parent = storage
+            .create_turn(NewTurn {
+                thread_id: parent_thread,
+                agent_id: "test-agent".into(),
+                state: TurnState::Delegating,
+                user_input: Some("delegate".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let mut children = Vec::new();
+        for name in ["child-a", "child-b"] {
+            let thread = insert_thread(&storage, session_id, name).await;
+            children.push(
+                storage
+                    .create_turn(NewTurn {
+                        thread_id: thread,
+                        agent_id: name.into(),
+                        state: TurnState::Processing,
+                        user_input: Some("the task".into()),
+                        parent_turn_id: Some(parent.id),
+                    })
+                    .await
+                    .unwrap()
+                    .id,
+            );
+        }
+        let listed = storage.list_child_turns(parent.id).await.unwrap();
+        assert_eq!(listed.iter().map(|t| t.id).collect::<Vec<_>>(), children);
+        assert!(
+            storage
+                .list_child_turns(children[0])
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 

@@ -583,6 +583,9 @@ pub trait TurnStore: Send + Sync {
     async fn get_turn(&self, id: Uuid) -> Result<Option<Turn>, StorageError>;
     /// List all turns for a thread ordered by created_at ascending.
     async fn list_turns_by_thread(&self, thread_id: Uuid) -> Result<Vec<Turn>, StorageError>;
+    /// The turns a delegating turn started — its children by
+    /// `parent_turn_id` — in creation order.
+    async fn list_child_turns(&self, parent_turn_id: Uuid) -> Result<Vec<Turn>, StorageError>;
     /// Update a turn's state.
     ///
     /// State is consumer-driven — the storage layer records whatever state is
@@ -1042,6 +1045,14 @@ pub trait AgentMessageStore: Send + Sync {
         id: Uuid,
         payload: serde_json::Value,
     ) -> Result<(), StorageError>;
+
+    /// The delegate message that started the child thread `thread_id` —
+    /// the one the executor annotated with that thread — or none when no
+    /// delegate names it.
+    async fn find_delegate_for_thread(
+        &self,
+        thread_id: Uuid,
+    ) -> Result<Option<AgentMessage>, StorageError>;
 
     /// List all messages sharing a correlation ID, ordered by creation time.
     ///
@@ -2647,6 +2658,9 @@ mod tests {
         async fn list_turns_by_thread(&self, _thread_id: Uuid) -> Result<Vec<Turn>, StorageError> {
             unimplemented!()
         }
+        async fn list_child_turns(&self, _: Uuid) -> Result<Vec<Turn>, StorageError> {
+            unimplemented!()
+        }
         async fn update_turn_state(&self, _: Uuid, _: TurnState) -> Result<(), StorageError> {
             unimplemented!()
         }
@@ -2954,6 +2968,12 @@ mod tests {
 
     #[async_trait]
     impl AgentMessageStore for StubStorage {
+        async fn find_delegate_for_thread(
+            &self,
+            _: Uuid,
+        ) -> Result<Option<AgentMessage>, StorageError> {
+            unimplemented!()
+        }
         async fn create_agent_message(
             &self,
             _: NewAgentMessage,
