@@ -45,6 +45,7 @@ function makeDetail(id: string) {
     id,
     topic_id: "default",
     agent_id: "gateway",
+    agent_display_name: "Swage default",
     created_at: "2026-01-01T00:00:00Z",
     last_activity: "2026-01-01T00:00:00Z",
     messages: [] as import("../types").MessageView[],
@@ -204,6 +205,7 @@ describe("createConversation", () => {
     const resp = {
       id: "new-conv",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: "default",
       created_at: "2026-01-05T00:00:00Z",
       last_activity: "2026-01-05T00:00:00Z",
@@ -221,6 +223,7 @@ describe("createConversation", () => {
     expect(store.conversations).toHaveLength(1);
     expect(store.conversations[0].id).toBe("new-conv");
     expect(store.activeConversation?.id).toBe("new-conv");
+    expect(store.activeConversation?.agent_display_name).toBe(resp.agent_display_name);
     expect(store.activeConversation?.messages).toEqual([]);
   });
 
@@ -234,6 +237,7 @@ describe("createConversation", () => {
     vi.mocked(api.createConversation).mockResolvedValueOnce({
       id: "new-conv",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: "default",
       created_at: "2026-01-05T00:00:00Z",
       last_activity: "2026-01-05T00:00:00Z",
@@ -249,6 +253,7 @@ describe("createConversation", () => {
     vi.mocked(api.createConversation).mockResolvedValueOnce({
       id: "new-conv",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: "default",
       created_at: "2026-01-05T00:00:00Z",
       last_activity: "2026-01-05T00:00:00Z",
@@ -708,6 +713,7 @@ describe("createConversation (topic-scoped)", () => {
     vi.mocked(api.createConversation).mockResolvedValueOnce({
       id: "new-conv",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: "proj-1",
       created_at: "2026-01-01T00:00:00Z",
       last_activity: "2026-01-01T00:00:00Z",

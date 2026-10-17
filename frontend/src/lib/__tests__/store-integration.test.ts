@@ -38,6 +38,7 @@ async function seedActiveConversation(store: ReturnType<typeof createConversatio
   const createSpy = vi.spyOn(api, "createConversation").mockResolvedValue({
     id: "conv-1",
     agent_id: "gateway",
+    agent_display_name: "Swage default",
     topic_id: "proj-1",
     created_at: new Date().toISOString(),
     last_activity: new Date().toISOString(),
