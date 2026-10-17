@@ -10,7 +10,7 @@ export function formatScheduleBrief(schedule: Pick<Schedule, "id" | "message">):
   return {
     heading: truncated
       ? `${brief.slice(0, 60).replace(/\s+/g, " ")}… · ${schedule.id.slice(-8)}`
-      : schedule.message,
+      : brief.replace(/\s+/g, " "),
     truncated,
   };
 }
