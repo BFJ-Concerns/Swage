@@ -403,9 +403,7 @@ fn trim_generated_typescript(directory: &Path) {
 /// shows as a dirty tree at the gate.
 #[test]
 fn client_route_projections_are_regenerated() {
-    let document = serde_json::to_string_pretty(&client::openapi::document())
-        .expect("openapi document serialises")
-        + "\n";
+    let document = render_canonical(&client::openapi::document());
     let document_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/client-openapi.json");
     std::fs::write(&document_path, document).expect("write openapi document");
 
@@ -417,7 +415,7 @@ fn client_route_projections_are_regenerated() {
 #[test]
 fn client_schema_is_regenerated() {
     let schema = schemars::schema_for!(client::ClientSurface);
-    let rendered = serde_json::to_string_pretty(&schema).expect("schema serialises") + "\n";
+    let rendered = render_canonical(&schema);
 
     let schema_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/client.json");
     std::fs::create_dir_all(schema_path.parent().expect("schema dir")).expect("create schema dir");
@@ -444,9 +442,37 @@ fn plugin_process_schema_is_regenerated() {
     write_schema::<plugin::PluginProcessSurface>("plugin-process.json");
 }
 
+/// Renders a JSON document with every object's keys in sorted order. The
+/// committed projections must come out the same whatever the build that
+/// regenerates them: serde_json keeps insertion order when any crate in the
+/// build turns on its `preserve_order` feature (the JavaScript runtime
+/// does) and sorts keys otherwise, so a document rendered as serialised
+/// would differ between a crate-alone run and the whole-workspace gate.
+fn render_canonical<T: serde::Serialize>(value: &T) -> String {
+    let value = serde_json::to_value(value).expect("document serialises");
+    serde_json::to_string_pretty(&with_sorted_keys(value)).expect("document renders") + "\n"
+}
+
+fn with_sorted_keys(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut entries: Vec<(String, serde_json::Value)> = object
+                .into_iter()
+                .map(|(key, value)| (key, with_sorted_keys(value)))
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            serde_json::Value::Object(entries.into_iter().collect())
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(with_sorted_keys).collect())
+        }
+        other => other,
+    }
+}
+
 fn write_schema<T: schemars::JsonSchema>(name: &str) {
     let schema = schemars::schema_for!(T);
-    let rendered = serde_json::to_string_pretty(&schema).expect("schema serialises") + "\n";
+    let rendered = render_canonical(&schema);
     let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("schema")
         .join(name);
