@@ -177,7 +177,7 @@ fn optional_offset_bytes(params: &Value, tool_name: &str) -> Result<usize, ToolE
 }
 
 /// A bounded slice of the result stream, with counts independent of retention.
-#[derive(Clone)]
+#[cfg_attr(not(test), derive(Clone))]
 struct SearchWindow {
     output: String,
     total_bytes: usize,
@@ -185,6 +185,27 @@ struct SearchWindow {
     offset: usize,
     limit: usize,
     boundary: bool,
+}
+
+// Count retained bytes copied by the scanner without changing release builds.
+#[cfg(test)]
+std::thread_local! {
+    static CLONED_OUTPUT_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+impl Clone for SearchWindow {
+    fn clone(&self) -> Self {
+        CLONED_OUTPUT_BYTES.with(|count| count.set(count.get() + self.output.len()));
+        Self {
+            output: self.output.clone(),
+            total_bytes: self.total_bytes,
+            matches: self.matches,
+            offset: self.offset,
+            limit: self.limit,
+            boundary: self.boundary,
+        }
+    }
 }
 
 impl SearchWindow {
@@ -871,44 +892,41 @@ mod regression_tests {
         assert!(result.is_ok(), "search did not stop at symlink cycle");
         assert_eq!(result.unwrap().unwrap()["output"], "inside:1: needle");
     }
-    #[tokio::test]
-    async fn regression_search_large_file_after_window_fills() {
-        use std::io::Write;
-
-        let dir = tempfile::tempdir().unwrap();
-        let mut file = std::fs::File::create(dir.path().join("large.txt")).unwrap();
+    #[test]
+    fn regression_search_large_file_after_window_fills() {
+        const LIMIT: usize = 100_000;
+        const LINES: usize = 2_000;
         let first_line = "needle ".repeat(14_286);
-        writeln!(file, "{first_line}").unwrap();
-        // Short non-matching lines stress retention overhead after the default
-        // result window fills, without constructing the input in memory.
-        const LINES: usize = 24_000_000;
-        let block = "x\n".repeat(10_000);
-        for _ in 0..LINES / 10_000 {
-            file.write_all(block.as_bytes()).unwrap();
-        }
-        file.write_all(b"needle tail\n").unwrap();
-        drop(file);
+        let text = format!("{first_line}\n{}needle tail\n", "x\n".repeat(LINES));
+        let mut window = SearchWindow::new(0, LIMIT);
+        let control = SearchControl {
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(86_400),
+        };
 
-        let mut ctx = swage_tool::context::MockToolContext::new("agent", "session");
-        ctx.working_directory = dir.path().into();
-        let result = FileSearchTool {
-            max_output_bytes: 100_000,
-        }
-        .execute(json!({"pattern": "needle"}), &ctx)
-        .await;
+        CLONED_OUTPUT_BYTES.with(|count| count.set(0));
+        search_into(
+            text.as_bytes(),
+            "large.txt",
+            "needle",
+            &mut window,
+            &control,
+        )
+        .unwrap();
+        let copied_bytes = CLONED_OUTPUT_BYTES.with(|count| count.get());
+        // File-level provisional results may copy the window once. Starting
+        // each later line must not copy all the retained earlier results.
         assert!(
-            result.is_ok(),
-            "search must finish after its retained window fills: {result:?}"
+            copied_bytes <= LIMIT,
+            "retained output copied {copied_bytes} bytes for {LINES} lines after the window filled"
         );
-        let result = result.unwrap();
         let expected = format!(
             "large.txt:1: {first_line}\nlarge.txt:{}: needle tail",
             LINES + 2
         );
-        assert_eq!(result["output"], &expected[..100_000]);
-        assert_eq!(result["total_bytes"], expected.len());
-        assert_eq!(result["truncated"], true);
-        assert_eq!(result["next_offset_bytes"], 100_000);
+        assert_eq!(window.output, expected[..LIMIT]);
+        assert_eq!(window.total_bytes, expected.len());
+        assert_eq!(window.matches, 2, "search must still find the tail match");
     }
 
     #[test]
