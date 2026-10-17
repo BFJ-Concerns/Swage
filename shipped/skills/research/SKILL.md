@@ -69,14 +69,15 @@ counts and the note as they stand: zero cards and zero assertions is a
 valid outcome when nothing warranted them, not a sign the pass was
 skipped.
 
-A sweep whose organising account is missing fails. The organiser works
-through its tools first and answers last, so when a run fails with "could
-not validate its organising account" its cards and assertions may already
-be in the knowledge base: those writes stand, but the run did not
+A sweep whose organising account cannot be validated fails — the
+organiser answered off-shape or not at all. The organiser works through
+its tools first and answers last, so when a run fails with "could not
+validate its organising account" its cards and assertions may already be
+in the knowledge base: those writes stand, but the run did not
 synthesise, and there are no findings to present. Report the run as
-failed, say that the organising pass left no account of what it did, and
-point the user at `knowledge_search` for what the sweep gathered; never
-present the landed writes as a completed sweep.
+failed, say that the organising pass left no validated account of what
+it did, and point the user at `knowledge_search` for what the sweep
+gathered; never present the landed writes as a completed sweep.
 
 Each finding carries its own trail: the claim, the exact `quote` the
 citation validated, the `observation_id` it was cited from, the `source`
