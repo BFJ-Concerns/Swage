@@ -5,25 +5,27 @@
   what it cost or why that is not known, and how it stopped.
 
   Read-only by design: the journal is the record of what already happened,
-  fetched on open rather than streamed, so what renders is always what was
+  read through the run view's refresh path, so what renders is always what was
   durably recorded. Absence is rendered as absence — a call whose usage was
   never reported reads "not recorded" with its reason, never as zero spend.
 -->
 <script lang="ts">
+  import { conversationPath } from "../router";
+  import type { WorkflowJournalEntry } from "../protocol/WorkflowJournalEntry";
   import type { WorkflowRunDetailResponse } from "../protocol/WorkflowRunDetailResponse";
-  import type { WorkflowAgentCallDetail } from "../protocol/WorkflowAgentCallDetail";
   import type { WorkflowCallUsage } from "../protocol/WorkflowCallUsage";
   import type { WorkflowWorkerTermination } from "../protocol/WorkflowWorkerTermination";
   import type { WorkflowProviderRound } from "../protocol/WorkflowProviderRound";
   import type { WorkflowAgentCallResolution } from "../protocol/WorkflowAgentCallResolution";
 
   interface Props {
+    onNavigate?: (path: string) => void;
     detail: WorkflowRunDetailResponse | null;
     loadState: "loading" | "loaded" | "absent" | "error";
     errorMessage: string;
   }
 
-  let { detail, loadState, errorMessage }: Props = $props();
+  let { detail, loadState, errorMessage, onNavigate }: Props = $props();
 
   const agentCalls = $derived(
     (detail?.journal ?? []).filter((entry) => entry.agent_call !== null),
@@ -107,18 +109,30 @@
     }
   }
 
-  // The last attempt is the one the call ended on; the earlier ones are the
-  // attempts a fallback or an interruption superseded. An attempt the run
-  // opened that no turn has resolved yet has no turn, and says so rather
-  // than reading as defaults.
-  function resolvedLabel(call: WorkflowAgentCallDetail): string {
-    const resolved = call.dispatch?.attempts.at(-1);
-    if (!resolved) return "not yet resolved";
-    if (resolved.turn_id === null) return "opened, not yet resolved by a turn";
-    return [resolved.model ?? "default model", resolved.effort ?? "default effort"].join(
-      ", ",
-    );
+  function resolvedLabel(attempt: WorkflowAgentCallResolution): string {
+    if (attempt.turn_id == null) return "opened, not yet resolved by a turn";
+    return [attempt.model ?? "default model", attempt.effort ?? "default effort"].join(", ");
   }
+
+  function navigate(event: MouseEvent, path: string) {
+    if (onNavigate && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.button === 0) {
+      event.preventDefault();
+      onNavigate(path);
+    }
+  }
+
+  function terminationFor(entry: WorkflowJournalEntry): WorkflowWorkerTermination {
+    const original = entry.agent_call!.termination;
+    const workers = detail?.run.terminal_account?.workers;
+    if (original.termination !== "outstanding" || !workers) return original;
+    return Object.values(workers).flat().find((worker) => worker.journal_entry_id === entry.id)?.termination ?? original;
+  }
+
+  function placementInAccount(path: string): boolean {
+    const workers = detail?.run.terminal_account?.workers;
+    return workers ? Object.values(workers).some((group) => group.some((worker) => worker.placement === path)) : false;
+  }
+
 </script>
 
 <section class="run-detail" aria-label="Workflow run">
@@ -138,6 +152,7 @@
     <ul class="calls">
       {#each agentCalls as entry (entry.id)}
         {@const call = entry.agent_call!}
+        {@const termination = terminationFor(entry)}
         <li class="call">
           <h3>{entry.label ?? call.dispatch?.agent_definition_id ?? "Worker"}</h3>
 
@@ -150,13 +165,18 @@
                 {call.dispatch.requested_effort ?? "no effort named"}
               </dd>
               <dt>Ran with</dt>
-              <dd>{resolvedLabel(call)}</dd>
-              {#if call.dispatch.attempts.length > 1}
+              <dd>{call.dispatch.attempts.length ? resolvedLabel(call.dispatch.attempts[call.dispatch.attempts.length - 1]) : "not yet resolved"}</dd>
+              {#if call.dispatch.attempts.length > 0}
                 <dt>Attempts</dt>
                 <dd class="attempts">
                   <ol class="plain">
                     {#each call.dispatch.attempts as attempt, index (index)}
-                      <li>{attemptLine(attempt, index)}</li>
+                      <li>
+                        <p>{attemptLine(attempt, index)} — {resolvedLabel(attempt)}</p>
+                        {#if attempt.session_id}
+                          <a href={conversationPath(attempt.session_id)} onclick={(event) => navigate(event, conversationPath(attempt.session_id!))}>Attempt {index + 1} session</a>
+                        {/if}
+                      </li>
                     {/each}
                   </ol>
                 </dd>
@@ -164,7 +184,11 @@
               {#if call.dispatch.placement}
                 <dt>Placed at</dt>
                 <dd>
-                  {call.dispatch.placement.path}
+                  {#if placementInAccount(call.dispatch.placement.path)}
+                    Shown in the terminal account
+                  {:else}
+                    {call.dispatch.placement.path}
+                  {/if}
                   ({call.dispatch.placement.can_write ? "writable" : "read-only"})
                 </dd>
               {/if}
@@ -182,11 +206,20 @@
             </p>
           {/if}
 
+          {#if call.session_id}
+            <a href={conversationPath(call.session_id)} onclick={(event) => navigate(event, conversationPath(call.session_id!))}>Worker session</a>
+          {/if}
+          {#if call.liveness}
+            <dl class="liveness">
+              <dt>Started</dt><dd>{call.liveness.started_at}</dd>
+              <dt>First evidence</dt><dd>{call.liveness.first_evidence_at ?? "Not yet recorded"}</dd>
+            </dl>
+          {/if}
           <dl>
             <dt>Spend</dt>
-            <dd class="usage">{usageLabel(call.usage, call.termination)}</dd>
+            <dd class="usage">{usageLabel(call.usage, termination)}</dd>
             <dt>Stopped</dt>
-            <dd class="termination">{terminationLabel(call.termination)}</dd>
+            <dd class="termination">{terminationLabel(termination)}</dd>
           </dl>
 
           {#if call.provider_rounds == null}

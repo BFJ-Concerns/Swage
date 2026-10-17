@@ -26,6 +26,7 @@
   import TopicSettingsPage from "./TopicSettingsPage.svelte";
   import ThemeToggle from "./ThemeToggle.svelte";
   import WorkflowRunDetail from "./WorkflowRunDetail.svelte";
+  import { UNSETTLED_RUN_REFRESH_MS } from "../one-shot-runs";
   import { fetchWorkflowRun } from "../api/workflow-runs";
   import { conversationPath } from "../router";
   import type { DisplayPreferences } from "../display-preferences";
@@ -159,17 +160,29 @@
     workflowRunError = "";
     if (!requestedRunId) return;
     workflowRunLoadState = "loading";
-    fetchWorkflowRun(requestedRunId)
-      .then((loaded) => {
-        if (requestedRunId !== workflowRunId) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    async function refresh() {
+      let terminal = false;
+      try {
+        const loaded = await fetchWorkflowRun(requestedRunId!);
+        if (disposed || requestedRunId !== workflowRunId) return;
         workflowRunDetail = loaded;
         workflowRunLoadState = loaded === null ? "absent" : "loaded";
-      })
-      .catch((error: unknown) => {
-        if (requestedRunId !== workflowRunId) return;
+        workflowRunError = "";
+        terminal = loaded === null || ["completed", "failed", "cancelled"].includes(loaded.run.state);
+      } catch (error: unknown) {
+        if (disposed || requestedRunId !== workflowRunId) return;
         workflowRunError = error instanceof Error ? error.message : String(error);
         workflowRunLoadState = "error";
-      });
+      }
+      if (!disposed && !terminal) timer = setTimeout(refresh, UNSETTLED_RUN_REFRESH_MS);
+    }
+    void refresh();
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+    };
   });
   const settingsTab = $derived(route?.settingsTab ?? null);
   const settingsTopicSlug = $derived(route?.settingsTopicSlug ?? null);
@@ -253,11 +266,13 @@
       <button type="button" class="back-btn" onclick={() => onNavigate?.("/")}>All sessions</button>
     {/if}
     <WorkflowRunView
+      {onNavigate}
       detail={workflowRunDetail}
       loadState={workflowRunLoadState}
       errorMessage={workflowRunError}
     />
     <WorkflowRunDetail
+      {onNavigate}
       detail={workflowRunDetail}
       loadState={workflowRunLoadState}
       errorMessage={workflowRunError}

@@ -60,6 +60,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Workflow run pages refresh until completion and show parked waits, shared placements, provenance links, attempt options, liveness and returned source outcomes.
 - Session agent names come from the session’s own topic, including when topic definitions cannot load; missing definitions display “Unavailable agent”.
 
 - Open conversations show their recorded agent definition, including after reopening or reloading, rather than the agent selected for a new conversation.

@@ -5,7 +5,15 @@ import type { WorkflowRunInterruption } from "./WorkflowRunInterruption";
 import type { WorkflowRunState } from "./WorkflowRunState";
 import type { WorkflowRunTerminalAccount } from "./WorkflowRunTerminalAccount";
 
-export type WorkflowRun = { id: string, topic_id: string, script_id?: string | null, script_name?: string | null, script_version?: number | null, carrying_skill?: string | null,
+export type WorkflowRun = {
+/**
+ * The conversation whose turn launched this run, when there is one.
+ */
+dispatching_session_id?: string | null,
+/**
+ * The next timer wake recorded for a parked run.
+ */
+wake_at?: string | null, id: string, topic_id: string, script_id?: string | null, script_name?: string | null, script_version?: number | null, carrying_skill?: string | null,
 /**
  * Opaque identity declared by the workflow script for grouping its runs.
  */
