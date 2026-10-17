@@ -2443,7 +2443,7 @@ impl crate::tool::Tool for RetainingFetchStub {
         let call_id = ctx.call_id().expect("the fetch runs as a recorded call");
         Ok(serde_json::json!({
             "output": RESEARCH_SWEEP_QUOTE,
-            "raw_body_artifact_path": path.relative,
+            "raw_body_artifact_path": path.reported,
             "media_type": "text/plain",
             "capture": {
                 "tool": "knowledge_record",

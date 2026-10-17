@@ -7,6 +7,7 @@ All notable changes to Swage are documented in this file.
 ### Added
 
 - A turn interrupted by a gateway restart while waiting on a delegated agent resumes when the gateway comes back: each child's result, failure or cut-off note reaches the parent as a delegation notice and the parent's conversation continues from there.
+- `file_write` can append content without rewriting or replacing the existing file.
 - A module a scheduled run, a workflow run or a routed turn delivers to a surface records what delivered it and when, and the surface shows the attribution above the module.
 - Settings has a read-only Channels tab showing channel status, linked chats and unredeemed link codes verbatim with their expiry in local time.
 - The turn context inspector opens complete recorded provider requests and element text, and shows effective model, provider, effort, budgets and request divergences.
@@ -55,6 +56,15 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- File search keeps scanning efficiently after the result window fills, preserving result bytes and total counts.
+
+- Tool-output creation refuses planted directory and file links, preventing sandboxed commands from redirecting gateway writes outside output storage.
+
+- File search runs off the async runtime, stops on cancellation or a deadline, confines symlinks to the approved root, and retains only the requested result window while counting matches. Case-insensitive matching preserves contextual Unicode lowercase, including Greek final sigma.
+- File reads retain a bounded byte window; binary files whose metadata cannot give their size report an unknown length.
+- File path checks preserve non-UTF-8 roots and accept canonical paths through approved symlink aliases. An untrusted child workspace cannot release a read-only parent's restriction, and device-owned paths outside gateway attachments are checked on the device.
+- Replacing a non-empty file with `file_write` reports the prior byte count.
+- Local gateway tool-output artefacts use managed session scratch storage, so read-only workspaces remain untouched and shell inspection returns its output. File tools can read only the artefact subtree through this grant and cannot modify artefacts.
 - Give session surfaces bordered controls and edge spacing, wider modules, a surface list above creation, and direct module navigation.
 
 - A workflow run's record shows every gateway interruption it lived through — a boot that found it running, or parked — and the run view lists them. Each attempt of a worker call records why it was dispatched: the first dispatch, a redispatch after an interruption (whose earlier attempt's outcome is unknown and whose tool calls may have been applied), or the declared fallback serving after the primary failed; the run detail words the two apart instead of calling every redispatch an interruption. The run's Done summary marks workers redispatched after an interruption and discloses that their effects may have been repeated.

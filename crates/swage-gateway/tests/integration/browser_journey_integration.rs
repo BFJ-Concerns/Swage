@@ -77,6 +77,7 @@ async fn browser_survives_settings_save_and_grant_update() {
         session_id: "browser-settings".into(),
         working_directory: temp.path().to_path_buf(),
         allowed_paths: vec![temp.path().to_path_buf()],
+        tool_output_directory: None,
         user_info: None,
         call_id: None,
         turn_id: None,
