@@ -312,6 +312,13 @@
         ],
         "type": "object"
       },
+      "ChannelLinkCodeListResponse": {
+        "description": "The readable, unredeemed codes, represented on the wire as an array.",
+        "items": {
+          "$ref": "#/components/schemas/ChannelLinkCodeResponse"
+        },
+        "type": "array"
+      },
       "ChannelLinkCodeResponse": {
         "description": "A short-lived, single-use channel link code.",
         "properties": {
@@ -326,6 +333,116 @@
         "required": [
           "link_code",
           "expires_at"
+        ],
+        "type": "object"
+      },
+      "ChannelLinkListResponse": {
+        "description": "All linked channel conversations.",
+        "properties": {
+          "links": {
+            "items": {
+              "$ref": "#/components/schemas/ChannelLinkResponse"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "links"
+        ],
+        "type": "object"
+      },
+      "ChannelLinkResponse": {
+        "description": "A channel conversation linked to a topic and agent.",
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "agent_id": {
+            "type": "string"
+          },
+          "conversation": {
+            "type": "string"
+          },
+          "home_target": true,
+          "integration": {
+            "type": "string"
+          },
+          "linked_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "topic_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "integration",
+          "account",
+          "conversation",
+          "topic_id",
+          "agent_id",
+          "linked_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "ChannelStatusListResponse": {
+        "properties": {
+          "channels": {
+            "items": {
+              "$ref": "#/components/schemas/ChannelStatusResponse"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "channels"
+        ],
+        "type": "object"
+      },
+      "ChannelStatusResponse": {
+        "properties": {
+          "delivery_count": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "integration": {
+            "type": "string"
+          },
+          "last_delivery_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "route_count": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "integration",
+          "status",
+          "route_count",
+          "delivery_count"
         ],
         "type": "object"
       },
@@ -9328,6 +9445,28 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/channels": {
+      "get": {
+        "operationId": "list_channel_statuses",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelStatusListResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List channel statuses."
+      }
+    },
     "/api/conversations": {
       "get": {
         "operationId": "list_conversations",
@@ -9662,6 +9801,50 @@
           }
         },
         "summary": "List every memory page of one scope — general memory, or a topic's."
+      }
+    },
+    "/api/onboarding/channels": {
+      "get": {
+        "operationId": "list_channel_links",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelLinkListResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List linked channel conversations."
+      }
+    },
+    "/api/onboarding/channels/link-codes": {
+      "get": {
+        "operationId": "list_channel_link_codes",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelLinkCodeListResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read unredeemed channel link codes."
       }
     },
     "/api/sessions": {

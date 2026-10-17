@@ -2,6 +2,9 @@
 // manifest (crates/swage-protocol/src/client/routes.rs). Do not edit:
 // change the manifest and regenerate.
 
+import type { ChannelLinkCodeListResponse } from "./ChannelLinkCodeListResponse";
+import type { ChannelLinkListResponse } from "./ChannelLinkListResponse";
+import type { ChannelStatusListResponse } from "./ChannelStatusListResponse";
 import type { ConversationBranchListResponse } from "./ConversationBranchListResponse";
 import type { ConversationBranchResponse } from "./ConversationBranchResponse";
 import type { ConversationDetail } from "./ConversationDetail";
@@ -75,6 +78,21 @@ async function request<T>(
     return undefined as T;
   }
   return (await response.json()) as T;
+}
+
+/** List channel statuses. */
+export async function listChannelStatuses(): Promise<ChannelStatusListResponse> {
+  return request<ChannelStatusListResponse>("GET", `/api/channels`);
+}
+
+/** List linked channel conversations. */
+export async function listChannelLinks(): Promise<ChannelLinkListResponse> {
+  return request<ChannelLinkListResponse>("GET", `/api/onboarding/channels`);
+}
+
+/** Read unredeemed channel link codes. */
+export async function listChannelLinkCodes(): Promise<ChannelLinkCodeListResponse> {
+  return request<ChannelLinkCodeListResponse>("GET", `/api/onboarding/channels/link-codes`);
 }
 
 /** List every topic. */

@@ -7,6 +7,7 @@ All notable changes to Swage are documented in this file.
 ### Added
 
 - `file_write` can append content without rewriting or replacing the existing file.
+- Settings has a read-only Channels tab showing channel status, linked chats and unredeemed link codes verbatim with their expiry in local time.
 - The turn context inspector opens complete recorded provider requests and element text, and shows effective model, provider, effort, budgets and request divergences.
 - Session surfaces can be renamed from their header or by the agent without changing the library entry or original surface.
 - Either party can resolve a surface note; it leaves the working view and remains in the surface record.

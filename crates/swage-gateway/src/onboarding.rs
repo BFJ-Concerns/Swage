@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use swage_core::GatewayError;
-use swage_protocol::client::channel::{ChannelLinkCodeResponse, CreateChannelLinkCodeRequest};
+use swage_protocol::client::channel::{
+    ChannelLinkCodeListResponse, ChannelLinkCodeResponse, CreateChannelLinkCodeRequest,
+};
+pub use swage_protocol::client::channel::{ChannelLinkListResponse, ChannelLinkResponse};
 use swage_storage::{
     ChannelLink, GateConfig, NewChannelLink, NewSchedule, NewSession, NewThread,
     NewWorkspaceAttachment, ScheduleCreator, ScheduleKind, ScheduleStatus, SessionPolicy,
@@ -26,24 +29,6 @@ pub struct CreateChannelLinkRequest {
     pub topic_id: Option<Uuid>,
     pub agent_id: Option<String>,
     pub home_target: Option<DeliveryTarget>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ChannelLinkResponse {
-    pub integration: String,
-    pub account: String,
-    pub conversation: String,
-    pub topic_id: Uuid,
-    pub agent_id: String,
-    pub session_id: Option<Uuid>,
-    pub home_target: Option<serde_json::Value>,
-    pub linked_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ChannelLinkListResponse {
-    pub links: Vec<ChannelLinkResponse>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -804,15 +789,17 @@ where
 /// Read unredeemed codes without issuing or invalidating a link.
 pub async fn list_channel_link_codes(
     state: &AppState,
-) -> Result<Vec<ChannelLinkCodeResponse>, GatewayError> {
-    Ok(state
-        .storage
-        .list_channel_link_codes()
-        .await?
-        .into_iter()
-        .map(|code| ChannelLinkCodeResponse {
-            link_code: code.code,
-            expires_at: code.expires_at,
-        })
-        .collect())
+) -> Result<ChannelLinkCodeListResponse, GatewayError> {
+    Ok(ChannelLinkCodeListResponse(
+        state
+            .storage
+            .list_channel_link_codes()
+            .await?
+            .into_iter()
+            .map(|code| ChannelLinkCodeResponse {
+                link_code: code.code,
+                expires_at: code.expires_at,
+            })
+            .collect(),
+    ))
 }
