@@ -92,23 +92,30 @@ impl CredentialServer {
         // This is the complete Git environment owned by the gateway. Drop
         // existing selectors and command configuration before supplying it;
         // the sandbox separately allowlists the inherited host environment.
+        // Only the gateway's own configuration is dropped with the
+        // inherited selectors: the command-scope entries another host
+        // service appended (the signer's) are kept and composed with.
+        let appended: Vec<(String, String)> = git_config_entries(config);
         config.environment.retain(|key, _| !key.starts_with("GIT_"));
         let binary = swage_sandbox::resolve_agent_binary()?;
         let quoted = format!("'{}'", binary.display().to_string().replace('\'', "'\\''"));
+        // Command scope resets ordinary and URL-scoped repository helpers.
+        append_git_config(
+            config,
+            &[
+                ("credential.helper", String::new()),
+                ("credential.helper", format!("!{quoted} git-credential")),
+                ("credential.useHttpPath", "true".to_owned()),
+            ],
+        );
+        let appended: Vec<(&str, String)> = appended
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.clone()))
+            .collect();
+        append_git_config(config, &appended);
         config.environment.extend([
             ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
             ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
-            // Command scope resets ordinary and URL-scoped repository helpers.
-            ("GIT_CONFIG_COUNT".into(), "3".into()),
-            ("GIT_CONFIG_KEY_0".into(), "credential.helper".into()),
-            ("GIT_CONFIG_VALUE_0".into(), String::new()),
-            ("GIT_CONFIG_KEY_1".into(), "credential.helper".into()),
-            (
-                "GIT_CONFIG_VALUE_1".into(),
-                format!("!{quoted} git-credential"),
-            ),
-            ("GIT_CONFIG_KEY_2".into(), "credential.useHttpPath".into()),
-            ("GIT_CONFIG_VALUE_2".into(), "true".into()),
             ("GIT_TERMINAL_PROMPT".into(), "0".into()),
             // Git tries askpass before checking GIT_TERMINAL_PROMPT. Override
             // both inherited programs and core.askPass after a helper refusal.
@@ -117,6 +124,30 @@ impl CredentialServer {
         ]);
         Ok(())
     }
+}
+
+/// The command-scope git configuration a sandbox's environment carries, in
+/// order, as `GIT_CONFIG_COUNT` and its numbered pairs name it.
+fn git_config_entries(config: &swage_sandbox::SandboxConfig) -> Vec<(String, String)> {
+    let count: usize = config
+        .environment
+        .get("GIT_CONFIG_COUNT")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    (0..count)
+        .filter_map(|index| {
+            Some((
+                config
+                    .environment
+                    .get(&format!("GIT_CONFIG_KEY_{index}"))?
+                    .clone(),
+                config
+                    .environment
+                    .get(&format!("GIT_CONFIG_VALUE_{index}"))?
+                    .clone(),
+            ))
+        })
+        .collect()
 }
 
 /// Append command-scope git configuration to a sandbox's environment after

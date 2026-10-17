@@ -27,94 +27,159 @@ use tokio::net::UnixStream;
 
 pub const SOCKET_ENV: &str = "SWAGE_GIT_SIGNER_SOCKET";
 
-/// The operator's commit-signing configuration as the host's git reads it:
-/// the key named by `user.signingkey`, its public half, and whether commits
-/// and tags sign by default.
+/// The operator's commit-signing configuration as the host's git reads it
+/// for the turn's workspace: the format, the key `user.signingkey` names
+/// with its public half — or why the host cannot sign with it — and
+/// whether commits and tags sign by default.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SigningConfig {
+    /// `gpg.format`: `ssh`, which the host signs with, or another format
+    /// (`openpgp`, `x509`) it cannot forward yet and refuses with the cause.
+    pub format: String,
+    /// The key the host signs with, or the reason it cannot: a signing
+    /// configuration whose key the host cannot use still reaches the
+    /// sandbox, so git fails the commit with that reason rather than
+    /// committing unsigned.
+    pub material: Result<KeyMaterial, String>,
+    pub commit_gpgsign: bool,
+    pub tag_gpgsign: bool,
+}
+
+/// The operator's SSH signing key as the host uses it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyMaterial {
     /// What `user.signingkey` names: a key file the host signs with, or none
     /// when the configuration carries the public key as a literal and the
     /// operator's agent holds the private half.
     pub key_file: Option<PathBuf>,
     /// The public key, one line, as `ssh-keygen` prints it.
     pub public_key: String,
-    pub commit_gpgsign: bool,
-    pub tag_gpgsign: bool,
 }
 
+/// The `user.signingkey` literal the sandboxed git is given when the host
+/// has no usable key: the host refuses the request it produces with the
+/// cause, so the commit fails with it.
+const UNAVAILABLE_KEY: &str = "unavailable";
+
 impl SigningConfig {
-    /// Read the operator's signing configuration from the host's git. `None`
-    /// when the operator does not sign, or signs with a format this seam
-    /// does not carry yet (openpgp), which is said once in the log.
-    pub async fn from_host_git() -> Option<Self> {
-        let get = |key: &'static str| async move {
-            let output = tokio::process::Command::new("git")
-                .args(["config", "--get", key])
-                .output()
-                .await
-                .ok()?;
-            output
-                .status
-                .success()
-                .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-                .filter(|value| !value.is_empty())
-        };
-        let commit_gpgsign = get("commit.gpgsign")
-            .await
-            .is_some_and(|value| git_bool(&value));
-        let tag_gpgsign = get("tag.gpgsign")
-            .await
-            .is_some_and(|value| git_bool(&value));
-        let format = get("gpg.format").await;
-        let signing_key = get("user.signingkey").await?;
-        if format.as_deref() != Some("ssh") {
-            if commit_gpgsign {
-                tracing::warn!(
-                    format = format.as_deref().unwrap_or("openpgp"),
-                    "the operator signs commits with a format sandboxed git cannot forward yet; sandboxed commits are unsigned"
-                );
-            }
+    /// Read the operator's signing configuration from the host's git as
+    /// the turn's workspace sees it — the operator's global configuration,
+    /// the repository's own, and any conditional include the workspace
+    /// selects. `None` when the operator does not sign: no signing key, no
+    /// key command, and neither commits nor tags signing by default. A
+    /// configuration that signs but that the host cannot forward — another
+    /// format, a key with no readable public half, a key command — is
+    /// carried with its reason, said in the log at the turn's start.
+    pub async fn from_host_git(workspace: &Path) -> Option<Self> {
+        let commit_gpgsign = host_git_bool(workspace, "commit.gpgsign").await;
+        let tag_gpgsign = host_git_bool(workspace, "tag.gpgsign").await;
+        let signing_key = host_git_config(workspace, &["--get", "user.signingkey"]).await;
+        let key_command = host_git_config(workspace, &["--get", "gpg.ssh.defaultKeyCommand"]).await;
+        if signing_key.is_none() && key_command.is_none() && !commit_gpgsign && !tag_gpgsign {
             return None;
         }
-        Self::from_signing_key(&signing_key, commit_gpgsign, tag_gpgsign)
-    }
-
-    /// The configuration for one `user.signingkey` value: a `key::` literal,
-    /// or a path to the public or private key file.
-    pub fn from_signing_key(
-        signing_key: &str,
-        commit_gpgsign: bool,
-        tag_gpgsign: bool,
-    ) -> Option<Self> {
-        if let Some(literal) = signing_key.strip_prefix("key::") {
-            return Some(Self {
-                key_file: None,
-                public_key: literal.trim().to_owned(),
-                commit_gpgsign,
-                tag_gpgsign,
-            });
-        }
-        let path = expand_home(signing_key);
-        let public_key = match std::fs::read_to_string(&path) {
-            Ok(text) if looks_like_public_key(&text) => text.trim().to_owned(),
-            _ => match std::fs::read_to_string(with_pub_suffix(&path)) {
-                Ok(text) if looks_like_public_key(&text) => text.trim().to_owned(),
-                _ => {
-                    tracing::warn!(key = %path.display(), "the operator's signing key names no readable public key; sandboxed commits are unsigned");
-                    return None;
-                }
-            },
+        let format = host_git_config(workspace, &["--get", "gpg.format"])
+            .await
+            .unwrap_or_else(|| "openpgp".to_owned());
+        let material = if format != "ssh" {
+            Err(format!(
+                "the operator signs with {format}, which sandboxed git cannot forward yet"
+            ))
+        } else if let Some(signing_key) = signing_key {
+            key_material(&signing_key)
+        } else {
+            Err("the operator's signing key comes from gpg.ssh.defaultKeyCommand, which sandboxed git cannot forward yet".to_owned())
         };
+        if let Err(reason) = &material {
+            tracing::warn!(
+                %reason,
+                "sandboxed commits that sign will fail with this cause"
+            );
+        }
         Some(Self {
-            key_file: Some(path),
-            public_key,
+            format,
+            material,
             commit_gpgsign,
             tag_gpgsign,
         })
     }
 
-    /// The key as the record names it: the file, or the literal's comment.
-    fn key_name(&self) -> String {
+    /// The SSH configuration for one `user.signingkey` value: a `key::`
+    /// literal, or a path to the public or private key file.
+    pub fn from_signing_key(signing_key: &str, commit_gpgsign: bool, tag_gpgsign: bool) -> Self {
+        Self {
+            format: "ssh".to_owned(),
+            material: key_material(signing_key),
+            commit_gpgsign,
+            tag_gpgsign,
+        }
+    }
+
+    /// The key as the record names it: its fingerprint, or why there is
+    /// none.
+    fn key_identity(&self) -> String {
+        match &self.material {
+            Ok(material) => material.fingerprint(),
+            Err(_) => "(no usable key)".to_owned(),
+        }
+    }
+}
+
+/// The material a `user.signingkey` value names, or why it cannot be used.
+fn key_material(signing_key: &str) -> Result<KeyMaterial, String> {
+    if let Some(literal) = signing_key.strip_prefix("key::") {
+        return Ok(KeyMaterial {
+            key_file: None,
+            public_key: literal.trim().to_owned(),
+        });
+    }
+    let path = expand_home(signing_key);
+    let public_key = match std::fs::read_to_string(&path) {
+        Ok(text) if looks_like_public_key(&text) => text.trim().to_owned(),
+        _ => match std::fs::read_to_string(with_pub_suffix(&path)) {
+            Ok(text) if looks_like_public_key(&text) => text.trim().to_owned(),
+            _ => {
+                return Err(format!(
+                    "the operator's signing key {} names no readable public key",
+                    path.display()
+                ));
+            }
+        },
+    };
+    Ok(KeyMaterial {
+        key_file: Some(path),
+        public_key,
+    })
+}
+
+impl KeyMaterial {
+    /// The key's SSH fingerprint — `SHA256:` and the unpadded base64 of the
+    /// key blob's digest, as `ssh-keygen -lf` prints it — the identity the
+    /// record names, the same for a file and for a literal of one key.
+    pub fn fingerprint(&self) -> String {
+        use sha2::Digest;
+        let blob = self
+            .public_key
+            .split_whitespace()
+            .nth(1)
+            .and_then(|encoded| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .ok()
+            });
+        match blob {
+            Some(blob) => format!(
+                "SHA256:{}",
+                base64::engine::general_purpose::STANDARD_NO_PAD
+                    .encode(sha2::Sha256::digest(&blob))
+            ),
+            None => "(unreadable key)".to_owned(),
+        }
+    }
+
+    /// The key as the operator would recognise it: the file, or the
+    /// literal's comment.
+    fn name(&self) -> String {
         match &self.key_file {
             Some(path) => path.display().to_string(),
             None => format!(
@@ -128,11 +193,29 @@ impl SigningConfig {
     }
 }
 
-fn git_bool(value: &str) -> bool {
-    matches!(
-        value.to_ascii_lowercase().as_str(),
-        "true" | "yes" | "on" | "1"
-    )
+/// One value of the host's git configuration as the workspace sees it.
+async fn host_git_config(workspace: &Path, args: &[&str]) -> Option<String> {
+    let output = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .arg("config")
+        .args(args)
+        .output()
+        .await
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// A boolean of the host's git configuration, read as git reads it: a key
+/// set with no value is true.
+async fn host_git_bool(workspace: &Path, key: &str) -> bool {
+    host_git_config(workspace, &["--type=bool", "--get", key])
+        .await
+        .is_some_and(|value| value == "true")
 }
 
 fn looks_like_public_key(text: &str) -> bool {
@@ -180,8 +263,11 @@ impl SignerServer {
         let (socket, listener) = swage_sandbox::SocketManager::create("git-sign")?;
         let served = signing.clone();
         let task = tokio::spawn(async move {
-            // One bounded exchange at a time, as the credential helper's: an
-            // abandoned caller never leaves a signing in flight unowned.
+            // One bounded exchange at a time, as the credential helper's.
+            // Each stage is bounded on its own, so a signing that waits —
+            // a key on a hardware token, a passphrase prompt — ends in a
+            // refusal git reports, not an exchange abandoned mid-signing;
+            // what the signing stages is cleaned up however it ends.
             loop {
                 let stream = match listener.accept().await {
                     Ok((stream, _)) => stream,
@@ -190,16 +276,32 @@ impl SignerServer {
                         break;
                     }
                 };
-                let exchange = tokio::time::timeout(Duration::from_secs(15), async {
+                let exchange = async {
                     let mut stream = BufReader::new(stream);
                     let mut line = String::new();
-                    (&mut stream)
-                        .take(4 * 1024 * 1024)
-                        .read_line(&mut line)
-                        .await?;
+                    tokio::time::timeout(
+                        EXCHANGE_TIMEOUT,
+                        (&mut stream).take(4 * 1024 * 1024).read_line(&mut line),
+                    )
+                    .await
+                    .map_err(|_| std::io::Error::other("the request did not arrive in time"))??;
                     let request: GitSignRequest =
                         serde_json::from_str(&line).map_err(std::io::Error::other)?;
-                    let response = sign(&served, &request).await;
+                    let response = match tokio::time::timeout(
+                        SIGNING_TIMEOUT,
+                        sign(&served, &request),
+                    )
+                    .await
+                    {
+                        Ok(response) => response,
+                        Err(_) => GitSignResponse {
+                            signature: None,
+                            refusal: Some(format!(
+                                "the host did not sign within {} seconds; a key on a hardware token or behind a passphrase prompt waits longer than a sandboxed commit can",
+                                SIGNING_TIMEOUT.as_secs()
+                            )),
+                        },
+                    };
                     let outcome = if response.signature.is_some() {
                         "signed"
                     } else {
@@ -207,20 +309,36 @@ impl SignerServer {
                     };
                     // The signing is attributed before the signature leaves;
                     // a record that cannot be written releases nothing.
+                    let (key_name, key_file, public_key) = match &served.material {
+                        Ok(material) => (
+                            Some(material.name()),
+                            material
+                                .key_file
+                                .as_ref()
+                                .map(|path| path.display().to_string()),
+                            Some(material.public_key.clone()),
+                        ),
+                        Err(_) => (None, None, None),
+                    };
                     storage
                         .create_audit_event(swage_storage::NewAuditEvent {
                             id: uuid::Uuid::new_v4().to_string(),
                             session_id,
                             entity_kind: "git_signing".into(),
-                            entity_id: served.key_name(),
-                            event_kind: "git_commit_signed".into(),
+                            entity_id: served.key_identity(),
+                            event_kind: "git_signing".into(),
                             summary: format!(
                                 "Signing with {} for namespace {}: {outcome}",
-                                served.key_name(),
+                                key_name
+                                    .clone()
+                                    .unwrap_or_else(|| "no usable key".to_owned()),
                                 request.namespace
                             ),
                             metadata: serde_json::json!({
-                                "key": served.key_name(),
+                                "key": key_name,
+                                "key_file": key_file,
+                                "public_key": public_key,
+                                "fingerprint": served.key_identity(),
                                 "namespace": request.namespace,
                                 "turn_id": turn_id,
                                 "outcome": outcome,
@@ -231,13 +349,12 @@ impl SignerServer {
                         .map_err(std::io::Error::other)?;
                     let mut body = serde_json::to_vec(&response).map_err(std::io::Error::other)?;
                     body.push(b'\n');
-                    stream.get_mut().write_all(&body).await
-                })
-                .await;
-                match exchange {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => tracing::warn!(%error, "git signing exchange refused"),
-                    Err(_) => tracing::warn!("git signing exchange timed out"),
+                    tokio::time::timeout(EXCHANGE_TIMEOUT, stream.get_mut().write_all(&body))
+                        .await
+                        .map_err(|_| std::io::Error::other("the reply was not taken in time"))?
+                };
+                if let Err(error) = exchange.await {
+                    tracing::warn!(%error, "git signing exchange refused");
                 }
             }
         });
@@ -248,11 +365,15 @@ impl SignerServer {
         }))
     }
 
-    /// The signing configuration the sandboxed git runs under: this binary
-    /// as the SSH signing program, the operator's public key as a literal
-    /// (nothing under `~/.ssh` is read inside), and the operator's defaults
-    /// for signing commits and tags. Appended to the git configuration the
-    /// credential helper owns, so the two compose.
+    /// The signing configuration the sandboxed git runs under: the
+    /// operator's format and defaults for signing commits and tags, and
+    /// this binary as the signing program — for SSH with the operator's
+    /// public key as a literal (nothing under `~/.ssh` is read inside), or
+    /// a placeholder the host refuses with the cause when it has no usable
+    /// key; for any other format, as a `gpg.program` that refuses, so a
+    /// commit that signs fails with the cause rather than going unsigned.
+    /// Appended to the git configuration the credential helper owns, so the
+    /// two compose in either order.
     pub fn configure(
         &self,
         config: &mut swage_sandbox::SandboxConfig,
@@ -261,33 +382,48 @@ impl SignerServer {
         config
             .environment
             .insert(SOCKET_ENV.into(), self.socket.path().display().to_string());
-        let binary = swage_sandbox::resolve_agent_binary()?;
-        crate::git_credential::append_git_config(
-            config,
-            &[
-                ("gpg.format", "ssh".to_owned()),
-                ("gpg.ssh.program", binary.display().to_string()),
-                (
-                    "user.signingkey",
-                    format!("key::{}", self.signing.public_key),
-                ),
-                ("commit.gpgsign", self.signing.commit_gpgsign.to_string()),
-                ("tag.gpgsign", self.signing.tag_gpgsign.to_string()),
-            ],
-        );
+        let binary = swage_sandbox::resolve_agent_binary()?.display().to_string();
+        let mut pairs = vec![
+            ("gpg.format", self.signing.format.clone()),
+            ("commit.gpgsign", self.signing.commit_gpgsign.to_string()),
+            ("tag.gpgsign", self.signing.tag_gpgsign.to_string()),
+        ];
+        if self.signing.format == "ssh" {
+            let literal = match &self.signing.material {
+                Ok(material) => material.public_key.clone(),
+                Err(_) => UNAVAILABLE_KEY.to_owned(),
+            };
+            pairs.push(("gpg.ssh.program", binary));
+            pairs.push(("user.signingkey", format!("key::{literal}")));
+        } else {
+            pairs.push(("gpg.program", binary));
+        }
+        crate::git_credential::append_git_config(config, &pairs);
         Ok(())
     }
 }
 
-/// Sign on the host, or say why not: the key must be the operator's
-/// configured one, and `ssh-keygen` must be able to sign with it — the
-/// private file beside the public one, or the operator's agent.
+/// How long a request may take to arrive and a reply to be taken.
+const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the host signs for before refusing: long enough for an agent
+/// to answer, short enough that a commit waiting on a hardware token or a
+/// passphrase prompt fails with that cause instead of hanging the turn.
+const SIGNING_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Sign on the host, or say why not: the host must have a usable key, the
+/// key must be the operator's configured one, and `ssh-keygen` must be able
+/// to sign with it — the private file beside the public one, or the
+/// operator's agent.
 async fn sign(signing: &SigningConfig, request: &GitSignRequest) -> GitSignResponse {
     let refuse = |refusal: String| GitSignResponse {
         signature: None,
         refusal: Some(refusal),
     };
-    if request.public_key.trim() != signing.public_key.trim() {
+    let material = match &signing.material {
+        Ok(material) => material,
+        Err(reason) => return refuse(reason.clone()),
+    };
+    if request.public_key.trim() != material.public_key.trim() {
         return refuse("the requested key is not the operator's configured signing key".into());
     }
     if request.namespace.is_empty() || request.namespace.contains(['\n', '\0']) {
@@ -297,13 +433,11 @@ async fn sign(signing: &SigningConfig, request: &GitSignRequest) -> GitSignRespo
         Ok(payload) => payload,
         Err(error) => return refuse(format!("the payload could not be read: {error}")),
     };
-    let scratch = std::env::temp_dir().join(format!("swage-sign-{}", uuid::Uuid::new_v4()));
-    if let Err(error) = tokio::fs::create_dir(&scratch).await {
-        return refuse(format!("the host could not stage the payload: {error}"));
-    }
-    let outcome = sign_in(&scratch, signing, &request.namespace, &payload).await;
-    let _ = tokio::fs::remove_dir_all(&scratch).await;
-    match outcome {
+    let scratch = match Scratch::create() {
+        Ok(scratch) => scratch,
+        Err(error) => return refuse(format!("the host could not stage the payload: {error}")),
+    };
+    match sign_in(&scratch.0, material, &request.namespace, &payload).await {
         Ok(signature) => GitSignResponse {
             signature: Some(signature),
             refusal: None,
@@ -312,9 +446,28 @@ async fn sign(signing: &SigningConfig, request: &GitSignRequest) -> GitSignRespo
     }
 }
 
+/// A private directory the payload and signature are staged in, removed
+/// when the signing ends — completed, refused, or dropped by a timeout.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn create() -> std::io::Result<Self> {
+        use std::os::unix::fs::DirBuilderExt;
+        let path = std::env::temp_dir().join(format!("swage-sign-{}", uuid::Uuid::new_v4()));
+        std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 async fn sign_in(
     scratch: &Path,
-    signing: &SigningConfig,
+    material: &KeyMaterial,
     namespace: &str,
     payload: &[u8],
 ) -> Result<String, String> {
@@ -322,29 +475,32 @@ async fn sign_in(
     tokio::fs::write(&payload_path, payload)
         .await
         .map_err(|error| format!("the host could not stage the payload: {error}"))?;
-    let key_path = match &signing.key_file {
+    let key_path = match &material.key_file {
         Some(path) => path.clone(),
         None => {
             // A literal key: the public half on disk for ssh-keygen, which
             // then looks the private half up in the operator's agent.
             let path = scratch.join("key.pub");
-            tokio::fs::write(&path, format!("{}\n", signing.public_key))
+            tokio::fs::write(&path, format!("{}\n", material.public_key))
                 .await
                 .map_err(|error| format!("the host could not stage the key: {error}"))?;
             path
         }
     };
+    // The signing is the host's for exactly as long as the exchange is:
+    // a signing abandoned by its timeout takes ssh-keygen with it.
     let output = tokio::process::Command::new("ssh-keygen")
         .args(["-Y", "sign", "-n", namespace, "-f"])
         .arg(&key_path)
         .arg(&payload_path)
+        .kill_on_drop(true)
         .output()
         .await
         .map_err(|error| format!("ssh-keygen could not run on the host: {error}"))?;
     if !output.status.success() {
         return Err(format!(
             "the host could not sign with {}: {}",
-            signing.key_name(),
+            material.name(),
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
@@ -380,22 +536,35 @@ pub async fn request_signature(
     .map_err(std::io::Error::other)?
 }
 
-/// The sandbox side: this binary invoked by git as its SSH signing program,
-/// with `ssh-keygen`'s arguments. `-Y sign` goes to the host over the
-/// socket; any other operation (`verify`, `find-principals`, …) is
+/// Whether a command line is git calling its signing program: `ssh-keygen`'s
+/// `-Y`, or `gpg`'s status and detached-signature arguments.
+pub fn is_signing_invocation(args: &[std::ffi::OsString]) -> bool {
+    args.get(1).is_some_and(|arg| arg == "-Y")
+        || args.iter().any(|arg| {
+            let arg = arg.to_string_lossy();
+            arg == "-bsau" || arg.starts_with("--status-fd")
+        })
+}
+
+/// The sandbox side: this binary invoked by git as its signing program.
+/// With `ssh-keygen`'s arguments, `-Y sign` goes to the host over the
+/// socket, and any other operation (`verify`, `find-principals`, …) is
 /// `ssh-keygen`'s own and runs it unchanged, so verification inside the
-/// sandbox behaves as git expects. Returns the exit code.
+/// sandbox behaves as git expects. With `gpg`'s arguments — the operator
+/// signs with a format the host cannot forward — it refuses, so the commit
+/// fails with the cause. Returns the exit code.
 pub async fn run_signer(args: &[std::ffi::OsString]) -> std::io::Result<i32> {
     let text: Vec<String> = args
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
-    let operation = text
-        .iter()
-        .position(|arg| arg == "-Y")
-        .and_then(|at| text.get(at + 1))
-        .cloned()
-        .unwrap_or_default();
+    let Some(at) = text.iter().position(|arg| arg == "-Y") else {
+        eprintln!(
+            "swage: commit not signed: the operator signs with OpenPGP, which sandboxed git cannot forward yet"
+        );
+        return Ok(1);
+    };
+    let operation = text.get(at + 1).cloned().unwrap_or_default();
     if operation != "sign" {
         let status = tokio::process::Command::new("ssh-keygen")
             .args(args)
@@ -466,18 +635,19 @@ mod tests {
     #[test]
     fn a_signing_key_literal_needs_no_file_and_a_path_reads_its_public_half() {
         let literal =
-            SigningConfig::from_signing_key("key::ssh-ed25519 AAAAC3 fixture", true, false)
-                .expect("a literal key configures");
-        assert_eq!(literal.key_file, None);
-        assert_eq!(literal.public_key, "ssh-ed25519 AAAAC3 fixture");
+            SigningConfig::from_signing_key("key::ssh-ed25519 AAAAC3 fixture", true, false);
+        let material = literal.material.clone().expect("a literal key configures");
+        assert_eq!(material.key_file, None);
+        assert_eq!(material.public_key, "ssh-ed25519 AAAAC3 fixture");
         assert!(literal.commit_gpgsign && !literal.tag_gpgsign);
-        assert_eq!(literal.key_name(), "key::fixture");
+        assert_eq!(material.name(), "key::fixture");
 
         let dir = tempfile::tempdir().unwrap();
         let private = dir.path().join("key");
         std::fs::write(&private, "-----BEGIN OPENSSH PRIVATE KEY-----\n").unwrap();
         std::fs::write(dir.path().join("key.pub"), "ssh-ed25519 AAAAC3 fixture\n").unwrap();
         let by_private = SigningConfig::from_signing_key(private.to_str().unwrap(), false, true)
+            .material
             .expect("a private key path finds its public half");
         assert_eq!(by_private.public_key, "ssh-ed25519 AAAAC3 fixture");
         assert_eq!(by_private.key_file.as_deref(), Some(private.as_path()));
@@ -486,16 +656,126 @@ mod tests {
             false,
             false,
         )
+        .material
         .expect("a public key path reads itself");
         assert_eq!(by_public.public_key, "ssh-ed25519 AAAAC3 fixture");
-        assert!(
-            SigningConfig::from_signing_key(
-                dir.path().join("absent").to_str().unwrap(),
-                true,
-                true
-            )
-            .is_none(),
-            "a key with no readable public half configures nothing"
+    }
+
+    /// A signing configuration whose key the host cannot use still reaches
+    /// the sandbox: the signer is configured with a placeholder key and
+    /// the operator's defaults, and refuses with the cause, so git fails
+    /// the commit with it instead of committing unsigned.
+    #[tokio::test]
+    async fn an_unusable_key_is_carried_as_a_refusal_not_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let absent = dir.path().join("absent");
+        let signing = SigningConfig::from_signing_key(absent.to_str().unwrap(), true, true);
+        let reason = signing
+            .material
+            .clone()
+            .expect_err("a key with no readable public half is a refusal");
+        assert!(reason.contains("names no readable public key"), "{reason}");
+        assert_eq!(signing.key_identity(), "(no usable key)");
+
+        let refused = sign(
+            &signing,
+            &GitSignRequest {
+                namespace: "git".into(),
+                public_key: UNAVAILABLE_KEY.into(),
+                payload: base64::engine::general_purpose::STANDARD.encode(b"tree"),
+            },
+        )
+        .await;
+        assert_eq!(refused.signature, None);
+        assert_eq!(refused.refusal.as_deref(), Some(reason.as_str()));
+    }
+
+    /// The host reads the operator's configuration as the workspace sees it,
+    /// and a boolean set with no value is true, as git reads it.
+    #[tokio::test]
+    async fn host_signing_configuration_is_read_for_the_workspace_with_gits_booleans() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .expect("git runs");
+            assert!(
+                output.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        let public = dir.path().join("operator.pub");
+        std::fs::write(&public, "ssh-ed25519 AAAAC3 operator\n").unwrap();
+        git(&["config", "gpg.format", "ssh"]);
+        git(&["config", "user.signingkey", public.to_str().unwrap()]);
+        // A bare `gpgsign` under `[commit]` is true to git.
+        let config = repo.join(".git").join("config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str("[commit]\n\tgpgsign\n");
+        std::fs::write(&config, text).unwrap();
+
+        let signing = SigningConfig::from_host_git(&repo)
+            .await
+            .expect("the workspace's configuration signs");
+        assert_eq!(signing.format, "ssh");
+        assert!(signing.commit_gpgsign, "a bare boolean reads as true");
+        assert!(!signing.tag_gpgsign);
+        let material = signing.material.expect("the public key is read");
+        assert_eq!(material.public_key, "ssh-ed25519 AAAAC3 operator");
+
+        let unconfigured = dir.path().join("plain");
+        std::fs::create_dir(&unconfigured).unwrap();
+        let plain = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&unconfigured)
+            .output()
+            .unwrap();
+        assert!(plain.status.success());
+        // Another workspace with no signing configuration of its own reads
+        // the operator's global configuration alone, whatever that is.
+        let _ = SigningConfig::from_host_git(&unconfigured).await;
+    }
+
+    /// A key's identity in the record is its fingerprint, the same for the
+    /// key file and for a literal of the same key, and what ssh-keygen
+    /// prints for it.
+    #[test]
+    fn a_keys_recorded_identity_is_its_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let generated = std::process::Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-C", "fixture", "-f"])
+            .arg(dir.path().join("key"))
+            .output()
+            .expect("ssh-keygen runs");
+        assert!(generated.status.success());
+        let public = std::fs::read_to_string(dir.path().join("key.pub")).unwrap();
+        let printed = std::process::Command::new("ssh-keygen")
+            .args(["-lf"])
+            .arg(dir.path().join("key.pub"))
+            .output()
+            .unwrap();
+        let printed = String::from_utf8_lossy(&printed.stdout);
+        let expected = printed
+            .split_whitespace()
+            .nth(1)
+            .expect("ssh-keygen prints the fingerprint second");
+
+        let by_file = key_material(dir.path().join("key").to_str().unwrap()).unwrap();
+        let by_literal = key_material(&format!("key::{}", public.trim())).unwrap();
+        assert_eq!(by_file.fingerprint(), expected);
+        assert_eq!(by_literal.fingerprint(), expected);
+        assert_ne!(
+            by_file.name(),
+            by_literal.name(),
+            "the names differ; the identity does not"
         );
     }
 }

@@ -640,10 +640,14 @@ pub(crate) async fn build_gateway_dispatcher(
         session_id,
         turn_id,
     )?;
-    // The operator's commit signing, forwarded to the host: present only
-    // when the operator signs with SSH, so a configuration that signs
-    // nothing leaves sandboxed git signing nothing.
-    let signer = match crate::git_signer::SigningConfig::from_host_git().await {
+    // The operator's commit signing, forwarded to the host: present when
+    // the operator signs, as the workspace's git configuration says; a
+    // configuration that signs nothing leaves sandboxed git signing nothing.
+    let signer = match crate::git_signer::SigningConfig::from_host_git(
+        &agent_config.working_directory,
+    )
+    .await
+    {
         Some(signing) => Some(crate::git_signer::SignerServer::start(
             state.storage.clone(),
             session_id,

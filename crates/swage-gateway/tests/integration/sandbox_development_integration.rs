@@ -1084,8 +1084,8 @@ async fn sandboxed_git_commits_are_signed_on_the_host_with_the_operators_key() {
         );
     }
     let operator_pub = keys.join("operator.pub");
-    let signing = SigningConfig::from_signing_key(operator_pub.to_str().unwrap(), true, false)
-        .expect("the operator's key configures");
+    let signing = SigningConfig::from_signing_key(operator_pub.to_str().unwrap(), true, false);
+    assert!(signing.material.is_ok(), "{:?}", signing.material);
     let credentials = CredentialServer::start(manager, storage.clone(), None, None).unwrap();
     let signer = SignerServer::start(storage.clone(), None, None, signing).unwrap();
     let mut policy = SandboxConfig::builder()
@@ -1245,7 +1245,7 @@ async fn sandboxed_git_commits_are_signed_on_the_host_with_the_operators_key() {
     let events = storage.list_audit_events().await.unwrap();
     let signings: Vec<_> = events
         .iter()
-        .filter(|event| event.event_kind == "git_commit_signed")
+        .filter(|event| event.event_kind == "git_signing")
         .collect();
     assert!(
         signings
@@ -1263,5 +1263,9 @@ async fn sandboxed_git_commits_are_signed_on_the_host_with_the_operators_key() {
         e.metadata["key"]
             .as_str()
             .is_some_and(|k| k.ends_with("operator.pub"))
+            && e.metadata["fingerprint"]
+                .as_str()
+                .is_some_and(|f| f.starts_with("SHA256:"))
+            && e.entity_id == e.metadata["fingerprint"]
     }));
 }

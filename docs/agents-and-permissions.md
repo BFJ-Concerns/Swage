@@ -400,10 +400,15 @@ key as a literal, so nothing under `~/.ssh` is read inside; the program
 forwards each payload to the gateway, which signs with the operator's key
 — the private file beside the public one, or the operator's agent — and
 records every signing in the audit trail with the key named and the turn
-attributed. A key the operator has not configured is refused, and a host
-that cannot sign fails the commit with the cause rather than leaving it
-unsigned. An operator who signs with OpenPGP is told at the turn's start
-that sandboxed commits are unsigned until that format is carried too.
+attributed, under its fingerprint. The configuration is read as the
+turn's workspace sees it, conditional includes and all. A key the operator
+has not configured is refused, and a host that cannot sign — a key with no
+readable public half, a key named by a key command, a signing that waits
+on a hardware token or a passphrase — fails the commit with the cause
+rather than leaving it unsigned. An operator who signs with OpenPGP gets
+the same: sandboxed git is given a signing program that refuses, so a
+commit that signs fails with that cause until the format is carried; the
+gateway log says why at the turn's start.
 
 ### Landlock
 
