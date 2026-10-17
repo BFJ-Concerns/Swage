@@ -1021,7 +1021,11 @@ mod tests {
                     ChatMessage::new(Role::User, "old conversation ".repeat(80)),
                     ChatMessage::new(Role::Assistant, "old answer ".repeat(80)),
                     ChatMessage::new(Role::User, "latest question"),
-                    ChatMessage::tool_result("call-1", "tool answer"),
+                    if name == "default" {
+                        ChatMessage::tool_result("call-1", "tool answer")
+                    } else {
+                        ChatMessage::new(Role::Assistant, "an ordinary history entry")
+                    },
                     ChatMessage::new(Role::Assistant, "latest answer"),
                 ])),
                 Box::new(Element("prompts", "instructions")),
@@ -1069,9 +1073,24 @@ mod tests {
                     kernel()
                 })
                 .expect("the shipped handler serves");
+            // Constructors stamp assembly-local identities and timestamps.
+            // Compare every provider-facing field, including structured content,
+            // tool correlation and assistant tool calls, rather than those stamps.
+            let messages = |messages: &[ChatMessage]| {
+                messages
+                    .iter()
+                    .map(|message| {
+                        let mut value = serde_json::to_value(message).unwrap();
+                        let object = value.as_object_mut().unwrap();
+                        object.remove("id");
+                        object.remove("created_at");
+                        value
+                    })
+                    .collect::<Vec<_>>()
+            };
             assert_eq!(
-                serde_json::to_value(&actual.messages).unwrap(),
-                serde_json::to_value(&expected.messages).unwrap(),
+                messages(&actual.messages),
+                messages(&expected.messages),
                 "{name}, budget={budget:?}"
             );
             let report = |mut report: swage_context::report::AssemblyReport| {

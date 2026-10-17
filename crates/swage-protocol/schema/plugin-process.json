@@ -3,6 +3,18 @@
   "title": "PluginProcessSurface",
   "type": "object",
   "properties": {
+    "context_compaction_output": {
+      "$ref": "#/$defs/ContextCompactionOutput"
+    },
+    "context_operation": {
+      "$ref": "#/$defs/ContextOperation"
+    },
+    "context_program_input": {
+      "$ref": "#/$defs/ContextProgramInput"
+    },
+    "context_program_output": {
+      "$ref": "#/$defs/ContextProgramOutput"
+    },
     "message": {
       "$ref": "#/$defs/PluginProcessMessage"
     },
@@ -12,9 +24,578 @@
   },
   "required": [
     "request",
-    "message"
+    "message",
+    "context_operation",
+    "context_compaction_output",
+    "context_program_input",
+    "context_program_output"
   ],
   "$defs": {
+    "AssemblyError": {
+      "type": "object",
+      "properties": {
+        "assembly_name": {
+          "type": "string"
+        },
+        "error_kind": {
+          "type": "string"
+        },
+        "fallback_used": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "assembly_name",
+        "error_kind",
+        "message",
+        "fallback_used"
+      ]
+    },
+    "AssemblyReport": {
+      "type": "object",
+      "properties": {
+        "assembly_name": {
+          "type": "string"
+        },
+        "budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "budget_remaining": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int"
+        },
+        "compaction_applied": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CompactionRecord"
+          }
+        },
+        "declared_omissions": {
+          "description": "Baseline elements the assembly script renounced by name, with the\nreason it gave. An element absent from the assembled context and\nabsent from this list is a floor breach, not a choice.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/DeclaredOmission"
+          }
+        },
+        "duration": {
+          "$ref": "#/$defs/Duration"
+        },
+        "effective_tool_permissions": true,
+        "elements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ElementReport"
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AssemblyError"
+          }
+        },
+        "provider_visible": true,
+        "tool_scope": true,
+        "total_tokens": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "turn_graph": {
+          "description": "The turn-graph revision the turn ran under and what filled its\nslots — the kernel's own implementation, a plugin, or a workflow —\nwith the hooks attached and the branches that shadowed it."
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "assembly_name",
+        "elements",
+        "total_tokens",
+        "compaction_applied",
+        "warnings",
+        "errors",
+        "duration"
+      ]
+    },
+    "CompactionRecord": {
+      "type": "object",
+      "properties": {
+        "actual_strategy": {
+          "type": "string"
+        },
+        "budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "diagnosis": {
+          "description": "How a successor built for a stalled session got its summary: the\nwalls it answers and the model calls that diagnosed them.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DiagnosisRecord"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "element": {
+          "type": "string"
+        },
+        "failure_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "focus": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "messages_removed": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "requested_strategy": {
+          "type": "string"
+        },
+        "source_message_range": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            }
+          ]
+        },
+        "tokens_after": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "tokens_before": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "element",
+        "requested_strategy",
+        "actual_strategy",
+        "messages_removed",
+        "tokens_before",
+        "tokens_after"
+      ]
+    },
+    "ContextCompactionOutput": {
+      "description": "The result of compacting history through the context host function.",
+      "type": "object",
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": true
+        },
+        "record": {
+          "$ref": "#/$defs/CompactionRecord"
+        }
+      },
+      "required": [
+        "messages",
+        "record"
+      ]
+    },
+    "ContextOperation": {
+      "description": "Pure context operations available through the `context` host grant.\nA named assembly is the one selected by the turn, never a path supplied\nby the plugin. Messages use the conversation's lossless JSON shape.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "messages": {
+              "type": "array",
+              "items": true
+            },
+            "operation": {
+              "type": "string",
+              "const": "count_messages"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "messages"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "budget": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            },
+            "messages": {
+              "type": "array",
+              "items": true
+            },
+            "operation": {
+              "type": "string",
+              "const": "compact_history"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "messages",
+            "budget"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "type": "string",
+              "const": "named_assembly"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "operation"
+          ]
+        }
+      ]
+    },
+    "ContextProgramElement": {
+      "description": "One context element, with its original and session-rendered messages.",
+      "type": "object",
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": true
+        },
+        "name": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "rendered_messages": {
+          "type": "array",
+          "items": true
+        },
+        "report": {
+          "$ref": "#/$defs/ElementReport"
+        }
+      },
+      "required": [
+        "name",
+        "priority",
+        "messages",
+        "rendered_messages",
+        "report"
+      ]
+    },
+    "ContextProgramInput": {
+      "description": "The input of a plugin's context-program slot.",
+      "type": "object",
+      "properties": {
+        "assembly_name": {
+          "type": "string"
+        },
+        "budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "elements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContextProgramElement"
+          }
+        },
+        "variables": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "elements",
+        "variables",
+        "assembly_name"
+      ]
+    },
+    "ContextProgramOutput": {
+      "description": "A context program's composition and optional account of that composition.",
+      "type": "object",
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": true
+        },
+        "report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AssemblyReport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "messages"
+      ]
+    },
+    "DeclaredOmission": {
+      "description": "One baseline element the assembly deliberately left out of the context.",
+      "type": "object",
+      "properties": {
+        "element": {
+          "description": "The omitted element's name, as it appears in the elements projection.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "The reason the assembly gave for leaving it out.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "element",
+        "reason"
+      ]
+    },
+    "DiagnosisCall": {
+      "description": "One model call a diagnosis made.",
+      "type": "object",
+      "properties": {
+        "cost": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "failure_reason": {
+          "description": "Why the call failed, when it did.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "input_tokens": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "model": {
+          "description": "The provider-facing model id the call was sent to.",
+          "type": "string"
+        },
+        "output_tokens": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "report": {
+          "description": "What a reader reported. A synthesis's output is the record's\n`synthesis`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stage": {
+          "$ref": "#/$defs/DiagnosisStage"
+        }
+      },
+      "required": [
+        "stage",
+        "model",
+        "input_tokens",
+        "output_tokens"
+      ]
+    },
+    "DiagnosisRecord": {
+      "description": "The diagnosis behind a degradation-triggered successor, recorded so the\nassembly report alone reconstructs the pass.",
+      "type": "object",
+      "properties": {
+        "calls": {
+          "description": "The model calls this turn made for the diagnosis, readers first and\nthe synthesis last; empty when an earlier turn's diagnosis was reused.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DiagnosisCall"
+          }
+        },
+        "reused_from_turn": {
+          "description": "The turn whose recorded diagnosis this successor carries again,\nwhen the walls had not changed since.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "signal": {
+          "description": "The wall the thread's recent turns ran into, as the synthesis was\ntold it.",
+          "type": "string"
+        },
+        "synthesis": {
+          "description": "The notes the successor carries in place of the summarised history;\nabsent when the diagnosis could not be written.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "walls": {
+          "description": "Every wall in the window the signal was read over, by the record it\nwas read from (`tool_call:<id>`, `turn:<id>`). A later turn reuses\nthis diagnosis while its window's walls are the same set.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "signal",
+        "walls",
+        "calls"
+      ]
+    },
+    "DiagnosisStage": {
+      "description": "Which part of a diagnosis a model call was.",
+      "oneOf": [
+        {
+          "description": "A blind reader locating where one slice of the history went wrong.",
+          "type": "string",
+          "const": "reader"
+        },
+        {
+          "description": "The synthesis naming the problems from the readers' reports.",
+          "type": "string",
+          "const": "synthesis"
+        }
+      ]
+    },
+    "Duration": {
+      "type": "object",
+      "properties": {
+        "nanos": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "secs",
+        "nanos"
+      ]
+    },
+    "ElementReport": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "named_assembly": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NamedAssemblyReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "preview": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "priority": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "source": {
+          "type": "string"
+        },
+        "token_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "name",
+        "source",
+        "token_count",
+        "priority"
+      ]
+    },
+    "NamedAssemblyReport": {
+      "type": "object",
+      "properties": {
+        "assembly_name": {
+          "type": "string"
+        },
+        "child_elements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ElementReport"
+          }
+        },
+        "resolved_level": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "assembly_name",
+        "resolved_level",
+        "child_elements"
+      ]
+    },
     "PluginCallContext": {
       "description": "Where a tool call comes from, as the plugin's handler sees it.",
       "type": "object",

@@ -20799,6 +20799,15 @@ async fn shipped_context_program_serves_turns_and_topic_variants_with_recorded_f
         }
         // Fresh sessions avoid a prior session's recorded variant choice.
         let session = storage.create_session(new_session(topic.id)).await.unwrap();
+        ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: session.agent_id.clone(),
+            },
+        )
+        .await
+        .unwrap();
         let (tx, _rx) = mpsc::unbounded_channel();
         process_turn(
             &state,

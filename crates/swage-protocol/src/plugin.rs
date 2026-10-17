@@ -36,6 +36,7 @@ pub enum ContextOperation {
 
 /// The result of compacting history through the context host function.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ContextCompactionOutput {
     #[ts(type = "unknown[]")]
     pub messages: Vec<Value>,
@@ -44,6 +45,7 @@ pub struct ContextCompactionOutput {
 
 /// One context element, with its original and session-rendered messages.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ContextProgramElement {
     pub name: String,
     pub priority: i32,
@@ -56,6 +58,7 @@ pub struct ContextProgramElement {
 
 /// The input of a plugin's context-program slot.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ContextProgramInput {
     pub elements: Vec<ContextProgramElement>,
     pub variables: std::collections::BTreeMap<String, String>,
@@ -65,6 +68,7 @@ pub struct ContextProgramInput {
 
 /// A context program's composition and optional account of that composition.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct ContextProgramOutput {
     #[ts(type = "unknown[]")]
     pub messages: Vec<Value>,
