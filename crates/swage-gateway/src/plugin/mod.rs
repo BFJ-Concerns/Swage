@@ -15,7 +15,7 @@
 
 mod composition;
 #[cfg(test)]
-mod context_contract;
+pub(crate) mod context_contract;
 pub mod process;
 pub mod slot;
 pub mod tool;

@@ -19,7 +19,7 @@ impl PluginHost for Host {
     fn log(&self, _: &str) {}
 }
 
-fn default_assembly(
+pub(crate) fn default_assembly(
     elements: &[Box<dyn ContextElement>],
     config: &ContextConfig,
     tokeniser: &dyn Tokeniser,
@@ -32,6 +32,19 @@ fn default_assembly_with_variables(
     config: &ContextConfig,
     tokeniser: &dyn Tokeniser,
     variables: &BTreeMap<String, String>,
+) -> AssemblyOutput {
+    assemble(elements, config, tokeniser, variables, "default", || {
+        panic!("the shipped default must serve without running the kernel")
+    })
+}
+
+pub(crate) fn assemble(
+    elements: &[Box<dyn ContextElement>],
+    config: &ContextConfig,
+    tokeniser: &dyn Tokeniser,
+    variables: &BTreeMap<String, String>,
+    name: &str,
+    named: impl FnOnce() -> AssemblyOutput,
 ) -> AssemblyOutput {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -59,10 +72,8 @@ fn default_assembly_with_variables(
                     working_directory: "/".into(),
                 },
             );
-            slot.context_program(elements, variables, tokeniser, "default", config, || {
-                panic!("the shipped default must serve without running the kernel")
-            })
-            .expect("the shipped context program serves")
+            slot.context_program(elements, variables, tokeniser, name, config, named)
+                .expect("the shipped context program serves")
         })
 }
 

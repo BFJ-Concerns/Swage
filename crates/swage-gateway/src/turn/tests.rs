@@ -15310,7 +15310,7 @@ fn assembly_with_instructions_produces_system_message_first() {
     let config = swage_config::ContextConfig::default();
     let tokeniser = TiktokenTokeniser::new("claude-sonnet-4-20250514");
 
-    let output = swage_context::assembly::default_assembly(&elements, &config, &tokeniser);
+    let output = crate::plugin::context_contract::default_assembly(&elements, &config, &tokeniser);
 
     // System message from instructions appears first.
     assert_eq!(
@@ -15361,7 +15361,7 @@ fn assembly_without_instructions_omits_system_message() {
     let config = swage_config::ContextConfig::default();
     let tokeniser = TiktokenTokeniser::new("claude-sonnet-4-20250514");
 
-    let output = swage_context::assembly::default_assembly(&elements, &config, &tokeniser);
+    let output = crate::plugin::context_contract::default_assembly(&elements, &config, &tokeniser);
 
     // No system message when instructions are empty.
     assert!(
@@ -16279,8 +16279,8 @@ fn a_workflow_worker_session_does_not_carry_memory_but_every_other_does() {
     );
 }
 
-#[tokio::test]
-async fn named_assembly_composes_the_memory_element_like_any_other() {
+#[test]
+fn named_assembly_composes_the_memory_element_like_any_other() {
     let memory = MemoryIndexElement::new(Some("Important topic context".to_string()), Vec::new());
     let elements = build_assembly_elements(
         "Be helpful.",
@@ -16306,13 +16306,25 @@ async fn named_assembly_composes_the_memory_element_like_any_other() {
         "#,
     )
     .unwrap();
-    let output = swage_context::js_assembly::assemble_named(
-        "memory-aware",
-        Some(&assembly_path),
+    let config = swage_config::model::ContextConfig::default();
+    let tokeniser = TiktokenTokeniser::new("gpt-5");
+    let variables = std::collections::BTreeMap::new();
+    let output = crate::plugin::context_contract::assemble(
         &elements,
-        &swage_config::model::ContextConfig::default(),
-        &TiktokenTokeniser::new("gpt-5"),
-        &std::collections::BTreeMap::new(),
+        &config,
+        &tokeniser,
+        &variables,
+        "memory-aware",
+        || {
+            swage_context::js_assembly::assemble_named(
+                "memory-aware",
+                Some(&assembly_path),
+                &elements,
+                &config,
+                &tokeniser,
+                &variables,
+            )
+        },
     );
 
     assert!(
@@ -16870,8 +16882,50 @@ async fn token_usage_remains_null_when_provider_sends_no_usage() {
 // ContextAssembled event and snapshot persistence tests
 // -----------------------------------------------------------------------
 
+/// An ordinary installed shipped package serves report consumers through the
+/// same coordinator as production. Keep the root alive for the entire turn.
+async fn make_state_with_shipped_context(
+    chunks: Vec<StreamChunk>,
+) -> (tempfile::TempDir, AppState, Uuid) {
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage.create_session(new_session(topic.id)).await.unwrap();
+    ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: session.agent_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let state = AppState::new_with_config_root(
+        storage.clone() as Arc<dyn swage_storage::store::Storage>,
+        storage as Arc<dyn TopicStore>,
+        Arc::new(MultiRoundMockProvider::new(vec![chunks])),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_owned(),
+    );
+    crate::shipped_plugins::regenerate(root.path())
+        .await
+        .unwrap();
+    state
+        .plugins
+        .install_shipped(
+            &crate::shipped_plugins::root(root.path()),
+            &["context-program", "succession-summariser"],
+            &[],
+        )
+        .await;
+    state.turn_graph.load().await.unwrap();
+    (root, state, session.id)
+}
+
 /// ContextAssembled must be the first event before any Token events.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn context_assembled_precedes_first_token() {
     let chunks = vec![
         StreamChunk::Delta {
@@ -16881,7 +16935,7 @@ async fn context_assembled_precedes_first_token() {
             finish_reason: None,
         },
     ];
-    let (state, session_id) = make_state_with_session(chunks).await;
+    let (_root, state, session_id) = make_state_with_shipped_context(chunks).await;
     let (tx, mut rx) = mpsc::unbounded_channel();
 
     process_turn(
@@ -16931,6 +16985,12 @@ async fn context_assembled_precedes_first_token() {
             report,
         } => {
             assert_eq!(*event_turn_id, turn_id, "turn_id should match");
+            let value = serde_json::to_value(report).unwrap();
+            assert_eq!(
+                value["turn_graph"]["context_program"]["served"],
+                "plugin context-program"
+            );
+            assert!(value["turn_graph"]["context_program"]["fallback"].is_null());
             // Report should have an "elements" array from the assembly engine.
             assert!(
                 !report.elements.is_empty(),
@@ -16954,7 +17014,7 @@ async fn context_assembled_precedes_first_token() {
 }
 
 /// The assembly report should be persisted as a context snapshot.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn assembly_report_persisted_as_context_snapshot() {
     let chunks = vec![
         StreamChunk::Delta {
@@ -16964,7 +17024,7 @@ async fn assembly_report_persisted_as_context_snapshot() {
             finish_reason: None,
         },
     ];
-    let (state, session_id) = make_state_with_session(chunks).await;
+    let (_root, state, session_id) = make_state_with_shipped_context(chunks).await;
     let (tx, _rx) = mpsc::unbounded_channel();
 
     process_turn(
@@ -17005,6 +17065,11 @@ async fn assembly_report_persisted_as_context_snapshot() {
         parsed.get("elements").is_some(),
         "snapshot should contain elements key"
     );
+    assert_eq!(
+        parsed["turn_graph"]["context_program"]["served"],
+        "plugin context-program"
+    );
+    assert!(parsed["turn_graph"]["context_program"]["fallback"].is_null());
     let expected = state
         .config_root
         .join("scratch/general/sessions")

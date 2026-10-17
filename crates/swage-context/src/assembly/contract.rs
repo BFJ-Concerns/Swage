@@ -363,6 +363,11 @@ fn skills_element_appears_between_prompts_and_history() {
     assert_eq!(output.messages.len(), 4);
     assert_eq!(output.messages[0].role(), Role::System); // prompts
     assert_eq!(output.messages[1].role(), Role::System); // skills
+    assert_eq!(output.messages[0].text_content(), "You are helpful.");
+    assert_eq!(
+        output.messages[1].text_content(),
+        "Always review for correctness."
+    );
     assert_eq!(output.messages[2].role(), Role::User); // history
     assert_eq!(output.messages[3].role(), Role::Assistant);
 }

@@ -266,23 +266,7 @@ impl PluginSlot {
         let descriptors = elements
             .iter()
             .map(|element| {
-                let messages = if element.renders_session_values() {
-                    element
-                        .content()
-                        .into_iter()
-                        .map(|message| {
-                            ChatMessage::new(
-                                message.role(),
-                                swage_context::briefing::substitute_variables(
-                                    &message.text_content(),
-                                    variables,
-                                ),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                } else {
-                    element.content()
-                };
+                let messages = swage_context::js_assembly::rendered_content(&**element, variables);
                 let source = element.source();
                 let report = swage_context::report::ElementReport {
                     name: element.name().to_owned(),
@@ -1028,7 +1012,24 @@ mod tests {
                     },
                     ChatMessage::new(Role::Assistant, "latest answer"),
                 ])),
-                Box::new(Element("prompts", "instructions")),
+                Box::new(swage_context::prompts::PromptsElement::new(vec![
+                    swage_config::prompt_rule::PromptRule {
+                        priority: 100,
+                        content: "instructions".into(),
+                        source_level: swage_config::HierarchyLevel::Global,
+                        file_path: "instructions.md".into(),
+                    },
+                ])),
+                Box::new(swage_context::skills::SkillsElement::new(vec![
+                    swage_context::skills::ActiveSkill {
+                        name: "review".into(),
+                        instructions: "Review for correctness.".into(),
+                        source_directory: "skills/review".into(),
+                        level: swage_config::HierarchyLevel::Global,
+                        is_agent_level: true,
+                        activation_order: 0,
+                    },
+                ])),
             ];
             if enriched {
                 elements.push(Box::new(swage_context::memory::MemoryIndexElement::new(
