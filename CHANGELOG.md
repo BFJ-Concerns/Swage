@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- A module a scheduled run, a workflow run or a routed turn delivers to a surface records what delivered it and when, and the surface shows the attribution above the module.
 - Settings has a read-only Channels tab showing channel status, linked chats and unredeemed link codes verbatim with their expiry in local time.
 - The turn context inspector opens complete recorded provider requests and element text, and shows effective model, provider, effort, budgets and request divergences.
 - Session surfaces can be renamed from their header or by the agent without changing the library entry or original surface.

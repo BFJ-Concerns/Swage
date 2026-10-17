@@ -153,14 +153,17 @@ const SESSION_SURFACES_AND_LIBRARY: &str = "
     );
     CREATE INDEX idx_surfaces_session ON surfaces(session_id, created_at);
     CREATE TABLE surface_modules (
-        id          TEXT NOT NULL PRIMARY KEY,
-        surface_id  TEXT NOT NULL REFERENCES surfaces(id) ON DELETE CASCADE,
-        kind        TEXT NOT NULL,
-        position    INTEGER NOT NULL,
-        source      TEXT NOT NULL,
-        revision    INTEGER NOT NULL DEFAULT 0,
-        created_at  TEXT NOT NULL,
-        updated_at  TEXT NOT NULL
+        id            TEXT NOT NULL PRIMARY KEY,
+        surface_id    TEXT NOT NULL REFERENCES surfaces(id) ON DELETE CASCADE,
+        kind          TEXT NOT NULL,
+        position      INTEGER NOT NULL,
+        source        TEXT NOT NULL,
+        revision      INTEGER NOT NULL DEFAULT 0,
+        created_at    TEXT NOT NULL,
+        updated_at    TEXT NOT NULL,
+        -- The run or turn that delivered the module, as JSON of the wire
+        -- shape; NULL for a module written by hand.
+        delivery_json TEXT
     );
     CREATE INDEX idx_surface_modules_surface ON surface_modules(surface_id);
     CREATE TABLE surface_annotations (

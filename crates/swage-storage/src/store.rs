@@ -9,7 +9,7 @@ use crate::model::{
     ChannelInboundMessage, ChannelLink, ContextSnapshotRecord, CurationAssertion, DeliveryRecord,
     DeviceRegistration, DrainedTurnQueue, ExtractionDerivation, GatewayInterruptionCounts,
     InboundAudit, KnowledgeCitation, KnowledgeSearchHit, LibraryEntry, LibraryEntryModule,
-    LibrarySeeding, Material, Message, ModuleSourceReplacement, NewAgentDefinition,
+    LibrarySeeding, Material, Message, ModuleDelivery, ModuleSourceReplacement, NewAgentDefinition,
     NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob,
     NewChannelInboundMessage, NewChannelLink, NewCurationAssertion, NewDeliveryRecord,
     NewDeviceRegistration, NewKnowledgeCitation, NewLibraryEntry, NewLibraryEntryModule,
@@ -1514,12 +1514,14 @@ pub trait SurfaceStore: Send + Sync {
     ) -> Result<SurfaceModule, StorageError>;
     async fn get_surface_module(&self, id: Uuid) -> Result<Option<SurfaceModule>, StorageError>;
     /// Append a module instance after the surface's last one, its position
-    /// assigned under the connection lock so two appends never share one.
+    /// assigned under the connection lock so two appends never share one;
+    /// `delivery` records the run or turn whose output it is, when one is.
     async fn append_surface_module(
         &self,
         surface_id: Uuid,
         kind: &str,
         source: &str,
+        delivery: Option<ModuleDelivery>,
     ) -> Result<SurfaceModule, StorageError>;
     /// A surface's module instances in position order.
     async fn list_surface_modules(
@@ -1531,11 +1533,14 @@ pub trait SurfaceStore: Send + Sync {
     /// and returns it as it now stands. A landed replace advances the
     /// revision and the owning surface's updated_at. `None` when there is no
     /// such module.
+    /// `delivery` names the run or turn whose output the new source is;
+    /// `None` is an edit by hand, which keeps the delivery the module has.
     async fn replace_surface_module_source(
         &self,
         id: Uuid,
         expected_revision: i64,
         source: &str,
+        delivery: Option<ModuleDelivery>,
     ) -> Result<Option<ModuleSourceReplacement>, StorageError>;
     /// Remove a module instance and the notes hung on it, closing the gap in
     /// the surface's positions. `None` when there is no such module.
@@ -2542,6 +2547,7 @@ mod tests {
             _: Uuid,
             _: &str,
             _: &str,
+            _: Option<ModuleDelivery>,
         ) -> Result<SurfaceModule, StorageError> {
             unimplemented!()
         }
@@ -2553,6 +2559,7 @@ mod tests {
             _: Uuid,
             _: i64,
             _: &str,
+            _: Option<ModuleDelivery>,
         ) -> Result<Option<ModuleSourceReplacement>, StorageError> {
             unimplemented!()
         }

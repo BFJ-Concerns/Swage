@@ -15,6 +15,21 @@
   import { marked, Marked } from "marked";
   import type { SurfacesStore } from "../stores/surfaces";
   import type { SurfaceModuleView } from "../protocol/SurfaceModuleView";
+  import type { ModuleDelivery } from "../protocol/ModuleDelivery";
+
+  // What delivered a module, for its attribution line: the schedule and run,
+  // the workflow run, or the turn — by the ids the run lists show.
+  function deliveredBy(delivery: ModuleDelivery): string {
+    const short = (id: string) => id.slice(0, 8);
+    switch (delivery.by) {
+      case "schedule_run":
+        return `Delivered by schedule ${short(delivery.schedule_id)}, run ${short(delivery.run_id)}`;
+      case "workflow_run":
+        return `Delivered by workflow run ${short(delivery.run_id)}`;
+      case "turn":
+        return `Delivered by turn ${short(delivery.turn_id)}`;
+    }
+  }
 
   interface Props {
     store: SurfacesStore;
@@ -477,6 +492,12 @@
       {#each store.activeSurface.modules as module, index (module.id)}
         {@const openNotes = module.annotations.filter((note) => !note.resolved_at)}
         <article class="module" id={`surface-module-${module.id}`} data-kind={module.kind}>
+          {#if module.delivery}
+            <p class="module-delivery">
+              {deliveredBy(module.delivery)} at
+              <time datetime={module.delivery.delivered_at}>{new Date(module.delivery.delivered_at).toLocaleString()}</time>
+            </p>
+          {/if}
           {#if editingModuleId === module.id}
             {#if staleModule}
               <div class="stale-notice" role="alert">
