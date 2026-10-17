@@ -439,6 +439,10 @@ pub struct WorkflowRunTerminalAccount {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct WorkflowRun {
+    /// The conversation whose turn launched this run, when there is one.
+    pub dispatching_session_id: Option<Uuid>,
+    /// The next timer wake recorded for a parked run.
+    pub wake_at: Option<DateTime<Utc>>,
     pub id: Uuid,
     pub topic_id: Uuid,
     pub script_id: Option<Uuid>,
@@ -1049,6 +1053,8 @@ mod journal_result_tests {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct WorkflowRunStartResult {
+    /// Gateway-relative address, resolved against the origin the reader uses.
+    pub view_url: String,
     #[serde(flatten)]
     pub run: WorkflowRun,
     pub status_as_of: DateTime<Utc>,
