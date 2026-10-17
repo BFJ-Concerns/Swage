@@ -28,6 +28,10 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- The README names Debian/Ubuntu build prerequisites, supported Node versions, and the binary path setup, with frontend install and build commands.
+
+- Provider setup documentation uses governed credentials through Settings → Providers, distinguishes GPT Responses from Chat Completions, and explains model-bound routing and the disabled Codex integration.
+
 - Browser clicks, typing, selections and scrolling no longer ask for approval by default.
 - Image references accept only `https:` and `data:` schemes by default; the accepted set is configurable through `[attachments]` and Settings, with explained refusals recorded in the audit trail.
 
@@ -59,6 +63,28 @@ All notable changes to Swage are documented in this file.
 
 - Open conversations show their recorded agent definition, including after reopening or reloading, rather than the agent selected for a new conversation.
 - Workflow worker conversations identify their agent as a workflow worker rather than Swage default.
+- Sessions can read shipped skills and their carried guidance without location approval, including after a gateway restart; other locations still require approval.
+
+- Queued scheduled turns acknowledge workflow endings only after successful settlement; failed turns leave them available.
+- Schedule gates retain workflow runs that complete while their digest is being read.
+- Workflow status and open accounts include active workers' start and first-output times.
+- Open workflow overviews omit worker prompts, results and provider-round bodies; named-run inspection retains the full journal.
+
+- Schedule gates acknowledge workflow endings after a successful outcome is durable, keeping failed attempts visible to the next gate.
+- Workflow and detached-child start observations capture their state and timestamp in the same storage read.
+- Interrupted workflow cancellation is refused plainly, and unclaimed cancellation requests leave no misleading audit record.
+- Workflow run status explains how to acknowledge handled run endings.
+- Workflow and delegated-child starts report their observed state and time, including work that finishes immediately.
+- Open workflow inspection includes the provider-round activity shown on the run page.
+- Workflow author errors retain their classification and identifier case; empty partial results are omitted and engine traces are secondary.
+- API workflow cancellations retain their source and request time in the terminal account.
+- Workflow endings close outstanding holds consistently; late answers report the settled run state.
+- Leads and schedule gates discover unseen workflow endings through bounded, durable acknowledgements.
+- Configuration history retains changes between a missing value and the literal environment-variable name `unset`, while suppressing absent-to-null rows.
+
+- Settings labels the provider credential input “API key”; history labels credential environment variables separately.
+
+- Configuration history uses Settings’ labels, including provider credentials, and shows creations, deletions, unchanged saves, arrays and single-field changes without misleading or duplicate field rows. Null and absent values both read as unset.
 - File search keeps scanning efficiently after the result window fills, preserving result bytes and total counts.
 
 - Tool-output creation refuses planted directory and file links, preventing sandboxed commands from redirecting gateway writes outside output storage.

@@ -57,20 +57,22 @@ creation request:
   "tool_permissions": {
     "allow": ["knowledge_search", "knowledge_orient", "docs_read", "file_read", "file_list", "file_search", "url_fetch", "web_search"],
     "deny": [],
-    "bundles": {},
-    "require_approval": []
+    "bundles": {}
   }
 }
 ```
 
 `description` is required. `topic_id` scopes the definition to one topic;
 omit it for a global definition. `tool_permissions` is a JSON object with
-`allow`, `deny`, `bundles`, and `require_approval`. `bundles` maps bundle
+`allow`, `deny`, and `bundles`. `bundles` maps bundle
 names to tool-name arrays — it must be present (use `{}` when no custom
 bundles are needed). The overlay intersects with the config cascade's
 grants, so it can only narrow what the config allows. Fields not shown
 above (`model_id`, `skills`, `output_schema`, `output_max_retries`) are
 optional.
+
+A definition request whose `tool_permissions` contains `require_approval`
+is refused with HTTP 422, including when its value is an empty list.
 
 Conversational authoring of agent definitions is not yet available. The
 API routes above are the supported surface.
@@ -781,6 +783,12 @@ first session needs nothing else. A topic, an attached workspace and trust
 in it are optional — they give agents their own memory, file access and
 project guidance, but a conversation can start without any of them.
 
+Configure a provider and choose its default model through
+[Provider setup](interfaces-and-tooling.md#provider-setup) before sending a
+message. Provider setup comes before any sandbox or tool approval. A small
+first tool request, such as asking the shell to print its working directory,
+checks that the configured route can answer and run a tool.
+
 ## The front door
 
 The web UI opens to the **New session** control at the top of the page; it
@@ -890,6 +898,9 @@ entirely.
 <!-- source: agent-docs/interfaces-and-tooling.md -->
 
 # Interfaces and tooling
+
+CLI examples assume `swage` is on `PATH`; see the build and `PATH` steps in
+the [README quick start](../README.md#quick-start).
 
 ## Settings memory view
 
@@ -1088,6 +1099,70 @@ column of the `messages` table (`TEXT NOT NULL DEFAULT '[]'`). The
 Text-only messages keep the plain string form on the wire; messages with
 image parts use the provider-specific typed content array.
 
+## Provider setup
+
+The gateway starts without a provider/model pair; messaging remains unavailable
+until one is configured. In **Settings → Providers**, use **Add provider**,
+choose a kind. For **OpenAI compatible**, enter **Provider name** and
+**Base URL**, then choose **Connect**. Paste the credential into **API key**.
+This tab autosaves; wait for the saved notice and stored-credential indicator
+before continuing.
+A new key becomes an encrypted managed `provider_key` secret and the saved
+provider entry receives its `api_key_secret_ref`. No shell export is needed.
+
+| Settings kind | `protocol` | Endpoint contract |
+|---|---|---|
+| OpenAI Responses | `openai-responses` | Responses API for GPT-family models; appends `/responses` to the base URL |
+| OpenAI | `openai` | Chat Completions; appends `/chat/completions` to the base URL |
+| OpenAI compatible | `openai` | Appends `/chat/completions` to the supplied base URL |
+| Anthropic | `anthropic` | Anthropic Messages |
+| Google | `google` | Google generative language API |
+| OpenRouter | `openrouter` | OpenRouter's Chat Completions endpoint |
+
+For a GPT-family Responses route choose **OpenAI Responses**. An OpenAI-family
+proxy's **Base URL** must include its API prefix (for example
+`https://api.example.com/v1`); a Responses route must serve Responses.
+Anthropic and Google base URLs precede the protocol paths the adapter adds
+(`/v1/messages` and `/v1beta/models/...`, respectively). **OpenAI compatible** selects Chat Completions; it does
+not select Responses. Native OpenAI kinds default to `https://api.openai.com/v1`.
+
+After the credential is stored, use **Discover → Refresh** and add a model,
+or enter the upstream model ID beside **Add model**. Use **Use** on its row
+(or the **Default model** selector) to choose the default; wait for autosave
+confirmation. OpenAI-family discovery with a custom base URL uses saved
+credentials for an existing provider. Other kinds may return built-in lists
+or use a public catalogue; discovery does not prove a credential works.
+Successful Settings saves apply provider/model changes to new turns without
+a gateway restart. Restart the gateway after hand-editing `config.toml`.
+
+`models.default` selects a catalogue entry; that entry's `provider_id` selects
+the provider and `model_id` names the upstream model. An interactive turn uses
+the selected entry's provider and that provider's saved URL, protocol and
+credential, including when another entry shares the upstream model ID. `[providers] default` does not select the
+provider for a model's turn. A failed selected route surfaces an error naming
+the provider and endpoint instead of silently using another configured route.
+
+For file configuration, register a governed secret first (below), then use
+the returned `reference` verbatim. The IDs below are placeholders:
+
+```toml
+[providers.entries.gpt]
+protocol = "openai-responses"
+api_key_secret_ref = "secret://file/<returned-id>"
+# base_url = "https://api.example.com/v1" # only for a Responses-serving proxy
+
+[models]
+default = "gpt"
+
+[models.entries.gpt]
+provider_id = "gpt"
+model_id = "<upstream-model-id>"
+```
+
+Configure the provider and model before starting the first turn or handling
+sandbox/tool approvals. The [first-session procedure](first-session.md)
+starts after setup.
+
 ## Provider credentials
 
 A provider entry in `config.toml` has two credential fields
@@ -1095,29 +1170,36 @@ A provider entry in `config.toml` has two credential fields
 
 | Field | Resolution | Audit/redaction |
 |---|---|---|
-| `api_key_secret_ref` | Resolved through the `SecretManager` by reference (`secret://{backend}/{id}`) with an audit event per access and the value registered for redaction | Yes |
-| `api_key_env` | Direct `std::env::var` read at startup; legacy path, warned at startup (`startup.rs:449`) | No |
+| `api_key_secret_ref` | Resolved through `SecretManager` using `secret://{backend}/{id}` | Secret-access audit; active values redact captured provider requests and provider-attempt errors |
+| `api_key_env` | Direct `std::env::var` read when the provider runtime is built; legacy path with a warning | No secret-access audit or value-based redaction; pattern-based safety filtering still applies |
 
-`resolve_provider_config` (`startup.rs:420`) checks `api_key_secret_ref`
-first; if absent, falls back to `api_key_env`. The resolved secret must have
-`material_kind` `"provider_key"`.
+`resolve_provider_config` in `swage-gateway/src/startup.rs` checks
+`api_key_secret_ref` first; if absent, it falls back to `api_key_env`. The
+resolved secret must have `material_kind` `"provider_key"`. OAuth-token
+records are not provider-key secrets.
 
 The built-in Codex app server (`protocol = "codex"`, the gateway spawning
 `codex app-server` and driving it over stdio) is temporarily disabled.
-`validate_resolved_catalog_references` (`swage-config/src/validation.rs`)
+`validate_resolved_catalog_references` in `swage-config/src/validation.rs`
 refuses such a provider entry at configuration load and at settings save:
 the Codex adapter accepts Codex's command and file-change approval requests
 only for tools granted without approval, so under the default
 `require_approval` list a Codex session could neither run commands nor edit
 files. The adapter (`swage-gateway/src/codex/`) and its tests remain, and
-settings do not offer it as a provider kind. Codex models reached through an
-OpenAI-protocol provider are unaffected.
+settings do not offer it as a provider kind. Codex models reached through a
+supported API provider are unaffected. For GPT/Codex-family models served
+over Responses, use `openai-responses`; use `openai` only for an endpoint
+serving Chat Completions. Add its upstream model ID under that provider and
+select it with **Use**. A CLI sign-in does not enable the disabled app-server
+route or automatically supply an API credential for these routes.
 
 ### Secret manager and backends
 
 The `SecretManager` (`secret.rs`) resolves secrets by their `secret://`
-reference, with an audit event per access and the resolved value registered
-for redaction. A secret's `backend_kind` names where its value lives;
+reference and audits successful access. Captured provider requests and
+provider-attempt errors are redacted using the current values of active
+secrets. This is separate from pattern-based safety filtering of tool results; it does not promise general log redaction.
+A secret's `backend_kind` names where its value lives;
 resolution reads the backend on every call, so material that changes
 underneath is current at the next access.
 
@@ -1126,6 +1208,12 @@ underneath is current at the next access.
 | Managed | `managed` | Encrypted at rest in the gateway's SQLite store |
 | Environment | `env` | `external_reference` names an environment variable |
 | File | `file` | `external_reference` names a file path; `metadata.json_pointer` (RFC 6901) optionally selects one field of a JSON document |
+
+Startup normally creates or reuses `<data-root>/secrets/managed-secret.key`
+for managed-secret encryption; `SWAGE_MANAGED_SECRET_KEY` can supply the key
+instead. Preserve the encryption key with the database in backups: a different
+key cannot decrypt stored credentials. Never include the key's contents in
+logs or documentation.
 
 ### File backend
 
@@ -1137,22 +1225,24 @@ the observation stamp.
 
 ### Registering a file-backed secret
 
-Create the secret with `POST /api/secrets` (`server.rs:251`):
+Create the secret with `POST /api/secrets`:
 
 ```json
 {
-  "name": "my-service-token",
+  "name": "my-provider-key",
   "material_kind": "provider_key",
   "owner_kind": "operator",
   "backend_kind": "file",
   "scope_kind": "provider",
   "scope_id": "my-provider",
-  "external_reference": "/path/to/token-file.json",
-  "metadata": { "json_pointer": "/tokens/access_token" }
+  "external_reference": "/path/to/provider-key.json",
+  "metadata": { "json_pointer": "/api_key" }
 }
 ```
 
-The request fields (`CreateSecretRequest` in `secret.rs:43`):
+The JSON file must contain the provider API key in its `api_key` field.
+
+The request fields (`CreateSecretRequest` in `secret.rs`):
 
 | Field | Required | Purpose |
 |---|---|---|
@@ -1175,10 +1265,38 @@ protocol = "openai"
 api_key_secret_ref = "secret://file/<returned-id>"
 ```
 
+### Registering a managed secret
+
+Settings → Providers creates a managed secret for a new pasted key. The API
+route is `POST /api/secrets` with `backend_kind: "managed"` and the provider
+API key inline in `value`:
+
+```json
+{
+  "name": "my-provider-key",
+  "material_kind": "provider_key",
+  "owner_kind": "operator",
+  "backend_kind": "managed",
+  "scope_kind": "provider",
+  "scope_id": "my-provider",
+  "value": "<provider-api-key>"
+}
+```
+
+Replace the placeholder. The response's `reference` is used verbatim for
+`api_key_secret_ref`. Create echoes the submitted value in `revealed_value`;
+keep that response out of logs and reports.
+
 ### Codex auth store registration
 
-At startup (`startup.rs:208`) the gateway registers the Codex CLI's
-`auth.json` under the file backend as two records:
+At startup the gateway registers `<data-root>/codex/auth.json` under the
+file backend as two records. The data root is `~/.swage` or `SWAGE_HOME`;
+the normal path is `~/.swage/codex/auth.json`, not `~/.codex/auth.json`.
+The retained supervisor uses this directory as its `CODEX_HOME`. Registration
+still occurs while the integration is disabled; it does not enable sign-in
+or turns through `protocol = "codex"`.
+
+The records select:
 
 | Name | Material kind | JSON pointer |
 |---|---|---|
@@ -1562,61 +1680,15 @@ Handlers construct refusals through `ApiError` rather than hand-built bodies.
   the `code` field. The generated TypeScript client's request helper raises
   `ApiError` on non-ok responses.
 
-## Wire-contract architecture
+## API reference
 
-All types that cross a process boundary live in `swage-protocol`
-(`crates/swage-protocol/`). Gateway modules consume or re-export those Rust
-types, and frontend wire types come from generated projections under
-`frontend/src/lib/protocol/`.
-
-The crate is organised into four surface modules:
-
-| Surface | Module | Anchor type | Scope |
-|---|---|---|---|
-| Client | `src/client/` | `ClientSurface` | Conversations, streaming, approvals, schedules, knowledge, voice, workflows, channels, delivery, topics, settings, materials, recovery, context reports, provider sign-in |
-| Hosting | `src/hosting.rs` | `HostingSurface` | Presence, operator overview, agent definitions, approvals, configuration |
-| Device | `src/device.rs` | `DeviceSurface` | Device registration, remote tool execution |
-| Channel | `src/channel.rs` | `ChannelSurface` | Inbound messages (DM/thread), delivery log, channel status |
-
-Each manually maintained anchor struct must reference every wire type on its
-surface. A `schemars::schema_for!` call walks only the type graph reachable from
-that anchor, so a new top-level type must be added to the anchor unless an
-existing field already reaches it.
-
-### Route manifest
-
-`routes.rs` (`swage-protocol::client::routes`) carries a growing manifest of
-client-surface HTTP routes: method, path template, path parameters, request
-body schema name, and response body schema name. The manifest does not yet
-cover the full client surface — the topic CRUD routes are the first entries;
-routes not yet in the manifest are registered directly on the router and are
-not covered by the OpenAPI or generated-client projections. Failures are not
-listed per route — every route answers a failure with `ApiErrorBody`,
-projected once as the shared error response.
-
-Adding a manifested route is one entry in the `routes()` function; the
-OpenAPI document, the generated TypeScript client, and the router-coverage
-test all read this table. The router test (`server.rs:418`) proves every
-manifest route is registered on the axum router — a manifest entry with no
-matching handler fails the test.
-
-### Projections
-
-| Projection | Output | Mechanism |
-|---|---|---|
-| TypeScript types (ts-rs) | `frontend/src/lib/protocol/` | `projections.rs` test manually calls `export_all` for each top-level export, then trims trailing whitespace |
-| JSON Schema (schemars) | `crates/swage-protocol/schema/{client,hosting,device,channel}.json` | `projections.rs` tests per surface, via the anchor type |
-| OpenAPI 3.1 (from route manifest) | `crates/swage-protocol/schema/client-openapi.json` | `projections.rs` test renders `openapi::document()`, which walks the manifest and reuses the client surface's JSON Schema as its `components/schemas` |
-| TypeScript client (from route manifest) | `frontend/src/lib/protocol/client.ts` | `projections.rs` test renders `typescript_client::generate()` — one typed function per manifest route over a shared `request` helper that raises `ApiError` on non-ok responses |
-
-Running `cargo test -p swage-protocol` regenerates all projections in place.
-New top-level wire types must be added to the appropriate anchor for JSON
-Schema and to the explicit `export_all` list for TypeScript unless already
-reachable from an existing entry. New routes must be added to the `routes()`
-manifest for the OpenAPI and client projections. Drift shows as uncommitted
-changes, caught by the verify gate's projection-freshness check; an
-unregistered type or unmanifested route creates no drift for that check to
-detect.
+The published client OpenAPI reference is
+[`client-openapi.json`](../crates/swage-protocol/schema/client-openapi.json).
+It covers a subset of client routes; secret operations are not included.
+See [Provider credentials](#provider-credentials) for those requests.
+JSON Schema contracts for the client, hosting, device and channel surfaces
+are in [`crates/swage-protocol/schema/`](../crates/swage-protocol/schema/).
+HTTP failures use the [wire error contract](#wire-error-contract).
 
 ## Verification gate
 
@@ -1674,14 +1746,9 @@ budget.
 
 ## Client-side route preservation
 
-The SPA router (`frontend/src/lib/router.ts`) is framework-free: `parseRoute`
-pattern-matches the URL (`/`, `/conversations/{id}`,
-`/conversations/{id}/surfaces/{surface_id}`, `/library`,
-`/workflow-runs/{id}`, `/settings/...`, `/settings/topic/{slug}/...`);
-`createRouter` manages `pushState` navigation and `popstate` listening.
-
-`applyLocation()` runs on every URL change. When the URL contains a
-conversation ID:
+Conversation links use `/conversations/{id}` and
+`/conversations/{id}/surfaces/{surface_id}`. Browser back/forward navigation
+to a conversation behaves as follows:
 
 - **Already active:** calls `checkConversationExists` — a lightweight `GET`
   that confirms the conversation exists without re-fetching it. On 404,
@@ -1691,21 +1758,14 @@ conversation ID:
 - **Different conversation:** calls `selectConversation`, which fully loads
   it. On 404, falls back to root. On other errors, the error propagates.
 
-The `conversationStore` dependency is injected as a four-member interface,
-wired in `App.svelte`. `clearActiveConversation` disconnects the WebSocket
-before clearing the store, preventing orphaned connections.
-
 Route changes propagate `notFound` state to the UI, so the "conversation not
 found" notice appears for `popstate`-triggered navigations and initial surface
 loads alike. When a scope was in view, `App.svelte` keeps a pending start in
 it (the composer stays open; the next message creates a session there);
 otherwise the front door serves.
 
-Session creation is fenced against a scope change: `createAndNavigate`
-captures a scope generation before the request and hands the store a
-`shouldInstall` check, so a session created for one scope is neither listed
-nor activated once the user has moved to another (it exists in the scope it
-was asked for, and the recent list finds it).
+A session requested before a scope change remains in the requested scope;
+it does not become active in the newly selected scope.
 
 ## Tool-call recording and replay
 
