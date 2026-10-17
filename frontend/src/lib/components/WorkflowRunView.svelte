@@ -182,9 +182,17 @@
                   <h4>{standing} ({placedWorkers.length})</h4>
                   <ul>
                     {#each placedWorkers as worker (worker.journal_entry_id)}
-                      {@const result = detail?.journal.find((entry) => entry.id === worker.journal_entry_id)?.result}
+                      {@const entry = detail?.journal.find((entry) => entry.id === worker.journal_entry_id)}
+                      {@const result = entry?.result}
+                      {@const sessionId = entry?.agent_call?.session_id ?? entry?.agent_call?.dispatch?.attempts.at(-1)?.session_id}
                       <li>
-                        <span class="worker">{describeWorker(worker)}</span>
+                        <span class="worker">
+                          {#if sessionId}
+                            <a href={conversationPath(sessionId)} onclick={(event) => navigate(event, conversationPath(sessionId))}>{describeWorker(worker)}</a>
+                          {:else}
+                            {describeWorker(worker)}
+                          {/if}
+                        </span>
                         <span class="detail">{describeTermination(worker)}</span>
                         {#if result?.kind === "agent_call"}<span class="output">{renderOutput(result.output)}</span>{/if}
                         {#if describeRedispatch(worker)}

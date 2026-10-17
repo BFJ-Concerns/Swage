@@ -347,4 +347,13 @@ describe("run page completeness", () => {
     expect(result.textContent).toContain("organised");
     expect(result.textContent).toContain("Two subjects indexed");
   });
+  it("links a terminal worker to its recorded session", () => {
+    const account = emptyAccount({ ending: "returned" });
+    account.workers.done = [{ journal_entry_id: "entry-session", seq: 0, label: "Completed worker", redispatched_after_interruption: false }];
+    const recorded = detail(run(account));
+    recorded.journal = [{ id: "entry-session", agent_call: { session_id: "recorded-session" } } as unknown as WorkflowRunDetailResponse["journal"][number]];
+    page = mount(WorkflowRunView, { target: document.body, props: { detail: recorded, loadState: "loaded", errorMessage: "" } });
+    expect(document.querySelector(".workers .worker a")?.getAttribute("href")).toBe("/conversations/recorded-session");
+  });
+
 });
