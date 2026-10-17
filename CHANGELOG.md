@@ -7,6 +7,13 @@ All notable changes to Swage are documented in this file.
 ### Added
 
 - Schedules can skip, queue with a configurable pending fire cap, or allow overlapping runs; the form, API and scheduling tool expose the policy, paused schedules retain their policy and cap display, and suppressed fires remain in run history.
+- `file_write` can append content without rewriting or replacing the existing file.
+- A module a scheduled run, a workflow run or a routed turn delivers to a surface records what delivered it and when, and the surface shows the attribution above the module.
+- Settings has a read-only Channels tab showing channel status, linked chats and unredeemed link codes verbatim with their expiry in local time.
+- The turn context inspector opens complete recorded provider requests and element text, and shows effective model, provider, effort, budgets and request divergences.
+- Session surfaces can be renamed from their header or by the agent without changing the library entry or original surface.
+- Either party can resolve a surface note; it leaves the working view and remains in the surface record.
+- Agents can replace or remove a uniquely matched passage of a module without resubmitting unrelated content.
 
 - Settings has a Memory tab listing every memory page, general and per topic, to read; a chat box there changes memory by instructing the curator, showing its reply and each page it changed. The curator's notice links open the page they name.
 - Settings edits the web search provider and applies saved changes to new turns.
@@ -21,6 +28,10 @@ All notable changes to Swage are documented in this file.
 - Surfaces belong to the session that created them and stay with its record. A surface can be saved to a shared library with a name, a description of what it does and when to use it, and tags; any session in any topic or the general scope can add a library entry as a surface of its own, receiving the saved content only within the entry's origin topic and the bare shape elsewhere. A topic can designate library entries as defaults that open in each of its new sessions, and carries tags that narrow the catalogue for its sessions. Agents browse the catalogue (descriptions and tags, never content) and add entries through the new `surface_library` tool, and save surfaces through `surface_write`.
 
 ### Changed
+
+- The README names Debian/Ubuntu build prerequisites, supported Node versions, and the binary path setup, with frontend install and build commands.
+
+- Provider setup documentation uses governed credentials through Settings → Providers, distinguishes GPT Responses from Chat Completions, and explains model-bound routing and the disabled Codex integration.
 
 - Browser clicks, typing, selections and scrolling no longer ask for approval by default.
 - Image references accept only `https:` and `data:` schemes by default; the accepted set is configurable through `[attachments]` and Settings, with explained refusals recorded in the audit trail.
@@ -53,6 +64,62 @@ All notable changes to Swage are documented in this file.
 - Schedule request schemas require a pending fire cap of at least one, matching API validation.
 - Operator run history retains assistant output alongside failed-call details.
 - Scheduled turns containing failed or refused tool calls show a distinct completed-with-errors outcome naming the calls in run history, the operator dashboard and the run API.
+- Workflow run pages refresh until completion and show parked waits, shared placements, provenance links, attempt options, liveness and returned source outcomes.
+- Session agent names come from the session’s own topic, including when topic definitions cannot load; missing definitions display “Unavailable agent”.
+
+- Open conversations show their recorded agent definition, including after reopening or reloading, rather than the agent selected for a new conversation.
+- Workflow worker conversations identify their agent as a workflow worker rather than Swage default.
+- Sessions can read shipped skills and their carried guidance without location approval, including after a gateway restart; other locations still require approval.
+
+- Queued scheduled turns acknowledge workflow endings only after successful settlement; failed turns leave them available.
+- Schedule gates retain workflow runs that complete while their digest is being read.
+- Workflow status and open accounts include active workers' start and first-output times.
+- Open workflow overviews omit worker prompts, results and provider-round bodies; named-run inspection retains the full journal.
+
+- Schedule gates acknowledge workflow endings after a successful outcome is durable, keeping failed attempts visible to the next gate.
+- Workflow and detached-child start observations capture their state and timestamp in the same storage read.
+- Interrupted workflow cancellation is refused plainly, and unclaimed cancellation requests leave no misleading audit record.
+- Workflow run status explains how to acknowledge handled run endings.
+- Workflow and delegated-child starts report their observed state and time, including work that finishes immediately.
+- Open workflow inspection includes the provider-round activity shown on the run page.
+- Workflow author errors retain their classification and identifier case; empty partial results are omitted and engine traces are secondary.
+- API workflow cancellations retain their source and request time in the terminal account.
+- Workflow endings close outstanding holds consistently; late answers report the settled run state.
+- Leads and schedule gates discover unseen workflow endings through bounded, durable acknowledgements.
+- Configuration history retains changes between a missing value and the literal environment-variable name `unset`, while suppressing absent-to-null rows.
+
+- Settings labels the provider credential input “API key”; history labels credential environment variables separately.
+
+- Configuration history uses Settings’ labels, including provider credentials, and shows creations, deletions, unchanged saves, arrays and single-field changes without misleading or duplicate field rows. Null and absent values both read as unset.
+- File search keeps scanning efficiently after the result window fills, preserving result bytes and total counts.
+
+- Tool-output creation refuses planted directory and file links, preventing sandboxed commands from redirecting gateway writes outside output storage.
+
+- File search runs off the async runtime, stops on cancellation or a deadline, confines symlinks to the approved root, and retains only the requested result window while counting matches. Case-insensitive matching preserves contextual Unicode lowercase, including Greek final sigma.
+- File reads retain a bounded byte window; binary files whose metadata cannot give their size report an unknown length.
+- File path checks preserve non-UTF-8 roots and accept canonical paths through approved symlink aliases. An untrusted child workspace cannot release a read-only parent's restriction, and device-owned paths outside gateway attachments are checked on the device.
+- Replacing a non-empty file with `file_write` reports the prior byte count.
+- Local gateway tool-output artefacts use managed session scratch storage, so read-only workspaces remain untouched and shell inspection returns its output. File tools can read only the artefact subtree through this grant and cannot modify artefacts.
+- Give session surfaces bordered controls and edge spacing, wider modules, a surface list above creation, and direct module navigation.
+
+- A workflow run's record shows every gateway interruption it lived through — a boot that found it running, or parked — and the run view lists them. Each attempt of a worker call records why it was dispatched: the first dispatch, a redispatch after an interruption (whose earlier attempt's outcome is unknown and whose tool calls may have been applied), or the declared fallback serving after the primary failed; the run detail words the two apart instead of calling every redispatch an interruption. The run's Done summary marks workers redispatched after an interruption and discloses that their effects may have been repeated.
+- Cancelling a turn while its initial provider attempt is queued retains that attempt as interrupted in the turn record.
+
+- The turn inspector shows the final provider attempt’s full request for each round and keeps failed attempts’ requests beside their entries, including cross-protocol failover.
+
+- Provider attempt records and the turn inspector identify each attempt’s provider adapter, model and stable route through failover, so separate providers’ first attempts are distinguishable.
+
+- Turn inspector instruction summaries count each configured file at its original hierarchy level, including topic instructions.
+
+- Turn records retain every provider stream attempt, including the initial request and retries, with start and end times and redacted failure details.
+- Surface renames and note resolutions commit with their audit event; a failed audit write leaves the surface unchanged.
+
+- Surface reads by the agent omit resolved notes while the HTTP response and stored record retain them.
+
+- Retrying a surface rename or note resolution clears the previous failure notice.
+
+- Failed checklist saves keep an open surface note and its unsaved text.
+
 - Shared-session channel arrivals keep their order across chats, and queued branch replies stay on their own thread in the live conversation.
 
 - Developer channel messages join the durable session queue during a turn. Telegram polling continues while the assistant answers; queued inputs retain their thread destinations, replies are delivered once per target, and deleting a session settles its waiting scheduled work. Delayed queue acknowledgements cannot restore drained messages.
@@ -63,6 +130,15 @@ All notable changes to Swage are documented in this file.
 - Saving an agent definition refuses `require_approval` in its tool-permission overlay instead of accepting an ignored approval requirement.
 - The web UI serves Bebas Neue, Hanken Grotesk and DM Mono from bundled font files without contacting Google Fonts.
 - LAN installation accepts a host and port, saves valid gateway defaults, and finds release artefacts under a custom Cargo target directory.
+- Failed surface renames and note resolutions preserve unsaved module edits and note drafts.
+
+- Library cards and topic-default choices distinguish same-name saves by time and origin.
+- Agent catalogue results include save times; saving an existing name explains that it creates a separate entry.
+- The save-to-library form has persistent visible labels, reviewable descriptions and tags, and explains what is preserved.
+- Shape-only surface copies explain why their modules start empty.
+- Surface tools resolve session surfaces by title and return useful surface listings for invalid references and unknown arguments.
+- Rendered checklist boxes save their changes to Markdown with the same revision checks and conflict choice as a module edit.
+- Whole-module replacements report when they discard most of the previous source.
 - Browser navigation keeps working after settings or grant changes, retaining the logged-in profile; startup timeouts explain how to recover.
 
 - Oversized browser snapshots retain the article’s opening paragraph through ignored accessibility wrappers and preceding infobox tables instead of eliding it.

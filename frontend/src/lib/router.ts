@@ -246,17 +246,19 @@ export function createRouter(options?: RouterOptions): Router {
     }
   }
 
-  // A selection the location pass could not make: the address falls back to
-  // the conversation still active, or the front door, so the bar never
-  // names a conversation that is not on the page.
-  function recoverFromFailedSelection(generation: number): void {
-    if (generation !== navigationGeneration) {
-      return;
-    }
-    const activeConversationId = options?.conversationStore?.activeConversationId;
-    const fallbackPath = activeConversationId ? `/conversations/${activeConversationId}` : "/";
-    window.history.replaceState(null, "", fallbackPath);
-    updateRoute(parseRoute(fallbackPath));
+  // A navigation that loads a conversation can fail after the URL changes.
+  // Restore the active conversation on a transient failure; applyLocation
+  // handles a missing conversation with its own not-found route.
+  function followLocation(generation: number): void {
+    void applyLocation(generation).catch(() => {
+      if (generation !== navigationGeneration) return;
+      const activeConversationId = options?.conversationStore?.activeConversationId;
+      const fallbackPath = activeConversationId
+        ? conversationPath(activeConversationId)
+        : "/";
+      window.history.replaceState(null, "", fallbackPath);
+      updateRoute(parseRoute(fallbackPath));
+    });
   }
 
   return {
@@ -270,18 +272,16 @@ export function createRouter(options?: RouterOptions): Router {
         window.history.pushState(null, "", path);
       }
       const route = parseRoute(path);
-      updateRoute(route);
-      // A caller that has already selected the conversation the path names
-      // (the conversation list, the surfaces pane) needs only the URL
-      // synced. A link to another conversation — a run's row, a record's
-      // notice — needs that conversation selected and shown, which the
-      // location pass does as it would for a deep link on load.
       if (
-        route.conversationId &&
         options?.conversationStore &&
+        route.conversationId &&
         route.conversationId !== options.conversationStore.activeConversationId
       ) {
-        void applyLocation(generation).catch(() => recoverFromFailedSelection(generation));
+        followLocation(generation);
+      } else {
+        // Session selectors install their conversation before navigating;
+        // links to other sessions use the same loading path as a deep link.
+        updateRoute(route);
       }
     },
 
@@ -291,7 +291,7 @@ export function createRouter(options?: RouterOptions): Router {
         // popstate is synchronous in terms of the URL update; async selection
         // runs in the background and updates currentRoute when it settles.
         const generation = ++navigationGeneration;
-        void applyLocation(generation).catch(() => recoverFromFailedSelection(generation));
+        followLocation(generation);
       });
 
       // Apply the initial URL — this kicks off conversation selection if

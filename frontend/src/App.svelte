@@ -277,14 +277,14 @@
   function handleRouteChange(route: Route): void {
     currentRoute = route;
     notFound = route.notFound;
-    // A URL that names a surface means the work surface: the pane opens the
-    // surface once the session is in view.
-    if (route.surfaceId) activeSurface = "surfaces";
-    // A URL that names a conversation — a run's link into the one already
-    // open, say — means the conversation surface: the operator surface, which
-    // carries no channel, hands back through the same switch a person uses,
-    // so the connection is re-established as it would be then.
-    if (route.conversationId && !route.surfaceId && activeSurface === "operator") {
+    // A URL that names a surface means the work surface, and one that names
+    // a conversation — a run's link into the one already open, say — means
+    // the conversation surface. Either way the change goes through the same
+    // switch a person uses: the operator surface carries no channel, so
+    // leaving it re-establishes the connection as it would then.
+    if (route.surfaceId) {
+      handleSelectSurface("surfaces");
+    } else if (route.conversationId && activeSurface === "operator") {
       handleSelectSurface("conversation");
     }
     // A conversation the URL named is gone. Someone who was working in a

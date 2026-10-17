@@ -58,7 +58,7 @@ things those tend to leave out:
 
 | Area | What's there |
 |---|---|
-| **Providers** | Anthropic, OpenAI Chat Completions and Responses, Google, OpenRouter, and the built-in Codex app server (temporarily disabled); retries, circuit breaking and failover between routes; per-model reasoning effort |
+| **Providers** | Anthropic, OpenAI Chat Completions and Responses, Google, OpenRouter, and the built-in Codex app server (temporarily disabled); retries; interactive turns honour the selected model's provider; per-model reasoning effort |
 | **Tools** | File read/write/edit/search, shell, URL fetch, web search¹, a Chromium browser¹, Python execution¹, memory, a knowledge base with citations, schedules, workflows, and agent-built *surfaces* |
 | **Safety** | Per-tool permissions with interactive approvals, grants that narrow as work is delegated, per-turn bubblewrap + Landlock sandboxing, and credential leak detection with redaction |
 | **Workflows** | A JavaScript workflow engine (QuickJS) whose runs are journalled: a run interrupted by a crash or restart replays and carries on. Token budgets per provider route, durable parking on long timers, and runs that pause for a human decision |
@@ -70,116 +70,76 @@ things those tend to leave out:
 
 ## Quick start
 
-Swage targets Linux. You need the Rust toolchain (pinned by
-`rust-toolchain.toml`), Node 24, and
-[bubblewrap](https://github.com/containers/bubblewrap), which the per-turn
-sandbox runs on.
+Swage targets Linux. Install the Rust toolchain with
+[rustup](https://rustup.rs/) (the version is pinned by
+`rust-toolchain.toml`) and **Node 24 with npm**. The frontend dependencies
+support Node 22 from **22.13.0**, or **24 and later**; Node 24 is recommended.
+
+Building needs a C toolchain, `pkg-config`, and OpenSSL development headers.
+The per-turn sandbox needs
+[bubblewrap](https://github.com/containers/bubblewrap). On Debian/Ubuntu,
+install these packages, plus Git for cloning the repository:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libssl-dev bubblewrap git ca-certificates
+```
+
+Clone the repository, build the binary, and add its directory to this
+terminal's `PATH`:
 
 ```bash
 git clone https://github.com/BFJ-Concerns/Swage.git && cd Swage
 cargo build --bin swage
+export PATH="$PWD/target/debug:$PATH"
 ```
 
-No turn can complete until a model provider is configured, and the gateway
-reads its configuration when it starts, so write `~/.swage/config.toml`
-first:
+The `PATH` change applies to this terminal only. In each new terminal,
+repeat the `export PATH` command from the repository root. Examples using
+`./target/debug/swage` also assume the repository root.
 
-```toml
-[providers]
-default = "anthropic"
-
-[providers.entries.anthropic]
-protocol = "anthropic"                # or "openai", "openai-responses", "google", "openrouter"
-api_key_env = "ANTHROPIC_API_KEY"     # read from the gateway's environment
-# base_url = "https://..."            # only for proxies or self-hosted routes
-
-[models]
-default = "sonnet"
-
-[models.entries.sonnet]
-provider_id = "anthropic"
-model_id = "claude-sonnet-5"
-default_effort = "high"               # optional: off|minimal|low|medium|high|xhigh|max
-```
-
-Then start the gateway with the key in its environment, and the web UI
-beside it:
+Start the gateway; it can run before a provider is configured:
 
 ```bash
-export ANTHROPIC_API_KEY=...
 ./target/debug/swage gateway start          # listens on 127.0.0.1:3000
 
-# In another terminal: the web UI on http://localhost:5173
-cd frontend && npm install && npm run dev
+# In another terminal, from the repository root:
+# install and build the frontend, then serve the web UI on http://localhost:5173
+(cd frontend && npm ci && npm run build && npm run dev)
 ```
 
-If you edit `config.toml` by hand later, stop and start the gateway again.
+Open `http://localhost:5173`, then **Settings → Providers**:
 
-Providers and models can also be managed from the web UI under
-**Settings → Providers**. Then open the UI, start a session, and see
-[First session](docs/first-session.md) for topics, workspaces and trust.
+1. Choose **Add provider** and the kind for your endpoint. For GPT-family
+   models over the Responses API, choose **OpenAI Responses**
+   (`protocol = "openai-responses"`). **OpenAI** and **OpenAI compatible**
+   use Chat Completions (`protocol = "openai"`). For an OpenAI-family proxy,
+   fill in its **Base URL**, including its API prefix such as `/v1`;
+   other protocols use different paths (see [Provider setup](docs/interfaces-and-tooling.md#provider-setup)).
+   For **OpenAI compatible**, enter a provider name and URL, then choose
+   **Connect** to open its fields.
+2. Paste the provider key into **API key** and wait for the saved notice
+   and stored credential indicator. Settings stores an encrypted governed
+   secret and writes `api_key_secret_ref`; no key export is needed.
+3. Choose **Refresh** under **Discover**, then add a model, or enter a model
+   ID your provider serves beside **Add model**. Choose **Use** on its row
+   to make it the default and wait for autosave confirmation.
+
+Provider and model changes saved here apply to new turns without a gateway
+restart. For file-based configuration, see
+[Provider setup](docs/interfaces-and-tooling.md#provider-setup); restart the
+gateway after hand-editing `config.toml`. A model's `provider_id` selects
+its route, including the saved protocol and URL. An unusable route fails
+visibly instead of silently using another configured provider.
+
+Choose **Close settings (×)**, then **Start** under **New session**, and ask
+for a small tool action, such as using the shell to print the working
+directory. Handle any sandbox or tool approval when it appears, after
+provider setup. [First session](docs/first-session.md) covers topics,
+workspaces and trust; none is required for a first conversation.
 
 To try Swage without touching a real installation, point `SWAGE_HOME` at a
 throwaway directory: `SWAGE_HOME=/tmp/swage-try ./target/debug/swage gateway start`.
-
-## How it fits together
-
-```mermaid
-flowchart LR
-    subgraph Clients
-        UI[Web UI<br/>Svelte 5]
-        Desktop[Desktop shell<br/>Electron]
-        CLI[CLI]
-        Channels[Channels<br/>Telegram]
-    end
-    subgraph Gateway["swage gateway (Axum)"]
-        Turn[Turn orchestration]
-        Context[Context assembly]
-        Agent[Agent runtime]
-        Tools[Tool dispatch<br/>permissions · approvals]
-        Workflow[Workflow engine<br/>QuickJS · journal]
-        Schedule[Schedules]
-    end
-    Store[(SQLite<br/>audit trail)]
-    Providers[Model providers]
-    Sandbox[Sandbox<br/>bubblewrap · Landlock]
-    Devices[Remote devices]
-
-    UI & Desktop & CLI -- HTTP / WebSocket --> Turn
-    Channels --> Turn
-    Schedule --> Turn
-    Turn --> Context --> Agent
-    Agent --> Providers
-    Agent --> Tools
-    Workflow --> Agent
-    Tools --> Sandbox
-    Tools --> Devices
-    Turn & Tools & Workflow --> Store
-```
-
-The Cargo workspace is split by responsibility:
-
-| Crate | Responsibility |
-|---|---|
-| `swage` | The CLI binary: gateway lifecycle, shell completion |
-| `swage-gateway` | HTTP and WebSocket server, turns, tools, schedules, channels, workflow host |
-| `swage-agent` | Streaming agent loop, tool dispatch, structured-output retries, delegation |
-| `swage-context` | Context assembly, orientation, working norms, JavaScript assemblies |
-| `swage-provider` | Provider adapters with retry, circuit breaking and failover |
-| `swage-codex` | Transport for the Codex app server |
-| `swage-workflow` | Deterministic JavaScript orchestration and replay |
-| `swage-tool` | Tool trait, registry and schema validation |
-| `swage-sandbox` | bubblewrap and Landlock isolation for tool execution |
-| `swage-safety` | Credential leak detection and redaction |
-| `swage-storage` | SQLite persistence: the audit trail and everything else |
-| `swage-config` | Configuration cascade, validation and skills |
-| `swage-protocol` | The wire contract, projected to TypeScript, JSON Schema and OpenAPI |
-| `swage-client` / `swage-device` | Rust client, and the remote device runtime |
-| `swage-python` | Child-process Python workers |
-| `swage-core` / `swage-hook` | Shared types and lifecycle hooks |
-
-[docs/architecture-flow.svg](docs/architecture-flow.svg) draws a turn's full
-route through these pieces.
 
 ## Documentation
 
@@ -192,7 +152,7 @@ route through these pieces.
   restart, spend their budgets, park, and account for how they ended.
 - [Interfaces and tooling](docs/interfaces-and-tooling.md) — the turn
   inspector, branching, surfaces, devices, credentials, the API error
-  contract, and the wire-contract architecture.
+  contract, and the published API reference.
 
 ## Running a gateway
 
@@ -218,13 +178,12 @@ completion script.
 
 ### Credentials
 
-`api_key_env` reads an environment variable at startup. The governed
-alternative is `api_key_secret_ref`, which resolves through the gateway's
-secret manager — every access is audited and the resolved value is redacted
-from logs. Secrets can be `managed` (encrypted in the gateway's store), `env`,
-or `file` (re-read on every access, optionally narrowed into a JSON document
-by pointer, so externally refreshed tokens stay current). See
-[Provider credentials](docs/interfaces-and-tooling.md#provider-credentials).
+Use **Settings → Providers** to store a governed credential, or configure
+`api_key_secret_ref` with an existing secret reference. See
+[Provider credentials](docs/interfaces-and-tooling.md#provider-credentials)
+for secret backends, the labelled legacy `api_key_env` route and supported
+Codex-family API routes. [Codex auth store](docs/interfaces-and-tooling.md#codex-auth-store)
+gives the disabled integration's credential location.
 
 ### Sandboxing and approvals
 
@@ -323,28 +282,8 @@ gives it its own metadata file:
 SWAGE_HOME=/tmp/swage-dev ./target/debug/swage gateway start --port 3100
 
 # Point the dev web UI at it
-SWAGE_GATEWAY_URL=http://127.0.0.1:3100 npm run dev
+(cd frontend && SWAGE_GATEWAY_URL=http://127.0.0.1:3100 npm run dev)
 ```
-
-## Development
-
-The repository's `just` recipes are the supported entry points:
-
-| Command | What it runs |
-|---|---|
-| `just check` | Workspace and frontend type checks |
-| `just check-gate` | The fast static gate: formatting, type checks, design-token checks, clippy |
-| `just test` | Rust (nextest), frontend (Vitest) and desktop smoke tests |
-| `just verify` | Everything above, plus a check that the generated protocol projections are current. CI runs exactly this |
-
-Anything that crosses a process boundary is defined once in `swage-protocol`;
-the TypeScript types under `frontend/src/lib/protocol/`, the JSON Schemas and
-the OpenAPI document are generated from it. [AGENTS.md](AGENTS.md) holds the
-repository's working conventions, for human and AI contributors alike.
-
-API handlers fail with a `{"code","message"}` body whose codes are defined in
-the protocol crate, and the client routes are described by an
-OpenAPI 3.1 document at `crates/swage-protocol/schema/client-openapi.json`.
 
 ## Licence
 

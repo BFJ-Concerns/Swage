@@ -54,6 +54,8 @@ pub struct ConversationResponse {
     pub topic_id: Option<Uuid>,
     /// The agent definition the session runs under.
     pub agent_id: String,
+    /// The display name resolved in the session's topic scope.
+    pub agent_display_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_model_id: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -84,6 +86,8 @@ pub struct ConversationDetail {
     pub topic_id: Option<Uuid>,
     /// The agent definition the session runs under.
     pub agent_id: String,
+    /// The display name resolved in the session's topic scope.
+    pub agent_display_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_model_id: Option<String>,
     pub created_at: DateTime<Utc>,

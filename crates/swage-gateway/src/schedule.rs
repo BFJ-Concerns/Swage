@@ -1201,20 +1201,29 @@ async fn drive_recorded_run(
     schedule: &Schedule,
     run: &ScheduleRun,
 ) -> Result<ScheduleRun, GatewayError> {
-    match run_body(state, schedule, run).await {
-        Ok(RunOutcome::Queued) => fetch_run(state, run.id).await,
-        Ok(RunOutcome::Completed { output }) => complete_run(state, run.id, output).await,
-        Ok(RunOutcome::Skipped {
-            reason,
-            gate,
-            message,
-        }) => skip_run(state, schedule, run.id, reason, gate, message).await,
+    let (outcome, ending_ids) = match run_body(state, schedule, run).await {
+        Ok(result) => result,
         Err(RunFailure {
             message,
             output,
             delivery_attempted,
-        }) => fail_run(state, schedule, run.id, message, output, delivery_attempted).await,
-    }
+        }) => {
+            return fail_run(state, schedule, run.id, message, output, delivery_attempted).await;
+        }
+    };
+    let settled = match outcome {
+        RunOutcome::Queued => return fetch_run(state, run.id).await,
+        RunOutcome::Completed { output } => complete_run(state, run.id, output).await,
+        RunOutcome::Skipped {
+            reason,
+            gate,
+            message,
+        } => skip_run(state, schedule, run.id, reason, gate, message).await,
+    }?;
+    // A failed execution leaves its endings available for the next occurrence.
+    // A crash before this write may repeat an ending, but cannot lose it.
+    acknowledge_gate_endings(state, schedule, &ending_ids).await?;
+    Ok(settled)
 }
 
 /// Start waiting fires in record order, claiming each through the one-active index.
@@ -1234,36 +1243,42 @@ fn drain_schedule_queue(
 /// Everything between a fresh pending run and its terminal outcome: gate
 /// check, session resolution, turn creation, turn execution, delivery. Every
 /// fallible step propagates its error as a [`RunFailure`] to the single
-/// catch in [`execute_schedule`]; the one non-failure exit is a busy
+/// catch in [`drive_recorded_run`]; the one non-failure exit is a busy
 /// session, which hands its brief to the shared turn queue.
 async fn run_body(
     state: &AppState,
     schedule: &Schedule,
     run: &ScheduleRun,
-) -> Result<RunOutcome, RunFailure> {
+) -> Result<(RunOutcome, Vec<Uuid>), RunFailure> {
     // The previous outcome feeds both the gate and fresh-session context.
     let previous_outcome = previous_run_outcome(state, schedule.id).await?;
 
+    let mut ending_ids = Vec::new();
     if let Some(gate) = &schedule.gate {
-        let decision = run_gate_check(state, schedule, gate)
-            .await
-            .map_err(|error| RunFailure {
-                // Fail closed: an unreachable gate fails the run visibly
-                // rather than silently waking the main model. The next
-                // occurrence tries again.
-                message: format!("gate check failed: {error}"),
-                output: None,
-                delivery_attempted: false,
-            })?;
+        let (decision, observed_endings) =
+            run_gate_check(state, schedule, gate)
+                .await
+                .map_err(|error| RunFailure {
+                    // Fail closed: an unreachable gate fails the run visibly
+                    // rather than silently waking the main model. The next
+                    // occurrence tries again.
+                    message: format!("gate check failed: {error}"),
+                    output: None,
+                    delivery_attempted: false,
+                })?;
 
-        record_gate_decision(state, schedule, run.id, &decision).await?;
+        ending_ids = observed_endings;
+        record_gate_decision(state, schedule, run.id, &decision, &ending_ids).await?;
 
         if decision.verdict == GateVerdict::Skip {
-            return Ok(RunOutcome::Skipped {
-                reason: SkipReason::Gate,
-                gate: Some(decision),
-                message: None,
-            });
+            return Ok((
+                RunOutcome::Skipped {
+                    reason: SkipReason::Gate,
+                    gate: Some(decision),
+                    message: None,
+                },
+                ending_ids,
+            ));
         }
         state
             .storage
@@ -1356,7 +1371,7 @@ async fn run_body(
                 Vec::new(),
             )
             .await?;
-            return Ok(RunOutcome::Queued);
+            return Ok((RunOutcome::Queued, ending_ids));
         }
         Err(error) => return Err(error.into()),
     };
@@ -1412,7 +1427,7 @@ async fn run_body(
             delivery_attempted: true,
         })?;
 
-    Ok(RunOutcome::Completed { output })
+    Ok((RunOutcome::Completed { output }, ending_ids))
 }
 
 /// Record a run that never executes because a predecessor still holds the
@@ -1463,6 +1478,42 @@ pub(crate) async fn settle_queued_run(
         .get_schedule(run.schedule_id)
         .await?
         .ok_or_else(|| GatewayError::ValidationError("queued schedule no longer exists".into()))?;
+    // The decision records precisely the batch seen before this brief queued.
+    // Re-reading the digest here could consume endings this turn never saw.
+    let ending_ids = if run.gate.is_some() {
+        let event = state
+            .storage
+            .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                entity_kind: Some("schedule_run".into()),
+                entity_id: Some(run_id.to_string()),
+                event_kind: Some("gate_decision".into()),
+                limit: 1,
+                ..Default::default()
+            })
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                GatewayError::ValidationError("queued run has no recorded gate decision".into())
+            })?;
+        serde_json::from_value::<Vec<Uuid>>(event.metadata["observed_ending_ids"].clone()).map_err(
+            |error| {
+                GatewayError::ValidationError(format!(
+                    "queued run ending batch is invalid: {error}"
+                ))
+            },
+        )?
+    } else {
+        Vec::new()
+    };
+    // A repeated settlement retries receipts without repeating delivery.
+    match run.state {
+        ScheduleRunState::Completed | ScheduleRunState::CompletedEmpty => {
+            return acknowledge_gate_endings(state, &schedule, &ending_ids).await;
+        }
+        ScheduleRunState::Failed | ScheduleRunState::Skipped => return Ok(()),
+        _ => {}
+    }
     let output = turn.assistant_response.clone().unwrap_or_default();
     if turn.state != swage_storage::TurnState::Completed {
         fail_run(
@@ -1488,6 +1539,7 @@ pub(crate) async fn settle_queued_run(
         {
             Ok(()) => {
                 complete_run(state, run_id, output).await?;
+                acknowledge_gate_endings(state, &schedule, &ending_ids).await?;
             }
             Err(error) => {
                 fail_run(
@@ -1624,7 +1676,10 @@ async fn deliver_run_output(
         state,
         session_id,
         crate::channel_gateway::DeliveryAttribution {
-            run_id: Some(run_id),
+            schedule_run: Some(crate::channel_gateway::ScheduleRunAttribution {
+                run_id,
+                schedule_id: schedule.id,
+            }),
             turn_id: Some(turn_id),
         },
         &targets,
@@ -1786,6 +1841,8 @@ struct GateStateDigest {
     /// runs judges "is there work" from this list, not from the clock.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     open_workflow_runs: Vec<DigestWorkflowRun>,
+    ended_workflow_runs: Vec<swage_protocol::client::workflow::WorkflowRunEndingNotice>,
+    more_ended_workflow_runs: bool,
     /// What the gate declared it observes, read from the scheduled
     /// session's trusted workspace at this fire: each file's presence,
     /// size and opening excerpt, or why it could not be read. The gate's
@@ -2034,6 +2091,22 @@ struct DigestMessage {
     excerpt: String,
 }
 
+#[cfg(test)]
+static DIGEST_TRANSITIONS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<Uuid, Uuid>>,
+> = std::sync::LazyLock::new(Default::default);
+
+#[cfg(test)]
+async fn digest_transition_hook(storage: &Arc<dyn Storage>, schedule_id: Uuid) {
+    let run_id = DIGEST_TRANSITIONS.lock().unwrap().remove(&schedule_id);
+    if let Some(run_id) = run_id {
+        storage
+            .update_workflow_run_state(run_id, "completed", None, None, None)
+            .await
+            .unwrap();
+    }
+}
+
 /// Assemble the gate's state digest from the stores. Reads only; a read
 /// failure propagates and fails the run closed, the same posture as an
 /// unreachable gate model — never silently degrade to a stateless verdict.
@@ -2092,9 +2165,28 @@ async fn assemble_gate_state_digest(
             .map(|session| session.topic_id),
     };
     let mut open_workflow_runs = Vec::new();
+    let mut ended_workflow_runs = Vec::new();
+    let mut more_ended_workflow_runs = false;
     if let Some(topic_id) = topic_id {
-        for run in storage.list_workflow_runs(topic_id).await? {
-            if crate::tool::workflow_run_status::is_terminal_run_state(&run.state) {
+        // Read open state first: a concurrent completion then appears here or
+        // in the later ending read. Prefer the ending if both reads saw it.
+        let open = storage.list_workflow_runs(topic_id).await?;
+        #[cfg(test)]
+        digest_transition_hook(storage, schedule.id).await;
+        let mut ended = storage
+            .list_unacknowledged_workflow_runs(topic_id, &format!("schedule:{}", schedule.id), 101)
+            .await?;
+        more_ended_workflow_runs = ended.len() > 100;
+        ended.truncate(100);
+        for run in ended {
+            ended_workflow_runs.push(crate::workflow::ending_notice(run));
+        }
+        for run in open {
+            if crate::tool::workflow_run_status::is_terminal_run_state(&run.state)
+                || ended_workflow_runs
+                    .iter()
+                    .any(|ending| ending.run_id == run.id)
+            {
                 continue;
             }
             let pending_events = storage
@@ -2145,6 +2237,8 @@ async fn assemble_gate_state_digest(
         recent_runs,
         latest_session_message,
         open_workflow_runs,
+        ended_workflow_runs,
+        more_ended_workflow_runs,
         observations,
     })
 }
@@ -2163,7 +2257,7 @@ async fn run_gate_check(
     state: &AppState,
     schedule: &Schedule,
     gate: &GateConfig,
-) -> Result<GateDecision, GatewayError> {
+) -> Result<(GateDecision, Vec<Uuid>), GatewayError> {
     let config = state.active_config();
     let model_id = crate::turn::resolve_model_catalogue_entry(&config.models, &gate.model)
         .map(|(_, model)| model.model_id.clone())
@@ -2193,7 +2287,39 @@ async fn run_gate_check(
             GatewayError::ValidationError(format!("gate model call failed: {error}"))
         })?;
 
-    Ok(parse_gate_reply(&gate.model, &response.content))
+    let evaluation = parse_gate_reply(&gate.model, &response.content);
+    let ids = digest
+        .ended_workflow_runs
+        .iter()
+        .map(|run| run.run_id)
+        .collect();
+    Ok((evaluation, ids))
+}
+
+async fn acknowledge_gate_endings(
+    state: &AppState,
+    schedule: &Schedule,
+    ids: &[Uuid],
+) -> Result<(), GatewayError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let topic_id = match &schedule.session_policy {
+        SessionPolicy::Fresh { topic_id, .. } => *topic_id,
+        SessionPolicy::Continuation { session_id } => state
+            .storage
+            .get_session(*session_id)
+            .await?
+            .map(|session| session.topic_id),
+    }
+    .ok_or_else(|| {
+        GatewayError::ValidationError("the schedule has no topic for its ending receipts".into())
+    })?;
+    state
+        .storage
+        .acknowledge_workflow_runs(topic_id, &format!("schedule:{}", schedule.id), ids)
+        .await?;
+    Ok(())
 }
 
 fn build_gate_prompt(schedule: &Schedule, gate: &GateConfig, digest: &GateStateDigest) -> String {
@@ -2280,6 +2406,7 @@ async fn record_gate_decision(
     schedule: &Schedule,
     run_id: Uuid,
     decision: &GateDecision,
+    ending_ids: &[Uuid],
 ) -> Result<(), GatewayError> {
     state
         .storage
@@ -2295,6 +2422,7 @@ async fn record_gate_decision(
                 "model": decision.model,
                 "verdict": decision.verdict.to_string(),
                 "reasoning": decision.reasoning,
+                "observed_ending_ids": ending_ids,
             }),
         })
         .await?;
@@ -3156,6 +3284,494 @@ mod tests {
         .expect("a gate without observations needs no workspace");
     }
 
+    async fn review_fix_3_fixture() -> (
+        AppState,
+        Schedule,
+        Uuid,
+        Uuid,
+        tempfile::TempDir,
+        Arc<swage_storage::SqliteStorage>,
+    ) {
+        use swage_storage::{
+            ScheduleStore, SessionStore, SqliteStorage, TopicStore, WorkflowStore,
+        };
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(swage_storage::fixtures::new_session(topic.id))
+            .await
+            .unwrap();
+        swage_storage::ThreadStore::create(
+            storage.as_ref(),
+            swage_storage::NewThread {
+                session_id: session.id,
+                agent_id: "gateway".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let ending = storage
+            .create_workflow_run(swage_storage::fixtures::new_workflow_run(topic.id))
+            .await
+            .unwrap();
+        storage
+            .update_workflow_run_state(ending.id, "completed", None, None, None)
+            .await
+            .unwrap();
+        let schedule = storage
+            .create_schedule(NewSchedule {
+                overlap_policy: Default::default(),
+                pending_cap: 1,
+                id: Uuid::new_v4(),
+                message: "Handle finished workflows".into(),
+                status: ScheduleStatus::Active,
+                kind: ScheduleKind::Interval,
+                expression: "every 5 minutes".into(),
+                session_policy: SessionPolicy::Continuation {
+                    session_id: session.id,
+                },
+                creator: ScheduleCreator::User,
+                delivery_routing: serde_json::to_value(DeliveryRoutingRequest::local_only())
+                    .unwrap(),
+                gate: Some(GateConfig {
+                    model: "small".into(),
+                    criteria: None,
+                    observations: Vec::new(),
+                }),
+                next_run_at: None,
+                last_run_at: None,
+            })
+            .await
+            .unwrap();
+        let mut config = swage_config::ResolvedConfig::default();
+        config.models.entries.insert(
+            "small".into(),
+            swage_config::ModelEndpointConfig {
+                model_id: "small".into(),
+                ..Default::default()
+            },
+        );
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::new_with_config_root(
+            storage.clone(),
+            storage.clone(),
+            Arc::new(crate::turn::tests::MockProvider::new(Vec::new())),
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            root.path().to_path_buf(),
+        );
+        (state, schedule, ending.id, session.id, root, storage)
+    }
+
+    async fn queued_ending_settlement(success: bool) {
+        let (state, schedule, ending, session_id, _root, storage) = review_fix_3_fixture().await;
+        let thread = crate::thread_selection::resolve_thread_for_session(
+            state.storage.as_ref(),
+            session_id,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut turn = state
+            .storage
+            .create_turn(swage_storage::NewTurn {
+                thread_id: thread.id,
+                agent_id: "gateway".into(),
+                state: swage_storage::TurnState::Processing,
+                user_input: Some("busy".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let run = execute_schedule(&state, &schedule, ScheduleRunTrigger::Manual, None)
+            .await
+            .unwrap();
+        assert_eq!(run.state, ScheduleRunState::Pending);
+        if success {
+            let digest = assemble_gate_state_digest(&state.storage, &schedule)
+                .await
+                .unwrap();
+            assert!(
+                digest
+                    .ended_workflow_runs
+                    .iter()
+                    .any(|run| run.run_id == ending),
+                "a queued turn must not acknowledge endings before it settles"
+            );
+        }
+        // Another ending after queueing must not be consumed by this turn's settlement.
+        let topic_id = state
+            .storage
+            .get_session(session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .topic_id;
+        let later = state
+            .storage
+            .create_workflow_run(swage_storage::fixtures::new_workflow_run(topic_id))
+            .await
+            .unwrap();
+        state
+            .storage
+            .update_workflow_run_state(later.id, "completed", None, None, None)
+            .await
+            .unwrap();
+        turn.state = if success {
+            swage_storage::TurnState::Completed
+        } else {
+            swage_storage::TurnState::Failed
+        };
+        turn.assistant_response = Some("handled".into());
+        settle_queued_run(&state, run.id, &turn).await.unwrap();
+        let settled = fetch_run(&state, run.id).await.unwrap();
+        assert_eq!(
+            settled.state,
+            if success {
+                ScheduleRunState::Completed
+            } else {
+                ScheduleRunState::Failed
+            },
+            "{settled:?}"
+        );
+        let next = assemble_gate_state_digest(&state.storage, &schedule)
+            .await
+            .unwrap();
+        let ids: Vec<_> = next
+            .ended_workflow_runs
+            .iter()
+            .map(|run| run.run_id)
+            .collect();
+        assert_eq!(
+            ids.contains(&ending),
+            !success,
+            "a failed queued turn must leave its endings in the next digest"
+        );
+        assert!(
+            ids.contains(&later.id),
+            "settlement must acknowledge only endings the gate saw"
+        );
+        if success {
+            settle_queued_run(&state, run.id, &turn).await.unwrap();
+        }
+        let count: i64 = storage
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM workflow_run_acknowledgements",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            count,
+            i64::from(success),
+            "successful settlement acknowledges exactly once"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn review_fix_3_failed_queue_retains_endings() {
+        queued_ending_settlement(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn review_fix_3_successful_queue_acknowledges_endings() {
+        queued_ending_settlement(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn review_fix_3_completion_between_digest_reads_is_present_once() {
+        let (state, schedule, ending, _, _root, _storage) = review_fix_3_fixture().await;
+        state
+            .storage
+            .update_workflow_run_state(ending, "running", None, None, None)
+            .await
+            .unwrap();
+        DIGEST_TRANSITIONS
+            .lock()
+            .unwrap()
+            .insert(schedule.id, ending);
+        let digest = assemble_gate_state_digest(&state.storage, &schedule)
+            .await
+            .unwrap();
+        let count = digest
+            .open_workflow_runs
+            .iter()
+            .filter(|run| run.run_id == ending)
+            .count()
+            + digest
+                .ended_workflow_runs
+                .iter()
+                .filter(|run| run.run_id == ending)
+                .count();
+        assert_eq!(
+            count, 1,
+            "a run completing between digest reads must appear exactly once"
+        );
+    }
+
+    async fn drained_fire_ending_settlement(fail: bool) {
+        use swage_storage::ScheduleStore;
+
+        let (state, schedule, ending, _, _root, storage) = review_fix_3_fixture().await;
+        let schedule = storage
+            .update_schedule(
+                schedule.id,
+                UpdateSchedule {
+                    overlap_policy: Some(swage_storage::model::OverlapPolicy::Queue),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let predecessor = storage
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule.id,
+                ScheduleRunTrigger::Manual,
+                None,
+                schedule.message.clone(),
+            ))
+            .await
+            .unwrap();
+        let waiting = execute_schedule(&state, &schedule, ScheduleRunTrigger::Manual, None)
+            .await
+            .unwrap();
+        assert_eq!(waiting.state, ScheduleRunState::Queued);
+        assert_eq!(
+            assemble_gate_state_digest(&state.storage, &schedule)
+                .await
+                .unwrap()
+                .ended_workflow_runs[0]
+                .run_id,
+            ending
+        );
+        complete_run(&state, predecessor.id, String::new())
+            .await
+            .unwrap();
+        *state.runtime_provider.write().unwrap() = Arc::new(SkipGateProvider);
+        if fail {
+            storage
+                .with_conn(|conn| {
+                    conn.execute_batch(
+                        "CREATE TRIGGER reject_drained_gate BEFORE INSERT ON audit_events
+                 WHEN NEW.event_kind = 'gate_decision'
+                 BEGIN SELECT RAISE(FAIL, 'injected drained gate failure'); END;",
+                    )
+                })
+                .await
+                .unwrap();
+        }
+        drain_schedule_queue(&state, schedule.id).await.unwrap();
+        let settled = fetch_run(&state, waiting.id).await.unwrap();
+        assert_eq!(
+            settled.state,
+            if fail {
+                ScheduleRunState::Failed
+            } else {
+                ScheduleRunState::Skipped
+            }
+        );
+        let digest = assemble_gate_state_digest(&state.storage, &schedule)
+            .await
+            .unwrap();
+        assert_eq!(
+            digest
+                .ended_workflow_runs
+                .iter()
+                .any(|run| run.run_id == ending),
+            fail,
+            "only a successfully settled drained fire acknowledges its endings"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drained_schedule_fire_acknowledges_its_gate_endings_after_settlement() {
+        drained_fire_ending_settlement(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_drained_schedule_fire_retains_its_gate_endings() {
+        drained_fire_ending_settlement(true).await;
+    }
+
+    struct SkipGateProvider;
+
+    #[async_trait::async_trait]
+    impl swage_provider::LlmProvider for SkipGateProvider {
+        fn model_id(&self) -> &str {
+            "small"
+        }
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            Ok(swage_core::CompletionResponse {
+                content: r#"{"decision":"skip","reasoning":"endings handled"}"#.into(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: swage_core::FinishReason::Stop,
+                cost: None,
+            })
+        }
+        async fn complete_with_tools(
+            &self,
+            _request: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unreachable!("gate checks use plain completions")
+        }
+        fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = swage_core::StreamChunk> + Send>>
+        {
+            unreachable!("a skipped schedule starts no turn")
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn review_fix_2_gate_decision_failure_retains_unseen_endings() {
+        gate_failure_retains_unseen_endings("decision").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn review_fix_2_gate_state_failure_retains_unseen_endings() {
+        gate_failure_retains_unseen_endings("gate_state").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn review_fix_2_later_schedule_failure_retains_unseen_endings() {
+        gate_failure_retains_unseen_endings("session_state").await;
+    }
+
+    async fn gate_failure_retains_unseen_endings(failure_at: &str) {
+        use swage_storage::{ScheduleStore, SqliteStorage, TopicStore, WorkflowStore};
+
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let topic = storage.general_scope().await.unwrap();
+        let ending = storage
+            .create_workflow_run(swage_storage::fixtures::new_workflow_run(topic.id))
+            .await
+            .unwrap();
+        storage
+            .update_workflow_run_state(ending.id, "completed", None, None, None)
+            .await
+            .unwrap();
+        let schedule = storage
+            .create_schedule(NewSchedule {
+                overlap_policy: Default::default(),
+                pending_cap: 1,
+                id: Uuid::new_v4(),
+                message: "Handle finished workflows".into(),
+                status: ScheduleStatus::Active,
+                kind: ScheduleKind::Interval,
+                expression: "every 5 minutes".into(),
+                session_policy: SessionPolicy::Fresh {
+                    topic_id: Some(topic.id),
+                    agent_id: "gateway".into(),
+                },
+                creator: ScheduleCreator::User,
+                delivery_routing: serde_json::json!({}),
+                gate: Some(GateConfig {
+                    model: "small".into(),
+                    criteria: None,
+                    observations: Vec::new(),
+                }),
+                next_run_at: None,
+                last_run_at: None,
+            })
+            .await
+            .unwrap();
+        let mut config = swage_config::ResolvedConfig::default();
+        config.models.entries.insert(
+            "small".into(),
+            swage_config::ModelEndpointConfig {
+                model_id: "small".into(),
+                ..Default::default()
+            },
+        );
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::new_with_config_root(
+            storage.clone(),
+            storage.clone(),
+            Arc::new(crate::turn::tests::MockProvider::new(Vec::new())),
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            root.path().to_path_buf(),
+        );
+        let trigger = match failure_at {
+            "decision" => {
+                "CREATE TRIGGER reject_gate_decision BEFORE INSERT ON audit_events
+                WHEN NEW.event_kind = 'gate_decision'
+                BEGIN SELECT RAISE(FAIL, 'injected gate decision failure'); END;"
+            }
+            "gate_state" => {
+                "CREATE TRIGGER reject_gate_state BEFORE UPDATE ON schedule_runs
+                WHEN NEW.gate_model IS NOT NULL AND OLD.gate_model IS NULL
+                BEGIN SELECT RAISE(FAIL, 'injected gate decision failure'); END;"
+            }
+            "session_state" => {
+                "CREATE TRIGGER reject_session_state BEFORE UPDATE ON schedule_runs
+                WHEN NEW.session_id IS NOT NULL
+                BEGIN SELECT RAISE(FAIL, 'injected gate decision failure'); END;"
+            }
+            _ => unreachable!(),
+        };
+        storage
+            .with_conn(|conn| conn.execute_batch(trigger))
+            .await
+            .unwrap();
+        let failed = execute_schedule(&state, &schedule, ScheduleRunTrigger::Manual, None)
+            .await
+            .unwrap();
+        assert_eq!(failed.state, ScheduleRunState::Failed);
+        assert!(
+            failed
+                .error_message
+                .as_deref()
+                .unwrap()
+                .contains("injected gate decision failure")
+        );
+        let next = assemble_gate_state_digest(&state.storage, &schedule)
+            .await
+            .unwrap();
+        assert_eq!(
+            next.ended_workflow_runs
+                .iter()
+                .map(|run| run.run_id)
+                .collect::<Vec<_>>(),
+            vec![ending.id],
+            "a failed gate decision must leave its endings in the next digest"
+        );
+
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "DROP TRIGGER IF EXISTS reject_gate_decision;
+             DROP TRIGGER IF EXISTS reject_gate_state;
+             DROP TRIGGER IF EXISTS reject_session_state;",
+                )
+            })
+            .await
+            .unwrap();
+        *state.runtime_provider.write().unwrap() = Arc::new(SkipGateProvider);
+        let skipped = execute_schedule(&state, &schedule, ScheduleRunTrigger::Manual, None)
+            .await
+            .unwrap();
+        assert_eq!(skipped.state, ScheduleRunState::Skipped);
+        assert_eq!(skipped.gate.unwrap().verdict, GateVerdict::Skip);
+        let next = assemble_gate_state_digest(&state.storage, &schedule)
+            .await
+            .unwrap();
+        assert!(
+            next.ended_workflow_runs.is_empty(),
+            "a durable gate outcome acknowledges the endings it handled"
+        );
+    }
+
     /// A schedule that steers workflow runs needs to see which runs are
     /// still open and what each is waiting on: a parked pipeline's hold is
     /// an undelivered event, and an ended run is not state at all.
@@ -3243,6 +3859,24 @@ mod tests {
             1,
             "an ended run is not state"
         );
+        let notices = serde_json::to_value(&digest).expect("digest JSON");
+        assert_eq!(
+            notices["ended_workflow_runs"][0]["run_id"],
+            serde_json::json!(ended.id),
+            "the gate must discover unseen endings"
+        );
+        storage
+            .acknowledge_workflow_runs(topic.id, &format!("schedule:{}", schedule.id), &[ended.id])
+            .await
+            .expect("acknowledge gate read");
+        let next = assemble_gate_state_digest(&dyn_storage, &schedule)
+            .await
+            .expect("next digest");
+        assert!(
+            next.ended_workflow_runs.is_empty(),
+            "acknowledged endings must not repeat"
+        );
+
         let open = &digest.open_workflow_runs[0];
         assert_eq!(open.run_id, holding.id);
         assert_eq!(open.state, "running");

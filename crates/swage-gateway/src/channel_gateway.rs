@@ -47,7 +47,7 @@ fn webhook_client(timeout: Duration) -> Result<reqwest::Client, reqwest::Error> 
 pub use swage_protocol::client::delivery::{
     DeliveryRoutingRequest, DeliveryTarget, ExternalChannelIntegration,
 };
-use swage_protocol::client::surface::WriteSurfaceModuleRequest;
+use swage_protocol::client::surface::{ModuleDelivery, WriteSurfaceModuleRequest};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChannelOrigin {
@@ -214,8 +214,8 @@ async fn handle_inbound(
     } else {
         run_channel_turn(state, session_id, text.clone()).await
     };
-    let response = match result {
-        Ok(response) => response,
+    let answered = match result {
+        Ok(answered) => answered,
         Err(GatewayError::TurnInProgress { .. }) => {
             let queued = crate::turn_queue::queue_input_with_attribution(
                 state,
@@ -240,10 +240,13 @@ async fn handle_inbound(
     let targets = deliver_channel_response(
         state,
         session_id,
-        DeliveryAttribution::default(),
+        DeliveryAttribution {
+            turn_id: answered.turn_id,
+            ..DeliveryAttribution::default()
+        },
         &origin,
         routing,
-        &response,
+        &answered.response,
     )
     .await?;
 
@@ -251,7 +254,7 @@ async fn handle_inbound(
         queued: None,
         session_id,
         delivered_to: targets,
-        response,
+        response: answered.response,
     })
 }
 
@@ -577,11 +580,18 @@ pub(crate) async fn queued_response_targets(
     )
 }
 
+/// What a channel's immediate turn answered, with the turn that answered
+/// it: a delivery of the response records that turn as its origin.
+struct ChannelTurnAnswer {
+    turn_id: Option<Uuid>,
+    response: String,
+}
+
 async fn run_channel_turn(
     state: &AppState,
     session_id: Uuid,
     text: String,
-) -> Result<String, GatewayError> {
+) -> Result<ChannelTurnAnswer, GatewayError> {
     let thread = resolve_thread_for_session(state.storage.as_ref(), session_id, None).await?;
     let (ws_tx, mut ws_rx) = mpsc::unbounded_channel();
     let subscription = Arc::new(Mutex::new(SubscriptionState::new(false)));
@@ -609,7 +619,10 @@ async fn run_channel_turn(
         .into_iter()
         .rev()
         .find(|message| message.role == Role::Assistant)
-        .map(|message| message.content)
+        .map(|message| ChannelTurnAnswer {
+            turn_id: message.turn_id,
+            response: message.content,
+        })
         .ok_or_else(|| {
             GatewayError::ValidationError(
                 "channel turn completed without assistant response".into(),
@@ -670,7 +683,7 @@ pub async fn deliver_to_targets(
     let mut recording_failure: Option<GatewayError> = None;
     for target in targets {
         let (status, delivery_error) =
-            match deliver_to_target(state, session_id, target, content).await {
+            match deliver_to_target(state, session_id, &attribution, target, content).await {
                 Ok(DeliveryOutcome::Sent) => ("sent", None),
                 Ok(DeliveryOutcome::NotSent) => (
                     "not_sent",
@@ -698,7 +711,7 @@ pub async fn deliver_to_targets(
         {
             tracing::warn!(
                 %session_id,
-                run_id = ?attribution.run_id,
+                run_id = ?attribution.run_id(),
                 turn_id = ?attribution.turn_id,
                 ?target,
                 error = %record_error,
@@ -719,10 +732,49 @@ pub async fn deliver_to_targets(
     }
 }
 
+/// What produced the output being delivered: a scheduled run (with its
+/// schedule) and the turn that ran it, a turn alone, or neither.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DeliveryAttribution {
-    pub run_id: Option<Uuid>,
+    /// The scheduled run behind the output, with its schedule.
+    pub schedule_run: Option<ScheduleRunAttribution>,
     pub turn_id: Option<Uuid>,
+}
+
+/// A scheduled run and the schedule it belongs to — a run is never named
+/// without its schedule.
+#[derive(Debug, Clone, Copy)]
+pub struct ScheduleRunAttribution {
+    pub run_id: Uuid,
+    pub schedule_id: Uuid,
+}
+
+impl DeliveryAttribution {
+    fn run_id(&self) -> Option<Uuid> {
+        self.schedule_run.map(|run| run.run_id)
+    }
+
+    /// The delivery a module written under this attribution records: the
+    /// schedule run's where one is behind the output, else the turn's, else
+    /// none — every shape answered, so a new origin that sets neither is
+    /// visible here rather than swallowed.
+    pub fn module_delivery(
+        &self,
+        delivered_at: chrono::DateTime<chrono::Utc>,
+    ) -> Option<ModuleDelivery> {
+        match (self.schedule_run, self.turn_id) {
+            (Some(run), _) => Some(ModuleDelivery::ScheduleRun {
+                run_id: run.run_id,
+                schedule_id: run.schedule_id,
+                delivered_at,
+            }),
+            (None, Some(turn_id)) => Some(ModuleDelivery::Turn {
+                turn_id,
+                delivered_at,
+            }),
+            (None, None) => None,
+        }
+    }
 }
 
 enum DeliveryOutcome {
@@ -733,6 +785,7 @@ enum DeliveryOutcome {
 async fn deliver_to_target(
     state: &AppState,
     session_id: Uuid,
+    attribution: &DeliveryAttribution,
     target: &DeliveryTarget,
     content: &str,
 ) -> Result<DeliveryOutcome, GatewayError> {
@@ -766,6 +819,7 @@ async fn deliver_to_target(
                     expected_revision: None,
                 },
                 "delivery",
+                attribution.module_delivery(chrono::Utc::now()),
             )
             .await?;
             Ok(DeliveryOutcome::Sent)
@@ -827,7 +881,7 @@ async fn record_delivery(
         .storage
         .create_delivery_record(NewDeliveryRecord {
             session_id: Some(session_id),
-            run_id: attribution.run_id,
+            run_id: attribution.run_id(),
             turn_id: attribution.turn_id,
             target: target_json,
             content,
@@ -870,7 +924,8 @@ mod tests {
     use crate::turn::tests::make_state_with_session;
     use swage_core::{FinishReason, StreamChunk};
     use swage_storage::{
-        AuditStore, ChannelLinkStore, SessionStore, SurfaceStore, ThreadStore, TopicStore,
+        AuditStore, ChannelLinkStore, ScheduleStore, SessionStore, SurfaceStore, ThreadStore,
+        TopicStore,
     };
     use tokio::net::TcpListener;
 
@@ -1545,6 +1600,167 @@ mod tests {
         assert_eq!(dev_dm.last_delivery_at, Some(sent_at));
     }
 
+    /// The attribution answers every shape: a schedule run's delivery where
+    /// a run is behind the output, a turn's where only a turn is, none where
+    /// neither — nothing falls through.
+    #[test]
+    fn a_delivery_attribution_names_the_schedule_run_or_the_turn_behind_it() {
+        let at = chrono::Utc::now();
+        let run = ScheduleRunAttribution {
+            run_id: Uuid::new_v4(),
+            schedule_id: Uuid::new_v4(),
+        };
+        let turn_id = Uuid::new_v4();
+        assert_eq!(
+            DeliveryAttribution {
+                schedule_run: Some(run),
+                turn_id: Some(turn_id),
+            }
+            .module_delivery(at),
+            Some(ModuleDelivery::ScheduleRun {
+                run_id: run.run_id,
+                schedule_id: run.schedule_id,
+                delivered_at: at,
+            })
+        );
+        assert_eq!(
+            DeliveryAttribution {
+                schedule_run: None,
+                turn_id: Some(turn_id),
+            }
+            .module_delivery(at),
+            Some(ModuleDelivery::Turn {
+                turn_id,
+                delivered_at: at,
+            })
+        );
+        assert_eq!(DeliveryAttribution::default().module_delivery(at), None);
+    }
+
+    /// A surface target reached through the shared delivery path records
+    /// the schedule run, or the turn, that produced the output.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_surface_delivery_records_the_schedule_run_or_the_turn_behind_it() {
+        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let state = AppState::new(
+            storage.clone(),
+            storage.clone(),
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            Default::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let topic = storage.general_scope().await.unwrap();
+        let session_id = storage
+            .create_session(swage_storage::fixtures::new_session(topic.id))
+            .await
+            .unwrap()
+            .id;
+        let surface = crate::surface::create_surface(
+            &state,
+            session_id,
+            swage_protocol::client::surface::CreateSurfaceRequest {
+                title: "Deliveries".into(),
+                library_entry_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        let targets = [DeliveryTarget::Surface {
+            surface_id: surface.id,
+        }];
+        // The delivery record names real rows: a schedule's run and the
+        // turn that ran it.
+        let schedule = storage
+            .create_schedule(swage_storage::model::NewSchedule {
+                overlap_policy: Default::default(),
+                pending_cap: 1,
+                id: Uuid::new_v4(),
+                message: "Deliver the digest".into(),
+                status: swage_storage::model::ScheduleStatus::Active,
+                kind: swage_storage::model::ScheduleKind::Interval,
+                expression: "every 5 minutes".into(),
+                session_policy: swage_storage::model::SessionPolicy::Continuation { session_id },
+                creator: swage_storage::model::ScheduleCreator::User,
+                delivery_routing: serde_json::json!({}),
+                gate: None,
+                next_run_at: None,
+                last_run_at: None,
+            })
+            .await
+            .unwrap();
+        let run = ScheduleRunAttribution {
+            run_id: storage
+                .create_schedule_run(swage_storage::model::NewScheduleRun::pending(
+                    schedule.id,
+                    swage_storage::model::ScheduleRunTrigger::Tick,
+                    None,
+                    schedule.message.clone(),
+                ))
+                .await
+                .unwrap()
+                .id,
+            schedule_id: schedule.id,
+        };
+        ThreadStore::create(
+            &*storage,
+            swage_storage::model::NewThread {
+                session_id,
+                agent_id: "gateway".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let turn_id =
+            crate::automated_turn::create_placeholder_turn(&state, session_id, "gateway", "run")
+                .await
+                .unwrap();
+        deliver_to_targets(
+            &state,
+            session_id,
+            DeliveryAttribution {
+                schedule_run: Some(run),
+                turn_id: Some(turn_id),
+            },
+            &targets,
+            "# The run's output",
+        )
+        .await
+        .unwrap();
+        deliver_to_targets(
+            &state,
+            session_id,
+            DeliveryAttribution {
+                schedule_run: None,
+                turn_id: Some(turn_id),
+            },
+            &targets,
+            "# A routed response",
+        )
+        .await
+        .unwrap();
+
+        let modules = storage.list_surface_modules(surface.id).await.unwrap();
+        assert_eq!(modules.len(), 2);
+        assert!(
+            matches!(
+                modules[0].delivery,
+                Some(ModuleDelivery::ScheduleRun { run_id, schedule_id, .. })
+                    if run_id == run.run_id && schedule_id == run.schedule_id
+            ),
+            "{:?}",
+            modules[0].delivery
+        );
+        assert!(
+            matches!(
+                modules[1].delivery,
+                Some(ModuleDelivery::Turn { turn_id: by, .. }) if by == turn_id
+            ),
+            "{:?}",
+            modules[1].delivery
+        );
+    }
+
     #[tokio::test]
     async fn webhook_client_enforces_its_request_timeout() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1580,11 +1796,15 @@ mod tests {
         ])
         .await;
 
-        let response = run_channel_turn(&state, session_id, "Channel hello".into())
+        let answered = run_channel_turn(&state, session_id, "Channel hello".into())
             .await
             .expect("channel turn should complete");
 
-        assert_eq!(response, "Channel answer");
+        assert_eq!(answered.response, "Channel answer");
+        assert!(
+            answered.turn_id.is_some(),
+            "the answer names the turn that produced it"
+        );
         let thread = state
             .storage
             .list_by_session(session_id)
