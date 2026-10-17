@@ -231,8 +231,12 @@ async fn turn_owner(storage: &dyn Storage, turn: &Turn) -> Result<TurnOwner, Sto
 }
 
 /// Whether the parent's own tool call for a delegation — the call the
-/// delegate message names — settled with a result in the parent's record.
-/// A delegate that names no call, or a call with no result, did not.
+/// delegate message names — settled with the delegation's own result in
+/// the parent's record. A delegate that names no call, a call with no
+/// result, and a call recovery itself settled with its placeholder for a
+/// cut-off or unavailable result (startup settles every started call
+/// before the parents resume) did not: only a result the delegation
+/// wrote counts.
 async fn delegate_call_settled(
     storage: &dyn Storage,
     parent: &Turn,
@@ -244,7 +248,13 @@ async fn delegate_call_settled(
     Ok(storage
         .get_tool_call_by_turn_and_call_id(parent.id, call_id)
         .await?
-        .is_some_and(|call| call.result.is_some()))
+        .is_some_and(|call| {
+            call.result.is_some()
+                && !matches!(
+                    call.status.as_deref(),
+                    Some(INTERRUPTED_TOOL_STATUS) | Some(TOOL_RESULT_UNAVAILABLE_STATUS)
+                )
+        }))
 }
 
 /// Why an incomplete child stopped, as its own record says: the account
@@ -945,6 +955,8 @@ mod tests {
             ("drafter", TurnState::Incomplete, Some("Half the draft.")),
             ("reviewer", TurnState::Processing, None),
             ("scout", TurnState::Completed, Some("Scouted.")),
+            ("critic", TurnState::Refused, Some("I will not write that.")),
+            ("builder", TurnState::Failed, None),
         ] {
             let child_session = storage
                 .create_session(NewSession {
@@ -997,6 +1009,16 @@ mod tests {
                     .unwrap()
                     .assistant_response = Some(response.to_string());
             }
+            if agent == "builder" {
+                storage
+                    .db
+                    .lock()
+                    .await
+                    .turns
+                    .get_mut(&child.id)
+                    .unwrap()
+                    .failure_message = Some("the build tool crashed".to_string());
+            }
             if agent == "scout" {
                 // The detached child's own Result, written by its executor and
                 // not yet claimed: the record of its fate already.
@@ -1031,7 +1053,7 @@ mod tests {
             .collect();
         assert_eq!(
             results.len(),
-            4,
+            6,
             "one Result per child, the scout's its own: {pending:?}"
         );
         for (agent, delegate_id, child_session_id, child_thread_id) in &delegates {
@@ -1080,6 +1102,15 @@ mod tests {
                     assert_eq!(result.payload["response"], "Half the draft.");
                     assert!(result.payload["incomplete_reason"].is_string());
                 }
+                "critic" => {
+                    assert_eq!(result.payload["refused"], true);
+                    assert_eq!(result.payload["response"], "I will not write that.");
+                    assert!(result.payload["error"].is_string());
+                }
+                "builder" => {
+                    assert_eq!(result.payload["error"], "the build tool crashed");
+                    assert!(result.payload.get("refused").is_none());
+                }
                 _ => assert!(
                     result.payload["error"]
                         .as_str()
@@ -1103,6 +1134,8 @@ mod tests {
                 .contains("The gateway restarted while this turn was waiting")
         );
         assert!(queued[0].content.contains("surveyor"));
+        assert!(queued[0].content.contains("critic refused the task"));
+        assert!(queued[0].content.contains("builder failed"));
         assert!(queued[0].content.contains("drafter"));
         assert!(queued[0].content.contains("stopped short"));
         assert!(queued[0].content.contains("reviewer"));
@@ -1449,6 +1482,35 @@ mod tests {
         .await;
         let (_, delegate) =
             delegated_child(&storage, topic.id, &parent, "scout", TurnState::Completed).await;
+        // The parent's delegate call was still started when the gateway
+        // stopped: startup settles it with its cut-off placeholder before
+        // the parent resumes, and that placeholder is not the delegation's
+        // result.
+        {
+            use swage_storage::model::NewToolCall;
+            use swage_storage::store::ToolCallStore;
+            storage
+                .create_tool_call(NewToolCall {
+                    turn_id: parent.id,
+                    agent_id: parent.agent_id.clone(),
+                    call_id: "call-scout".to_string(),
+                    tool: "delegate".to_string(),
+                    arguments: "{}".to_string(),
+                    model_arguments: "{}".to_string(),
+                    result: None,
+                    model_result: None,
+                    status: None,
+                    duration_ms: None,
+                    truncated: false,
+                    total_bytes: None,
+                    provider_round: 1,
+                    position: 0,
+                    parent_call_id: None,
+                    display_summary: None,
+                })
+                .await
+                .unwrap();
+        }
         let delivered = storage
             .create_agent_message(NewAgentMessage {
                 sender_agent_id: "scout".to_string(),
@@ -1481,6 +1543,19 @@ mod tests {
             "the one result is reissued, not copied: {results:?}"
         );
         assert_eq!(results[0].status, MessageStatus::Pending);
+        {
+            use swage_storage::store::ToolCallStore;
+            let call = storage
+                .get_tool_call_by_turn_and_call_id(parent.id, "call-scout")
+                .await
+                .unwrap()
+                .expect("the delegate call is on the record");
+            assert_eq!(
+                call.status.as_deref(),
+                Some(INTERRUPTED_TOOL_STATUS),
+                "startup settled the started call with its placeholder, which is not the delegation's result"
+            );
+        }
         assert_eq!(results[0].payload["response"], "Scouted.");
         assert_eq!(
             results[0].payload["parent_session_id"],
