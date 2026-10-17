@@ -98,7 +98,9 @@ pub(super) async fn compose(
                                 return Err(refusal("no named assembly is selected"));
                             }
                             if named_output.is_none() {
-                                named_output = Some(serde_json::to_value(named.take().expect("once")())
+                                let output = named.take().expect("once")();
+                                compactions.extend(output.report.compaction_applied.iter().cloned());
+                                named_output = Some(serde_json::to_value(output)
                                     .map_err(|error| refusal(error.to_string()))?);
                             }
                             Ok(named_output.as_ref().expect("assembled").clone())

@@ -239,8 +239,10 @@ impl PluginSlot {
     /// can count tokens, compact history or run the configured named assembly.
     /// It may return element accounting in a composition report; otherwise
     /// the report accounts for the supplied elements. The host always records
-    /// the configured budget, the compactions it served in call order, actual
-    /// token totals, remaining budget and elapsed duration.
+    /// the configured budget and every compaction it performed, in order:
+    /// direct history compactions and the records of a named assembly it ran
+    /// on the plugin's behalf. Plugin claims cannot add compaction records.
+    /// Token totals, remaining budget and elapsed duration are host-computed.
     ///
     /// The assembly runs on the turn's thread synchronously, so the isolate
     /// is awaited from here through `block_in_place`, which the
@@ -1002,6 +1004,7 @@ mod tests {
             ("default", Some(100), true),
             ("ordered", Some(50), true),
             ("missing", None, true),
+            ("missing", Some(50), true),
         ] {
             let mut elements: Vec<Box<dyn ContextElement>> = vec![
                 Box::new(History(vec![
