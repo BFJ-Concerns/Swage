@@ -11,6 +11,12 @@ a topic, a workspace attached to it, and trust in that workspace are
 optional steps that give agents their own memory, file access and project
 guidance, but a conversation can start without any of them.
 
+Configure a provider and choose its default model through
+[Provider setup](interfaces-and-tooling.md#provider-setup) before sending a
+message. Provider setup comes before any sandbox or tool approval. A small
+first tool request, such as asking the shell to print its working directory,
+checks that the configured route can answer and run a tool.
+
 ## The front door
 
 Opening the web UI presents the **New session** control at the top of the

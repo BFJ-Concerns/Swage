@@ -1,5 +1,5 @@
 ---
-description: Network binding, the Settings memory view, operator history, the web UI's context inspector, conversation branching, image attachments and reference admission, surfaces, workspace relinking, delivery targets, devices (registration and pairing procedure, the dial-in connection, cancellation, and presence), tool-call recording and replay, turn completion states (incomplete, failed, interrupted, cancelled), hosted documentation, voice capabilities, gateway lifecycle (status and start recovery), the API error contract, wire-contract architecture with the route manifest and its projections, verification gate, route handling, the gateway's built-in tool inventory, and workspace tool output
+description: Provider setup and credentials, protocol selection, network access, Settings, turn inspection, conversations, surfaces, devices, gateway lifecycle, API reference, voice and tools
 ---
 
 # Interfaces and tooling
@@ -179,30 +179,113 @@ or `fileData` for Google. Text-only messages keep the plain string form.
 Stored messages carry their attachments as records that survive round-trips
 through the API.
 
+## Provider setup
+
+Start the gateway and web UI as shown in the [README](../README.md#quick-start).
+The gateway can run before a provider is configured, but cannot answer messages
+until you add a provider and model.
+
+In **Settings → Providers**, choose **Add provider** and select the kind that
+matches your endpoint:
+
+| Settings kind | Configuration protocol | Use it for |
+|---|---|---|
+| OpenAI Responses | `openai-responses` | GPT-family models through the Responses API |
+| OpenAI | `openai` | OpenAI Chat Completions |
+| OpenAI compatible | `openai` | Proxies and other Chat-Completions-shaped endpoints |
+| Anthropic | `anthropic` | Anthropic Messages |
+| Google | `google` | Google's generative language API |
+| OpenRouter | `openrouter` | OpenRouter's Chat Completions endpoint |
+
+For **OpenAI compatible**, enter **Provider name** and **Base URL** in the
+creation form, then choose **Connect** to open the provider fields.
+
+For GPT-family models over Responses, choose **OpenAI Responses**. The
+**OpenAI compatible** kind selects Chat Completions, even when the endpoint
+also serves Responses. For an OpenAI-family proxy, set **Base URL** to its API root,
+including any prefix such as `/v1`; Swage appends `/responses` or
+`/chat/completions` according to the protocol. The native OpenAI kinds use
+`https://api.openai.com/v1` unless overridden. Anthropic and Google base URLs
+come before the `/v1/messages` and `/v1beta/models/...` paths their adapters
+append; do not copy an OpenAI `/v1` suffix into those routes.
+
+Paste your key into **API key** and wait for the saved notice and stored
+credential indicator. Settings autosaves the key into an encrypted managed
+secret and puts its reference in `api_key_secret_ref`; no shell export is
+needed. Once it is stored, choose **Refresh** under **Discover** and add a
+model, or enter an upstream model ID beside **Add model**. OpenAI-family
+discovery with a custom base URL reads the saved credential. Other kinds may
+show a built-in list or a public catalogue, so discovery does not prove your
+key works. Choose **Use** beside the model you want (or select it
+under **Default model**), then wait for autosave confirmation. These changes
+apply to new turns without restarting the gateway.
+
+For an interactive turn, the selected model's `provider_id` determines its
+route. An unreachable or
+invalid endpoint produces an error naming that provider and endpoint;
+Swage does not silently answer from another configured provider. Setting
+`[providers] default` does not redirect a selected model.
+
+### Configure by file
+
+Register a governed secret through the [secret API](#registering-a-file-backed-secret)
+first. Copy the returned `reference` into the provider entry and bind a model
+to it. For example, the placeholders below describe a GPT-family Responses
+route; replace the secret reference and upstream model ID with your own:
+
+```toml
+[providers.entries.gpt]
+protocol = "openai-responses"
+api_key_secret_ref = "secret://file/<returned-id>"
+# base_url = "https://api.example.com/v1" # only for a Responses-serving proxy
+
+[models]
+default = "gpt"
+
+[models.entries.gpt]
+provider_id = "gpt"
+model_id = "<upstream-model-id>"
+```
+
+Use the reference exactly as returned, including its backend and ID.
+`models.default` names your catalogue entry; `model_id` is the ID the
+provider accepts. Restart the gateway after hand-editing `config.toml`.
+Complete provider setup before starting the [first session](first-session.md).
+Handle any sandbox or tool approvals during its turns.
+
 ## Provider credentials
 
 A provider entry has two credential fields, checked in order:
 
 1. **`api_key_secret_ref`** — a `secret://` reference resolved through the
-   gateway's secret manager. Every access is audited and the resolved value
-   is registered for redaction. This is the governed path.
+   gateway's secret manager. Successful access is audited; active secret
+   values redact captured provider requests and provider-attempt errors.
+   This is the governed path.
 2. **`api_key_env`** — a direct environment-variable read (`std::env::var`)
-   at startup. This is the legacy path; the gateway logs a warning when it is
-   used. It does not go through the secret manager and is neither audited nor
-   redacted.
+   when the provider runtime is built. This is the legacy path; the gateway
+   logs a warning when it is used. It bypasses secret-access auditing and
+   redaction based on active secret values. Pattern-based safety filtering
+   of tool results still applies.
 
 When both are set, `api_key_secret_ref` wins.
 
 The built-in Codex app server (`protocol = "codex"`) is temporarily
 disabled: a configuration naming it does not load, until Swage can ask you
-to approve the commands and file changes it makes. Codex models stay
-reachable through any OpenAI-protocol provider.
+to approve the commands and file changes it makes. Settings offers no Codex
+provider kind. Codex models stay
+reachable through a supported API provider: use `openai-responses` for a
+GPT/Codex-family model served over Responses, or `openai` for an endpoint
+that serves it over Chat Completions. Add the upstream model ID to that
+provider and choose **Use**. An existing CLI sign-in does not enable the
+disabled app-server route or automatically supply an API credential for
+these routes.
 
 ### Secret manager and backends
 
-The secret manager resolves `secret://` references with an audit event on
-every access and automatic redaction of resolved values. Three backends
-determine where a secret's value lives:
+The secret manager resolves `secret://` references and audits successful
+access. Provider request captures and provider-attempt errors use active
+secret values for redaction; this does not promise general log redaction.
+Three backends determine where a secret's value lives:
 
 - **Managed** — encrypted at rest in the gateway's own SQLite store. Used by
   the generate-secret path; the create-secret path takes `backend_kind` from
@@ -214,6 +297,12 @@ determine where a secret's value lives:
   (RFC 6901) can optionally select a single field from a JSON file rather
   than using the whole file's content.
 
+For managed secrets, startup normally keeps the encryption key in
+`secrets/managed-secret.key` under your data root; `SWAGE_MANAGED_SECRET_KEY`
+can supply it instead. Keep the encryption key with the database in backups.
+Losing or changing the key makes stored credentials unreadable; do not put
+its contents in logs or documentation.
+
 ### Registering a file-backed secret
 
 Create the secret through the API (`POST /api/secrets`), specifying the file
@@ -222,36 +311,62 @@ path, the JSON pointer if the file is a JSON document, and
 
 ```json
 {
-  "name": "my-service-token",
+  "name": "my-provider-key",
   "material_kind": "provider_key",
   "owner_kind": "operator",
   "backend_kind": "file",
   "scope_kind": "provider",
   "scope_id": "my-provider",
-  "external_reference": "/path/to/token-file.json",
-  "metadata": { "json_pointer": "/tokens/access_token" }
+  "external_reference": "/path/to/provider-key.json",
+  "metadata": { "json_pointer": "/api_key" }
 }
 ```
 
-The response includes a `reference` field (e.g.
-`secret://file/a1b2c3d4-e5f6-7890-abcd-ef1234567890`). Point the provider
-entry's `api_key_secret_ref` at it to bring the credential under the
-governed path:
+The JSON file must contain your provider API key in its `api_key` field.
+
+The response includes a `reference` field (`secret://file/<returned-id>`).
+Point the provider entry's `api_key_secret_ref` at it to bring the credential
+under the governed path:
 
 ```toml
 [providers.entries.my-provider]
 protocol = "openai"
-api_key_secret_ref = "secret://file/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+api_key_secret_ref = "secret://file/<returned-id>"
 ```
+
+### Registering a managed secret
+
+For a key that is not already in a file, **Settings → Providers** stores it
+as a managed secret. An API client can also send `POST /api/secrets` with
+the key inline in the JSON body:
+
+```json
+{
+  "name": "my-provider-key",
+  "material_kind": "provider_key",
+  "owner_kind": "operator",
+  "backend_kind": "managed",
+  "scope_kind": "provider",
+  "scope_id": "my-provider",
+  "value": "<provider-api-key>"
+}
+```
+
+Replace the placeholder with the key. Use the returned `reference` verbatim
+in `api_key_secret_ref`. The create response includes the submitted value
+in `revealed_value`; keep the response out of logs and reports.
 
 ### Codex auth store
 
 The file backend is how the gateway governs credentials that a companion
 tool manages itself. The Codex CLI keeps its ChatGPT OAuth tokens in an
-`auth.json` file and refreshes them on its own schedule. At startup, the
-gateway registers the Codex access and refresh tokens as file-backed secrets
-pointing into that document, so they resolve, audit, and redact through the
-governed system without being copied out of the CLI's own store.
+`auth.json` file. Swage's retained integration uses
+`~/.swage/codex/auth.json`, or `$SWAGE_HOME/codex/auth.json` when that data
+root is set; it does not read `~/.codex/auth.json`. At startup, the gateway
+registers file-backed access-token and refresh-token records pointing into
+that document, even while the integration is disabled. Registration enables
+neither sign-in nor Codex turns. These OAuth-token records cannot be used as
+`provider_key` secrets for API providers.
 
 ## Surfaces
 
@@ -631,79 +746,14 @@ The Rust client parses the body into a typed error variant; the frontend has
 an `ApiError` class that extracts the code. The generated TypeScript client
 raises `ApiError` on any non-ok response.
 
-## Wire-contract architecture
+## API reference
 
-The architecture's rule is that all types crossing a process boundary — HTTP
-request and response bodies, WebSocket events, device commands — are defined
-once in the `swage-protocol` crate as plain serde types. Every consumer is a
-derived projection: Rust crates depend on the protocol crate directly, the
-frontend's TypeScript is generated from it via ts-rs, and the canonical
-published artefact is the JSON Schema generated via schemars and committed
-under `crates/swage-protocol/schema/`.
-
-The report's `provider_visible` object also records the resolved effort for
-the turn — what was requested, what the adapter sent, and any clamp or
-substitution — so an operator can see how effort was resolved for any past
-turn through the `GET /api/turns/{id}/context` endpoint (the web UI's
-inspector panel does not yet render this field). See
-[Agents and permissions — Effort](agents-and-permissions.md#effort)
-for the full resolution rules.
-
-The assembly report used by the context inspector is part of the client
-surface. Both the stored-context response and the `context_assembled`
-WebSocket event use that protocol type, and the frontend imports its generated
-TypeScript projection.
-
-The crate is organised into four surfaces, each emitting its own schema
-document:
-
-- **Client** — conversations, streaming, approvals, schedules, knowledge,
-  voice, workflows, channels, delivery, topics, settings, materials, recovery,
-  context reports, and provider sign-in.
-- **Hosting** — presence, operator overview, agent definitions, approvals,
-  and configuration. The contract between the gateway and its hosting
-  operator.
-- **Device** — device registration and remote tool execution. The contract
-  between the gateway and execution clients that dial in to run tool calls.
-- **Channel** — inbound messages (direct and threaded), delivery log, and
-  channel status. The contract external integrators speak.
-
-Each surface module has a manually maintained anchor struct whose fields
-reference every wire type on that surface. A schema-generation call walks the
-type graph reachable from that anchor. A new top-level wire type must therefore
-be added to the surface anchor (unless an existing anchor field already reaches
-it) and to the explicit `ts-rs` export list in
-`crates/swage-protocol/tests/projections.rs` (unless an existing export already
-reaches it).
-
-### Route manifest
-
-The client surface is gaining a route manifest — a single table that names
-each covered HTTP route once, with its method, path template, request and
-response schema names. The manifest does not yet cover the full client
-surface: the topic CRUD routes are the first entries, and routes not yet in
-the manifest are registered directly on the router without appearing in the
-projections below. Two projections are generated from the manifest:
-
-- An **OpenAPI 3.1 document** at `crates/swage-protocol/schema/client-openapi.json`,
-  whose `components/schemas` are the client surface's own JSON Schema — so
-  the OpenAPI document and the schema never disagree.
-- A **generated TypeScript client** at `frontend/src/lib/protocol/client.ts`,
-  with one typed function per manifested route over a shared request helper
-  that raises the API error contract on failure.
-
-Adding a manifested route is one entry in the manifest. A router test
-verifies that every manifest route is actually registered on the gateway's
-HTTP router — a manifest entry with no handler fails the test.
-
-### Projections
-
-Running `cargo test -p swage-protocol` regenerates all projections in place:
-TypeScript type bindings, JSON Schemas, the OpenAPI document, and the
-generated client. Any drift shows up as uncommitted changes and is caught by
-the verification gate, but the freshness check cannot detect an omitted type
-that was never made reachable, or a route that was never added to the
-manifest.
+The [OpenAPI document](../crates/swage-protocol/schema/client-openapi.json)
+describes a subset of the client API. It does not include secret operations;
+use the [credential reference](#provider-credentials) for those requests. The
+[JSON Schemas](../crates/swage-protocol/schema/) describe the client,
+hosting, device and channel contracts. HTTP failures follow the
+[API error contract](#api-error-contract).
 
 ## Verification gate
 
@@ -759,10 +809,9 @@ Other useful recipes:
 
 ## Client-side route handling
 
-The web UI uses a minimal, framework-free SPA router. It pattern-matches the
-browser's URL path against the application's routes (the front door,
-conversations and their surfaces, the surface library, workflow runs,
-settings) and keeps the active conversation stable across browser navigation.
+The web UI keeps the active conversation stable across browser navigation
+between the front door, conversations and their surfaces, the surface
+library, workflow runs and settings.
 
 When the browser navigates to a conversation URL that is already the active
 conversation — the common case for back/forward navigation — the router skips
@@ -776,12 +825,6 @@ For a conversation URL that is not the currently active one, the router loads
 it normally. A 404 falls back to the root with a notice; other errors
 propagate. When a scope was in view, the composer stays open in it so the
 next message starts a fresh session there; otherwise the front door serves.
-
-The router's dependency on the conversation store is a narrow injected
-interface — four members rather than a coupling to the store's internals.
-Disconnecting the WebSocket is part of clearing the active conversation, so
-browser navigation to a deleted conversation does not leave an orphaned
-connection.
 
 ## Hosted documentation
 
