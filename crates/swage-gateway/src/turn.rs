@@ -14,7 +14,7 @@ use swage_core::{
 };
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
 use swage_protocol::client::turn::MessageAttachment;
-use swage_protocol::client::workflow::{WorkflowAgentCallResolution, WorkflowProviderRoundOutcome};
+use swage_protocol::client::workflow::{WorkflowAttemptResolution, WorkflowProviderRoundOutcome};
 use swage_storage::model::{
     AppendMessage, ApprovalKind, ApprovalState, InboundAudit, NewAgentMessage, NewApprovalRequest,
     NewTurn, ToolCallRecord, TurnState,
