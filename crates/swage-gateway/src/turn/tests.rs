@@ -15827,6 +15827,53 @@ fn a_linked_worktree_writes_its_gitdir_and_the_repository_it_belongs_to() {
     assert!(sandbox_config.write_paths.contains(&repo_git));
 }
 
+/// A workspace's `.git` pointer is content the sandbox can write, so the git
+/// metadata it names is never the operator's grant: a pointer into a masked
+/// private path — `~/.ssh`, the data root — leaves that path masked and
+/// ungranted, while the workspace itself stays writable.
+#[test]
+fn git_metadata_under_a_masked_path_is_left_masked() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path().join("home");
+    let ssh = home.join(".ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    let data_root = home.join(".swage");
+    std::fs::create_dir_all(data_root.join("store")).unwrap();
+    let roots = PolicyRoots {
+        home: home.clone(),
+        data_root: data_root.clone(),
+    };
+
+    for pointed_at in [ssh.clone(), data_root.join("store")] {
+        let workspace = temp_dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            workspace.join(".git"),
+            format!("gitdir: {}\n", pointed_at.display()),
+        )
+        .unwrap();
+        let agent_config =
+            AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
+        let policy = build_sandbox_config(&agent_config, None, &roots).unwrap();
+        assert!(policy.working_directory_is_writable());
+        assert!(
+            !policy.write_paths.contains(&sandbox_path(&pointed_at)),
+            "{} is not granted by a pointer: {:?}",
+            pointed_at.display(),
+            policy.write_paths
+        );
+        assert!(
+            policy
+                .masked_paths
+                .iter()
+                .any(|mask| pointed_at.starts_with(mask)),
+            "{} stays masked: {:?}",
+            pointed_at.display(),
+            policy.masked_paths
+        );
+    }
+}
+
 /// A grant that names a masked private path reopens exactly what it names:
 /// the policy carries both the mask and the grant for that path, and the
 /// mount layer binds the grant after the mask (the sandbox crate's own

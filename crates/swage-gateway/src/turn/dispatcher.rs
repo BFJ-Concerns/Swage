@@ -238,6 +238,7 @@ pub(crate) fn build_sandbox_config(
     let working_directory = sandbox_path(&agent_config.working_directory);
     let mut builder = swage_sandbox::SandboxConfig::builder().working_directory(&working_directory);
     let mut granted: Vec<PathBuf> = Vec::new();
+    let masked = masked_paths(roots);
 
     let active_grant = workspace_policy
         .and_then(|policy| policy.active_workspace.as_ref())
@@ -247,10 +248,22 @@ pub(crate) fn build_sandbox_config(
     if active_can_write {
         builder = builder.write_path(&working_directory);
         for path in git_metadata_outside(&working_directory) {
-            if path.exists() {
-                builder = builder.write_path(&path);
-                granted.push(path);
+            if !path.exists() {
+                continue;
             }
+            // The pointer is read from the workspace, which the sandbox
+            // writes, so it is never the operator's deliberate reach into a
+            // private path (C64): metadata under a mask stays masked.
+            if let Some(private) = masked.iter().find(|private| path.starts_with(private)) {
+                tracing::warn!(
+                    path = %path.display(),
+                    private = %private.display(),
+                    "ignoring workspace git metadata under a masked private path"
+                );
+                continue;
+            }
+            builder = builder.write_path(&path);
+            granted.push(path);
         }
     } else {
         builder = builder.read_only_path(&working_directory);
@@ -293,24 +306,33 @@ pub(crate) fn build_sandbox_config(
             builder = builder.write_path(sandbox_path(&path));
         }
     }
-    for private in MASKED_HOME_PATHS {
-        let path = roots.home.join(private);
-        if path.exists() {
-            builder = builder.masked_path(sandbox_path(&path));
-        }
-    }
-    // The gateway's own data root — its store, secrets and token — is masked
-    // unless a grant names it (C64). A grant beneath it (the managed scratch
-    // workspace lives there) reopens only its own subtree: the mount layer
-    // applies the deeper path last, so the grant shows through the mask
-    // without the rest of the root; a grant equal to the root, or to any
-    // masked private path, binds after the mask and reopens what it names.
-    if roots.data_root.exists() {
-        builder = builder.masked_path(&roots.data_root);
+    for private in &masked {
+        builder = builder.masked_path(private);
     }
     tracing::debug!(?granted, "sandbox policy grants");
 
     builder.build()
+}
+
+/// The private paths a turn's sandbox masks, each only where it exists: the
+/// operator's secrets under the home, and the gateway's own data root — its
+/// store, secrets and token — masked unless a grant names it (C64). A grant
+/// beneath a mask (the managed scratch workspace lives under the data root)
+/// reopens only its own subtree: the mount layer applies the deeper path
+/// last, so the grant shows through the mask without the rest; a grant equal
+/// to the root, or to any masked private path, binds after the mask and
+/// reopens what it names.
+fn masked_paths(roots: &PolicyRoots) -> Vec<PathBuf> {
+    let mut masked: Vec<PathBuf> = MASKED_HOME_PATHS
+        .iter()
+        .map(|private| roots.home.join(private))
+        .filter(|path| path.exists())
+        .map(|path| sandbox_path(&path))
+        .collect();
+    if roots.data_root.exists() {
+        masked.push(roots.data_root.clone());
+    }
+    masked
 }
 
 pub(crate) fn apply_worker_placement_permission(

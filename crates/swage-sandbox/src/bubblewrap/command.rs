@@ -247,14 +247,17 @@ fn policy_mounts<'a>(
     }
     // Only reopen executables hidden by an overlay. Binding an already
     // visible executable is unnecessary and fails for symlink destinations
-    // such as /usr/bin/python3. An exact mask still wins over an executable.
+    // such as /usr/bin/python3. The mount covering an executable is the one
+    // that binds last over it — the same order the policy binds in, so an
+    // executable beneath a grant that reopens its mask is already visible.
+    // An exact mask still wins over an executable.
     let executable_mounts: Vec<_> = executables
         .iter()
         .filter(|path| {
             let covering = mounts
                 .iter()
                 .filter(|(parent, _)| path.starts_with(parent))
-                .max_by_key(|(parent, _)| parent.components().count());
+                .max_by_key(|(parent, kind)| bind_order(parent, *kind));
             match covering {
                 Some((parent, kind)) => {
                     parent != *path
@@ -266,17 +269,19 @@ fn policy_mounts<'a>(
         .map(|path| (*path, PolicyMount::ReadOnly))
         .collect();
     mounts.extend(executable_mounts);
-    // Depth order, so a deeper mount shows through the one above it. At one
-    // depth a mask binds before a grant, so a grant that names exactly a
-    // masked path — a workspace at `~/.ssh`, the data root under C64 —
-    // reopens what it names: the grant wins over the mask for the named
-    // path and everything beneath, and a grant above the mask (the home
-    // directory) still leaves the mask in place, being a shallower mount.
-    mounts.sort_by_key(|(path, kind)| {
-        let masks = matches!(kind, PolicyMount::MaskDirectory | PolicyMount::MaskFile);
-        (path.components().count(), !masks)
-    });
+    mounts.sort_by_key(|(path, kind)| bind_order(path, *kind));
     mounts
+}
+
+/// The order the policy's mounts bind in, and so which of two mounts over
+/// one path wins: depth first, so a deeper mount shows through the one
+/// above it; at one depth a mask before a grant, so a grant that names
+/// exactly a masked path — a workspace at `~/.ssh`, the data root under
+/// C64 — reopens what it names, while a grant above the mask (the home
+/// directory) still leaves the mask in place, being a shallower mount.
+fn bind_order(path: &Path, kind: PolicyMount) -> (usize, bool) {
+    let masks = matches!(kind, PolicyMount::MaskDirectory | PolicyMount::MaskFile);
+    (path.components().count(), !masks)
 }
 
 // ---------------------------------------------------------------------------
@@ -443,6 +448,39 @@ mod tests {
         assert!(
             home_bind < positions(&ssh)[0],
             "the home grant above the mask leaves the mask after it"
+        );
+    }
+
+    /// An executable beneath a path that a grant reopens through its mask
+    /// is already visible — the grant binds last over it — so it is not
+    /// bound again; a second, deeper read-only bind would override the
+    /// grant for that file and fail for a symlinked executable.
+    #[test]
+    fn an_executable_beneath_a_grant_that_reopens_its_mask_is_not_bound_again() {
+        let home = tempfile::tempdir().unwrap();
+        let data_root = home.path().join(".swage");
+        let binary = data_root.join("bin").join("swage-agent");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, b"").unwrap();
+        let config = SandboxConfig::builder()
+            .working_directory(home.path())
+            .write_path(&data_root)
+            .masked_path(&data_root)
+            .build()
+            .unwrap();
+        let cmd = build_bwrap_command_with_path(
+            Path::new("/usr/bin/bwrap"),
+            &config,
+            Path::new("/run/swage/agent.sock"),
+            None,
+            &binary,
+        )
+        .unwrap();
+        let args = args_of(&cmd);
+        let mentions = args.iter().filter(|a| **a == binary.as_os_str()).count();
+        assert_eq!(
+            mentions, 1,
+            "the binary is named once, as the command run, never as a bind: {args:?}"
         );
     }
 
