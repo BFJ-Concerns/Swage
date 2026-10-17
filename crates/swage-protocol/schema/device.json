@@ -1,47 +1,23 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "DeviceSurface",
-  "type": "object",
-  "properties": {
-    "device_frame": {
-      "$ref": "#/$defs/DeviceFrame"
-    },
-    "gateway_frame": {
-      "$ref": "#/$defs/GatewayFrame"
-    },
-    "list": {
-      "$ref": "#/$defs/DeviceListResponse"
-    },
-    "register": {
-      "$ref": "#/$defs/RegisterDeviceRequest"
-    }
-  },
-  "required": [
-    "register",
-    "list",
-    "device_frame",
-    "gateway_frame"
-  ],
   "$defs": {
     "DeviceFrame": {
       "description": "Frames a device sends over the connection it dialled.",
       "oneOf": [
         {
           "description": "The first frame after connecting: who the device is, its credential,\nand what it can run. The gateway answers with `GatewayFrame::Welcome`\nor `GatewayFrame::Rejected` and closes.",
-          "type": "object",
           "properties": {
             "capabilities": {
-              "type": "array",
               "items": {
                 "type": "string"
-              }
+              },
+              "type": "array"
             },
             "device_id": {
               "type": "string"
             },
             "kind": {
-              "type": "string",
-              "const": "hello"
+              "const": "hello",
+              "type": "string"
             },
             "label": {
               "type": [
@@ -58,32 +34,32 @@
             "device_id",
             "shared_token",
             "capabilities"
-          ]
+          ],
+          "type": "object"
         },
         {
           "description": "Sent every `heartbeat_interval_secs` from the welcome; the gateway\nmarks a device stale when they stop and disconnected when the\nconnection closes.",
-          "type": "object",
           "properties": {
             "kind": {
-              "type": "string",
-              "const": "heartbeat"
+              "const": "heartbeat",
+              "type": "string"
             }
           },
           "required": [
             "kind"
-          ]
+          ],
+          "type": "object"
         },
         {
           "description": "The operation `correlation_id` finished with `output`.",
-          "type": "object",
           "properties": {
             "correlation_id": {
-              "type": "string",
-              "format": "uuid"
+              "format": "uuid",
+              "type": "string"
             },
             "kind": {
-              "type": "string",
-              "const": "result"
+              "const": "result",
+              "type": "string"
             },
             "output": true
           },
@@ -91,19 +67,19 @@
             "kind",
             "correlation_id",
             "output"
-          ]
+          ],
+          "type": "object"
         },
         {
           "description": "The operation `correlation_id` failed on the device.",
-          "type": "object",
           "properties": {
             "correlation_id": {
-              "type": "string",
-              "format": "uuid"
+              "format": "uuid",
+              "type": "string"
             },
             "kind": {
-              "type": "string",
-              "const": "failure"
+              "const": "failure",
+              "type": "string"
             },
             "message": {
               "type": "string"
@@ -113,51 +89,51 @@
             "kind",
             "correlation_id",
             "message"
-          ]
+          ],
+          "type": "object"
         },
         {
           "description": "The operation `correlation_id` was stopped at the gateway's request.",
-          "type": "object",
           "properties": {
             "correlation_id": {
-              "type": "string",
-              "format": "uuid"
+              "format": "uuid",
+              "type": "string"
             },
             "kind": {
-              "type": "string",
-              "const": "cancelled"
+              "const": "cancelled",
+              "type": "string"
             }
           },
           "required": [
             "kind",
             "correlation_id"
-          ]
+          ],
+          "type": "object"
         }
       ]
     },
     "DeviceListResponse": {
-      "type": "object",
       "properties": {
         "devices": {
-          "type": "array",
           "items": {
             "$ref": "#/$defs/DeviceResponse"
-          }
+          },
+          "type": "array"
         }
       },
       "required": [
         "devices"
-      ]
+      ],
+      "type": "object"
     },
     "DeviceResponse": {
       "description": "A registered device as the gateway lists it. `capabilities` are what the\ndevice last advertised on connecting; empty until it first dials in.",
-      "type": "object",
       "properties": {
         "capabilities": {
-          "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
         },
         "device_id": {
           "type": "string"
@@ -172,17 +148,17 @@
           ]
         },
         "registered_at": {
-          "type": "string",
-          "format": "date-time"
+          "format": "date-time",
+          "type": "string"
         },
         "workspace_root": {
           "type": "string"
         },
         "workspace_roots": {
-          "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -192,41 +168,41 @@
         "workspace_roots",
         "capabilities",
         "registered_at"
-      ]
+      ],
+      "type": "object"
     },
     "GatewayFrame": {
       "description": "Frames the gateway sends to a connected device.",
       "oneOf": [
         {
           "description": "The hello was accepted; the device is connected.",
-          "type": "object",
           "properties": {
             "device_id": {
               "type": "string"
             },
             "heartbeat_interval_secs": {
-              "type": "integer",
               "format": "uint64",
-              "minimum": 0
+              "minimum": 0,
+              "type": "integer"
             },
             "kind": {
-              "type": "string",
-              "const": "welcome"
+              "const": "welcome",
+              "type": "string"
             }
           },
           "required": [
             "kind",
             "device_id",
             "heartbeat_interval_secs"
-          ]
+          ],
+          "type": "object"
         },
         {
           "description": "The hello was refused; the gateway closes after this frame.",
-          "type": "object",
           "properties": {
             "kind": {
-              "type": "string",
-              "const": "rejected"
+              "const": "rejected",
+              "type": "string"
             },
             "message": {
               "type": "string"
@@ -235,22 +211,22 @@
           "required": [
             "kind",
             "message"
-          ]
+          ],
+          "type": "object"
         },
         {
           "description": "Run `tool_name` with `params` in `context`, answering with a\n`Result`, `Failure`, or `Cancelled` frame carrying `correlation_id`.",
-          "type": "object",
           "properties": {
             "context": {
               "$ref": "#/$defs/SerializableToolContext"
             },
             "correlation_id": {
-              "type": "string",
-              "format": "uuid"
+              "format": "uuid",
+              "type": "string"
             },
             "kind": {
-              "type": "string",
-              "const": "operation"
+              "const": "operation",
+              "type": "string"
             },
             "params": true,
             "tool_name": {
@@ -263,38 +239,38 @@
             "tool_name",
             "params",
             "context"
-          ]
+          ],
+          "type": "object"
         },
         {
           "description": "Stop the operation `correlation_id` if it is still running; the\ndevice answers `Cancelled`, or `Result`/`Failure` if it had already\nfinished.",
-          "type": "object",
           "properties": {
             "correlation_id": {
-              "type": "string",
-              "format": "uuid"
+              "format": "uuid",
+              "type": "string"
             },
             "kind": {
-              "type": "string",
-              "const": "cancel"
+              "const": "cancel",
+              "type": "string"
             }
           },
           "required": [
             "kind",
             "correlation_id"
-          ]
+          ],
+          "type": "object"
         }
       ]
     },
     "RegisterDeviceRequest": {
       "description": "Register a device: its identity, the secret its connection credential\nresolves against, and the workspace it may operate in. What it can run\nis not registered — the device advertises that each time it connects.",
-      "type": "object",
       "properties": {
         "device_id": {
           "type": "string"
         },
         "kind": {
-          "type": "string",
-          "default": "attached_device"
+          "default": "attached_device",
+          "type": "string"
         },
         "label": {
           "type": [
@@ -310,30 +286,30 @@
           "type": "string"
         },
         "workspace_roots": {
-          "type": "array",
           "default": [],
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
         }
       },
       "required": [
         "device_id",
         "shared_token_secret_ref",
         "workspace_root"
-      ]
+      ],
+      "type": "object"
     },
     "SerializableToolContext": {
-      "type": "object",
       "properties": {
         "agent_id": {
           "type": "string"
         },
         "allowed_paths": {
-          "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
         },
         "call_id": {
           "type": [
@@ -345,11 +321,11 @@
           "type": "string"
         },
         "turn_id": {
+          "format": "uuid",
           "type": [
             "string",
             "null"
-          ],
-          "format": "uuid"
+          ]
         },
         "user_info": {
           "anyOf": [
@@ -370,17 +346,17 @@
         "session_id",
         "working_directory",
         "allowed_paths"
-      ]
+      ],
+      "type": "object"
     },
     "UserInfo": {
-      "type": "object",
       "properties": {
         "id": {
           "type": "string"
         },
         "metadata": {
-          "type": "object",
-          "additionalProperties": true
+          "additionalProperties": true,
+          "type": "object"
         },
         "name": {
           "type": "string"
@@ -390,7 +366,31 @@
         "id",
         "name",
         "metadata"
-      ]
+      ],
+      "type": "object"
     }
-  }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "device_frame": {
+      "$ref": "#/$defs/DeviceFrame"
+    },
+    "gateway_frame": {
+      "$ref": "#/$defs/GatewayFrame"
+    },
+    "list": {
+      "$ref": "#/$defs/DeviceListResponse"
+    },
+    "register": {
+      "$ref": "#/$defs/RegisterDeviceRequest"
+    }
+  },
+  "required": [
+    "register",
+    "list",
+    "device_frame",
+    "gateway_frame"
+  ],
+  "title": "DeviceSurface",
+  "type": "object"
 }

@@ -1,23 +1,7 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "PluginProcessSurface",
-  "type": "object",
-  "properties": {
-    "message": {
-      "$ref": "#/$defs/PluginProcessMessage"
-    },
-    "request": {
-      "$ref": "#/$defs/PluginProcessRequest"
-    }
-  },
-  "required": [
-    "request",
-    "message"
-  ],
   "$defs": {
     "PluginCallContext": {
       "description": "Where a tool call comes from, as the plugin's handler sees it.",
-      "type": "object",
       "properties": {
         "agentId": {
           "type": "string"
@@ -39,11 +23,11 @@
         "sessionId",
         "agentId",
         "workingDirectory"
-      ]
+      ],
+      "type": "object"
     },
     "PluginHostCallError": {
       "description": "A host call's refusal or failure, by name and message.",
-      "type": "object",
       "properties": {
         "message": {
           "type": "string"
@@ -55,11 +39,11 @@
       "required": [
         "name",
         "message"
-      ]
+      ],
+      "type": "object"
     },
     "PluginHostReply": {
       "description": "The gateway's answer to a host call: a value, or an error by name.",
-      "type": "object",
       "properties": {
         "error": {
           "anyOf": [
@@ -78,41 +62,41 @@
       },
       "required": [
         "ok"
-      ]
+      ],
+      "type": "object"
     },
     "PluginProcessMessage": {
       "description": "What the process sends the gateway.",
       "oneOf": [
         {
           "description": "The process's first message: the tools it serves. A tool the\nmanifest declares that is missing here fails the start.",
-          "type": "object",
           "properties": {
             "kind": {
-              "type": "string",
-              "const": "ready"
+              "const": "ready",
+              "type": "string"
             },
             "tools": {
-              "type": "array",
               "items": {
                 "type": "string"
-              }
+              },
+              "type": "array"
             }
           },
           "required": [
             "kind",
             "tools"
-          ]
+          ],
+          "type": "object"
         },
         {
           "description": "The invocation `id` succeeded with `value`.",
-          "type": "object",
           "properties": {
             "id": {
               "type": "string"
             },
             "kind": {
-              "type": "string",
-              "const": "result"
+              "const": "result",
+              "type": "string"
             },
             "value": true
           },
@@ -120,18 +104,18 @@
             "kind",
             "id",
             "value"
-          ]
+          ],
+          "type": "object"
         },
         {
           "description": "The invocation `id` failed.",
-          "type": "object",
           "properties": {
             "id": {
               "type": "string"
             },
             "kind": {
-              "type": "string",
-              "const": "failure"
+              "const": "failure",
+              "type": "string"
             },
             "message": {
               "type": "string"
@@ -145,11 +129,11 @@
             "id",
             "name",
             "message"
-          ]
+          ],
+          "type": "object"
         },
         {
           "description": "A host call made while serving `invocation`: `name` and `payload`\nas the plugin isolate's door takes them (`callTool` with\n`{ \"name\", \"arguments\" }`, `log` with a string). The gateway\nanswers with a `reply` carrying the same `id`.",
-          "type": "object",
           "properties": {
             "id": {
               "type": "string"
@@ -158,8 +142,8 @@
               "type": "string"
             },
             "kind": {
-              "type": "string",
-              "const": "call"
+              "const": "call",
+              "type": "string"
             },
             "name": {
               "type": "string"
@@ -172,7 +156,8 @@
             "invocation",
             "name",
             "payload"
-          ]
+          ],
+          "type": "object"
         }
       ]
     },
@@ -181,7 +166,6 @@
       "oneOf": [
         {
           "description": "Run a tool the plugin provides; the process answers with a `result`\nor a `failure` carrying the same `id`.",
-          "type": "object",
           "properties": {
             "context": {
               "$ref": "#/$defs/PluginCallContext"
@@ -190,8 +174,8 @@
               "type": "string"
             },
             "kind": {
-              "type": "string",
-              "const": "invoke"
+              "const": "invoke",
+              "type": "string"
             },
             "params": true,
             "tool": {
@@ -204,18 +188,18 @@
             "tool",
             "params",
             "context"
-          ]
+          ],
+          "type": "object"
         },
         {
           "description": "The answer to a host call the process made, by the call's `id`.",
-          "type": "object",
           "properties": {
             "id": {
               "type": "string"
             },
             "kind": {
-              "type": "string",
-              "const": "reply"
+              "const": "reply",
+              "type": "string"
             },
             "reply": {
               "$ref": "#/$defs/PluginHostReply"
@@ -225,15 +209,15 @@
             "kind",
             "id",
             "reply"
-          ]
+          ],
+          "type": "object"
         },
         {
           "description": "The process is being stopped and has the gateway's grace period to\nexit on its own; after it the process is signalled, and killed a\nmoment later if it ignores that.",
-          "type": "object",
           "properties": {
             "kind": {
-              "type": "string",
-              "const": "stop"
+              "const": "stop",
+              "type": "string"
             },
             "reason": {
               "$ref": "#/$defs/PluginProcessStopReason"
@@ -242,7 +226,8 @@
           "required": [
             "kind",
             "reason"
-          ]
+          ],
+          "type": "object"
         }
       ]
     },
@@ -250,26 +235,41 @@
       "description": "Why the gateway is stopping the process.",
       "oneOf": [
         {
+          "const": "session_closed",
           "description": "The session the process served has closed.",
-          "type": "string",
-          "const": "session_closed"
+          "type": "string"
         },
         {
+          "const": "idle",
           "description": "Nothing called the process for the manifest's idle period.",
-          "type": "string",
-          "const": "idle"
+          "type": "string"
         },
         {
+          "const": "gateway_stopping",
           "description": "The gateway is stopping.",
-          "type": "string",
-          "const": "gateway_stopping"
+          "type": "string"
         },
         {
+          "const": "superseded",
           "description": "A newer revision of the plugin was installed.",
-          "type": "string",
-          "const": "superseded"
+          "type": "string"
         }
       ]
     }
-  }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "message": {
+      "$ref": "#/$defs/PluginProcessMessage"
+    },
+    "request": {
+      "$ref": "#/$defs/PluginProcessRequest"
+    }
+  },
+  "required": [
+    "request",
+    "message"
+  ],
+  "title": "PluginProcessSurface",
+  "type": "object"
 }
