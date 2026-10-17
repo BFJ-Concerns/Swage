@@ -9651,7 +9651,7 @@ async fn wait_for_open_hold(storage: &Arc<SqliteStorage>, run_id: Uuid) -> Uuid 
 }
 
 async fn answer_open_hold(state: &AppState, hold_id: Uuid) {
-    answer_run_hold(
+    Box::pin(answer_run_hold(
         state,
         AnswerWorkflowRunHoldRequest {
             hold_id,
@@ -9664,7 +9664,7 @@ async fn answer_open_hold(state: &AppState, hold_id: Uuid) {
             session_id: None,
             turn_id: None,
         },
-    )
+    ))
     .await
     .expect("answer the open hold");
 }

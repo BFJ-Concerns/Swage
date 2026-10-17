@@ -8922,6 +8922,14 @@
           "type": "string",
           "format": "date-time"
         },
+        "dispatching_session_id": {
+          "description": "The conversation whose turn launched this run, when there is one.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
         "error_message": {
           "type": [
             "string",
@@ -9006,6 +9014,14 @@
         "topic_id": {
           "type": "string",
           "format": "uuid"
+        },
+        "wake_at": {
+          "description": "The next timer wake recorded for a parked run.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
         }
       },
       "required": [
@@ -9573,6 +9589,14 @@
           "type": "string",
           "format": "date-time"
         },
+        "dispatching_session_id": {
+          "description": "The conversation whose turn launched this run, when there is one.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
         "error_message": {
           "type": [
             "string",
@@ -9662,6 +9686,18 @@
           "type": "string",
           "format": "uuid"
         },
+        "view_url": {
+          "description": "Gateway-relative address, resolved against the origin the reader uses.",
+          "type": "string"
+        },
+        "wake_at": {
+          "description": "The next timer wake recorded for a parked run.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
         "workers_dispatched": {
           "type": [
             "integer",
@@ -9672,6 +9708,7 @@
         }
       },
       "required": [
+        "view_url",
         "id",
         "topic_id",
         "source_hash",

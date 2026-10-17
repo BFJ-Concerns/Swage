@@ -8,7 +8,19 @@ import type { WorkflowRunTerminalAccount } from "./WorkflowRunTerminalAccount";
 /**
  * A run's observed state when its start request returns.
  */
-export type WorkflowRunStartResult = { status_as_of: string, workers_dispatched?: number | null, id: string, topic_id: string, script_id?: string | null, script_name?: string | null, script_version?: number | null, carrying_skill?: string | null,
+export type WorkflowRunStartResult = {
+/**
+ * Gateway-relative address, resolved against the origin the reader uses.
+ */
+view_url: string, status_as_of: string, workers_dispatched?: number | null,
+/**
+ * The conversation whose turn launched this run, when there is one.
+ */
+dispatching_session_id?: string | null,
+/**
+ * The next timer wake recorded for a parked run.
+ */
+wake_at?: string | null, id: string, topic_id: string, script_id?: string | null, script_name?: string | null, script_version?: number | null, carrying_skill?: string | null,
 /**
  * Opaque identity declared by the workflow script for grouping its runs.
  */
