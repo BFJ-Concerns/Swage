@@ -72,6 +72,11 @@ All notable changes to Swage are documented in this file.
 - API workflow cancellations retain their source and request time in the terminal account.
 - Workflow endings close outstanding holds consistently; late answers report the settled run state.
 - Leads and schedule gates discover unseen workflow endings through bounded, durable acknowledgements.
+- Configuration history retains changes between a missing value and the literal environment-variable name `unset`, while suppressing absent-to-null rows.
+
+- Settings labels the provider credential input “API key”; history labels credential environment variables separately.
+
+- Configuration history uses Settings’ labels, including provider credentials, and shows creations, deletions, unchanged saves, arrays and single-field changes without misleading or duplicate field rows. Null and absent values both read as unset.
 - File search keeps scanning efficiently after the result window fills, preserving result bytes and total counts.
 
 - Tool-output creation refuses planted directory and file links, preventing sandboxed commands from redirecting gateway writes outside output storage.
