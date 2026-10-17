@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use swage_core::GatewayError;
-use swage_protocol::client::channel::{ChannelLinkCodeResponse, CreateChannelLinkCodeRequest};
+use swage_protocol::client::channel::{
+    ChannelLinkCodeListResponse, ChannelLinkCodeResponse, CreateChannelLinkCodeRequest,
+};
 pub use swage_protocol::client::channel::{ChannelLinkListResponse, ChannelLinkResponse};
 use swage_storage::{
     ChannelLink, GateConfig, NewChannelLink, NewSchedule, NewSession, NewThread,
@@ -787,15 +789,17 @@ where
 /// Read unredeemed codes without issuing or invalidating a link.
 pub async fn list_channel_link_codes(
     state: &AppState,
-) -> Result<Vec<ChannelLinkCodeResponse>, GatewayError> {
-    Ok(state
-        .storage
-        .list_channel_link_codes()
-        .await?
-        .into_iter()
-        .map(|code| ChannelLinkCodeResponse {
-            link_code: code.code,
-            expires_at: code.expires_at,
-        })
-        .collect())
+) -> Result<ChannelLinkCodeListResponse, GatewayError> {
+    Ok(ChannelLinkCodeListResponse(
+        state
+            .storage
+            .list_channel_link_codes()
+            .await?
+            .into_iter()
+            .map(|code| ChannelLinkCodeResponse {
+                link_code: code.code,
+                expires_at: code.expires_at,
+            })
+            .collect(),
+    ))
 }
