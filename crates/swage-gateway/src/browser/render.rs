@@ -113,8 +113,31 @@ impl Renderer {
         if should_drop(node) {
             return;
         }
+        // Ignored AX nodes can still own exposed descendants. Traverse these
+        // wrappers without rendering them so content keeps its landmark ancestry.
+        if node.ignored {
+            if !self.is_masked(node) {
+                for child in child_nodes(nodes, node) {
+                    self.render_node(nodes, child, depth, in_main, in_opening);
+                }
+            }
+            return;
+        }
         let role = ax_value_string(node.role.as_ref()).unwrap_or_else(|| "node".to_string());
-        let in_main = in_main || matches!(role.as_str(), "main" | "article");
+        // Supporting content can contain paragraphs before the article's lead,
+        // such as an infobox table or navigation within the main landmark.
+        let in_main = (in_main || matches!(role.as_str(), "main" | "article"))
+            && !matches!(
+                role.as_str(),
+                "table"
+                    | "grid"
+                    | "treegrid"
+                    | "navigation"
+                    | "complementary"
+                    | "contentinfo"
+                    | "banner"
+                    | "note"
+            );
         let starts_opening = in_main && role == "paragraph" && !self.opening_started;
         self.opening_started |= starts_opening;
         let in_opening = in_opening || starts_opening;
@@ -275,7 +298,7 @@ fn child_nodes<'a>(nodes: &'a [AxNode], node: &AxNode) -> Vec<&'a AxNode> {
 }
 
 fn should_drop(node: &AxNode) -> bool {
-    node.ignored || ax_value_string(node.role.as_ref()).is_some_and(|role| role == "InlineTextBox")
+    ax_value_string(node.role.as_ref()).is_some_and(|role| role == "InlineTextBox")
 }
 
 fn is_actionable(node: &AxNode, role: &str) -> bool {
@@ -625,6 +648,64 @@ mod tests {
                 .contains("Detailed discussion")
         );
         assert!(rendered.output.contains("ref=s1e3"), "article link lost");
+    }
+
+    #[test]
+    fn over_budget_chromium_article_keeps_its_opening() {
+        // Chromium Accessibility.getFullAXTree for /wiki/Heron, 2026-10-16.
+        // Pruned sibling branches and their childIds only: the ignored wrappers,
+        // infobox paragraphs before the lead, and split inline text are intact.
+        let nodes: Vec<AxNode> = serde_json::from_str(include_str!(
+            "../../tests/fixtures/browser/ax/heron-chromium.json"
+        ))
+        .expect("Chromium article AX fixture");
+        let rendered = render_snapshot(
+            &nodes,
+            "https://en.wikipedia.org/wiki/Heron",
+            "Heron - Wikipedia",
+            1,
+            6_000,
+            &HashSet::new(),
+        );
+        // Compare with the independently captured paragraph, joining the quoted
+        // node names because inline links split the prose into separate lines.
+        let paragraph = "Herons are long-legged, long-necked, freshwater and coastal birds \
+            in the family Ardeidae, with 75 recognised species, some of which are \
+            referred to as egrets or bitterns rather than herons. Members of the \
+            genus Botaurus are referred to as bitterns, and, together with the \
+            zigzag heron, or zigzag bittern, in the monotypic genus Zebrilus, form \
+            a monophyletic group, Botaurinae, within the Ardeidae family. Egrets \
+            do not form a biologically distinct group from herons, and tend to \
+            be named differently because they are mainly white or have decorative \
+            plumes in breeding plumage. Herons, by evolutionary adaptation, have \
+            long beaks.";
+        let names = rendered.output.lines().filter_map(|line| {
+            let start = line.find('"')?;
+            serde_json::Deserializer::from_str(&line[start..])
+                .into_iter::<String>()
+                .next()?
+                .ok()
+        });
+        let rendered_text: String = names
+            .flat_map(|name| {
+                name.chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let expected: String = paragraph.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            rendered_text.contains(&expected),
+            "article opening was elided or incomplete:\n{}",
+            rendered.output
+        );
+        assert!(rendered.output.len() <= 6_000);
+        assert!(
+            rendered
+                .output
+                .contains("nodes elided - full snapshot saved")
+        );
+        assert!(rendered.full_output.is_some(), "full snapshot must spill");
     }
 
     #[test]

@@ -12,9 +12,24 @@
 -->
 <script lang="ts">
   import DOMPurify from "dompurify";
-  import { marked } from "marked";
+  import { marked, Marked } from "marked";
   import type { SurfacesStore } from "../stores/surfaces";
   import type { SurfaceModuleView } from "../protocol/SurfaceModuleView";
+  import type { ModuleDelivery } from "../protocol/ModuleDelivery";
+
+  // What delivered a module, for its attribution line: the schedule and run,
+  // the workflow run, or the turn — by the ids the run lists show.
+  function deliveredBy(delivery: ModuleDelivery): string {
+    const short = (id: string) => id.slice(0, 8);
+    switch (delivery.by) {
+      case "schedule_run":
+        return `Delivered by schedule ${short(delivery.schedule_id)}, run ${short(delivery.run_id)}`;
+      case "workflow_run":
+        return `Delivered by workflow run ${short(delivery.run_id)}`;
+      case "turn":
+        return `Delivered by turn ${short(delivery.turn_id)}`;
+    }
+  }
 
   interface Props {
     store: SurfacesStore;
@@ -29,6 +44,9 @@
   let { store, sessionId, routedSurfaceId = null, onOpenSurface, onOpenLibrary }: Props = $props();
 
   let newTitle = $state("");
+  let renamingSurfaceId = $state<string | null>(null);
+  let renamedTitle = $state("");
+  let ticking = $state(false);
   // The library entry a new surface is seeded from, "" for a blank surface.
   // The picker reads the catalogue; it never mutates it.
   let newEntryId = $state("");
@@ -48,9 +66,13 @@
   let moduleError = $state<string | null>(null);
 
   async function refetchAfterFailure(error: unknown, surfaceId: string): Promise<void> {
-    moduleError = error instanceof Error ? error.message : "The change was not applied.";
     stopEditing();
     annotatingModuleId = null;
+    await reportAndRefreshFailure(error, surfaceId);
+  }
+
+  async function reportAndRefreshFailure(error: unknown, surfaceId: string): Promise<void> {
+    moduleError = error instanceof Error ? error.message : "The change was not applied.";
     try {
       await store.openSurface(surfaceId);
     } catch {
@@ -74,6 +96,7 @@
     // A picker selection belongs to one session's view: switching sessions
     // must not carry a selection into the next create.
     newEntryId = "";
+    renamingSurfaceId = null;
     savingToLibrary = false;
     saveNotice = null;
     void store.loadSurfaces(sessionId);
@@ -94,11 +117,117 @@
     onOpenSurface?.(surfaceId);
   }
 
+  function moduleLabel(module: SurfaceModuleView, index: number): string {
+    const heading = module.source.match(/^#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/m)?.[1];
+    return heading ? `${index + 1}. ${heading}` : `Module ${index + 1}`;
+  }
+
   function renderDocument(source: string): string {
     // Same discipline as conversation markdown: parse, then sanitise —
     // module source is shared work product and may quote anything.
     const raw = marked.parse(source) as string;
     return DOMPurify.sanitize(raw);
+  }
+
+  async function renameSurface(): Promise<void> {
+    const surface = store.activeSurface;
+    if (!surface || surface.id !== renamingSurfaceId || !renamedTitle.trim()) return;
+    moduleError = null;
+    try {
+      await store.renameSurface(surface.id, renamedTitle.trim());
+      renamingSurfaceId = null;
+    } catch (error) { await reportAndRefreshFailure(error, surface.id); }
+  }
+
+  async function resolveNote(annotationId: string): Promise<void> {
+    const surface = store.activeSurface;
+    if (!surface) return;
+    moduleError = null;
+    try { await store.resolveAnnotation(surface.id, annotationId); }
+    catch (error) { await reportAndRefreshFailure(error, surface.id); }
+  }
+
+  // Block tokens keep code examples separate from lists. Each descent maps
+  // the lexer's de-indented item text back to the saved source characters.
+  function taskOffsets(source: string): number[] {
+    const offsets: number[] = [];
+    function mappedLines(raw: string, body: string, start: number, positions: number[]): number[] | null {
+      const rawLines = raw.split("\n");
+      const bodyLines = body.split("\n");
+      const mapped: number[] = [];
+      let rawOffset = start;
+      for (let i = 0; i < bodyLines.length; i++) {
+        const rawLine = rawLines[i];
+        const line = bodyLines[i];
+        const at = rawLine?.indexOf(line) ?? -1;
+        if (at < 0) return null;
+        for (let j = 0; j < line.length; j++) mapped.push(positions[rawOffset + at + j]);
+        if (i < bodyLines.length - 1) mapped.push(positions[rawOffset + rawLine.length]);
+        rawOffset += rawLine.length + 1;
+      }
+      return mapped;
+    }
+    function visit(tokens: ReturnType<typeof marked.lexer> | import("marked").Token[], text: string, positions: number[]): void {
+      let cursor = 0;
+      for (const token of tokens) {
+        const start = text.indexOf(token.raw, cursor);
+        if (start < 0) continue;
+        cursor = start + token.raw.length;
+        if (token.type === "blockquote") {
+          const mapped = mappedLines(token.raw, token.text, start, positions);
+          if (mapped && token.tokens) visit(token.tokens, token.text, mapped);
+        }
+        if (token.type !== "list") continue;
+        let itemCursor = start;
+        for (const item of token.items) {
+          const itemStart = text.indexOf(item.raw, itemCursor);
+          if (itemStart < 0) continue;
+          itemCursor = itemStart + item.raw.length;
+          const marker = /^[ \t]*(?:[-+*]|\d+[.)]) +\[([ xX])\]/.exec(item.raw);
+          if (item.task && marker) offsets.push(positions[itemStart + marker[0].lastIndexOf("[") + 1]);
+          const mapped = mappedLines(item.raw, item.text, itemStart, positions);
+          if (mapped) visit(item.tokens, item.text, mapped);
+        }
+      }
+    }
+    const normalised = source.replace(/\r\n?/g, "\n");
+    const positions: number[] = [];
+    for (let i = 0; i < source.length; i++) {
+      positions.push(i);
+      if (source[i] === "\r" && source[i + 1] === "\n") i++;
+    }
+    visit(marked.lexer(normalised), normalised, positions);
+    return offsets;
+  }
+
+  function renderChecklist(source: string): string {
+    const offsets = taskOffsets(source);
+    let index = 0;
+    const raw = new Marked({ renderer: {
+      checkbox({ checked }) {
+        const offset = offsets[index++];
+        const label = (offset === undefined ? "Task" : source.slice(offset + 2).split(/\r?\n/, 1)[0].trim())
+          .replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
+        return `<input type="checkbox" aria-label="${label}" ${checked ? "checked" : ""} ${offset === undefined ? "disabled" : `data-task-offset="${offset}"`} />`;
+      },
+    } }).parse(source) as string;
+    return DOMPurify.sanitize(raw);
+  }
+
+  async function toggleChecklist(event: Event, module: SurfaceModuleView): Promise<void> {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) || target.type !== "checkbox") return;
+    const offset = Number(target.dataset.taskOffset);
+    target.checked = module.source[offset]?.toLowerCase() === "x";
+    if (target.dataset.taskOffset === undefined || !taskOffsets(module.source).includes(offset) || ticking || editingModuleId !== null) return;
+    const surface = store.activeSurface;
+    if (!surface) return;
+    const source = module.source.slice(0, offset) + (target.checked ? " " : "x") + module.source.slice(offset + 1);
+    ticking = true;
+    editingModuleId = module.id;
+    editingSource = source;
+    editingRevision = module.revision;
+    try { await saveEdit(); } finally { ticking = false; }
   }
 
   async function createSurface(): Promise<void> {
@@ -127,9 +256,12 @@
     const description = saveDescription.trim();
     if (!surface || !name || !description) return;
     const tags = saveTags.split(",").map((tag) => tag.trim()).filter(Boolean);
+    const duplicate = store.library.some((entry) => entry.name === name);
     await store.saveToLibrary(surface.id, name, description, tags);
     savingToLibrary = false;
-    saveNotice = `Saved to the library as “${name}”.`;
+    saveNotice = duplicate
+      ? `Saved to the library as “${name}”, creating a separate entry with its own save time.`
+      : `Saved to the library as “${name}”.`;
   }
 
   function startEditing(module: SurfaceModuleView): void {
@@ -153,7 +285,8 @@
     try {
       newer = await store.writeModule(surface.id, editingModuleId, editingSource, editingRevision);
     } catch (error) {
-      await refetchAfterFailure(error, surface.id);
+      stopEditing();
+      await reportAndRefreshFailure(error, surface.id);
       return;
     }
     if (newer) {
@@ -253,23 +386,6 @@
 
 <div class="surfaces">
   <aside aria-label="Surfaces">
-    <form
-      onsubmit={(event) => {
-        event.preventDefault();
-        void createSurface();
-      }}
-    >
-      <input placeholder="New surface title" bind:value={newTitle} />
-      {#if store.library.length > 0}
-        <select aria-label="From the library" bind:value={newEntryId}>
-          <option value="">Blank surface</option>
-          {#each store.library as entry (entry.id)}
-            <option value={entry.id} title={entry.description}>{entry.name}</option>
-          {/each}
-        </select>
-      {/if}
-      <button type="submit">Create</button>
-    </form>
     <ul>
       {#each store.surfaces as surface (surface.id)}
         <li>
@@ -285,6 +401,23 @@
         <li class="none">No surfaces yet.</li>
       {/each}
     </ul>
+    <form
+      onsubmit={(event) => {
+        event.preventDefault();
+        void createSurface();
+      }}
+    >
+      <label>New surface title<input placeholder="New surface title" bind:value={newTitle} /></label>
+      {#if store.library.length > 0}
+        <label>From the library<select aria-label="From the library" bind:value={newEntryId}>
+          <option value="">Blank surface</option>
+          {#each store.library as entry (entry.id)}
+            <option value={entry.id} title={entry.description}>{entry.name}</option>
+          {/each}
+        </select></label>
+      {/if}
+      <button type="submit">Create</button>
+    </form>
     {#if onOpenLibrary}
       <button type="button" class="library-link" onclick={onOpenLibrary}>Browse the library</button>
     {/if}
@@ -293,6 +426,18 @@
   <section aria-label="Surface">
     {#if store.activeSurface}
       <h2>{store.activeSurface.title}</h2>
+      {#if renamingSurfaceId === store.activeSurface.id}
+        <form onsubmit={(event) => { event.preventDefault(); void renameSurface(); }}>
+          <label>Surface title<input aria-label="Surface title" bind:value={renamedTitle} /></label>
+          <button type="submit" disabled={!renamedTitle.trim()}>Save title</button>
+          <button type="button" onclick={() => (renamingSurfaceId = null)}>Cancel</button>
+        </form>
+      {:else}
+        <button onclick={() => { renamedTitle = store.activeSurface!.title; renamingSurfaceId = store.activeSurface!.id; }}>Rename surface</button>
+      {/if}
+      {#if store.activeSurface.shape_only}
+        <p class="lineage">This copy keeps the saved shape. The saved content stays in its origin scope; these modules start empty for this session’s own data.</p>
+      {/if}
       {#if store.activeSurface.seeded_from_name}
         <p class="lineage">
           Added from the library entry <strong
@@ -311,13 +456,10 @@
               void saveToLibrary();
             }}
           >
-            <input aria-label="Library name" placeholder="Name" bind:value={saveName} />
-            <input
-              aria-label="Library description"
-              placeholder="What it does and when to use it"
-              bind:value={saveDescription}
-            />
-            <input aria-label="Library tags" placeholder="Tags, comma separated" bind:value={saveTags} />
+            <label>Library name<input aria-label="Library name" bind:value={saveName} /></label>
+            <label>Library description<textarea aria-label="Library description" rows="4" bind:value={saveDescription}></textarea></label>
+            <label>Library tags<textarea aria-label="Library tags" rows="2" bind:value={saveTags}></textarea></label>
+            <p>Content is preserved within its origin scope; other scopes receive the shape with empty modules. Notes stay with this session.</p>
             <button type="submit" disabled={!saveName.trim() || !saveDescription.trim()}>Save</button>
             <button type="button" onclick={() => (savingToLibrary = false)}>Cancel</button>
           </form>
@@ -328,6 +470,14 @@
       </div>
       {#if moduleError}
         <p class="module-error" role="alert">{moduleError}</p>
+      {/if}
+      {#if store.activeSurface.modules.length > 0}
+        <nav class="module-nav" aria-label="Modules">
+          <span class="nav-label">Modules</span>
+          {#each store.activeSurface.modules as module, index (module.id)}
+            <a href={`#surface-module-${module.id}`}>{moduleLabel(module, index)}</a>
+          {/each}
+        </nav>
       {/if}
       {#if editingModuleId !== null && !store.activeSurface.modules.some((candidate) => candidate.id === editingModuleId)}
         <article class="module orphaned-draft" aria-label="Draft of a removed module">
@@ -340,7 +490,14 @@
         </article>
       {/if}
       {#each store.activeSurface.modules as module, index (module.id)}
-        <article class="module" data-kind={module.kind}>
+        {@const openNotes = module.annotations.filter((note) => !note.resolved_at)}
+        <article class="module" id={`surface-module-${module.id}`} data-kind={module.kind}>
+          {#if module.delivery}
+            <p class="module-delivery">
+              {deliveredBy(module.delivery)} at
+              <time datetime={module.delivery.delivered_at}>{new Date(module.delivery.delivered_at).toLocaleString()}</time>
+            </p>
+          {/if}
           {#if editingModuleId === module.id}
             {#if staleModule}
               <div class="stale-notice" role="alert">
@@ -362,7 +519,8 @@
             </div>
           {:else if module.kind === "document"}
             <!-- eslint-disable-next-line svelte/no-at-html-tags — sanitised above -->
-            <div class="module-content">{@html renderDocument(module.source)}</div>
+            <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events — native checkboxes supply keyboard activation -->
+            <div class="module-content" onclick={(event) => void toggleChecklist(event, module)}>{@html renderChecklist(module.source)}</div>
             <div class="module-actions">
               <button onclick={() => startEditing(module)}>
                 Edit
@@ -390,9 +548,9 @@
             </div>
           {/if}
 
-          {#if module.annotations.length > 0}
+          {#if openNotes.length > 0}
             <ul class="annotations" aria-label="Notes on this module">
-              {#each module.annotations as annotation (annotation.id)}
+              {#each openNotes as annotation (annotation.id)}
                 <li data-annotation-id={annotation.id}>
                   <span class="annotation-author">{annotation.author}</span>
                   {#if editingAnnotationId === annotation.id}
@@ -424,6 +582,7 @@
                     >
                       Edit
                     </button>
+                    <button onclick={() => void resolveNote(annotation.id)}>Resolve</button>
                     <button
                       class="annotation-remove"
                       onclick={() =>
@@ -470,19 +629,24 @@
 </div>
 
 <style>
+  .save-form label {
+    flex: 1 1 16rem;
+  }
+
   .surfaces {
     display: grid;
-    grid-template-columns: 220px 1fr;
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    padding: var(--topic-4);
     gap: 16px;
     min-width: 0;
     height: 100%;
     overflow: auto;
   }
 
-  /* Phone-sized: the surface list sits above the open surface. */
+  /* Phone-sized panes grow with their content in the stacked workspace. */
   @media (max-width: 720px) {
     .surfaces {
-      grid-template-columns: 1fr;
       height: auto;
     }
   }
@@ -492,11 +656,13 @@
     padding: 0;
     margin: 8px 0;
     display: flex;
-    flex-direction: column;
-    gap: 4px;
+    flex-wrap: wrap;
+    gap: var(--topic-2);
   }
 
   aside button.active {
+    background: var(--ink);
+    color: var(--paper);
     font-weight: 600;
   }
 
@@ -506,24 +672,100 @@
   }
 
   .library-link {
-    margin-top: 8px;
-    background: none;
-    border: none;
-    padding: 0;
-    color: var(--ink-soft);
-    font-family: var(--font-mono);
-    font-size: var(--font-label-sm);
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    text-decoration: underline dotted;
-    cursor: pointer;
+    margin-top: var(--topic-2);
   }
 
-  .library-link:hover {
-    color: var(--ink-orange);
+  section,
+  aside {
+    min-width: 0;
+  }
+
+  aside form,
+  section > form {
+    display: flex;
+    align-items: end;
+    flex-wrap: wrap;
+    gap: var(--topic-2);
+  }
+
+  label {
+    display: flex;
+    flex-direction: column;
+    gap: var(--topic-1);
+    min-width: 0;
+    font-size: var(--font-body-sm);
+  }
+
+  button {
+    border: var(--border);
+    background: var(--paper);
+    color: var(--ink);
+    padding: 6px 12px;
+    font-family: var(--font-display);
+    font-size: var(--font-body-md);
+    text-transform: uppercase;
+  }
+
+  button:hover:not(:disabled) {
+    background: var(--ink);
+    color: var(--paper);
+  }
+
+  button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  input,
+  select,
+  textarea {
+    max-width: 100%;
+    min-width: 0;
+    border: var(--border);
+    background: var(--paper);
+    color: var(--ink);
+    padding: 6px 8px;
+    font: inherit;
+  }
+
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  .module-nav a:focus-visible {
+    outline: 2px solid var(--ink);
+    outline-offset: 2px;
+  }
+
+  .module-nav {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: var(--topic-2) var(--topic-3);
+    padding: var(--topic-2) 0;
+    border-block: var(--rule);
+    background: var(--paper);
+  }
+
+  .nav-label {
+    font-family: var(--font-mono);
+    font-size: var(--font-label-sm);
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+
+  .module-nav a {
+    color: var(--ink);
+    overflow-wrap: anywhere;
   }
 
   .module {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    scroll-margin-top: 6rem;
     border-left: 3px solid var(--ink);
     padding: 8px 0 8px 12px;
     margin: 12px 0;
@@ -562,6 +804,7 @@
 
   .module-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     margin-top: 4px;
   }
@@ -591,6 +834,7 @@
 
   .annotations li {
     display: flex;
+    flex-wrap: wrap;
     align-items: baseline;
     gap: 8px;
     border-left: 2px solid var(--ink-soft);
@@ -609,6 +853,7 @@
 
   .annotation-form {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     margin-top: 8px;
   }
@@ -621,9 +866,10 @@
 
   .surface-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     align-items: baseline;
-    margin: 0 0 12px;
+    margin: var(--topic-2) 0 var(--topic-3);
   }
 
   .save-form {
