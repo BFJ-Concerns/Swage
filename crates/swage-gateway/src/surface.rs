@@ -288,12 +288,10 @@ pub async fn save_surface_to_library(
     library_entry_response(state, entry.id).await
 }
 
+/// Tags in the one canonical form every tag path shares
+/// (`swage_core::tags`): saved tags and the catalogue's filter meet in it.
 fn normalised_tags(tags: &[String]) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    tags.iter()
-        .map(|tag| tag.trim().to_lowercase())
-        .filter(|tag| !tag.is_empty() && seen.insert(tag.clone()))
-        .collect()
+    swage_core::tags::canonical_tags(tags)
 }
 
 /// The library's catalogue: names, descriptions and tags, never module

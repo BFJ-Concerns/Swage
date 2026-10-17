@@ -18,6 +18,7 @@ pub mod request;
 pub mod runtime;
 pub mod scope;
 pub mod secret;
+pub mod tags;
 pub mod tool;
 
 /// Whether a value is a non-empty lowercase ASCII slug.

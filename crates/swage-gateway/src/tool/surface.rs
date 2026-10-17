@@ -183,6 +183,9 @@ fn parse_surface_id(tool: &str, params: &Value) -> Result<Uuid, ToolError> {
         .map_err(|_| invalid(tool, "surface_id must be a surface id from surface_read"))
 }
 
+/// The call's tags as the model wrote them. Each destination applies its own
+/// rule: a library save canonicalises them (`swage_core::tags`), while an
+/// annotation keeps their case.
 fn parse_tags(params: &Value) -> Vec<String> {
     params
         .get("tags")
@@ -868,6 +871,36 @@ mod tests {
             ids.push(written["module"]["id"].as_str().unwrap().parse().unwrap());
         }
         (surface_id, ids)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn annotation_tags_keep_their_case_while_library_tags_are_canonical() {
+        let (ctx, _state, _) = session_ctx().await;
+        let (surface_id, ids) = surface_with(&ctx, &["# Plan"]).await;
+        let tags = json!(["  Research ", "research", "PLANS", "", "Q3 Review"]);
+
+        let note = SurfaceWriteTool
+            .execute(
+                json!({"surface_id": surface_id, "module_id": ids[0],
+                       "annotation": "Check the dates", "tags": tags}),
+                &ctx,
+            )
+            .await
+            .expect("annotate");
+        assert_eq!(
+            note["tags"],
+            json!(["Research", "research", "PLANS", "Q3 Review"])
+        );
+
+        let entry = SurfaceWriteTool
+            .execute(
+                json!({"surface_id": surface_id, "save_as": "Plan",
+                       "description": "A plan", "tags": tags}),
+                &ctx,
+            )
+            .await
+            .expect("save");
+        assert_eq!(entry["tags"], json!(["research", "plans", "q3 review"]));
     }
 
     #[tokio::test(flavor = "multi_thread")]
