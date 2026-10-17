@@ -228,9 +228,10 @@ pub fn location_approval_error(
 /// Relative paths are interpreted from `ctx.working_directory()`. Absolute
 /// paths are accepted only when they remain inside the working directory, one
 /// of `ctx.allowed_paths()`, or the `.swage/tool-output` subtree of the
-/// output directory. Built-in file tools use this resolver as their runtime
-/// permission boundary so location approvals can take effect without rebuilding
-/// a sandbox mount set mid-turn. The output grant permits reads only.
+/// output directory, or the shipped-skill projection. Built-in file tools use
+/// this resolver as their runtime permission boundary so location approvals can
+/// take effect without rebuilding a sandbox mount set mid-turn. Output and
+/// shipped-skill grants permit reads only.
 pub fn resolve_context_path(
     ctx: &dyn ToolContext,
     requested: &str,
@@ -288,7 +289,7 @@ pub async fn require_workspace_write_access(
     path: &Path,
     tool_name: &str,
 ) -> Result<(), ToolError> {
-    require_tool_output_read_only(ctx, path, tool_name)?;
+    require_runtime_read_only(ctx, path, tool_name)?;
     // Both DeviceConnection and NestedToolRuntime preflight gateway attachments
     // before dispatching native tools with this wire context. The type alone
     // carries no attachment authority; those callers own the preceding check.
@@ -415,7 +416,7 @@ pub(crate) async fn require_native_file_write_access(
                 message,
             }
         })?;
-        require_tool_output_read_only(ctx, &path, tool_name)?;
+        require_runtime_read_only(ctx, &path, tool_name)?;
         require_attachment_write_access(&attachments, &path, tool_name)?;
     }
     Ok(())
@@ -727,7 +728,24 @@ fn context_roots(ctx: &dyn ToolContext) -> Result<Vec<PathBuf>, String> {
     {
         roots.push(root);
     }
+    if let Some(root) = shipped_skill_read_root(ctx)
+        && !roots.contains(&root)
+    {
+        roots.push(root);
+    }
     Ok(roots)
+}
+
+fn shipped_skill_read_root(ctx: &dyn ToolContext) -> Option<PathBuf> {
+    let gateway = ctx
+        .as_any()
+        .downcast_ref::<crate::tool_executor::GatewayToolContext>()?;
+    let data_root = canonical_existing_root(&gateway.app_state()?.config_root).ok()?;
+    let expected = crate::shipped_skill_projection::root(&data_root);
+    let resolved = validate_path(&data_root, expected.to_str()?).ok()?;
+    // A linked generated directory or projection must not confer authority on
+    // another location, even one beneath the data root.
+    (resolved == expected && resolved.is_dir()).then_some(resolved)
 }
 
 /// Only the artefact subtree confers read authority. A linked output directory
@@ -741,11 +759,20 @@ fn tool_output_read_root(ctx: &dyn ToolContext) -> Option<PathBuf> {
     (resolved == expected).then_some(resolved)
 }
 
-fn require_tool_output_read_only(
+fn require_runtime_read_only(
     ctx: &dyn ToolContext,
     path: &Path,
     tool_name: &str,
 ) -> Result<(), ToolError> {
+    if shipped_skill_read_root(ctx).is_some_and(|root| path.starts_with(root)) {
+        return Err(ToolError::ExecutionFailed {
+            name: tool_name.to_owned(),
+            message: format!(
+                "Permission denied: shipped skills have read-only access: {}",
+                path.display()
+            ),
+        });
+    }
     if tool_output_read_root(ctx).is_some_and(|root| path.starts_with(root)) {
         return Err(ToolError::ExecutionFailed {
             name: tool_name.to_owned(),

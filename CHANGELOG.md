@@ -57,6 +57,8 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Sessions can read shipped skills and their carried guidance without location approval, including after a gateway restart; other locations still require approval.
+
 - Queued scheduled turns acknowledge workflow endings only after successful settlement; failed turns leave them available.
 - Schedule gates retain workflow runs that complete while their digest is being read.
 - Workflow status and open accounts include active workers' start and first-output times.
