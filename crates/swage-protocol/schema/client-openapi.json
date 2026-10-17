@@ -119,6 +119,13 @@
             },
             "type": "array"
           },
+          "provider_attempts": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProviderAttemptRecord"
+            },
+            "type": "array"
+          },
           "provider_visible": true,
           "tool_scope": true,
           "total_tokens": {
@@ -1830,6 +1837,13 @@
       },
       "ElementReport": {
         "properties": {
+          "full_text": {
+            "description": "The element's rendered text after substitution and assembly compaction.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "name": {
             "type": "string"
           },
@@ -2996,6 +3010,80 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "ProviderAttemptOutcome": {
+        "enum": [
+          "outstanding",
+          "succeeded",
+          "failed",
+          "interrupted"
+        ],
+        "type": "string"
+      },
+      "ProviderAttemptRecord": {
+        "description": "One actual stream attempt, including the initial request and any retries.",
+        "properties": {
+          "attempt": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "ended_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "model_id": {
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ProviderAttemptOutcome"
+          },
+          "provider": {
+            "description": "Provider adapter that opened this attempt (for example, `anthropic`).",
+            "type": "string"
+          },
+          "request": {
+            "description": "Concrete provider-visible request for this attempt, omitted if secret\nredaction could not be completed."
+          },
+          "round": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "route_id": {
+            "description": "Stable position in the provider chain, independent of retry number and\ncooldown order. A standalone provider uses `direct`.",
+            "type": "string"
+          },
+          "started_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "round",
+          "attempt",
+          "provider",
+          "model_id",
+          "route_id",
+          "started_at_ms",
+          "outcome"
+        ],
         "type": "object"
       },
       "ProviderProtocol": {

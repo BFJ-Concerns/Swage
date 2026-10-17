@@ -868,6 +868,10 @@ pub struct ResolvedConfig {
     pub channels: ChannelsConfig,
     /// Assembled instruction text from all hierarchy levels, in order.
     pub instructions: String,
+    /// Source level of each instruction file or definition overlay.
+    /// Runtime metadata retained with the text, never reconstructed from it.
+    #[serde(skip)]
+    pub instruction_sources: Vec<HierarchyLevel>,
     /// When true, the entire permission and approval system is bypassed:
     /// tool allow/deny lists are ignored, `require_approval` gates do not
     /// fire, and out-of-workspace location prompts are auto-approved. The
