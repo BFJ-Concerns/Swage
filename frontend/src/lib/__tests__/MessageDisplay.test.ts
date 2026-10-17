@@ -183,6 +183,14 @@ describe("turn context inspector trigger", () => {
     expect(streaming.startTurn).toHaveBeenCalledExactlyOnceWith(request.content);
   });
 
+  it("keeps a scrolled-to message below the channel's session bar", () => {
+    const { css } = compile(messageDisplaySource, {
+      filename: "MessageDisplay.svelte",
+      css: "external",
+    });
+    expect(css!.code).toMatch(/\.message[^{]*\{[^}]*scroll-margin-top:\s*var\(--session-bar-height/);
+  });
+
   it("opens at the turn the address names and stops following the end", () => {
     const scrolled: Element[] = [];
     Element.prototype.scrollIntoView = function () {

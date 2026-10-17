@@ -55,6 +55,16 @@
     focusTurnId = null,
   }: Props = $props();
 
+  // The session bar is sticky at the top of the channel's scroll, so a
+  // message scrolled to the top would sit under it: its height is published
+  // to the transcript as the margin a scrolled-to turn keeps. One line of
+  // controls, measured once it is on the page.
+  let sessionBar: HTMLElement | undefined = $state();
+  let sessionBarHeight = $state(0);
+  $effect(() => {
+    sessionBarHeight = sessionBar?.offsetHeight ?? 0;
+  });
+
   const activeConversation = $derived(conversationStore.activeConversation);
   const activeStream = $derived(
     streamingStore.streamFor?.(activeConversation?.id ?? null),
@@ -126,10 +136,10 @@
   }
 </script>
 
-<section aria-label="Conversation">
+<section aria-label="Conversation" style:--session-bar-height="{sessionBarHeight}px">
   <!-- Session controls travel with the channel, so cycling to another
        conversation or starting one costs no surface. -->
-  <header class="session-bar">
+  <header class="session-bar" bind:this={sessionBar}>
     <select
       class="session-select"
       aria-label="Active conversation"

@@ -610,6 +610,9 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+    /* A message scrolled into view (a turn the address names) stops below
+       the channel's sticky session bar, not under it. */
+    scroll-margin-top: var(--session-bar-height, 0px);
   }
 
   /* User messages sit on the right; assistant messages on the left. The role

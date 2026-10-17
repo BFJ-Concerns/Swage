@@ -190,6 +190,25 @@ describe("ambient channel control path", () => {
     expect(wsClient.connect).not.toHaveBeenCalled();
   });
 
+  it("hands back from the operator surface when the address names the open conversation's turn", async () => {
+    component = await mountAppOnConversation();
+    surfaceButton("Operator").click();
+    await vi.waitFor(() => {
+      expect(surfaceButton("Operator").getAttribute("aria-pressed")).toBe("true");
+    });
+
+    // A run's link into the conversation already open: the address changes
+    // to its turn and the conversation surface must show again, the socket
+    // it kept still serving.
+    window.history.pushState({}, "", "/conversations/conv-1/turns/turn-9");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    await vi.waitFor(() => {
+      expect(surfaceButton("Operator").getAttribute("aria-pressed")).toBe("false");
+    });
+    expect(window.location.pathname).toBe("/conversations/conv-1/turns/turn-9");
+    expect(wsClient.disconnect).not.toHaveBeenCalled();
+  });
+
   it("cycles sessions in place, leaving the user on the work surface", async () => {
     component = await mountAppOnConversation();
     surfaceButton("Surfaces").click();
