@@ -91,8 +91,10 @@
   }
 
   // Each attempt after the first says why it was dispatched, in the record's
-  // own words: a fallback is the primary's failure served another way, and
-  // an interruption leaves the attempt before it with an unknown outcome.
+  // own words — a cause, never an outcome: a fallback attempt was dispatched
+  // because the primary failed, and whether it served is the round's
+  // result, read from the rounds beside it; an interruption leaves the
+  // attempt before it with an unknown outcome.
   function attemptLine(attempt: WorkflowAgentCallResolution, index: number): string {
     const ordinal = `attempt ${index + 1}`;
     switch (attempt.cause.cause) {
@@ -101,7 +103,7 @@
       case "after_interruption":
         return `${ordinal} — dispatched again after a gateway interruption: attempt ${index}'s outcome is unknown and the tool calls it issued may have been applied twice`;
       case "provider_fallback":
-        return `${ordinal} — the primary failed (${attempt.cause.primary_failure}); the declared fallback served`;
+        return `${ordinal} — dispatched to the declared fallback because the primary failed (${attempt.cause.primary_failure})`;
     }
   }
 

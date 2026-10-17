@@ -277,7 +277,8 @@ describe("WorkflowRunDetail", () => {
       } as unknown as WorkflowAgentCallDetail),
     );
     attempts = document.querySelector(".attempts")!.textContent!;
-    expect(attempts).toContain("the primary failed (unknown model pinned); the declared fallback served");
+    expect(attempts).toContain("dispatched to the declared fallback because the primary failed (unknown model pinned)");
+    expect(attempts).not.toContain("served");
     expect(attempts).not.toContain("interrupt");
     expect(document.querySelector(".call")!.textContent).toContain("fallback, low");
   });
