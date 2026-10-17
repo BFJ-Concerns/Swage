@@ -873,14 +873,15 @@ documentation (see [Hosted documentation](#hosted-documentation)).
 
 ### Workspace tool output
 
-Several tools produce file artefacts as a side effect of their work. When a
-session has an attached workspace, these artefacts land at:
+Several tools produce file artefacts as a side effect of their work. Local gateway
+sessions store these in the session's managed scratch directory, independently
+of the attached workspace's write permission:
 
 ```
-.swage/tool-output/<turn_id>/<call_id>/<filename>
+<session scratch directory>/.swage/tool-output/<turn_id>/<call_id>/<filename>
 ```
 
-`shell` writes stdout and stderr artefacts only when the output stream was
+`shell` retains stdout and stderr artefacts only when the output stream was
 truncated — a stream that fits in the tool result is reported inline and the
 artefact file is removed. Three browser action tools — `browser_click`,
 `browser_select`, and `browser_scroll` — write a post-action screenshot when
@@ -891,8 +892,8 @@ otherwise the result is inline with no artefact file. `url_fetch` writes
 `raw-body.html` only when the HTML body exceeds its capture limit; a body
 that fits is reported inline and the artefact file is removed.
 
-The path the tool result reports is relative to the workspace root (e.g.
-`.swage/tool-output/turn/call/stdout.txt`). `file_read` can open text
+The tool result reports the full path to an artefact in managed scratch.
+`file_read` can open text
 artefacts directly, but it refuses binary content — so a screenshot written
 by a browser action tool is not readable through `file_read`. The
 `<turn_id>/<call_id>` structure keeps repeated calls from overwriting each
@@ -900,11 +901,9 @@ other.
 
 The first time a tool writes output, the gateway creates
 `.swage/tool-output/` and places a `.gitignore` containing `*` inside it.
-This keeps every file under that directory out of `git status`, so tool
-artefacts never appear as untracked files in the workspace's repository.
-
-Sessions without an attached workspace write their tool output into the
-session's scratch directory instead.
+Local gateway tool output does not create files or directories in an attached
+workspace. Paired-device execution still stores artefacts relative to its
+working directory at `.swage/tool-output/` and reports relative paths.
 
 Operators can register additional tools through plugins; plugin tool names come
 from the plugin manifest rather than the gateway's built-in set.

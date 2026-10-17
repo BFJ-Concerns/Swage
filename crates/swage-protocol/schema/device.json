@@ -344,6 +344,17 @@
         "session_id": {
           "type": "string"
         },
+        "tool_output_directory": {
+          "description": "Writable runtime storage for tool-output artefacts, separate from workspaces.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolOutputLocation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "turn_id": {
           "type": [
             "string",
@@ -370,6 +381,18 @@
         "session_id",
         "working_directory",
         "allowed_paths"
+      ]
+    },
+    "ToolOutputLocation": {
+      "description": "Runtime-owned storage kept separate from attached workspace permissions.",
+      "type": "object",
+      "properties": {
+        "directory": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "directory"
       ]
     },
     "UserInfo": {
