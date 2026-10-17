@@ -4136,7 +4136,7 @@
       ]
     },
     "SaveSecuritySettingsRequest": {
-      "description": "A scope's security settings as the settings surface writes them: the\noverrides the scope should hold afterwards, whole. An absent field clears\nthe scope's own setting and the scope beneath decides again.",
+      "description": "Changes to a scope's security overrides. Absent fields leave stored\noverrides unchanged; explicit null clears an override so the scope\nbeneath decides again. A supplied approval list replaces that list.",
       "type": "object",
       "properties": {
         "access_gate": {

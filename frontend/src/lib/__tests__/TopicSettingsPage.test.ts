@@ -209,8 +209,7 @@ describe("TopicSettingsPage", () => {
     expect(document.querySelector<HTMLInputElement>('[aria-label="Timeout for shell"]')?.value).toBe("27");
     document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await flushUi();
-    expect(vi.mocked(settingsApi.saveTopicSecuritySettings).mock.calls.at(-1)![1].require_approval)
-      .toEqual([{ tool: "shell", timeout: 27, timeout_policy: "interrupt" }]);
+    expect(vi.mocked(settingsApi.saveTopicSecuritySettings).mock.calls.at(-1)![1]).toEqual({});
   });
 
   it("renders topic workspaces without global settings controls", async () => {

@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { fetchInstallSecuritySettings, saveInstallSecuritySettings, fetchTopicSecuritySettings, saveTopicSecuritySettings } from "../../api/settings";
   import type { SecuritySettingsResponse } from "../../protocol/SecuritySettingsResponse";
+  import type { SaveSecuritySettingsRequest } from "../../protocol/SaveSecuritySettingsRequest";
   import type { RequireApprovalEntry } from "../../protocol/RequireApprovalEntry";
   import type { AccessGateMode } from "../../protocol/AccessGateMode";
   import ApprovalToolPicker from "./ApprovalToolPicker.svelte";
@@ -17,8 +18,10 @@
   let busy = $state(false);
   let error = $state<string | null>(null);
   let notice = $state("");
+  const edited = new Set<keyof SaveSecuritySettingsRequest>();
   const scopeLabel = $derived(topicId ? "this topic" : "the install");
   function loaded(value: SecuritySettingsResponse): void {
+    edited.clear();
     security = value;
     const own = value.overrides;
     sandbox = own.sandbox_enabled == null ? "inherit" : own.sandbox_enabled ? "on" : "off";
@@ -33,12 +36,11 @@
   });
   async function save(): Promise<void> {
     busy = true; error = null; notice = "";
-    const overrides = {
-      sandbox_enabled: sandbox === "inherit" ? undefined : sandbox === "on",
-      allow_degraded_execution: confinement === "inherit" ? undefined : confinement === "allow_degraded",
-      require_approval: approvalMode === "inherit" ? undefined : approvals,
-      ...(!topicId ? { access_gate: access === "inherit" ? undefined : access as AccessGateMode } : {}),
-    };
+    const overrides: SaveSecuritySettingsRequest = {};
+    if (edited.has("sandbox_enabled")) overrides.sandbox_enabled = sandbox === "inherit" ? null : sandbox === "on";
+    if (edited.has("allow_degraded_execution")) overrides.allow_degraded_execution = confinement === "inherit" ? null : confinement === "allow_degraded";
+    if (edited.has("require_approval")) overrides.require_approval = approvalMode === "inherit" ? null : approvals;
+    if (!topicId && edited.has("access_gate")) overrides.access_gate = access === "inherit" ? null : access as AccessGateMode;
     try {
       loaded(await (topicId ? saveTopicSecuritySettings(topicId, overrides) : saveInstallSecuritySettings(overrides)));
       securitySettingsChanged();
@@ -68,29 +70,29 @@
     <form onsubmit={(event) => { event.preventDefault(); void save(); }}>
       <fieldset disabled={busy}>
         <label>Sandbox
-          <select aria-label={`Sandbox for ${scopeLabel}`} bind:value={sandbox}>
+          <select aria-label={`Sandbox for ${scopeLabel}`} bind:value={sandbox} onchange={() => edited.add("sandbox_enabled")}>
             <option value="inherit">{topicId ? "Follow the install" : "Use shipped default"}</option>
             <option value="on">On</option><option value="off">Off (relaxed)</option>
           </select>
         </label>
         <label>Sandbox confinement
-          <select aria-label={`Sandbox confinement for ${scopeLabel}`} bind:value={confinement}>
+          <select aria-label={`Sandbox confinement for ${scopeLabel}`} bind:value={confinement} onchange={() => edited.add("allow_degraded_execution")}>
             <option value="inherit">{topicId ? "Follow the install" : "Use shipped default"}</option>
             <option value="strict">Strict</option><option value="allow_degraded">Allow unconfined fallback (relaxed)</option>
           </select>
         </label>
         <label>Approval prompts
-          <select aria-label={`Approval prompts for ${scopeLabel}`} bind:value={approvalMode}>
+          <select aria-label={`Approval prompts for ${scopeLabel}`} bind:value={approvalMode} onchange={() => edited.add("require_approval")}>
             <option value="inherit">{topicId ? "Follow the install" : "Use shipped default"}</option>
             <option value="own">{topicId ? "This topic's own list" : "The install's own list"}</option>
           </select>
         </label>
         {#if approvalMode === "own"}
-          <ApprovalToolPicker tools={security.available_tools} entries={approvals} onChange={(entries) => approvals = entries} />
+          <ApprovalToolPicker tools={security.available_tools} entries={approvals} onChange={(entries) => { approvals = entries; edited.add("require_approval"); }} />
         {/if}
         {#if !topicId}
           <label>Access gate
-            <select aria-label="Access gate for the install" bind:value={access}>
+            <select aria-label="Access gate for the install" bind:value={access} onchange={() => edited.add("access_gate")}>
               <option value="inherit">Use shipped default</option><option value="token">Require token</option>
               <option value="warn">Warn (relaxed)</option><option value="off">Off (relaxed)</option>
             </select>
