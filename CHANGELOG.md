@@ -61,7 +61,7 @@ All notable changes to Swage are documented in this file.
 - File reads retain a bounded byte window; binary files whose metadata cannot give their size report an unknown length.
 - File path checks preserve non-UTF-8 roots and accept canonical paths through approved symlink aliases. An untrusted child workspace cannot release a read-only parent's restriction, and device-owned paths outside gateway attachments are checked on the device.
 - Replacing a non-empty file with `file_write` reports the prior byte count.
-- Local gateway tool-output artefacts use managed session scratch storage, so read-only workspaces remain untouched and shell inspection returns its output.
+- Local gateway tool-output artefacts use managed session scratch storage, so read-only workspaces remain untouched and shell inspection returns its output. File tools can read only the artefact subtree through this grant and cannot modify artefacts.
 - Cancelling a turn while its initial provider attempt is queued retains that attempt as interrupted in the turn record.
 
 - The turn inspector shows the final provider attempt’s full request for each round and keeps failed attempts’ requests beside their entries, including cross-protocol failover.

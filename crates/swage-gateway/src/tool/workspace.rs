@@ -227,10 +227,10 @@ pub fn location_approval_error(
 ///
 /// Relative paths are interpreted from `ctx.working_directory()`. Absolute
 /// paths are accepted only when they remain inside the working directory, one
-/// of `ctx.allowed_paths()`, or `ctx.tool_output_directory()`. Built-in file tools
-/// use this resolver as their runtime permission boundary so location approvals
-/// can take effect without
-/// rebuilding a sandbox mount set mid-turn.
+/// of `ctx.allowed_paths()`, or the `.swage/tool-output` subtree of the
+/// output directory. Built-in file tools use this resolver as their runtime
+/// permission boundary so location approvals can take effect without rebuilding
+/// a sandbox mount set mid-turn. The output grant permits reads only.
 pub fn resolve_context_path(
     ctx: &dyn ToolContext,
     requested: &str,
@@ -254,7 +254,7 @@ pub fn resolve_context_path(
 }
 
 /// Resolves a not-yet-created tool path against the same permitted roots as
-/// `resolve_context_path`, including the tool-output directory.
+/// `resolve_context_path`; mutations also require a separate write check.
 pub fn resolve_new_context_path(
     ctx: &dyn ToolContext,
     requested: &str,
@@ -288,6 +288,7 @@ pub async fn require_workspace_write_access(
     path: &Path,
     tool_name: &str,
 ) -> Result<(), ToolError> {
+    require_tool_output_read_only(ctx, path, tool_name)?;
     // Both DeviceConnection and NestedToolRuntime preflight gateway attachments
     // before dispatching native tools with this wire context. The type alone
     // carries no attachment authority; those callers own the preceding check.
@@ -414,6 +415,7 @@ pub(crate) async fn require_native_file_write_access(
                 message,
             }
         })?;
+        require_tool_output_read_only(ctx, &path, tool_name)?;
         require_attachment_write_access(&attachments, &path, tool_name)?;
     }
     Ok(())
@@ -710,12 +712,7 @@ fn normalise_path(path: &Path) -> PathBuf {
 
 fn context_roots(ctx: &dyn ToolContext) -> Result<Vec<PathBuf>, String> {
     let mut roots = vec![canonical_existing_root(ctx.working_directory())?];
-    for path in ctx
-        .allowed_paths()
-        .iter()
-        .map(PathBuf::as_path)
-        .chain(ctx.tool_output_directory())
-    {
+    for path in ctx.allowed_paths() {
         let root = if !path.exists() {
             resolve_existing_prefix(&normalise_path(path), &path.to_string_lossy())?
         } else {
@@ -725,7 +722,40 @@ fn context_roots(ctx: &dyn ToolContext) -> Result<Vec<PathBuf>, String> {
             roots.push(root);
         }
     }
+    if let Some(root) = tool_output_read_root(ctx)
+        && !roots.contains(&root)
+    {
+        roots.push(root);
+    }
     Ok(roots)
+}
+
+/// Only the artefact subtree confers read authority. A linked output directory
+/// cannot turn a different scratch subtree into an implicit file-tool grant.
+fn tool_output_read_root(ctx: &dyn ToolContext) -> Option<PathBuf> {
+    let base = ctx
+        .tool_output_directory()
+        .unwrap_or_else(|| ctx.working_directory());
+    let expected = canonical_existing_root(base).ok()?.join(TOOL_OUTPUT_ROOT);
+    let resolved = validate_path(base, TOOL_OUTPUT_ROOT).ok()?;
+    (resolved == expected).then_some(resolved)
+}
+
+fn require_tool_output_read_only(
+    ctx: &dyn ToolContext,
+    path: &Path,
+    tool_name: &str,
+) -> Result<(), ToolError> {
+    if tool_output_read_root(ctx).is_some_and(|root| path.starts_with(root)) {
+        return Err(ToolError::ExecutionFailed {
+            name: tool_name.to_owned(),
+            message: format!(
+                "Permission denied: tool-output artefacts have read-only access: {}",
+                path.display()
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn canonical_existing_root(path: &Path) -> Result<PathBuf, String> {
@@ -1388,6 +1418,130 @@ mod regression_tests {
         );
         assert!(!child.join("notes").exists());
     }
+    async fn output_grant_fixture() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        crate::tool_executor::GatewayToolContext,
+        ToolOutputArtifactPath,
+    ) {
+        use swage_storage::NewWorkspaceAttachment;
+        use tokio::io::AsyncWriteExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        std::fs::write(scratch.path().join("notes.txt"), "earlier scratch content").unwrap();
+        let original = writable_test_context(workspace.path(), vec![]);
+        let session = original
+            .storage()
+            .get_session(uuid::Uuid::parse_str(original.session_id()).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        original
+            .storage()
+            .create_workspace_attachment(NewWorkspaceAttachment {
+                topic_id: session.topic_id,
+                label: "reference".into(),
+                path: workspace.path().display().to_string(),
+                permissions: vec!["read".into()],
+                is_trusted: true,
+            })
+            .await
+            .unwrap();
+        let mut base = swage_tool::context::serialise_tool_context(&original);
+        base.tool_output_directory = Some(swage_tool::context::ToolOutputLocation {
+            directory: scratch.path().to_path_buf(),
+        });
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let ctx =
+            crate::tool_executor::GatewayToolContext::new(&base, tx, original.storage().clone());
+        let artifact = tool_output_artifact_path(&ctx, "stdout.txt");
+        let mut file = create_tool_output_artifact(&ctx, &artifact.absolute)
+            .await
+            .unwrap();
+        file.write_all(b"retained output").await.unwrap();
+        file.flush().await.unwrap();
+        (workspace, scratch, ctx, artifact)
+    }
+
+    async fn assert_output_grant_refuses_mutation(edit: bool, artifact_target: bool) {
+        use crate::tool::Tool;
+        let (_workspace, scratch, ctx, artifact) = output_grant_fixture().await;
+        let path = if artifact_target {
+            artifact.absolute
+        } else {
+            scratch.path().join("notes.txt")
+        };
+        let before = std::fs::read(&path).unwrap();
+        let result = if edit {
+            crate::tool::file_edit::FileEditTool.execute(json!({"changes": [{
+                "path": path, "edits": [{"type": "replace", "old_text": if artifact_target { "output" } else { "content" }, "new_text": "changed"}]
+            }]}), &ctx).await
+        } else {
+            crate::tool::file_write::FileWriteTool
+                .execute(json!({"path": path, "content": "changed"}), &ctx)
+                .await
+        };
+        assert!(
+            result.is_err(),
+            "output grant permitted file mutation (edit={edit}, artifact={artifact_target}): {result:?}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        if artifact_target {
+            assert!(
+                matches!(result, Err(ToolError::ExecutionFailed { ref message, .. }) if message.contains("read-only")),
+                "artefact must be refused before reading or editing: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(result, Err(ToolError::RequiresLocationApproval { ref access, .. }) if access == "write"),
+                "former scratch requires a separate write grant: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn regression_output_grant_refuses_scratch_write() {
+        assert_output_grant_refuses_mutation(false, false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn regression_output_grant_refuses_scratch_edit() {
+        assert_output_grant_refuses_mutation(true, false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn regression_output_grant_refuses_artifact_write() {
+        assert_output_grant_refuses_mutation(false, true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn regression_output_grant_refuses_artifact_edit() {
+        assert_output_grant_refuses_mutation(true, true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn regression_output_grant_reads_only_artifact_subtree() {
+        use crate::tool::Tool;
+        let (_workspace, scratch, ctx, artifact) = output_grant_fixture().await;
+        let read = (crate::tool::file_read::FileReadTool {
+            max_output_bytes: 1024,
+        })
+        .execute(json!({"path": artifact.reported}), &ctx)
+        .await
+        .unwrap();
+        assert_eq!(read["output"], "retained output");
+        let outside = (crate::tool::file_read::FileReadTool {
+            max_output_bytes: 1024,
+        })
+        .execute(json!({"path": scratch.path().join("notes.txt")}), &ctx)
+        .await;
+        assert!(
+            matches!(outside, Err(ToolError::RequiresLocationApproval { ref access, .. }) if access == "read"),
+            "output grant exposed earlier scratch content: {outside:?}"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn regression_device_preflight_does_not_traverse_unattached_host_paths() {
