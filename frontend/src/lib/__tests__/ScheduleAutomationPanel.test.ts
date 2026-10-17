@@ -53,6 +53,7 @@ const RUN: ScheduleRun = {
   state: "completed",
   skip_reason: null,
   executed_message: SCHEDULE.message,
+  deliveries: [],
   scheduled_for: null,
   session_id: "session-1",
   turn_id: "turn-1",
@@ -171,6 +172,45 @@ describe("ScheduleAutomationPanel", () => {
     const current = rows.find((row) => row.textContent?.includes("did the thing"));
     expect(earlier?.textContent).toContain("Ran an earlier brief: Review the inbox.");
     expect(current?.textContent).not.toContain("Ran an earlier brief");
+  });
+
+  it("shows every destination of a run with its own outcome, and links the run to its conversation at its turn", async () => {
+    const onNavigate = vi.fn();
+    vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValue({
+      runs: [
+        {
+          ...RUN,
+          deliveries: [
+            { target: { kind: "local_storage" }, outcome: "sent", error: null, delivered_at: "2026-04-07T12:05:01Z" },
+            { target: { kind: "webhook", url: "https://example.test/hook" }, outcome: "failed", error: "connection refused", delivered_at: "2026-04-07T12:05:02Z" },
+            { target: { kind: "channel", integration: "dev_dm", account: "acct", conversation: "person" }, outcome: "not_sent", error: "development channel target is a deliberate no-op", delivered_at: "2026-04-07T12:05:03Z" },
+          ],
+        },
+        { ...RUN, id: "run-nowhere", session_id: null, turn_id: null, output_text: "nowhere output", deliveries: [{ target: null, outcome: "not_delivered", error: "gate skip", delivered_at: "2026-04-07T12:06:00Z" }] },
+      ],
+    });
+    component = mount(ScheduleAutomationPanel, {
+      target: document.body,
+      props: { topicId: "topic-1", sessionId: "session-1", onNavigate },
+    });
+    await flushUi();
+
+    const rows = [...document.querySelectorAll(".run-row")];
+    const delivered = rows.find((row) => row.textContent?.includes("did the thing"))!;
+    const outcomes = [...delivered.querySelectorAll(".run-delivery")].map((node) => node.textContent?.replace(/\s+/g, " ").trim());
+    expect(outcomes).toEqual([
+      "local storage — sent",
+      "webhook https://example.test/hook — failed: connection refused",
+      "dev_dm person — not sent: development channel target is a deliberate no-op",
+    ]);
+    const nowhere = rows.find((row) => row.querySelector(".outcome-not_delivered"))!;
+    expect(nowhere.querySelector(".run-delivery")?.textContent).toContain("no destination — not delivered: gate skip");
+    expect(nowhere.querySelector("a.run-link")).toBeNull();
+
+    const link = delivered.querySelector<HTMLAnchorElement>("a.run-link")!;
+    expect(link.getAttribute("href")).toBe("/conversations/session-1/turns/turn-1");
+    link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    expect(onNavigate).toHaveBeenCalledWith("/conversations/session-1/turns/turn-1");
   });
 
   it("attributes each schedule to its creator", async () => {
@@ -447,6 +487,7 @@ describe("passed one-shot cards", () => {
     overlap_policy: "skip",
     id: "older", schedule_id: schedule.id, trigger: "tick", state: "completed",
     executed_message: schedule.message, created_at: "2026-01-01T00:00:00Z",
+    deliveries: [],
   };
   const latest: ScheduleRun = {
     ...older, id: "latest", state: "failed", created_at: "2026-01-01T00:01:00Z",

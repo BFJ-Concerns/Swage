@@ -32,6 +32,10 @@ export interface Route {
   // Set with `conversationId` when the URL names one of the session's
   // surfaces, so a surface is a place the address bar can point at.
   surfaceId: string | null;
+  // Set with `conversationId` when the URL names one of the session's
+  // turns: the transcript opens at that turn, so a run or a record can
+  // point at the exchange it produced.
+  turnId: string | null;
   // Set when the URL is the shared surface library's catalogue.
   library: boolean;
   // Set when the URL names a workflow run, so the run's recorded journal
@@ -55,6 +59,7 @@ function rootRoute(pathname = "/", notFound = false): Route {
     path: pathname,
     conversationId: null,
     surfaceId: null,
+    turnId: null,
     library: false,
     workflowRunId: null,
     settingsTab: null,
@@ -109,6 +114,7 @@ function memoryPageAddress(query: URLSearchParams): MemoryPageAddress | null {
  *   /                                   → root, no active conversation
  *   /conversations/:id                  → load conversation with that ID
  *   /conversations/:id/surfaces/:sid    → that conversation with one of its surfaces open
+ *   /conversations/:id/turns/:tid       → that conversation, the transcript opened at that turn
  *   /library                            → the shared surface library's catalogue
  *   /workflow-runs/:id                  → read back that run's record and terminal account
  *   /settings/memory?reference=:ref     → the memory settings tab with that page open
@@ -118,12 +124,15 @@ export function parseRoute(location: string): Route {
   const queryStart = location.indexOf("?");
   const pathname = queryStart === -1 ? location : location.slice(0, queryStart);
   const query = new URLSearchParams(queryStart === -1 ? "" : location.slice(queryStart + 1));
-  const match = pathname.match(/^\/conversations\/([^/]+)(?:\/surfaces\/([^/]+))?$/);
+  const match = pathname.match(
+    /^\/conversations\/([^/]+)(?:\/surfaces\/([^/]+)|\/turns\/([^/]+))?$/,
+  );
   if (match) {
     return {
       ...rootRoute(pathname),
       conversationId: match[1],
       surfaceId: match[2] === undefined ? null : decodeURIComponent(match[2]),
+      turnId: match[3] === undefined ? null : decodeURIComponent(match[3]),
     };
   }
   if (pathname === "/library") {
@@ -173,6 +182,11 @@ function isNotAConversation(error: Error): boolean {
 export function conversationPath(conversationId: string, surfaceId?: string | null): string {
   const base = `/conversations/${encodeURIComponent(conversationId)}`;
   return surfaceId ? `${base}/surfaces/${encodeURIComponent(surfaceId)}` : base;
+}
+
+/** The address of one turn of a conversation: the transcript opens there. */
+export function turnPath(conversationId: string, turnId: string): string {
+  return `${conversationPath(conversationId)}/turns/${encodeURIComponent(turnId)}`;
 }
 
 // ---------------------------------------------------------------------------

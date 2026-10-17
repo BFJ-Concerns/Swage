@@ -31,7 +31,7 @@
     type StreamingStore,
   } from "./lib/stores/streaming";
   import { createTopicStore } from "./lib/stores/topics";
-  import { conversationPath, createRouter } from "./lib/router";
+  import { conversationPath, createRouter, turnPath } from "./lib/router";
   import type { Route } from "./lib/router";
   import { getDesktopRuntime } from "./lib/runtime";
   import {
@@ -123,11 +123,12 @@
     pendingStart = null;
     connectionStore.connectTo(id);
     // router is declared below but will be initialised before this is called.
-    // The URL may already name one of this session's surfaces (a deep link
-    // or a browser Back): keep it, so the surface opens.
+    // The URL may already name one of this session's surfaces or turns (a
+    // deep link or a browser Back): keep it, so the surface or turn opens.
     const surfaceId =
       currentRoute.conversationId === id ? currentRoute.surfaceId : null;
-    router.navigate(conversationPath(id, surfaceId));
+    const turnId = currentRoute.conversationId === id ? currentRoute.turnId : null;
+    router.navigate(turnId ? turnPath(id, turnId) : conversationPath(id, surfaceId));
   }
 
   // The sidebar and agent list follow the session's scope: its topic, or

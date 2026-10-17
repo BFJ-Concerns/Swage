@@ -1797,6 +1797,31 @@
         "annotations_removed"
       ]
     },
+    "DeliveryOutcome": {
+      "description": "How one routed destination of a run's output ended, as the delivery\npath recorded it.",
+      "oneOf": [
+        {
+          "description": "The destination took the output.",
+          "type": "string",
+          "const": "sent"
+        },
+        {
+          "description": "The destination is a deliberate no-op (a development channel).",
+          "type": "string",
+          "const": "not_sent"
+        },
+        {
+          "description": "The attempt failed; `error` says how.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "The run delivered nowhere; `error` says why.",
+          "type": "string",
+          "const": "not_delivered"
+        }
+      ]
+    },
     "DeliveryRoutingRequest": {
       "description": "Where output should be routed once a run completes.\n\n`deliver_to_origin` defaults to true for channel-initiated turns, where\nan origin always exists. Callers without an origin (schedules, manual\nAPI calls) must set it false or target resolution errors.",
       "type": "object",
@@ -4383,6 +4408,13 @@
           "type": "string",
           "format": "date-time"
         },
+        "deliveries": {
+          "description": "Every destination the run's output was routed to with its outcome,\nin delivery order, or the one record of a run that delivered\nnowhere; empty while the run has not delivered.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScheduleRunDelivery"
+          }
+        },
         "error_message": {
           "type": [
             "string",
@@ -4481,7 +4513,43 @@
         "trigger",
         "state",
         "executed_message",
-        "created_at"
+        "created_at",
+        "deliveries"
+      ]
+    },
+    "ScheduleRunDelivery": {
+      "description": "One destination of a run's output and how it ended — a delivery record\nread back under the run it belongs to.",
+      "type": "object",
+      "properties": {
+        "delivered_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "error": {
+          "description": "Why the output was not sent, failed, or was not delivered.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "$ref": "#/$defs/DeliveryOutcome"
+        },
+        "target": {
+          "description": "The destination; absent for the record a run leaves when it\ndelivered nowhere.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliveryTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "outcome",
+        "delivered_at"
       ]
     },
     "ScheduleRunListResponse": {

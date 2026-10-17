@@ -240,6 +240,12 @@ pub trait DeliveryStore: Send + Sync {
         &self,
         session_id: Uuid,
     ) -> Result<Vec<DeliveryRecord>, StorageError>;
+    /// A run's delivery records in delivery order — every routed
+    /// destination with its outcome, or the one no-delivery record.
+    async fn list_delivery_records_by_run(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Vec<DeliveryRecord>, StorageError>;
 }
 
 #[async_trait]
@@ -1916,6 +1922,12 @@ mod tests {
             unimplemented!()
         }
         async fn list_delivery_records_by_session(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<DeliveryRecord>, StorageError> {
+            unimplemented!()
+        }
+        async fn list_delivery_records_by_run(
             &self,
             _: Uuid,
         ) -> Result<Vec<DeliveryRecord>, StorageError> {

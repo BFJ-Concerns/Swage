@@ -183,6 +183,26 @@ describe("turn context inspector trigger", () => {
     expect(streaming.startTurn).toHaveBeenCalledExactlyOnceWith(request.content);
   });
 
+  it("opens at the turn the address names and stops following the end", () => {
+    const scrolled: Element[] = [];
+    Element.prototype.scrollIntoView = function () {
+      scrolled.push(this);
+    };
+    const first: MessageView = { role: "user", origin: "user", content: "First ask.", timestamp: "2026-10-05T12:00:00Z", turn_id: "turn-a" };
+    const firstReply: MessageView = { role: "assistant", origin: "assistant", content: "First answer.", timestamp: "2026-10-05T12:00:01Z", turn_id: "turn-a" };
+    const second: MessageView = { role: "user", origin: "schedule", content: "Daily digest", timestamp: "2026-10-05T13:00:00Z", turn_id: "turn-b" };
+    const secondReply: MessageView = { role: "assistant", origin: "assistant", content: "The digest.", timestamp: "2026-10-05T13:00:01Z", turn_id: "turn-b" };
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store: makeConversationStore([first, firstReply, second, secondReply]), streamingStore: createStreamingStore(), focusTurnId: "turn-b" },
+    });
+    flushSync();
+
+    expect(scrolled).toHaveLength(1);
+    expect(scrolled[0].getAttribute("data-turn-id")).toBe("turn-b");
+    expect(scrolled[0].textContent).toContain("Daily digest");
+  });
+
   it("shows the refusal account and retries the person's request from recorded messages", async () => {
     const request: MessageView = { role: "user", origin: "user", content: "Read a harmless file.", timestamp: "2026-10-04T20:00:00Z", turn_id: "refused-turn" };
     const notice: MessageView = { role: "user", origin: "platform", content: "The model refused this request. You can amend your request in the message box or retry it.", timestamp: "2026-10-04T20:00:01Z", turn_id: "refused-turn", turn_state: "refused" as MessageView["turn_state"] };

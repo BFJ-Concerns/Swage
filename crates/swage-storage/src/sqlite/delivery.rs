@@ -131,6 +131,23 @@ impl DeliveryStore for SqliteStorage {
         })
         .await
     }
+
+    async fn list_delivery_records_by_run(
+        &self,
+        run_id: Uuid,
+    ) -> Result<Vec<DeliveryRecord>, StorageError> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, session_id, run_id, turn_id, target_json, content, status, error, delivered_at
+                 FROM delivery_records
+                 WHERE run_id = ?1
+                 ORDER BY delivered_at ASC, rowid ASC",
+            )?;
+            let rows = stmt.query_map(params![run_id.to_string()], row_to_delivery)?;
+            rows.collect()
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -142,13 +159,117 @@ mod tests {
     use uuid::Uuid;
 
     use crate::model::{
-        NewSchedule, NewScheduleRun, NewThread, NewTurn, ScheduleCreator, ScheduleKind,
-        ScheduleRunTrigger, ScheduleStatus, SessionPolicy, TurnState,
+        NewSchedule, NewScheduleRun, NewThread, NewTurn, OverlapPolicy, ScheduleCreator,
+        ScheduleKind, ScheduleRunTrigger, ScheduleStatus, SessionPolicy, TurnState,
     };
     use crate::store::{
         DeliveryStore, ScheduleStore, SessionStore, ThreadStore, TopicStore, TurnStore,
     };
     use crate::{NewDeliveryRecord, NewSession};
+
+    /// A run's records come back under its id in delivery order — every
+    /// destination with its outcome — and another run's do not.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delivery_records_list_by_run_in_delivery_order() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(NewSession {
+                ..crate::fixtures::new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let schedule = storage
+            .create_schedule(NewSchedule {
+                id: Uuid::new_v4(),
+                message: "Deliver the digest.".into(),
+                overlap_policy: OverlapPolicy::Skip,
+                pending_cap: 1,
+                status: ScheduleStatus::Active,
+                kind: ScheduleKind::Interval,
+                expression: "every 5 minutes".into(),
+                session_policy: SessionPolicy::Continuation {
+                    session_id: session.id,
+                },
+                creator: ScheduleCreator::User,
+                delivery_routing: serde_json::json!({}),
+                gate: None,
+                next_run_at: None,
+                last_run_at: None,
+            })
+            .await
+            .unwrap();
+        let run = storage
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule.id,
+                ScheduleRunTrigger::Tick,
+                None,
+                "Deliver the digest.",
+            ))
+            .await
+            .unwrap();
+        // One run of a schedule is in flight at a time: settle the first
+        // before the next is recorded.
+        storage
+            .update_schedule_run(
+                run.id,
+                crate::model::ScheduleRunUpdate {
+                    state: Some(crate::model::ScheduleRunState::Completed),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let other = storage
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule.id,
+                ScheduleRunTrigger::Tick,
+                None,
+                "Deliver the digest.",
+            ))
+            .await
+            .unwrap();
+        for (run_id, target, status, error) in [
+            (run.id, json!({"kind": "local_storage"}), "sent", None),
+            (
+                run.id,
+                json!({"kind": "webhook", "url": "https://example.test/hook"}),
+                "failed",
+                Some("connection refused"),
+            ),
+            (
+                other.id,
+                json!({"kind": "no_delivery"}),
+                "not_delivered",
+                Some("gate skip"),
+            ),
+        ] {
+            storage
+                .create_delivery_record(NewDeliveryRecord {
+                    session_id: Some(session.id),
+                    run_id: Some(run_id),
+                    turn_id: None,
+                    target,
+                    content: String::new(),
+                    status: status.into(),
+                    error: error.map(str::to_owned),
+                })
+                .await
+                .unwrap();
+        }
+
+        let listed = storage.list_delivery_records_by_run(run.id).await.unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].status, "sent");
+        assert_eq!(listed[1].status, "failed");
+        assert_eq!(listed[1].error.as_deref(), Some("connection refused"));
+        let others = storage
+            .list_delivery_records_by_run(other.id)
+            .await
+            .unwrap();
+        assert_eq!(others.len(), 1);
+        assert_eq!(others[0].status, "not_delivered");
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn delivery_record_round_trips_and_lists_by_session() {

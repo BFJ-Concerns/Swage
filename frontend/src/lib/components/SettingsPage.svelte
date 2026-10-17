@@ -51,6 +51,8 @@
     // The memory page a notice link names, opened on the memory tab.
     memoryPage?: MemoryPageAddress | null;
     onSettingsSaved?: () => void | Promise<void>;
+    /** Opens an address in the app, for a panel that links out of settings. */
+    onNavigate?: (path: string) => void;
   }
 
   let {
@@ -59,6 +61,7 @@
     topics = [],
     memoryPage = null,
     onSettingsSaved,
+    onNavigate,
   }: Props = $props();
 
   // settings is the working copy — bind:value mutates it freely. saveSettings
@@ -454,7 +457,7 @@
     {:else if tab === "generation"}
       <GenerationSettingsPanel bind:settings />
     {:else if tab === "automation"}
-      <ScheduleAutomationPanel {topicId} {topics} sessionId={null} />
+      <ScheduleAutomationPanel {topicId} {topics} sessionId={null} {onNavigate} />
       <section aria-label="Automation settings">
         <div class="head">
           <h3>Automation settings</h3>

@@ -35,6 +35,8 @@
     selectedAgentId: string;
     onNavigate?: (path: string) => void;
     onNewConversation?: (agentId?: string) => void;
+    /** The turn the address names: the transcript opens at it. */
+    focusTurnId?: string | null;
   }
 
   let {
@@ -50,6 +52,7 @@
     selectedAgentId = $bindable(),
     onNavigate,
     onNewConversation,
+    focusTurnId = null,
   }: Props = $props();
 
   const activeConversation = $derived(conversationStore.activeConversation);
@@ -173,7 +176,7 @@
     </div>
   {/if}
   {#if activeConversation}<ConnectionIndicator store={connectionStore} {onRetry} />{/if}
-  <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} />
+  <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} {focusTurnId} />
   <!-- Pinned to the foot of the channel's scroll, so a turn waiting on the
        user's decision shows its approval card in view however long the
        history above it is. -->

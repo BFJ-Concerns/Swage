@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 import { ApiError } from "../api/error";
-import { createRouter, parseRoute } from "../router";
+import { createRouter, parseRoute, turnPath } from "../router";
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -30,6 +30,7 @@ describe("parseRoute", () => {
       path: "/",
       conversationId: null,
       surfaceId: null,
+      turnId: null,
       library: false,
       workflowRunId: null,
       settingsTab: null,
@@ -45,6 +46,7 @@ describe("parseRoute", () => {
       path: "/conversations/abc-123",
       conversationId: "abc-123",
       surfaceId: null,
+      turnId: null,
       library: false,
       workflowRunId: null,
       settingsTab: null,
@@ -55,11 +57,29 @@ describe("parseRoute", () => {
     });
   });
 
+  it("maps '/conversations/:id/turns/:tid' to that conversation opened at the turn", () => {
+    expect(parseRoute("/conversations/abc-123/turns/turn-9")).toEqual({
+      path: "/conversations/abc-123/turns/turn-9",
+      conversationId: "abc-123",
+      surfaceId: null,
+      turnId: "turn-9",
+      library: false,
+      workflowRunId: null,
+      settingsTab: null,
+      settingsTopicSlug: null,
+      settingsTopicTab: null,
+      settingsMemoryPage: null,
+      notFound: false,
+    });
+    expect(turnPath("abc-123", "turn 9")).toBe("/conversations/abc-123/turns/turn%209");
+  });
+
   it("maps '/workflow-runs/:id' to that run's own surface", () => {
     expect(parseRoute("/workflow-runs/run-42")).toEqual({
       path: "/workflow-runs/run-42",
       conversationId: null,
       surfaceId: null,
+      turnId: null,
       library: false,
       workflowRunId: "run-42",
       settingsTab: null,
@@ -75,6 +95,7 @@ describe("parseRoute", () => {
       path: "/",
       conversationId: null,
       surfaceId: null,
+      turnId: null,
       library: false,
       workflowRunId: null,
       settingsTab: null,
@@ -90,6 +111,7 @@ describe("parseRoute", () => {
       path: "/",
       conversationId: null,
       surfaceId: null,
+      turnId: null,
       library: false,
       workflowRunId: null,
       settingsTab: null,
@@ -105,6 +127,7 @@ describe("parseRoute", () => {
       path: "/workflow-runs/run-9",
       conversationId: null,
       surfaceId: null,
+      turnId: null,
       library: false,
       workflowRunId: "run-9",
       settingsTab: null,
@@ -120,6 +143,7 @@ describe("parseRoute", () => {
       path: "/settings/generation",
       conversationId: null,
       surfaceId: null,
+      turnId: null,
       library: false,
       workflowRunId: null,
       settingsTab: "generation",
@@ -158,6 +182,7 @@ describe("parseRoute", () => {
       path: "/settings/topic/research/workspaces",
       conversationId: null,
       surfaceId: null,
+      turnId: null,
       library: false,
       workflowRunId: null,
       settingsTab: null,
@@ -170,6 +195,7 @@ describe("parseRoute", () => {
       path: "/settings/topic/research/surfaces",
       conversationId: null,
       surfaceId: null,
+      turnId: null,
       library: false,
       workflowRunId: null,
       settingsTab: null,
@@ -458,6 +484,7 @@ describe("init with conversation store", () => {
       path: "/conversations/new-conv",
       conversationId: "new-conv",
       surfaceId: null,
+      turnId: null,
       library: false,
       workflowRunId: null,
       settingsTab: null,
@@ -505,6 +532,7 @@ describe("init with conversation store", () => {
       path: "/conversations/second-conv",
       conversationId: "second-conv",
       surfaceId: null,
+      turnId: null,
       library: false,
       workflowRunId: null,
       settingsTab: null,
