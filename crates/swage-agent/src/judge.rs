@@ -88,6 +88,10 @@ pub struct JudgeRequest {
     pub arguments: Value,
     /// The agent's stated reason for the request, when it gave one.
     pub justification: Option<String>,
+    /// The task the turn was given — the person's or the automation's own
+    /// words, as the turn's record holds them — the one thing the judge
+    /// reads that the agent did not write; `None` when the record has none.
+    pub task: Option<String>,
     pub reach: RequestedReach,
 }
 
@@ -144,6 +148,21 @@ pub trait RequestJudge: Send + Sync {
 }
 
 pub type SharedRequestJudge = Arc<dyn RequestJudge>;
+
+/// Characters of a turn's task the judge reads; a longer task is cut here,
+/// its tail marked, so one request's judgement stays one capped completion.
+pub const TASK_EXCERPT_CHARS: usize = 2000;
+
+/// The turn's task as the judge reads it: its opening `TASK_EXCERPT_CHARS`
+/// characters, marked where a longer task was cut.
+pub fn task_excerpt(task: &str) -> String {
+    if task.chars().count() <= TASK_EXCERPT_CHARS {
+        task.to_owned()
+    } else {
+        let head: String = task.chars().take(TASK_EXCERPT_CHARS).collect();
+        format!("{head}…")
+    }
+}
 
 /// The justification a call carries, read from its arguments.
 pub fn justification_from_arguments(arguments: &Value) -> Option<String> {

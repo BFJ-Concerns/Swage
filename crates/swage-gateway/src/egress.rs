@@ -117,7 +117,10 @@ impl EgressPolicy for SessionEgressPolicy {
         // is given the task the turn is doing, as the person stated it, and
         // weighs the host against that.
         let task = match self.storage.get_turn(turn_id).await {
-            Ok(Some(turn)) => turn.user_input,
+            Ok(Some(turn)) => turn
+                .user_input
+                .as_deref()
+                .map(swage_agent::judge::task_excerpt),
             Ok(None) => None,
             Err(error) => {
                 return EgressVerdict::Refused {
@@ -132,7 +135,6 @@ impl EgressPolicy for SessionEgressPolicy {
         let arguments = serde_json::json!({
             "host": request.host,
             "port": request.port,
-            "task": task.as_deref().map(|text| excerpt(text, 2000)),
         });
         let judgement = judge
             .judge(JudgeRequest {
@@ -142,6 +144,7 @@ impl EgressPolicy for SessionEgressPolicy {
                 tool_name: EGRESS_TOOL_NAME.into(),
                 arguments: arguments.clone(),
                 justification: None,
+                task: task.clone(),
                 reach: reach.clone(),
             })
             .await;
@@ -166,6 +169,7 @@ impl EgressPolicy for SessionEgressPolicy {
                     "arguments": arguments,
                     "reach": reach.record(),
                     "justification": serde_json::Value::Null,
+                    "task": task,
                     "verdict": judgement.verdict.as_str(),
                     "reason": judgement.reason,
                     "judge": judgement.judge,
@@ -196,16 +200,6 @@ impl EgressPolicy for SessionEgressPolicy {
                 reason: format!("no judge could allow it: {}", judgement.reason),
             },
         }
-    }
-}
-
-/// The first `limit` characters of a text, marked where it was cut.
-fn excerpt(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        text.to_owned()
-    } else {
-        let head: String = text.chars().take(limit).collect();
-        format!("{head}…")
     }
 }
 
@@ -413,7 +407,8 @@ mod tests {
             }
         );
         assert_eq!(
-            asked[0].arguments["task"], "fetch the deps and build",
+            asked[0].task.as_deref(),
+            Some("fetch the deps and build"),
             "the judge is shown the task the turn is doing"
         );
         drop(asked);
