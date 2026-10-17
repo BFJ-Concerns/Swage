@@ -6,9 +6,9 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowRunHold,
-    NewWorkflowRunHoldRejection, NewWorkflowScript, WorkflowHoldSettlement, WorkflowJournalRecord,
-    WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
+    GatewayInterruptionCounts, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent,
+    NewWorkflowRunHold, NewWorkflowRunHoldRejection, NewWorkflowScript, WorkflowHoldSettlement,
+    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
     WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
 };
 use crate::sqlite::SqliteStorage;
@@ -175,9 +175,59 @@ fn run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRecord> {
                 )
             })?,
         dispatching_session_id: row.get::<_, Option<String>>(27)?.map(uuid).transpose()?,
+        interruptions: serde_json::from_str(&row.get::<_, String>(28)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                28,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
         created_at: time(row.get(19)?)?,
         completed_at: completed_at.map(time).transpose()?,
     })
+}
+
+/// The attempts recorded on a journal entry, oldest first; `None` when the
+/// entry is not there — reporting success for a missing entry would leave
+/// the caller believing the account was written.
+fn read_call_attempts(
+    tx: &rusqlite::Transaction<'_>,
+    id: Uuid,
+) -> rusqlite::Result<Option<Vec<serde_json::Value>>> {
+    let stored: Option<Option<String>> = tx
+        .query_row(
+            "SELECT dispatch_attempts_json FROM workflow_journal WHERE id=?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+    match stored {
+        Some(json) => serde_json::from_str(&json).map(Some).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        }),
+        None => Ok(Some(Vec::new())),
+    }
+}
+
+fn write_call_attempts(
+    tx: &rusqlite::Transaction<'_>,
+    id: Uuid,
+    attempts: &[serde_json::Value],
+) -> rusqlite::Result<()> {
+    let encoded = serde_json::to_string(attempts)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    tx.execute(
+        "UPDATE workflow_journal SET dispatch_attempts_json=?2 WHERE id=?1",
+        params![id.to_string(), encoded],
+    )?;
+    Ok(())
 }
 
 const SCRIPT_COLUMNS: &str = "id, topic_id, name, description, delivery_grant_json, captured_sources_grant, authoring_session_id, created_at, updated_at";
@@ -186,7 +236,7 @@ const RUN_COLUMNS: &str = "id, topic_id, parent_run_id, parent_seq, script_versi
     COALESCE((SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_id), \
     COALESCE((SELECT name FROM workflow_scripts WHERE id = (SELECT script_id FROM workflow_script_versions WHERE id = workflow_runs.script_version_id)), inline_workflow_name), \
     COALESCE((SELECT version FROM workflow_script_versions WHERE id = workflow_runs.script_version_id), inline_workflow_version), \
-    carrying_skill, task, source, source_hash, args_json, budget_json, state, final_output_json, handover_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, wake_at, inherited_worker_placement_json, workflow_call_tools_json, terminal_account_json, dispatching_session_id";
+    carrying_skill, task, source, source_hash, args_json, budget_json, state, final_output_json, handover_json, error_message, engine_version, created_at, completed_at, dispatch_bound_agent_ids_json, dispatch_bound_task_definition_ids_json, wake_at, inherited_worker_placement_json, workflow_call_tools_json, terminal_account_json, dispatching_session_id, interruptions_json";
 const JOURNAL_COLUMNS: &str = "id, run_id, seq, completed_order, kind, status, args_hash, request_json, result_json, terminal_metadata_json, error_message, effect_kind, idempotency_key, target_kind, started_at, completed_at, dispatch_json, dispatch_attempts_json, termination_json";
 const RUN_EVENT_COLUMNS: &str = "id, run_id, journal_entry_id, seq, kind, payload_json, source_surface, source_agent_id, source_session_id, source_turn_id, posted_at, delivered_wake_seq, delivered_at";
 
@@ -718,8 +768,33 @@ impl WorkflowStore for SqliteStorage {
         })
         .await
     }
-    async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {
-        self.with_conn(|conn| { let count=conn.execute("UPDATE workflow_runs SET state='interrupted', completed_at=NULL WHERE state='running'", [])?; Ok(count as u64) }).await
+    async fn record_gateway_interruption(
+        &self,
+        detected_at: DateTime<Utc>,
+    ) -> Result<GatewayInterruptionCounts, StorageError> {
+        let stamp = detected_at.to_rfc3339();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let mut counts = GatewayInterruptionCounts::default();
+            for (state, run_state) in [("running", "running"), ("parked", "parked")] {
+                let entry = serde_json::json!({ "detected_at": stamp, "run_state": run_state });
+                let appended = tx.execute(
+                    "UPDATE workflow_runs SET interruptions_json = json_insert(interruptions_json, '$[#]', json(?2)) WHERE state = ?1",
+                    params![state, entry.to_string()],
+                )? as u64;
+                match state {
+                    "running" => counts.running_interrupted = appended,
+                    _ => counts.parked = appended,
+                }
+            }
+            tx.execute(
+                "UPDATE workflow_runs SET state='interrupted', completed_at=NULL WHERE state='running'",
+                [],
+            )?;
+            tx.commit()?;
+            Ok(counts)
+        })
+        .await
     }
 
     async fn create_workflow_run_event(
@@ -1163,47 +1238,19 @@ impl WorkflowStore for SqliteStorage {
         Ok(())
     }
 
-    async fn record_workflow_call_attempt(
+    async fn open_workflow_call_attempt(
         &self,
         id: Uuid,
         attempt: serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, StorageError> {
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
-            // Read, append, write inside one transaction: an attempt that
-            // replaced its predecessor would erase the turn the interrupted
-            // attempt ran, which is the record this list exists to keep.
-            let stored: Option<Option<String>> = tx
-                .query_row(
-                    "SELECT dispatch_attempts_json FROM workflow_journal WHERE id=?1",
-                    [id.to_string()],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            // No row means the entry this record belongs to is not there.
-            // Reporting success would leave the caller believing the account
-            // was written.
-            let Some(stored) = stored else {
+            let Some(earlier) = read_call_attempts(&tx, id)? else {
                 return Ok(None);
-            };
-            let earlier: Vec<serde_json::Value> = match stored {
-                Some(json) => serde_json::from_str(&json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })?,
-                None => Vec::new(),
             };
             let mut attempts = earlier.clone();
             attempts.push(attempt);
-            let encoded = serde_json::to_string(&attempts)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-            tx.execute(
-                "UPDATE workflow_journal SET dispatch_attempts_json=?2 WHERE id=?1",
-                params![id.to_string(), encoded],
-            )?;
+            write_call_attempts(&tx, id, &attempts)?;
             tx.commit()?;
             Ok(Some(earlier))
         })
@@ -1212,6 +1259,44 @@ impl WorkflowStore for SqliteStorage {
             entity: "workflow journal entry".to_string(),
             id: id.to_string(),
         })
+    }
+
+    async fn resolve_workflow_call_attempt(
+        &self,
+        id: Uuid,
+        resolution: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let Some(mut attempts) = read_call_attempts(&tx, id)? else {
+                return Ok(None);
+            };
+            // The open attempt is the latest one no turn has resolved. The
+            // resolution merges over it, so the cause and opening time the
+            // run wrote stay beside what the turn resolved.
+            let Some(open) = attempts.iter().rposition(|attempt| {
+                attempt
+                    .get("turn_id")
+                    .is_none_or(serde_json::Value::is_null)
+            }) else {
+                return Ok(Some(Err(StorageError::QueryFailed(format!(
+                    "workflow journal entry {id} has no open attempt to resolve"
+                )))));
+            };
+            if let (serde_json::Value::Object(target), serde_json::Value::Object(fields)) =
+                (&mut attempts[open], resolution)
+            {
+                target.extend(fields);
+            }
+            write_call_attempts(&tx, id, &attempts)?;
+            tx.commit()?;
+            Ok(Some(Ok(())))
+        })
+        .await?
+        .ok_or_else(|| StorageError::NotFound {
+            entity: "workflow journal entry".to_string(),
+            id: id.to_string(),
+        })?
     }
 
     async fn cut_short_workflow_journal_entry(
@@ -1685,7 +1770,7 @@ mod tests {
         assert_eq!(inline.source.as_deref(), Some("return 3"));
         assert_eq!(inline.source_hash, "inline-hash");
         storage
-            .interrupt_running_workflow_runs()
+            .record_gateway_interruption(Utc::now())
             .await
             .expect("recover");
         assert_eq!(
@@ -1917,13 +2002,75 @@ mod tests {
         );
 
         let error = storage
-            .record_workflow_call_attempt(Uuid::new_v4(), serde_json::json!({"model": "m"}))
+            .open_workflow_call_attempt(
+                Uuid::new_v4(),
+                serde_json::json!({"cause": {"cause": "first"}, "opened_at": "2026-10-17T00:00:00Z"}),
+            )
             .await
             .expect_err("an attempt record with no entry to attach to must fail");
         assert!(
             matches!(error, StorageError::NotFound { .. }),
             "expected the missing entry to be reported, got {error:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_boot_records_the_interruption_on_running_and_parked_runs_alike() {
+        let storage = SqliteStorage::in_memory().expect("storage");
+        let topic = storage.general_scope().await.expect("topic");
+        let make = || NewWorkflowRun {
+            source_hash: "hash".into(),
+            args: serde_json::json!({}),
+            ..crate::fixtures::new_workflow_run(topic.id)
+        };
+        let running = storage.create_workflow_run(make()).await.expect("running");
+        let parked = storage.create_workflow_run(make()).await.expect("parked");
+        storage
+            .set_workflow_run_parked(parked.id, Utc::now() + chrono::Duration::hours(1))
+            .await
+            .expect("park");
+        let done = storage.create_workflow_run(make()).await.expect("done");
+        storage
+            .update_workflow_run_state(done.id, "completed", None, None, None)
+            .await
+            .expect("complete");
+
+        let detected_at = Utc::now();
+        let counts = storage
+            .record_gateway_interruption(detected_at)
+            .await
+            .expect("record");
+        assert_eq!(
+            counts,
+            GatewayInterruptionCounts {
+                running_interrupted: 1,
+                parked: 1
+            }
+        );
+        let running = storage.get_workflow_run(running.id).await.unwrap().unwrap();
+        assert_eq!(running.state, "interrupted");
+        assert_eq!(
+            running.interruptions,
+            vec![
+                serde_json::json!({ "detected_at": detected_at.to_rfc3339(), "run_state": "running" })
+            ]
+        );
+        let parked = storage.get_workflow_run(parked.id).await.unwrap().unwrap();
+        assert_eq!(parked.state, "parked", "a parked run stays parked");
+        assert_eq!(parked.interruptions[0]["run_state"], "parked");
+        let done = storage.get_workflow_run(done.id).await.unwrap().unwrap();
+        assert!(
+            done.interruptions.is_empty(),
+            "an ended run was not interrupted"
+        );
+
+        // A second boot appends; the first entry stays.
+        storage
+            .record_gateway_interruption(Utc::now())
+            .await
+            .expect("record again");
+        let parked = storage.get_workflow_run(parked.id).await.unwrap().unwrap();
+        assert_eq!(parked.interruptions.len(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1952,23 +2099,73 @@ mod tests {
             .await
             .expect("intent");
 
-        let before_first = storage
-            .record_workflow_call_attempt(entry.id, serde_json::json!({"turn_id": "one"}))
+        // An attempt is opened with its cause and resolved by its turn; a
+        // resolution with nothing open is refused, since no run opened it.
+        // The records are shaped as the gateway writes them
+        // (`swage_protocol::client::workflow::WorkflowAgentCallResolution`):
+        // the store keeps them opaque, and a sibling test reading them back
+        // through the contract needs that shape.
+        let turn_one = Uuid::new_v4();
+        let turn_two = Uuid::new_v4();
+        let opened = |cause: &str, opened_at: &str| {
+            serde_json::json!({
+                "cause": { "cause": cause },
+                "opened_at": opened_at,
+                "model": null,
+                "effort": null,
+                "session_id": null,
+                "thread_id": null,
+                "turn_id": null,
+            })
+        };
+        let resolved = |turn: Uuid| {
+            serde_json::json!({
+                "model": "m",
+                "effort": null,
+                "session_id": null,
+                "thread_id": null,
+                "turn_id": turn,
+            })
+        };
+        let unopened = storage
+            .resolve_workflow_call_attempt(entry.id, resolved(Uuid::new_v4()))
             .await
-            .expect("first attempt");
+            .expect_err("nothing open");
+        assert!(
+            unopened.to_string().contains("no open attempt"),
+            "{unopened}"
+        );
+        let before_first = storage
+            .open_workflow_call_attempt(entry.id, opened("first", "2026-10-17T00:00:00Z"))
+            .await
+            .expect("open first");
         assert!(
             before_first.is_empty(),
             "the first attempt had none before it"
         );
-        let before_second = storage
-            .record_workflow_call_attempt(entry.id, serde_json::json!({"turn_id": "two"}))
+        storage
+            .resolve_workflow_call_attempt(entry.id, resolved(turn_one))
             .await
-            .expect("second attempt");
+            .expect("first attempt");
+        let before_second = storage
+            .open_workflow_call_attempt(
+                entry.id,
+                opened("after_interruption", "2026-10-17T00:01:00Z"),
+            )
+            .await
+            .expect("open second");
+        let mut first_resolved = opened("first", "2026-10-17T00:00:00Z");
+        first_resolved["model"] = serde_json::json!("m");
+        first_resolved["turn_id"] = serde_json::json!(turn_one);
         assert_eq!(
             before_second,
-            vec![serde_json::json!({"turn_id": "one"})],
-            "the re-dispatch is told which attempts it superseded"
+            vec![first_resolved.clone()],
+            "the re-dispatch is told which attempts it supersedes as it opens"
         );
+        storage
+            .resolve_workflow_call_attempt(entry.id, resolved(turn_two))
+            .await
+            .expect("second attempt");
 
         let stored = storage
             .list_workflow_journal(run.id)
@@ -1979,10 +2176,13 @@ mod tests {
             .expect("entry")
             .dispatch_attempts
             .expect("attempts");
+        let mut second_resolved = opened("after_interruption", "2026-10-17T00:01:00Z");
+        second_resolved["model"] = serde_json::json!("m");
+        second_resolved["turn_id"] = serde_json::json!(turn_two);
         assert_eq!(
             stored,
-            serde_json::json!([{"turn_id": "one"}, {"turn_id": "two"}]),
-            "both attempts stay in the record, oldest first"
+            serde_json::json!([first_resolved, second_resolved]),
+            "both attempts stay in the record, oldest first, each with its cause"
         );
     }
 }

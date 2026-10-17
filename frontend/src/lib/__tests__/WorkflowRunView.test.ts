@@ -25,6 +25,7 @@ function run(
     final_output: null,
     handover: null,
     terminal_account: terminalAccount,
+    interruptions: [],
     error_message: null,
     created_at: "2026-09-02T10:00:00Z",
     completed_at: null,
@@ -85,6 +86,7 @@ describe("WorkflowRunView", () => {
             placement: "/worktrees/run-1/finishing",
             worktree: null,
             termination: null,
+            redispatched_after_interruption: false,
           },
         ],
         failed: [
@@ -99,6 +101,7 @@ describe("WorkflowRunView", () => {
               termination: "failed",
               message: "the worker exhausted its attempts",
             },
+            redispatched_after_interruption: false,
           },
         ],
         cut_short: [
@@ -114,6 +117,7 @@ describe("WorkflowRunView", () => {
               cause: "run_cancelled",
               detail: "the run was cancelled",
             },
+            redispatched_after_interruption: false,
           },
         ],
         unsettled: [
@@ -125,6 +129,7 @@ describe("WorkflowRunView", () => {
             placement: null,
             worktree: null,
             termination: { termination: "unsettled" },
+            redispatched_after_interruption: false,
           },
         ],
       },
@@ -163,6 +168,59 @@ describe("WorkflowRunView", () => {
     // The completed worker's output survives the run that never returned.
     expect(text).toContain("the run was cancelled before returning");
     expect(text).toContain("the survey text");
+  });
+
+  it("shows each interruption the run lived through and marks workers redispatched after one", async () => {
+    const account: WorkflowRunTerminalAccount = {
+      ...emptyAccount({ ending: "returned" }),
+      workers: {
+        done: [
+          {
+            journal_entry_id: "entry-1",
+            seq: 0,
+            label: "appender",
+            agent_definition_id: null,
+            placement: null,
+            worktree: null,
+            termination: null,
+            redispatched_after_interruption: true,
+          },
+          {
+            journal_entry_id: "entry-2",
+            seq: 1,
+            label: "clean",
+            agent_definition_id: null,
+            placement: null,
+            worktree: null,
+            termination: null,
+            redispatched_after_interruption: false,
+          },
+        ],
+        failed: [],
+        cut_short: [],
+        unsettled: [],
+      },
+    };
+    const interrupted = {
+      ...run(account),
+      interruptions: [
+        { detected_at: "2026-09-02T10:02:00Z", run_state: "parked" },
+        { detected_at: "2026-09-02T10:04:00Z", run_state: "running" },
+      ],
+    } as unknown as WorkflowRun;
+    component = render(interrupted);
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Interruptions");
+    expect(text).toContain("the gateway stopped while this run was parked");
+    expect(text).toContain("the gateway stopped while this run was executing; the calls it had in flight were cut off");
+    expect(text).not.toContain("dispatched again");
+    expect(text).toContain("Workers redispatched after an interruption may have repeated their effects.");
+    const done = Array.from(document.querySelectorAll(".standing li"));
+    const appender = done.find((item) => item.textContent?.includes("appender"))!;
+    expect(appender.textContent).toContain("redispatched after an interruption");
+    expect(appender.textContent).toContain("unknown outcomes and may have been applied twice");
+    const clean = done.find((item) => item.textContent?.includes("clean"))!;
+    expect(clean.textContent).not.toContain("redispatched");
   });
 
   it("says a run that has not ended has no account yet", async () => {

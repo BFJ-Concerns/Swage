@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use swage_core::GatewayError;
-use swage_protocol::client::channel::{ChannelLinkCodeResponse, CreateChannelLinkCodeRequest};
+use swage_protocol::client::channel::{
+    ChannelLinkCodeListResponse, ChannelLinkCodeResponse, CreateChannelLinkCodeRequest,
+};
+pub use swage_protocol::client::channel::{ChannelLinkListResponse, ChannelLinkResponse};
 use swage_storage::{
     ChannelLink, GateConfig, NewChannelLink, NewSchedule, NewSession, NewThread,
     NewWorkspaceAttachment, ScheduleCreator, ScheduleKind, ScheduleStatus, SessionPolicy,
@@ -15,7 +18,7 @@ use swage_storage::{
 use crate::{
     channel_gateway::{DeliveryTarget, ExternalChannelIntegration},
     device::{DeviceResponse, RegisterDeviceRequest, register_remote_device},
-    state::{AppState, ChannelLinkCodeRecord, PairingCodeRecord},
+    state::{AppState, PairingCodeRecord},
 };
 
 #[derive(Debug, Clone, Deserialize)]
@@ -26,24 +29,6 @@ pub struct CreateChannelLinkRequest {
     pub topic_id: Option<Uuid>,
     pub agent_id: Option<String>,
     pub home_target: Option<DeliveryTarget>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ChannelLinkResponse {
-    pub integration: String,
-    pub account: String,
-    pub conversation: String,
-    pub topic_id: Uuid,
-    pub agent_id: String,
-    pub session_id: Option<Uuid>,
-    pub home_target: Option<serde_json::Value>,
-    pub linked_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ChannelLinkListResponse {
-    pub links: Vec<ChannelLinkResponse>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -196,6 +181,14 @@ pub async fn create_channel_link(
     state: &AppState,
     request: CreateChannelLinkRequest,
 ) -> Result<ChannelLinkResponse, GatewayError> {
+    create_channel_link_with_code(state, request, None).await
+}
+
+pub(crate) async fn create_channel_link_with_code(
+    state: &AppState,
+    request: CreateChannelLinkRequest,
+    code: Option<&str>,
+) -> Result<ChannelLinkResponse, GatewayError> {
     let integration: ExternalChannelIntegration = request
         .integration
         .trim()
@@ -240,28 +233,43 @@ pub async fn create_channel_link(
         })
         .await?;
 
-    let link = state
-        .storage
-        .upsert_channel_link(NewChannelLink {
-            integration: integration.as_metadata_value().to_string(),
-            account: request.account,
-            conversation: request.conversation,
-            topic_id: topic.id,
-            agent_id,
-            session_id: Some(session.id),
-            home_target: request
-                .home_target
-                .map(serde_json::to_value)
-                .transpose()
-                .map_err(|error| {
-                    GatewayError::ValidationError(format!(
-                        "invalid channel home_target payload: {error}"
-                    ))
-                })?,
-        })
-        .await?;
-
-    Ok(map_channel_link_response(link))
+    let input = NewChannelLink {
+        integration: integration.as_metadata_value().to_string(),
+        account: request.account,
+        conversation: request.conversation,
+        topic_id: topic.id,
+        agent_id,
+        session_id: Some(session.id),
+        home_target: request
+            .home_target
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| {
+                GatewayError::ValidationError(format!(
+                    "invalid channel home_target payload: {error}"
+                ))
+            })?,
+    };
+    let saved = if let Some(code) = code {
+        state.storage.redeem_channel_link_code(code, input).await
+    } else {
+        state.storage.upsert_channel_link(input).await.map(Some)
+    };
+    match saved {
+        Ok(Some(link)) => Ok(map_channel_link_response(link)),
+        other => {
+            let error = match other {
+                Err(error) => GatewayError::Storage(error),
+                _ => GatewayError::ValidationError("link code is invalid or has expired".into()),
+            };
+            if let Err(cleanup) = state.storage.delete_session(session.id).await {
+                return Err(GatewayError::ValidationError(format!(
+                    "{error}; could not remove unlinked session: {cleanup}"
+                )));
+            }
+            Err(error)
+        }
+    }
 }
 
 pub async fn list_channel_links(state: &AppState) -> Result<ChannelLinkListResponse, GatewayError> {
@@ -281,18 +289,23 @@ pub async fn create_channel_link_code(
     state: &AppState,
     request: CreateChannelLinkCodeRequest,
 ) -> Result<ChannelLinkCodeResponse, GatewayError> {
-    let expires_at = Utc::now() + Duration::minutes(10);
+    let expires_at = Utc::now() + Duration::hours(24);
     let link_code = Uuid::new_v4().to_string();
-    state.channel_link_codes.lock().await.insert(
-        link_code.clone(),
-        ChannelLinkCodeRecord {
-            integration: request.integration,
+    state
+        .storage
+        .save_channel_link_code(swage_storage::model::ChannelLinkCode {
+            code: link_code.clone(),
+            integration: request.integration.as_metadata_value().into(),
             topic_id: request.topic_id,
             agent_id: request.agent_id,
-            home_target: request.home_target,
+            home_target: request
+                .home_target
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(|error| GatewayError::ValidationError(error.to_string()))?,
             expires_at,
-        },
-    );
+        })
+        .await?;
     Ok(ChannelLinkCodeResponse {
         link_code,
         expires_at,
@@ -771,4 +784,22 @@ where
     T: std::str::FromStr<Err = String>,
 {
     value.parse().map_err(GatewayError::ValidationError)
+}
+
+/// Read unredeemed codes without issuing or invalidating a link.
+pub async fn list_channel_link_codes(
+    state: &AppState,
+) -> Result<ChannelLinkCodeListResponse, GatewayError> {
+    Ok(ChannelLinkCodeListResponse(
+        state
+            .storage
+            .list_channel_link_codes()
+            .await?
+            .into_iter()
+            .map(|code| ChannelLinkCodeResponse {
+                link_code: code.code,
+                expires_at: code.expires_at,
+            })
+            .collect(),
+    ))
 }

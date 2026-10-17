@@ -98,6 +98,7 @@ function mockConversationStoreWithSessions(
 function mockSurfacesStore(): SurfacesStore {
   const surface = {
     id: "surface-1",
+    shape_only: false,
     session_id: "conv-1",
     title: "Release checklist",
     created_at: "2026-08-29T10:00:00Z",
@@ -142,6 +143,8 @@ function mockSurfacesStore(): SurfacesStore {
     moveModule: async () => {},
     annotate: async () => {},
     updateAnnotation: async () => {},
+    renameSurface: async () => {},
+    resolveAnnotation: async () => {},
     removeAnnotation: async () => {},
     stopListening: () => {},
   };
@@ -887,6 +890,15 @@ describe("AppLayout shell navigation", () => {
       expect(onNavigate).toHaveBeenCalledWith("/");
     },
   );
+
+  it("opens Channels from the Settings navigation", () => {
+    const onNavigate = vi.fn();
+    component = mountLayout({ onNavigate, routePath: "/settings/providers" });
+    const channels = Array.from(document.querySelectorAll('nav[aria-label="Settings sections"] button'))
+      .find((button) => button.textContent?.trim() === "Channels") as HTMLButtonElement | undefined;
+    flushSync(() => channels?.click());
+    expect(onNavigate).toHaveBeenCalledWith("/settings/channels");
+  });
 
   it("navigates to the agent definitions settings tab", () => {
     const onNavigate = vi.fn();
