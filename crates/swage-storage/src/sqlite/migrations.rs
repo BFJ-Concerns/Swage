@@ -386,7 +386,11 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         -- recoverable from a run that never returned. Generic JSON like
         -- every other run blob; the contract lives in `swage-protocol` and
         -- is enforced at the wire boundary.
-        terminal_account_json TEXT
+        terminal_account_json TEXT,
+        -- Every gateway interruption the run lived through, as a JSON list
+        -- of { detected_at, run_state } entries written by the boot that
+        -- found it running or parked with no gateway alive to serve it.
+        interruptions_json   TEXT NOT NULL DEFAULT '[]'
     );
     INSERT INTO workflow_runs_parking_new (
         id, topic_id, script_version_id, inline_workflow_id,
