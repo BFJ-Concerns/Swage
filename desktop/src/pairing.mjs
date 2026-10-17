@@ -19,16 +19,22 @@ export async function installPairing(session, gatewayUrl, configurationDirectory
     if (parsed.protocol === "wss:") parsed.protocol = "https:";
     return parsed.origin === origin;
   }
-  function gatewayHeaders(url, supplied = {}) {
+  function gatewayHeaders(url, supplied = {}, trustedInitiator = false) {
     const headers = { ...supplied };
     for (const key of Object.keys(headers)) {
       if (key.toLowerCase() === "x-swage-token") delete headers[key];
     }
-    if (isGateway(url) && tokens[origin]) headers["X-Swage-Token"] = tokens[origin];
+    if (trustedInitiator && isGateway(url) && tokens[origin]) headers["X-Swage-Token"] = tokens[origin];
     return headers;
   }
   session.webRequest.onBeforeSendHeaders((details, callback) => {
-    callback({ requestHeaders: gatewayHeaders(details.url, details.requestHeaders) });
+    // Missing/detached frames have no authority. Health probes use headers()
+    // directly in the main process rather than this renderer request hook.
+    let trustedInitiator = false;
+    try {
+      trustedInitiator = new URL(details.frame?.url).origin === origin;
+    } catch { /* An absent or opaque initiating frame is untrusted. */ }
+    callback({ requestHeaders: gatewayHeaders(details.url, details.requestHeaders, trustedInitiator) });
   });
   session.webRequest.onHeadersReceived((details, callback) => {
     const url = new URL(details.url);
@@ -56,5 +62,5 @@ export async function installPairing(session, gatewayUrl, configurationDirectory
       }
     })();
   });
-  return { headers: (url) => gatewayHeaders(url) };
+  return { headers: (url) => gatewayHeaders(url, {}, true) };
 }

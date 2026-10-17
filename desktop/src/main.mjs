@@ -116,6 +116,18 @@ async function createWindow() {
     },
   });
 
+  const gatewayOrigin = new URL(targetUrl).origin;
+  const restrictNavigation = (event, url) => {
+    try {
+      if (new URL(url ?? event.url).origin === gatewayOrigin) return;
+    } catch { /* Invalid destinations cannot be gateway pages. */ }
+    event.preventDefault();
+  };
+  win.webContents.on("will-navigate", restrictNavigation);
+  win.webContents.on("will-redirect", restrictNavigation);
+  win.webContents.on("will-frame-navigate", restrictNavigation);
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+
   win.once("ready-to-show", () => {
     if (!isHeadlessShell) {
       win.show();
