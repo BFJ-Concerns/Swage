@@ -28,6 +28,8 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- Provider setup documentation uses governed credentials through Settings → Providers, distinguishes GPT Responses from Chat Completions, and explains model-bound routing and the disabled Codex integration.
+
 - Browser clicks, typing, selections and scrolling no longer ask for approval by default.
 - Image references accept only `https:` and `data:` schemes by default; the accepted set is configurable through `[attachments]` and Settings, with explained refusals recorded in the audit trail.
 
