@@ -14,8 +14,8 @@ use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
 use crate::tool::workspace::{
-    FileContent, location_approval_error, read_file_content, require_workspace_write_access,
-    resolve_context_path,
+    FileContent, binary_size_description, location_approval_error, read_file_content,
+    require_workspace_write_access, resolve_context_path,
 };
 
 // ---------------------------------------------------------------------------
@@ -111,7 +111,8 @@ impl Tool for FileEditTool {
                     return Err(ToolError::ExecutionFailed {
                         name: self.name().to_string(),
                         message: format!(
-                            "File appears to be binary ({len} bytes): {}",
+                            "File appears to be binary ({}): {}",
+                            binary_size_description(len),
                             change.requested_path
                         ),
                     });

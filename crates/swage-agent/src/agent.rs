@@ -2466,6 +2466,7 @@ impl Agent {
         .with_thread_id(execution.thread_id);
         let ctx = AgentToolContext {
             allowed_paths: self.config.allowed_paths.clone(),
+            tool_output_directory: self.config.tool_output_directory.clone(),
             ..ctx
         };
         let dispatch_started_at = std::time::Instant::now();
