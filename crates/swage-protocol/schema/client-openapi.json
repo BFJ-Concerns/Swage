@@ -6723,7 +6723,7 @@
             ]
           },
           "attempts": {
-            "description": "Every attempt the call ran, oldest first, each stamped once its turn\nresolved the options it actually ran with. A call interrupted and\nre-dispatched by replay has more than one, and each names its own\nturn — so the record keeps the interrupted attempt rather than only\nthe one that settled. Empty until the first turn resolves.",
+            "description": "Every attempt the call was dispatched for, oldest first: opened by\nthe run with its cause before the turn starts, and resolved by the\nturn with the options it actually ran with. A call interrupted and\nre-dispatched by replay, or served by its declared fallback, has more\nthan one, each naming its own turn — so the record keeps the attempt\nthat was cut off beside the one that followed. An attempt with no\nturn was opened and never resolved.",
             "items": {
               "$ref": "#/components/schemas/WorkflowAgentCallResolution"
             },
@@ -6779,8 +6779,11 @@
         "type": "object"
       },
       "WorkflowAgentCallResolution": {
-        "description": "The options a dispatched worker's turn resolved for itself.",
+        "description": "One attempt of a dispatched call: why it was dispatched, when it was\nopened, and the options its turn resolved for itself. Opened by the run\nbefore the turn starts and resolved by the turn before any provider work,\nso an attempt the gateway dies between the two writes of stays in the\nrecord with its cause and no resolution.",
         "properties": {
+          "cause": {
+            "$ref": "#/components/schemas/WorkflowAttemptCause"
+          },
           "effort": {
             "anyOf": [
               {
@@ -6796,6 +6799,10 @@
               "string",
               "null"
             ]
+          },
+          "opened_at": {
+            "format": "date-time",
+            "type": "string"
           },
           "session_id": {
             "format": "uuid",
@@ -6819,6 +6826,10 @@
             ]
           }
         },
+        "required": [
+          "cause",
+          "opened_at"
+        ],
         "type": "object"
       },
       "WorkflowArgumentContract": {
@@ -6847,6 +6858,54 @@
             },
             "required": [
               "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkflowAttemptCause": {
+        "description": "Why an attempt of an agent call was dispatched.",
+        "oneOf": [
+          {
+            "description": "The call's first dispatch.",
+            "properties": {
+              "cause": {
+                "const": "first",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cause"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Replay re-dispatched the call after a gateway death cut the attempt\nbefore it off: that attempt's outcome is unknown, and the tool calls\nit issued may have been applied.",
+            "properties": {
+              "cause": {
+                "const": "after_interruption",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cause"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The model the call named refused before any output, and the call's\ndeclared fallback served it instead; no interruption occurred.",
+            "properties": {
+              "cause": {
+                "const": "provider_fallback",
+                "type": "string"
+              },
+              "primary_failure": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "cause",
+              "primary_failure"
             ],
             "type": "object"
           }
@@ -7150,6 +7209,20 @@
           "answers_rejected"
         ],
         "type": "object"
+      },
+      "WorkflowInterruptedRunState": {
+        "oneOf": [
+          {
+            "const": "running",
+            "description": "The run was executing: its workers in flight lost their process, and\nreplay re-dispatches the calls that had not settled.",
+            "type": "string"
+          },
+          {
+            "const": "parked",
+            "description": "The run was parked on a durable wait: nothing of it was executing,\nand the waker relaunches it when its wake is due.",
+            "type": "string"
+          }
+        ]
       },
       "WorkflowJournalEntry": {
         "properties": {
@@ -8157,6 +8230,13 @@
             "format": "uuid",
             "type": "string"
           },
+          "interruptions": {
+            "description": "Every gateway interruption the run lived through, oldest first: a\nboot that found the run running (so it was marked interrupted and\nrelaunched by replay) or parked (its wait outlived the gateway).",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowRunInterruption"
+            },
+            "type": "array"
+          },
           "script_id": {
             "format": "uuid",
             "type": [
@@ -8222,6 +8302,7 @@
           "state",
           "args",
           "budget",
+          "interruptions",
           "created_at"
         ],
         "type": "object"
@@ -8629,6 +8710,25 @@
         ],
         "type": "string"
       },
+      "WorkflowRunInterruption": {
+        "description": "A gateway interruption a run lived through, recorded by the boot that\nfound the run with no gateway alive to serve it.",
+        "properties": {
+          "detected_at": {
+            "description": "When the boot recorded it; the gateway's death itself left no stamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "run_state": {
+            "$ref": "#/components/schemas/WorkflowInterruptedRunState",
+            "description": "How the run stood when the gateway stopped."
+          }
+        },
+        "required": [
+          "detected_at",
+          "run_state"
+        ],
+        "type": "object"
+      },
       "WorkflowRunListResponse": {
         "properties": {
           "runs": {
@@ -8859,6 +8959,10 @@
               "null"
             ]
           },
+          "redispatched_after_interruption": {
+            "description": "Whether any attempt of this worker followed a gateway interruption:\nthe interrupted attempt's outcome is unknown and the tool calls it\nissued may have been applied, so this worker's effects may have been\nrepeated.",
+            "type": "boolean"
+          },
           "seq": {
             "format": "uint64",
             "minimum": 0,
@@ -8889,7 +8993,8 @@
         },
         "required": [
           "journal_entry_id",
-          "seq"
+          "seq",
+          "redispatched_after_interruption"
         ],
         "type": "object"
       },

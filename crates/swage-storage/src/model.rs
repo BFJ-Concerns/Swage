@@ -2498,8 +2498,20 @@ pub struct WorkflowRunRecord {
     /// workers are grouped beneath in the recent-sessions list. `None` for a
     /// run started by the operator API or a schedule.
     pub dispatching_session_id: Option<Uuid>,
+    /// Every gateway interruption the run lived through, oldest first.
+    /// Generic JSON; the contract is
+    /// `swage_protocol::client::workflow::WorkflowRunInterruption`.
+    pub interruptions: Vec<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// What a boot's interruption pass found: the runs it marked interrupted
+/// because they were running, and the runs it found parked.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GatewayInterruptionCounts {
+    pub running_interrupted: u64,
+    pub parked: u64,
 }
 
 #[derive(Clone, Debug)]
