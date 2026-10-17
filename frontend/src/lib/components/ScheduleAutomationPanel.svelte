@@ -1,4 +1,15 @@
 <script lang="ts">
+  import { formatScheduleBrief } from "../schedule-brief";
+  import { untrack } from "svelte";
+  import { listRecentSessions } from "../api/sessions";
+  import type { RecentSession } from "../protocol/RecentSession";
+  import { listSurfaces } from "../api/surfaces";
+  import type { SurfaceSummary } from "../protocol/SurfaceSummary";
+  import AgentPicker from "./AgentPicker.svelte";
+  import { listEffectiveAgentDefinitions } from "../api/agent-definitions";
+  import type { EffectiveAgentDefinitionResponse } from "../protocol/EffectiveAgentDefinitionResponse";
+  import type { DeliveryTarget } from "../protocol/DeliveryTarget";
+  import type { DeliveryRoutingRequest } from "../protocol/DeliveryRoutingRequest";
   import { createSchedule } from "../api/workflows";
   import {
     fetchScheduleRuns,
@@ -50,7 +61,141 @@
   let scheduleCron = $state("0 0 9 * * * *");
   let scheduleAt = $state("");
   let schedulePolicy = $state<"fresh" | "continuation">("fresh");
-  let scheduleAgentId = $state("gateway");
+  let runConversationId = $state(untrack(() => sessionId ?? ""));
+  let conversations = $state<RecentSession[]>([]);
+  let conversationsLoading = $state(false);
+  let conversationLoadError = $state<string | null>(null);
+
+  $effect(() => {
+    if (schedulePolicy !== "continuation") return;
+    let active = true;
+    conversationsLoading = true;
+    conversationLoadError = null;
+    void listRecentSessions(null)
+      .then(async (entries) => {
+        const sessions = entries.flatMap((entry) => [
+          ...(entry.source.kind === "conversation" ? [entry.source.session] : []),
+          ...entry.automated,
+        ]);
+        const scopes = [...new Set(sessions.map((session) => session.topic_id ?? null))];
+        const definitions = new Map(await Promise.all(scopes.map(async (scope) =>
+          [scope, await listEffectiveAgentDefinitions(scope)] as const)));
+        const selectable = sessions.filter((session) => definitions.get(session.topic_id ?? null)
+          ?.some((definition) => definition.id === session.agent_id && definition.selectable));
+        if (active) {
+          conversations = selectable;
+          if (sessions.some((session) => session.id === runConversationId)
+            && !selectable.some((session) => session.id === runConversationId)) {
+            chooseRunConversation("");
+          }
+        }
+      })
+      .catch((err: unknown) => {
+        if (active) conversationLoadError = err instanceof Error ? err.message : "Failed to load conversations.";
+      })
+      .finally(() => { if (active) conversationsLoading = false; });
+    return () => { active = false; };
+  });
+
+  function chooseRunConversation(id: string): void {
+    runConversationId = id;
+    // A surface belongs to one conversation; selecting another requires a
+    // new destination choice even while its surfaces are still loading.
+    deliveryTargets = deliveryTargets.map((target) => target.kind === "surface"
+      ? { kind: "surface", surface_id: "" }
+      : target);
+  }
+
+  let scheduleAgentId = $state("");
+  let scheduleTopicId = $state(untrack(() => topicId ?? ""));
+  let agentDefinitions = $state<EffectiveAgentDefinitionResponse[]>([]);
+  let agentLoadError = $state<string | null>(null);
+  let agentsLoading = $state(false);
+  let agentLoadGeneration = 0;
+  let routingChanged = $state(false);
+  let storeLocalOutput = $state(true);
+  let deliveryTargets = $state<DeliveryTarget[]>([]);
+  let deliverySurfaces = $state<SurfaceSummary[]>([]);
+  let surfaceLoadError = $state<string | null>(null);
+  let surfacesLoading = $state(false);
+  let surfaceLoadGeneration = 0;
+
+  $effect(() => {
+    const continuationId = schedulePolicy === "continuation" ? runConversationId : null;
+    const generation = ++surfaceLoadGeneration;
+    deliverySurfaces = [];
+    surfaceLoadError = null;
+    surfacesLoading = !!continuationId;
+    if (!continuationId) return;
+    void listSurfaces(continuationId)
+      .then((response) => {
+        if (generation === surfaceLoadGeneration) deliverySurfaces = response.surfaces;
+      })
+      .catch((err: unknown) => {
+        if (generation === surfaceLoadGeneration) surfaceLoadError = err instanceof Error ? err.message : "Failed to load conversation surfaces.";
+      })
+      .finally(() => {
+        if (generation === surfaceLoadGeneration) surfacesLoading = false;
+      });
+  });
+
+  $effect(() => {
+    const scope = scheduleTopicId || null;
+    const generation = ++agentLoadGeneration;
+    scheduleAgentId = "";
+    agentDefinitions = [];
+    agentLoadError = null;
+    agentsLoading = true;
+    void listEffectiveAgentDefinitions(scope)
+      .then((definitions) => {
+        if (generation === agentLoadGeneration) agentDefinitions = definitions;
+      })
+      .catch((err: unknown) => {
+        if (generation === agentLoadGeneration) {
+          agentLoadError = err instanceof Error ? err.message : "Failed to load agents.";
+        }
+      })
+      .finally(() => {
+        if (generation === agentLoadGeneration) agentsLoading = false;
+      });
+  });
+
+  function newDeliveryTarget(kind: DeliveryTarget["kind"]): DeliveryTarget {
+    switch (kind) {
+      case "channel": return { kind, integration: "telegram", account: "", conversation: "" };
+      case "surface": return { kind, surface_id: "" };
+      case "webhook": return { kind, url: "" };
+      case "local_storage": return { kind };
+    }
+  }
+
+  function buildRouting(): DeliveryRoutingRequest | null {
+    if (!routingChanged) return null;
+    const explicitTargets = deliveryTargets.map((target): DeliveryTarget => {
+      switch (target.kind) {
+        case "channel": {
+          const account = target.account.trim();
+          const conversation = target.conversation.trim();
+          if (!account || !conversation) throw new Error("Channel delivery needs an account and conversation.");
+          return { ...target, account, conversation };
+        }
+        case "webhook": {
+          const url = target.url.trim();
+          const parsed = new URL(url);
+          if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("Webhook delivery needs an HTTP or HTTPS URL.");
+          return { kind: "webhook", url };
+        }
+        case "surface": {
+          if (schedulePolicy !== "continuation") throw new Error("Surface delivery needs a schedule that continues its conversation.");
+          const surfaceId = target.surface_id.trim();
+          if (!surfaceId) throw new Error("Surface delivery needs a surface ID from this conversation.");
+          return { kind: "surface", surface_id: surfaceId };
+        }
+        case "local_storage": return target;
+      }
+    });
+    return { deliver_to_origin: false, store_local_output: storeLocalOutput, explicit_targets: explicitTargets };
+  }
   let gateEnabled = $state(false);
   let gateModel = $state("");
   let gateCriteria = $state("");
@@ -134,15 +279,14 @@
 
   function buildSessionPolicy(): SessionPolicy {
     if (schedulePolicy === "continuation") {
-      if (!sessionId) {
-        throw new Error("Open a conversation to schedule work that continues it.");
+      if (!runConversationId) {
+        throw new Error("Choose a conversation for this schedule to continue.");
       }
-      return { policy: "continuation", session_id: sessionId };
+      return { policy: "continuation", session_id: runConversationId };
     }
-    const agentId = scheduleAgentId.trim();
-    if (!agentId) throw new Error("Fresh-session schedules need a target agent.");
-    return topicId
-      ? { policy: "fresh", topic_id: topicId, agent_id: agentId }
+    const agentId = scheduleAgentId || "gateway";
+    return scheduleTopicId
+      ? { policy: "fresh", topic_id: scheduleTopicId, agent_id: agentId }
       : { policy: "fresh", agent_id: agentId };
   }
 
@@ -163,9 +307,11 @@
 
     let spec: ScheduleSpec;
     let session: SessionPolicy;
+    let routing: DeliveryRoutingRequest | null;
     try {
       spec = buildScheduleSpec();
       session = buildSessionPolicy();
+      routing = buildRouting();
     } catch (err) {
       error = err instanceof Error ? err.message : "Schedule details are incomplete.";
       return;
@@ -183,7 +329,7 @@
         pending_cap: pendingCap,
         spec,
         session,
-        routing: null,
+        routing,
         gate: gateEnabled
           ? {
               model: gateModel.trim(),
@@ -342,17 +488,37 @@
       <button
         type="button"
         class:active={schedulePolicy === "continuation"}
-        disabled={!sessionId}
         onclick={() => (schedulePolicy = "continuation")}
       >
-        This conversation
+        Continue a conversation
       </button>
     </div>
     {#if schedulePolicy === "fresh"}
       <label>
-        <span>Agent</span>
-        <input bind:value={scheduleAgentId} placeholder="gateway" />
+        <span>Run topic</span>
+        <select aria-label="Run topic" bind:value={scheduleTopicId}>
+          <option value="">No topic — general assistant</option>
+          {#each topics as topic (topic.id)}
+            <option value={topic.id}>{topic.name}</option>
+          {/each}
+        </select>
       </label>
+      <AgentPicker definitions={agentDefinitions} bind:selectedAgentId={scheduleAgentId} disabled={agentsLoading} />
+      {#if agentsLoading}<p class="empty">Loading agents…</p>{/if}
+      {#if agentLoadError}<p class="error" role="alert">{agentLoadError}</p>{/if}
+    {:else}
+      <label>
+        <span>Run conversation</span>
+        <select aria-label="Run conversation" value={runConversationId} disabled={conversationsLoading}
+          onchange={(event) => chooseRunConversation(event.currentTarget.value)}>
+          <option value="">Choose a conversation</option>
+          {#each conversations as conversation (conversation.id)}
+            <option value={conversation.id}>{conversation.topic_name} · {conversation.message_preview || conversation.id}</option>
+          {/each}
+        </select>
+      </label>
+      {#if conversationsLoading}<p class="empty">Loading conversations…</p>{/if}
+      {#if conversationLoadError}<p class="error" role="alert">{conversationLoadError}</p>{/if}
     {/if}
     <label>
       <span>While a previous run is active</span>
@@ -394,6 +560,47 @@
         ></textarea>
       </label>
     {/if}
+    <fieldset class="delivery-settings">
+      <legend>Delivery destinations</legend>
+      <label class="gate-toggle">
+        <input type="checkbox" bind:checked={storeLocalOutput} onchange={() => { routingChanged = true; }} aria-label="Keep a local log" />
+        <span>Keep a local log</span>
+      </label>
+      {#each deliveryTargets as target, index}
+        <div class="delivery-target">
+          <label>
+            <span>Destination type</span>
+            <select aria-label="Destination type" value={target.kind}
+              onchange={(event) => { deliveryTargets[index] = newDeliveryTarget(event.currentTarget.value as DeliveryTarget["kind"]); }}>
+              <option value="webhook">Webhook</option>
+              <option value="channel">Channel</option>
+              <option value="surface" disabled={schedulePolicy !== "continuation" || !runConversationId}>
+                {schedulePolicy !== "continuation" ? "Conversation surface — requires a continuation schedule" : !runConversationId ? "Conversation surface — choose a conversation first" : "Conversation surface"}
+              </option>
+              <option value="local_storage">Local log</option>
+            </select>
+          </label>
+          {#if target.kind === "webhook"}
+            <label><span>Webhook URL</span><input type="url" aria-label="Webhook URL" bind:value={target.url} placeholder="https://example.com/results" /></label>
+          {:else if target.kind === "channel"}
+            <label><span>Channel</span><select aria-label="Channel integration" bind:value={target.integration}>
+              <option value="telegram">Telegram</option><option value="dev_dm">Development direct message</option><option value="dev_thread">Development thread</option>
+            </select></label>
+            <label><span>Account</span><input aria-label="Channel account" bind:value={target.account} /></label>
+            <label><span>Conversation</span><input aria-label="Channel conversation" bind:value={target.conversation} /></label>
+          {:else if target.kind === "surface"}
+            <label><span>Conversation surface</span><select aria-label="Conversation surface" bind:value={target.surface_id} disabled={surfacesLoading || schedulePolicy !== "continuation" || !runConversationId}>
+              <option value="">Choose a surface</option>
+              {#each deliverySurfaces as surface (surface.id)}<option value={surface.id}>{surface.title}</option>{/each}
+            </select></label>
+            {#if surfaceLoadError}<p class="error" role="alert">{surfaceLoadError}</p>{/if}
+            {#if !surfacesLoading && !surfaceLoadError && deliverySurfaces.length === 0}<p class="empty">This conversation has no surfaces yet.</p>{/if}
+          {/if}
+          <button type="button" onclick={() => { routingChanged = true; deliveryTargets = deliveryTargets.filter((_, i) => i !== index); }}>Remove destination</button>
+        </div>
+      {/each}
+      <button type="button" onclick={() => { routingChanged = true; deliveryTargets = [...deliveryTargets, newDeliveryTarget("webhook")]; }}>Add destination</button>
+    </fieldset>
     <button
       type="button"
       class="primary"
@@ -407,9 +614,13 @@
   <div class="schedule-list" aria-label="Schedules">
     {#each schedules as schedule (schedule.id)}
       {@const latestRun = cardRun(schedule)}
+      {@const brief = formatScheduleBrief(schedule)}
       <article class="schedule-row">
         <div class="schedule-main">
-          <strong>{schedule.message}</strong>
+          <strong>{brief.heading}</strong>
+          {#if brief.truncated}
+            <details><summary>Full brief</summary><p class="full-brief">{schedule.message}</p></details>
+          {/if}
           <span class="schedule-sub">
             {describeSpec(schedule.spec)} · {describeSession(schedule.session)}
             {schedule.gate
@@ -501,6 +712,9 @@
 </section>
 
 <style>
+  .delivery-settings, .delivery-target { display: grid; gap: 8px; border: 1px solid var(--rule-soft); padding: 12px; }
+  .full-brief { white-space: pre-wrap; overflow-wrap: anywhere; }
+
   .schedule-automation {
     display: grid;
     gap: 14px;

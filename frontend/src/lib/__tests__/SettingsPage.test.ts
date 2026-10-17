@@ -8,11 +8,17 @@ import type { Schedule } from "../protocol/Schedule";
 import type { SettingsPayload, SettingsResponse } from "../types";
 
 import * as agentDefinitionsApi from "../api/agent-definitions";
+import * as sessionsApi from "../api/sessions";
+import * as surfaceApi from "../api/surfaces";
 import * as settingsApi from "../api/settings";
 import * as skillsApi from "../api/skills";
 import * as workflowApi from "../api/workflows";
 import * as operatorApi from "../api/operator";
+import { makeAgentDefinition } from "./fixtures/agent-definitions";
 import { makeSchedule } from "./fixtures/schedules";
+
+vi.mock("../api/sessions", () => ({ listRecentSessions: vi.fn(async () => []) }));
+vi.mock("../api/surfaces", () => ({ listSurfaces: vi.fn(async () => ({ surfaces: [] })) }));
 
 vi.mock("../api/settings", () => ({
   discoverModels: vi.fn(),
@@ -857,6 +863,126 @@ describe("SettingsPage", () => {
       gate: null,
     });
     expect(document.body.textContent).not.toContain("Select a topic before scheduling work.");
+  });
+
+  it("sends an added webhook route when creating a fresh schedule", async () => {
+    vi.mocked(workflowApi.createSchedule).mockResolvedValue(createdSchedule("selected-topic"));
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", topicId: "selected-topic" },
+    });
+    await flushUi();
+
+    const prompt = document.querySelector<HTMLTextAreaElement>(".schedule-automation textarea");
+    if (!prompt) throw new Error("Schedule prompt was not rendered");
+    prompt.value = "Review the queue.";
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    buttonNamed("Add destination").click();
+    await flushUi();
+    const webhook = document.querySelector<HTMLInputElement>('input[aria-label="Webhook URL"]');
+    if (!webhook) throw new Error("Webhook URL was not rendered");
+    webhook.value = "https://example.test/results";
+    webhook.dispatchEvent(new Event("input", { bubbles: true }));
+    buttonNamed("Create schedule").click();
+    await flushUi();
+
+    expect(workflowApi.createSchedule).toHaveBeenCalledWith(expect.objectContaining({
+      session: { policy: "fresh", topic_id: "selected-topic", agent_id: "gateway" },
+      routing: {
+        deliver_to_origin: false,
+        store_local_output: true,
+        explicit_targets: [{ kind: "webhook", url: "https://example.test/results" }],
+      },
+    }));
+  });
+
+  it("routes a chosen continuation conversation to its surface through Settings", async () => {
+    vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockResolvedValue([makeAgentDefinition("gateway", "built_in")]);
+    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValue([{
+      source: { kind: "conversation", session: {
+        id: "conversation-orchard", topic_name: "Orchard", agent_id: "gateway",
+        origin: { kind: "direct" }, created_at: "2026-01-01T00:00:00Z",
+        last_activity: "2026-01-01T00:00:00Z", message_preview: "Orchard review",
+        has_interrupted_turn: false, has_running_turn: false,
+      } },
+      last_activity: "2026-01-01T00:00:00Z", automated: [{
+        id: "conversation-greenhouse", topic_name: "Greenhouse", agent_id: "gateway",
+        origin: { kind: "schedule_run", schedule_id: "schedule-greenhouse" },
+        created_at: "2026-01-01T00:00:00Z", last_activity: "2026-01-01T00:00:00Z",
+        message_preview: "Greenhouse review", has_interrupted_turn: false, has_running_turn: false,
+      }],
+    }]);
+    vi.mocked(surfaceApi.listSurfaces).mockResolvedValue({ surfaces: [{
+      id: "surface-orchard", title: "Orchard digest", updated_at: "2026-01-01T00:00:00Z",
+    }] });
+    vi.mocked(workflowApi.createSchedule).mockResolvedValue(makeSchedule());
+    component = mount(SettingsPage, { target: document.body, props: { tab: "automation" } });
+    await flushUi();
+
+    // Assert route availability explicitly so an unreachable conversation
+    // selection fails at the destination assertion.
+    const continuation = [...document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => /This conversation|Continue a conversation/.test(button.textContent ?? ""));
+    continuation?.click();
+    await flushUi();
+    const conversation = document.querySelector<HTMLSelectElement>('select[aria-label="Run conversation"]');
+    if (conversation) {
+      conversation.value = "conversation-orchard";
+      conversation.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    await flushUi();
+    buttonNamed("Add destination").click();
+    await flushUi();
+    const destination = document.querySelector<HTMLSelectElement>('select[aria-label="Destination type"]')!;
+    expect(destination.querySelector<HTMLOptionElement>('option[value="surface"]')?.disabled).toBe(false);
+    expect(conversation?.textContent).toContain("Orchard review");
+    expect(sessionsApi.listRecentSessions).toHaveBeenCalledWith(null);
+    expect(surfaceApi.listSurfaces).toHaveBeenCalledWith("conversation-orchard");
+    destination.value = "surface";
+    destination.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUi();
+    const surface = document.querySelector<HTMLSelectElement>('select[aria-label="Conversation surface"]')!;
+    expect(surface.textContent).toContain("Orchard digest");
+    surface.value = "surface-orchard";
+    surface.dispatchEvent(new Event("change", { bubbles: true }));
+    const prompt = document.querySelector<HTMLTextAreaElement>(".schedule-automation textarea")!;
+    prompt.value = "Review the orchard.";
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    buttonNamed("Create schedule").click();
+    await flushUi();
+    expect(workflowApi.createSchedule).toHaveBeenCalledWith(expect.objectContaining({
+      session: { policy: "continuation", session_id: "conversation-orchard" },
+      routing: {
+        deliver_to_origin: false, store_local_output: true,
+        explicit_targets: [{ kind: "surface", surface_id: "surface-orchard" }],
+      },
+    }));
+
+    // Changing the continued conversation must not reuse its predecessor's surface.
+    vi.mocked(surfaceApi.listSurfaces).mockResolvedValue({ surfaces: [] });
+    conversation!.value = "conversation-greenhouse";
+    conversation!.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUi();
+    expect(surfaceApi.listSurfaces).toHaveBeenLastCalledWith("conversation-greenhouse");
+    expect(surface.value).toBe("");
+    expect(surface.textContent).not.toContain("Orchard digest");
+    prompt.value = "Review the greenhouse.";
+    prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    buttonNamed("Create schedule").click();
+    await flushUi();
+    expect(workflowApi.createSchedule).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).toContain("Surface delivery needs a surface ID");
+  });
+
+  it("explains why fresh-session schedules cannot choose a surface through Settings", async () => {
+    component = mount(SettingsPage, { target: document.body, props: { tab: "automation" } });
+    await flushUi();
+    buttonNamed("Add destination").click();
+    await flushUi();
+    const option = document.querySelector<HTMLOptionElement>('select[aria-label="Destination type"] option[value="surface"]')!;
+    expect(option.disabled).toBe(true);
+    expect(option.textContent).toContain("requires a continuation schedule");
+    expect(surfaceApi.listSurfaces).not.toHaveBeenCalled();
   });
 
   it("autosaves edited image reference schemes from Automation", async () => {

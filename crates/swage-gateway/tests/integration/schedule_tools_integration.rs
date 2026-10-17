@@ -1014,3 +1014,69 @@ async fn schedule_outcomes_tool_policy_is_persisted_and_updated() {
         "an omitted cap survives policy edits"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_agent_registry_refuses_unknown_agents_through_the_tool() {
+    let state = test_state();
+    let topic = state.topic_store.general_scope().await.unwrap();
+    let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
+    let ctx = host_context(&state, "researcher", tool_session(&state, topic.id).await);
+    let valid = dispatcher.dispatch("schedule", json!({
+        "action": "create", "message": "Check the orchard", "timing": "every",
+        "every": "every 1 hours", "session": "fresh", "topic_id": topic.id, "agent_id": "gateway",
+    }), &ctx, "researcher").await.unwrap();
+    let valid_id = valid.result["schedule"]["id"].as_str().unwrap();
+    let mut responses = Vec::new();
+    for agent_id in ["nonexistent-heron", "Luna"] {
+        responses.push(
+            dispatcher
+                .dispatch(
+                    "schedule",
+                    json!({
+                        "action": "create", "message": "Check the orchard", "timing": "every",
+                        "every": "every 1 hours", "session": "fresh", "topic_id": topic.id, "agent_id": agent_id,
+                    }),
+                    &ctx,
+                    "researcher",
+                )
+                .await,
+        );
+    }
+    assert!(
+        responses
+            .iter()
+            .all(|result| matches!(result, Err(swage_core::ToolError::InvalidParameters { message, .. }) if message.contains("no agent definition named"))),
+        "unknown agents must be refused through the tool: {responses:?}"
+    );
+    let schedules = state.storage.list_schedules().await.unwrap();
+    assert_eq!(schedules.len(), 1);
+    assert_eq!(schedules[0].id.to_string(), valid_id);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_continuation_refuses_platform_agent_through_the_tool() {
+    let state = test_state();
+    let topic = state.topic_store.general_scope().await.unwrap();
+    let session = state
+        .storage
+        .create_session(swage_storage::NewSession {
+            topic_id: topic.id,
+            agent_id: "memory-curator".into(),
+            origin: swage_storage::SessionOrigin::Direct,
+            metadata: None,
+            active_workspace_attachment_id: None,
+        })
+        .await
+        .unwrap();
+    let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
+    let ctx = host_context(&state, "gateway", tool_session(&state, topic.id).await);
+    let result = dispatcher.dispatch("schedule", json!({
+        "action": "create", "message": "Check the orchard", "timing": "every",
+        "every": "every 1 hours", "session": "continuation", "continuation_session_id": session.id,
+    }), &ctx, "gateway").await;
+    assert!(
+        matches!(&result, Err(swage_core::ToolError::InvalidParameters { message, .. }) if message.contains("platform's own agent")),
+        "platform continuation must be refused through the tool: {result:?}"
+    );
+    assert!(state.storage.list_schedules().await.unwrap().is_empty());
+}

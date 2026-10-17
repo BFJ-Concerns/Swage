@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { formatScheduleBrief } from "../schedule-brief";
   import { messagePreview } from "../message-preview";
   import { onMount } from "svelte";
   import {
@@ -349,10 +350,11 @@
             <p class="empty-copy">Nothing is scheduled.</p>
           {:else}
             {#each overview.schedules.schedules as schedule (schedule.id)}
+              {@const brief = formatScheduleBrief(schedule)}
               {@const latestRun = passedOneShot(schedule) ? scheduleRuns[schedule.id]?.[0] : undefined}
               <section class="control-card">
                 <div class="primary-line">
-                  <span>{schedule.message}</span>
+                  <span>{brief.heading}</span>
                   <StatusBadge
                     register={latestRun
                       ? runRegister(latestRun)
@@ -360,6 +362,9 @@
                     label={latestRun ? describeRunState(latestRun) : schedule.status}
                   />
                 </div>
+                {#if brief.truncated}
+                  <details><summary>Full brief</summary><p class="detail-copy full-brief">{schedule.message}</p></details>
+                {/if}
                 <p class="detail-copy">
                   {describeSpec(schedule)} · {describeSession(schedule)}
                   · while a run is active: {schedule.overlap_policy}{schedule.overlap_policy === "queue" ? ` (cap ${schedule.pending_cap})` : ""}
@@ -542,6 +547,8 @@
 </section>
 
 <style>
+  .full-brief { white-space: pre-wrap; overflow-wrap: anywhere; }
+
   /*
     Riso/cyanotype operator deck. Two-tone print vocabulary throughout:
       - Bebas Neue display headings, Hanken Grotesk body, DM Mono for labels.
