@@ -259,7 +259,12 @@ Surfaces are a session's work surfaces, assembled from ordered module
 instances. A surface belongs to the session that created it and stays with
 that session's record: another session in the same topic does not see it. An
 agent or workflow can write to a surface's modules, and users can annotate
-individual modules with notes.
+individual modules with notes. A module a run delivers records what
+delivered it — the schedule and its run, the workflow run, or the turn
+whose response was routed there — and when; the surface shows that line
+above the module, so repeated deliveries read apart, and a module written
+by hand carries none. A run that refreshes a standing module records the
+new delivery; an edit by hand keeps the one the module has.
 
 ### The shared library
 

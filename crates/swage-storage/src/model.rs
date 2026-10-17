@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use swage_core::{Role, StorageError};
 pub use swage_protocol::client::conversation::MessageOrigin;
+pub use swage_protocol::client::surface::ModuleDelivery;
 use uuid::Uuid;
 
 /// One durable string value scoped to a session.
@@ -1362,6 +1363,9 @@ pub struct SurfaceModule {
     /// The module's durable source, in the kind's own format (markdown for
     /// the document module).
     pub source: String,
+    /// The run or turn that delivered this module, recorded as it was
+    /// written; none for a module written by hand.
+    pub delivery: Option<ModuleDelivery>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1380,6 +1384,7 @@ pub struct NewSurfaceModule {
     pub kind: String,
     pub position: i32,
     pub source: String,
+    pub delivery: Option<ModuleDelivery>,
 }
 
 /// The outcome of replacing a module's source against the revision the

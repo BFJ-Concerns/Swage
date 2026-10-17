@@ -194,6 +194,34 @@ pub struct SurfaceAnnotationView {
     pub updated_at: DateTime<Utc>,
 }
 
+/// What delivered a module to its surface, recorded as the module is
+/// written: the run or turn whose output it is, and when. A module a person
+/// or an agent writes by hand carries none.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(tag = "by", rename_all = "snake_case")]
+pub enum ModuleDelivery {
+    /// A scheduled run's output, routed to the surface.
+    ScheduleRun {
+        run_id: Uuid,
+        schedule_id: Uuid,
+        delivered_at: DateTime<Utc>,
+    },
+    /// A workflow run's delivery to its granted surface target; the effect
+    /// key is the run's durable name for that one delivery, so a recovery
+    /// after a crash finds the module already written instead of writing
+    /// it again.
+    WorkflowRun {
+        run_id: Uuid,
+        effect_key: Uuid,
+        delivered_at: DateTime<Utc>,
+    },
+    /// A conversation turn's response, routed to the surface.
+    Turn {
+        turn_id: Uuid,
+        delivered_at: DateTime<Utc>,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct SurfaceModuleView {
@@ -206,6 +234,8 @@ pub struct SurfaceModuleView {
     #[ts(type = "number")]
     pub revision: i64,
     pub updated_at: DateTime<Utc>,
+    /// The run or turn that delivered this module, when one did.
+    pub delivery: Option<ModuleDelivery>,
     /// Notes hung on this module, oldest first.
     pub annotations: Vec<SurfaceAnnotationView>,
 }

@@ -30,6 +30,7 @@ function module(id: string, source: string, position: number): SurfaceModuleView
     source,
     revision: 0,
     updated_at: "2026-10-04T10:00:00Z",
+    delivery: null,
     annotations: [],
   };
 }
@@ -100,6 +101,53 @@ describe("SurfacesPane module controls", () => {
     if (component) unmount(component);
     component = undefined;
     document.body.innerHTML = "";
+  });
+
+  it("names the schedule and run that delivered a module, and says nothing on one written by hand", async () => {
+    const delivered: SurfaceModuleView = {
+      ...module("m-1", "DELIVERY-SURFACE-OK", 0),
+      delivery: {
+        by: "schedule_run",
+        run_id: "44444444-4444-4444-8444-444444444444",
+        schedule_id: "22222222-2222-4222-8222-222222222222",
+        delivered_at: "2026-10-04T10:05:00Z",
+      },
+    };
+    const store = fakeStore(surface([delivered, module("m-2", "# Mine", 1)]));
+    component = mount(SurfacesPane, {
+      target: document.body,
+      props: { store, sessionId: SESSION_ID },
+    });
+    flushSync();
+
+    const lines = Array.from(document.querySelectorAll(".module-delivery"));
+    expect(lines).toHaveLength(1);
+    const text = lines[0].textContent!.replace(/\s+/g, " ").trim();
+    expect(text).toContain("Delivered by schedule 22222222, run 44444444 at");
+    expect(lines[0].querySelector("time")?.getAttribute("datetime")).toBe("2026-10-04T10:05:00Z");
+    expect(document.querySelectorAll(".module")[1].querySelector(".module-delivery")).toBeNull();
+  });
+
+  it("offers move and delete on every module, and calls the store with the module's place", async () => {
+    const store = fakeStore(surface([module("m-1", "# First", 0), module("m-2", "# Second", 1)]));
+    component = mount(SurfacesPane, {
+      target: document.body,
+      props: { store, sessionId: SESSION_ID },
+    });
+    flushSync();
+
+    const articles = document.querySelectorAll("article.module");
+    expect(articles).toHaveLength(2);
+    expect(button("Move module up", articles[0]).disabled).toBe(true);
+    expect(button("Move module down", articles[1]).disabled).toBe(true);
+
+    button("Move module down", articles[0]).click();
+    await settled();
+    expect(store.moveModule).toHaveBeenCalledWith(SURFACE_ID, "m-1", 1);
+
+    button("Delete module", articles[1]).click();
+    await settled();
+    expect(store.deleteModule).toHaveBeenCalledWith(SURFACE_ID, "m-2");
   });
 
   it("links every module in order to its own article, including the seventh", () => {
