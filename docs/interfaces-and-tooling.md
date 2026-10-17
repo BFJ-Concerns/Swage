@@ -4,6 +4,9 @@ description: Provider setup and credentials, protocol selection, network access,
 
 # Interfaces and tooling
 
+For a source build, follow the [README quick start](../README.md#quick-start),
+including its `PATH` step, before running the CLI examples on this page.
+
 ## Network binding
 
 The gateway listens on a single TCP address configured through `ServerConfig`

@@ -28,6 +28,8 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- The README names Debian/Ubuntu build prerequisites, supported Node versions, and the binary path setup, with frontend install and build commands.
+
 - Provider setup documentation uses governed credentials through Settings → Providers, distinguishes GPT Responses from Chat Completions, and explains model-bound routing and the disabled Codex integration.
 
 - Browser clicks, typing, selections and scrolling no longer ask for approval by default.
@@ -58,6 +60,7 @@ All notable changes to Swage are documented in this file.
 ### Fixed
 
 - Workflow run pages refresh until completion and show parked waits, shared placements, provenance links, attempt options, liveness and returned source outcomes.
+- Sessions can read shipped skills and their carried guidance without location approval, including after a gateway restart; other locations still require approval.
 
 - Queued scheduled turns acknowledge workflow endings only after successful settlement; failed turns leave them available.
 - Schedule gates retain workflow runs that complete while their digest is being read.

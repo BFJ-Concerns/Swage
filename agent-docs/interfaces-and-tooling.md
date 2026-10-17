@@ -4,6 +4,9 @@ description: Provider setup and credentials, protocol selection, Settings, turn 
 
 # Interfaces and tooling
 
+CLI examples assume `swage` is on `PATH`; see the build and `PATH` steps in
+the [README quick start](../README.md#quick-start).
+
 ## Settings memory view
 
 Settings has a **Memory** tab that lists every memory page — general and
