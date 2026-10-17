@@ -2404,8 +2404,21 @@ impl Agent {
         use crate::judge::{JudgeRequest, Judgement};
 
         let justification = crate::judge::justification_from_arguments(&call.arguments);
-        let judgement = match &self.request_judge {
-            Some(judge) => {
+        // The task the turn was given, from the turn's own record: the
+        // judge weighs the request and the agent's account against it. A
+        // record that cannot be read leaves the judge without it, which is
+        // no judgement and so a refusal.
+        let task = match self.storage.get_turn(execution.turn_id).await {
+            Ok(turn) => Ok(turn
+                .and_then(|turn| turn.user_input)
+                .map(|input| crate::judge::task_excerpt(&input))),
+            Err(error) => Err(format!(
+                "the turn's task could not be read for the judge: {error}"
+            )),
+        };
+        let judgement = match (&self.request_judge, task) {
+            (_, Err(reason)) => Judgement::unavailable(reason),
+            (Some(judge), Ok(task)) => {
                 judge
                     .judge(JudgeRequest {
                         session_id: execution.session_id,
@@ -2414,11 +2427,12 @@ impl Agent {
                         tool_name: call.name.clone(),
                         arguments: call.arguments.clone(),
                         justification: justification.clone(),
+                        task,
                         reach: reach.clone(),
                     })
                     .await
             }
-            None => Judgement::unavailable("no judge is configured for this session"),
+            (None, Ok(_)) => Judgement::unavailable("no judge is configured for this session"),
         };
         // The judgement is part of the local record (C15, C68): it is written
         // before the request can run, and a failed write refuses the request.
@@ -3572,6 +3586,11 @@ mod judge_seam_tests {
         let asked = judge.asked.lock().expect("asked");
         assert_eq!(asked.len(), 1);
         assert_eq!(asked[0].tool_name, "outside_read");
+        assert_eq!(
+            asked[0].task.as_deref(),
+            Some("read the plan"),
+            "the judge is shown the task the turn was given"
+        );
         assert_eq!(
             asked[0].justification.as_deref(),
             Some("the plan the task is about")
