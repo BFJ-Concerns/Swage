@@ -634,9 +634,19 @@ pub(crate) async fn build_gateway_dispatcher(
         session_id,
         turn_id,
     )?;
+    let sandbox_build = build_turn_sandbox(
+        state,
+        config,
+        agent_config,
+        workspace_policy.as_ref(),
+        egress.clone(),
+        Some(&credentials),
+    )
+    .await?;
+    tracing::debug!(backend = ?sandbox_build.backend, "selected turn sandbox backend");
     let python_config = if config.tools.python_execute.enabled
         && (config.tools.python_execute.require_sandbox
-            || (config.sandbox.enabled && state.declared_execution_boundary.is_none()))
+            || sandbox_build.backend == SandboxBackend::Bubblewrap)
     {
         let roots = PolicyRoots::from_environment(&state.config_root)?;
         let mut policy = build_sandbox_config(agent_config, workspace_policy.as_ref(), &roots)
@@ -648,16 +658,6 @@ pub(crate) async fn build_gateway_dispatcher(
     } else {
         None
     };
-    let sandbox_build = build_turn_sandbox(
-        state,
-        config,
-        agent_config,
-        workspace_policy.as_ref(),
-        egress.clone(),
-        Some(&credentials),
-    )
-    .await?;
-    tracing::debug!(backend = ?sandbox_build.backend, "selected turn sandbox backend");
     let sandbox = sandbox_build.sandbox;
     let sandbox_guard = sandbox
         .as_ref()
@@ -937,6 +937,180 @@ mod tests {
             config.dangerously_skip_permissions = true;
             assert!(config.sandbox.enabled);
             environment_case_dispatcher(config, true).await;
+        });
+    }
+
+    #[test]
+    fn degraded_python_records_http_without_bubblewrap() {
+        degraded_python_case(
+            "turn::dispatcher::tests::degraded_python_records_http_without_bubblewrap",
+            false,
+        );
+    }
+
+    #[test]
+    fn degraded_python_required_sandbox_refuses_without_bubblewrap() {
+        degraded_python_case(
+            "turn::dispatcher::tests::degraded_python_required_sandbox_refuses_without_bubblewrap",
+            true,
+        );
+    }
+
+    fn degraded_python_case(name: &str, require_sandbox: bool) {
+        if std::env::var_os("SWAGE_IPC_SOCKET").is_some() {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                swage_sandbox::run_agent_loop(Vec::new()).await.unwrap();
+            });
+            return;
+        }
+        if std::env::var_os("SWAGE_DEGRADED_PYTHON_CHILD").is_none() {
+            use std::os::unix::fs::PermissionsExt;
+            let root = tempfile::tempdir().unwrap();
+            // Move out of Cargo's deps directory so the real backend selection
+            // runs, including starting the fallback agent over IPC.
+            let binary = root.path().join("dispatcher-test");
+            std::fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
+            let agent = root.path().join("agent");
+            std::fs::write(
+                &agent,
+                format!(
+                    "#!/bin/sh\nexec \"$SWAGE_TEST_DISPATCHER_BINARY\" --exact {name} --nocapture\n"
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let runtime = swage_python::runtime_resolver::ResolvedPythonRuntime::resolve(
+                &swage_config::model::PythonExecuteToolConfig::default(),
+            )
+            .unwrap();
+            let output = std::process::Command::new(&binary)
+                .args(["--exact", name, "--nocapture"])
+                .env("SWAGE_DEGRADED_PYTHON_CHILD", "1")
+                .env("SWAGE_TEST_DISPATCHER_BINARY", &binary)
+                .env("SWAGE_SANDBOX_AGENT_BINARY", agent)
+                .env("SWAGE_ENABLE_TEST_SANDBOX", "1")
+                .env("SWAGE_TEST_PYTHON", runtime.executable_path)
+                .env("PATH", "")
+                .env_remove("SWAGE_EXECUTION_BOUNDARY")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "degraded Python case failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+            assert!(swage_sandbox::find_bwrap().is_err());
+            let root = tempfile::tempdir().unwrap();
+            let workspace = root.path().join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            let (state, session_id) = crate::turn::tests::make_state_with_storage_and_root(
+                Vec::new(),
+                Arc::new(MockStorage::new()),
+                Some(root.path().join("config")),
+            )
+            .await;
+            let mut config = swage_config::ResolvedConfig::default();
+            config.sandbox.enabled = true;
+            config.sandbox.allow_degraded_execution = true;
+            config.sandbox.egress_hosts = vec!["127.0.0.1".into()];
+            config.tools.python_execute.enabled = true;
+            config.tools.python_execute.require_sandbox = require_sandbox;
+            config.tools.python_execute.warm_target = 0;
+            config.tools.python_execute.runtime_path =
+                Some(std::env::var("SWAGE_TEST_PYTHON").unwrap());
+            config.dangerously_skip_permissions = true;
+            let runtime = Arc::new(
+                swage_python::PythonWorkerRuntime::new(config.tools.python_execute.clone()).unwrap(),
+            );
+            let pool = swage_python::WorkerPool::new(runtime.clone()).unwrap();
+            let tool: Arc<dyn Tool> = Arc::new(crate::tool::python_execute::PythonExecuteTool::new(
+                runtime,
+                pool,
+                state.storage.clone(),
+            ));
+            *state.runtime_tool_dispatcher.write().unwrap() =
+                Arc::new(ToolDispatcher::allow_all(vec![tool]));
+            let agent_config = AgentConfig::new("gateway")
+                .with_workspace(&workspace, vec![workspace.clone()]);
+            let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
+            let turn_id = Uuid::new_v4();
+            let build = build_gateway_dispatcher(
+                &state,
+                GatewayDispatcherRequest {
+                    config: &config,
+                    agent_config: &agent_config,
+                    session_metadata: None,
+                    topic_id: None,
+                    active_workspace_attachment_id: None,
+                    ws_tx,
+                    session_id: Some(session_id),
+                    turn_id: Some(turn_id),
+                },
+            )
+            .await
+            .expect("opted-in fallback dispatcher must build");
+            assert_eq!(
+                build.isolation,
+                ExecutionIsolation::Degraded { reason: "bubblewrap_unavailable".into() }
+            );
+            assert!(build.sandbox_guard.is_some());
+            let server = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let address = server.local_addr().unwrap();
+            let fixture = tokio::spawn(async move {
+                let (stream, _) = server.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                assert_eq!(line, "GET /recorded HTTP/1.1\r\n");
+                reader.get_mut().write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nfixture",
+                ).await.unwrap();
+            });
+            let outside = root.path().join("outside-workspace");
+            let code = format!(
+                "import os, pathlib, urllib.request\nos.environ['no_proxy'] = ''\nos.environ['NO_PROXY'] = ''\npathlib.Path({:?}).write_text('unsandboxed')\nprint(urllib.request.urlopen('http://{address}/recorded', timeout=3).read().decode())",
+                outside.to_str().unwrap(),
+            );
+            let mut ctx = swage_tool::context::MockToolContext::new("gateway", session_id.to_string());
+            ctx.working_directory = workspace.clone();
+            ctx.allowed_paths = vec![workspace];
+            ctx.turn_id = Some(turn_id);
+            ctx.call_id = Some("degraded-python".into());
+            let result = build.dispatcher.dispatch(
+                "python_execute", serde_json::json!({"code": code}), &ctx, "gateway",
+            ).await;
+            if require_sandbox {
+                let error = result.expect_err("required Python sandbox must refuse fallback");
+                assert!(error.to_string().contains("bubblewrap is required"), "{error}");
+                assert!(!outside.exists());
+                fixture.abort();
+            } else {
+                assert!(result.is_ok(), "degraded Python must run: {result:?}");
+                assert_eq!(result.unwrap().result["output"].as_str().unwrap().trim(), "fixture");
+                assert_eq!(std::fs::read_to_string(outside).unwrap(), "unsandboxed");
+                tokio::time::timeout(std::time::Duration::from_secs(5), fixture)
+                    .await.unwrap().unwrap();
+            }
+            let events = state.storage.list_audit_events().await.unwrap();
+            let records: Vec<_> = events.iter()
+                .filter(|event| event.event_kind == "egress_connection").collect();
+            if require_sandbox {
+                assert!(records.is_empty());
+            } else {
+                assert_eq!(records.len(), 1, "the turn must record Python HTTP egress");
+                assert_eq!(records[0].session_id, Some(session_id));
+                assert_eq!(records[0].entity_id, turn_id.to_string());
+                assert_eq!(records[0].metadata["host"], "127.0.0.1");
+                assert_eq!(records[0].metadata["port"], address.port());
+                assert_eq!(records[0].metadata["method"], "GET");
+                assert_eq!(records[0].metadata["verdict"], "allowed");
+            }
+            build.sandbox_guard.as_ref().unwrap().shutdown().await.unwrap();
         });
     }
 
