@@ -237,8 +237,10 @@ impl PluginSlot {
     /// failure, never a silent recast. Elements also carry priority, rendered
     /// messages and safe report metadata. Under the context grant the plugin
     /// can count tokens, compact history or run the configured named assembly.
-    /// It may return its composition report beside the messages; otherwise
-    /// the report accounts for the supplied elements without claiming compaction.
+    /// It may return element accounting in a composition report; otherwise
+    /// the report accounts for the supplied elements. The host always records
+    /// the configured budget, the compactions it served in call order, actual
+    /// token totals, remaining budget and elapsed duration.
     ///
     /// The assembly runs on the turn's thread synchronously, so the isolate
     /// is awaited from here through `block_in_place`, which the
@@ -305,7 +307,7 @@ impl PluginSlot {
             budget: config.budget,
         })
         .expect("context input");
-        let output = tokio::task::block_in_place(|| {
+        let (output, compactions) = tokio::task::block_in_place(|| {
             handle.block_on(super::composition::compose(
                 self,
                 input,
@@ -342,10 +344,11 @@ impl PluginSlot {
                     .into_iter()
                     .map(|element| element.report)
                     .collect();
-                report.budget = config.budget;
                 report
             }
         };
+        report.budget = config.budget;
+        report.compaction_applied = compactions;
         report.total_tokens = tokeniser.count_messages(&messages);
         report.budget_remaining = report
             .budget
@@ -1104,6 +1107,118 @@ mod tests {
                 "{name}, budget={budget:?}"
             );
         }
+    }
+
+    async fn context_report_slot(script: &str) -> PluginSlot {
+        let manifest = PluginManifest::parse(
+            r#"
+            name = "report-composer"
+            version = "1"
+            description = "Composes context."
+            script = "plugin.js"
+            grants = ["context"]
+            [[provides.slots]]
+            name = "context_program"
+            "#,
+        )
+        .unwrap();
+        let runtime = PluginRuntime::start(manifest, script.to_owned())
+            .await
+            .unwrap();
+        PluginSlot::new(
+            "report-composer".into(),
+            runtime,
+            Arc::new(SummarisingHost::default()),
+            context(),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn context_report_retains_host_compactions_without_a_plugin_report() {
+        let composer = context_report_slot(
+            r#"swage.provide.slot("context_program", async (input) => {
+                let messages = input.elements[0].messages;
+                for (const budget of [1, 1000]) {
+                    const result = await swage.context({ operation: "compact_history", messages, budget });
+                    messages = result.messages;
+                }
+                return { messages };
+            });"#,
+        )
+        .await;
+        let history = vec![
+            ChatMessage::new(Role::User, "old question"),
+            ChatMessage::new(Role::Assistant, "old answer"),
+            ChatMessage::new(Role::User, "recent question"),
+            ChatMessage::new(Role::Assistant, "recent answer"),
+        ];
+        let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("gpt-4o");
+        let compactor = swage_context::compaction::TruncationCompactor::new();
+        let (compacted, first) = compactor.compact(history.clone(), 1, &tokeniser);
+        let (_, second) = compactor.compact(compacted, 1000, &tokeniser);
+        assert!(first.messages_removed > 0);
+        let output = composer
+            .context_program(
+                &[Box::new(History(history))],
+                &Default::default(),
+                &tokeniser,
+                "default",
+                &Default::default(),
+                || panic!("no named assembly requested"),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&output.report.compaction_applied).unwrap(),
+            serde_json::to_value([first, second]).unwrap(),
+            "the report records every host compaction in call order, even without a plugin report"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn context_report_replaces_plugin_claims_with_host_facts() {
+        let mut claimed = swage_context::report::AssemblyReport::new("default");
+        claimed.budget = Some(999);
+        let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("gpt-4o");
+        let (_, invented) = swage_context::compaction::TruncationCompactor::new().compact(
+            vec![ChatMessage::new(Role::User, "never submitted to the host")],
+            1,
+            &tokeniser,
+        );
+        claimed.compaction_applied.push(invented);
+        let composer = context_report_slot(&format!(
+            r#"swage.provide.slot("context_program", () => ({{
+                messages: [{{ role: "user", content: "hello" }}], report: {}
+            }}));"#,
+            serde_json::to_string(&claimed).unwrap(),
+        ))
+        .await;
+        let config = swage_config::model::ContextConfig {
+            budget: Some(50),
+            ..Default::default()
+        };
+        let output = composer
+            .context_program(
+                &[],
+                &Default::default(),
+                &tokeniser,
+                "default",
+                &config,
+                || panic!("no named assembly requested"),
+            )
+            .unwrap();
+        assert_eq!(
+            json!({ "budget": output.report.budget, "compaction_applied": output.report.compaction_applied }),
+            json!({ "budget": 50, "compaction_applied": [] }),
+            "configured budget and served compactions override plugin claims"
+        );
+        assert_eq!(
+            output.report.total_tokens,
+            tokeniser.count_messages(&output.messages)
+        );
+        assert_eq!(
+            output.report.budget_remaining,
+            Some(50 - output.report.total_tokens as isize)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

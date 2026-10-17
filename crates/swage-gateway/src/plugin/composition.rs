@@ -6,7 +6,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use swage_context::{
-    compaction::TruncationCompactor, report::AssemblyOutput, tokeniser::Tokeniser,
+    compaction::TruncationCompactor,
+    report::{AssemblyOutput, CompactionRecord},
+    tokeniser::Tokeniser,
 };
 use swage_core::ChatMessage;
 use swage_plugin::{HostCallFailure, PluginHost};
@@ -64,7 +66,7 @@ pub(super) async fn compose(
     tokeniser: &dyn Tokeniser,
     named: impl FnOnce() -> AssemblyOutput,
     named_available: bool,
-) -> Result<Value, String> {
+) -> Result<(Value, Vec<CompactionRecord>), String> {
     let (requests, mut receiver) = mpsc::unbounded_channel();
     let host = Arc::new(CompositionHost {
         parent: Arc::clone(&slot.host),
@@ -76,9 +78,12 @@ pub(super) async fn compose(
     tokio::pin!(invocation);
     let mut named = Some(named);
     let mut named_output = None;
+    let mut compactions = Vec::new();
     loop {
         tokio::select! {
-            answer = &mut invocation => return answer.map_err(|error| format!("{}: {error}", slot.plugin)),
+            answer = &mut invocation => return answer
+                .map(|output| (output, compactions))
+                .map_err(|error| format!("{}: {error}", slot.plugin)),
             Some(request) = receiver.recv() => {
                 let result = (|| {
                     let operation: ContextOperation = serde_json::from_value(request.value)
@@ -102,6 +107,7 @@ pub(super) async fn compose(
                             Ok(json!(tokeniser.count_messages(&messages(values)?))),
                         ContextOperation::CompactHistory { messages: values, budget } => {
                             let (messages, record) = TruncationCompactor::new().compact(messages(values)?, budget, tokeniser);
+                            compactions.push(record.clone());
                             serde_json::to_value(swage_protocol::plugin::ContextCompactionOutput {
                                 messages: messages.iter().map(|message| serde_json::to_value(message).expect("message")).collect(),
                                 record,
