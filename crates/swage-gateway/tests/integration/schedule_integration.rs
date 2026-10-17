@@ -3562,3 +3562,117 @@ async fn skip_after_overlap_suppresses_fire_until_predecessor_ends() {
     );
     assert_eq!(fire.skip_reason.unwrap().to_string(), "overlap");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_agent_registry_rejects_unknown_create_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(
+        &dir.path().join("unknown-agents.db"),
+        MockProvider::new(vec![]),
+    );
+    let router = build_router(state.clone());
+    let mut responses = Vec::new();
+    for agent_id in ["nonexistent-heron", "Luna", "memory-curator"] {
+        let (status, body) = request_json(&router, "POST", "/api/schedules", Some(json!({
+            "message": "Check the orchard", "spec": {"kind": "interval", "every": "every 1 hours"},
+            "session": {"policy": "fresh", "agent_id": agent_id},
+        }))).await;
+        responses.push((status, body));
+    }
+    assert!(
+        responses
+            .iter()
+            .all(|(status, _)| *status == StatusCode::UNPROCESSABLE_ENTITY),
+        "unknown or platform-only agents must be refused: {responses:?}"
+    );
+    assert!(state.storage.list_schedules().await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_agent_registry_revalidates_the_stored_agent_on_update() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(
+        &dir.path().join("removed-agent.db"),
+        MockProvider::new(vec![MockProvider::text_round("Research complete")]),
+    );
+    let topic = state.topic_store.general_scope().await.unwrap();
+    state
+        .storage
+        .upsert_agent_definition(swage_storage::NewAgentDefinition {
+            id: "researcher".into(),
+            topic_id: Some(topic.id),
+            display_name: "Researcher".into(),
+            description: String::new(),
+            instructions: String::new(),
+            model_id: None,
+            tool_permissions: None,
+            skills: vec![],
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .unwrap();
+    let router = build_router(state.clone());
+    let (status, created) = request_json(
+        &router,
+        "POST",
+        "/api/schedules",
+        Some(json!({
+            "message": "Original brief", "spec": {"kind": "interval", "every": "every 1 hours"},
+            "session": {"policy": "fresh", "agent_id": "researcher"},
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let run = schedule::trigger_schedule(&state, created["id"].as_str().unwrap().parse().unwrap())
+        .await
+        .unwrap()
+        .run;
+    let session = state
+        .storage
+        .get_session(run.session_id.unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.agent_id, "researcher");
+    assert_eq!(session.topic_id, topic.id);
+    let uri = format!("/api/schedules/{}", created["id"].as_str().unwrap());
+    for agent_id in ["nonexistent-heron", "Luna"] {
+        let (status, body) = request_json(
+            &router,
+            "PUT",
+            &uri,
+            Some(json!({
+                "agent_id": agent_id, "message": "Must not be applied",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(body["message"].as_str().unwrap().contains("agent is fixed"));
+    }
+    state
+        .storage
+        .delete_agent_definition("researcher", Some(topic.id))
+        .await
+        .unwrap();
+    let uri = format!("/api/schedules/{}", created["id"].as_str().unwrap());
+    let (status, body) = request_json(
+        &router,
+        "PUT",
+        &uri,
+        Some(json!({ "message": "Unrunnable edit" })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a removed agent must invalidate an edit: {body}"
+    );
+    let stored = state
+        .storage
+        .get_schedule(created["id"].as_str().unwrap().parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.message, "Original brief");
+}

@@ -127,6 +127,25 @@ describe("OperatorDashboard", () => {
     }
   });
 
+  it("keeps long schedule headings short and distinct with the complete briefs in disclosures", async () => {
+    const prefix = "Review the outstanding work and report each decision. ".repeat(9);
+    const briefs = [prefix + "Check the orchard.", prefix + "Check the harbour."];
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOverview({ schedules: {
+      schedules: briefs.map((message, index) => makeSchedule({ id: `distinct-${index}`, message })),
+    } }));
+    component = mount(OperatorDashboard, { target: document.body });
+    await settleUi();
+    const cards = [...document.querySelectorAll(".control-card")].filter((card) => card.textContent?.includes("Review the outstanding"));
+    expect(cards).toHaveLength(2);
+    const headings = cards.map((card) => card.querySelector(".primary-line > span")?.textContent ?? "");
+    expect(headings.every((heading) => heading.length <= 100)).toBe(true);
+    expect(new Set(headings).size).toBe(2);
+    cards.forEach((card, index) => {
+      expect(card.querySelector("summary")?.textContent).toContain("Full brief");
+      expect(card.querySelector("details p")?.textContent).toBe(briefs[index]);
+    });
+  });
+
   it.each([false, true])("hides a paused schedule's next run while retaining an active schedule's (gated: %s)", async (gated) => {
     const nextRun = "2026-01-01T01:00:00Z";
     const paused = makeSchedule({

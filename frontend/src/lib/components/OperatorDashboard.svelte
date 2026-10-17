@@ -330,7 +330,7 @@
               {@const latestRun = passedOneShot(schedule) ? scheduleRuns[schedule.id]?.[0] : undefined}
               <section class="control-card">
                 <div class="primary-line">
-                  <span>{schedule.message}</span>
+                  <span>{schedule.message.trim().length > 72 ? `${schedule.message.trim().slice(0, 60).replace(/\s+/g, " ")}… · ${schedule.id.slice(-8)}` : schedule.message}</span>
                   <StatusBadge
                     register={latestRun
                       ? runRegister(latestRun)
@@ -338,6 +338,9 @@
                     label={latestRun ? describeRunState(latestRun) : schedule.status}
                   />
                 </div>
+                {#if schedule.message.trim().length > 72}
+                  <details><summary>Full brief</summary><p class="detail-copy full-brief">{schedule.message}</p></details>
+                {/if}
                 <p class="detail-copy">
                   {describeSpec(schedule)} · {describeSession(schedule)}
                   · while a run is active: {schedule.overlap_policy}{schedule.overlap_policy === "queue" ? ` (cap ${schedule.pending_cap})` : ""}
@@ -509,6 +512,8 @@
 </section>
 
 <style>
+  .full-brief { white-space: pre-wrap; overflow-wrap: anywhere; }
+
   /*
     Riso/cyanotype operator deck. Two-tone print vocabulary throughout:
       - Bebas Neue display headings, Hanken Grotesk body, DM Mono for labels.

@@ -760,6 +760,25 @@ async fn validate_session_policy(
                 .get(topic_id)
                 .await?
                 .ok_or(GatewayError::TopicNotFound { id: topic_id })?;
+            match crate::service::resolve_effective_agent_definition(
+                state.storage.as_ref(),
+                agent_id,
+                topic_id,
+            )
+            .await?
+            {
+                None => {
+                    return Err(GatewayError::ValidationError(format!(
+                        "no agent definition named '{agent_id}' is visible to this topic"
+                    )));
+                }
+                Some(definition) if !definition.selectable => {
+                    return Err(GatewayError::ValidationError(format!(
+                        "'{agent_id}' is the platform's own agent and cannot be chosen for a session"
+                    )));
+                }
+                Some(_) => {}
+            }
         }
         SessionPolicy::Continuation { session_id } => {
             state

@@ -3,12 +3,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
 
 import ScheduleAutomationPanel from "../components/ScheduleAutomationPanel.svelte";
+import * as surfaceApi from "../api/surfaces";
+import * as agentApi from "../api/agent-definitions";
+import { makeAgentDefinition } from "./fixtures/agent-definitions";
 import * as workflowApi from "../api/workflows";
 import * as operatorApi from "../api/operator";
 import type { Schedule } from "../protocol/Schedule";
 import type { ScheduleRun } from "../protocol/ScheduleRun";
 import { UNSETTLED_RUN_REFRESH_MS } from "../one-shot-runs";
 import { makeSchedule } from "./fixtures/schedules";
+
+vi.mock("../api/surfaces", () => ({ listSurfaces: vi.fn(async () => ({ surfaces: [] })) }));
+vi.mock("../api/agent-definitions", () => ({ listEffectiveAgentDefinitions: vi.fn() }));
 
 vi.mock("../api/workflows", () => ({
   createSchedule: vi.fn(),
@@ -75,6 +81,8 @@ describe("ScheduleAutomationPanel", () => {
   let component: MountedComponent | undefined;
 
   beforeEach(() => {
+    vi.mocked(agentApi.listEffectiveAgentDefinitions).mockReset();
+    vi.mocked(agentApi.listEffectiveAgentDefinitions).mockResolvedValue([makeAgentDefinition("gateway", "built_in")]);
     vi.mocked(operatorApi.listSchedules).mockResolvedValue({ schedules: [SCHEDULE] });
     vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValue({ runs: [RUN] });
     vi.mocked(operatorApi.triggerSchedule).mockResolvedValue({
@@ -124,6 +132,122 @@ describe("ScheduleAutomationPanel", () => {
     expect(activeRow?.textContent).toContain(new Date(nextRun).toLocaleString());
     expect(pausedRow?.textContent).not.toContain(new Date(nextRun).toLocaleString());
     expect(pausedRow?.textContent).not.toContain("next");
+  });
+
+  it("keeps long schedule headings short and distinct with the complete briefs in disclosures", async () => {
+    const prefix = "Review the outstanding work and report each decision. ".repeat(9);
+    const briefs = [prefix + "Check the orchard.", prefix + "Check the harbour."];
+    vi.mocked(operatorApi.listSchedules).mockResolvedValue({ schedules: briefs.map((message, index) =>
+      makeSchedule({ id: `distinct-${index}`, message })) });
+    component = mount(ScheduleAutomationPanel, { target: document.body, props: { topicId: null, sessionId: null } });
+    await flushUi();
+    const headings = [...document.querySelectorAll(".schedule-main strong")].map((node) => node.textContent ?? "");
+    expect(headings).toHaveLength(2);
+    expect(headings.every((heading) => heading.length <= 100)).toBe(true);
+    expect(new Set(headings).size).toBe(2);
+    const disclosures = [...document.querySelectorAll(".schedule-main details")];
+    expect(disclosures).toHaveLength(2);
+    disclosures.forEach((node, index) => {
+      expect(node.querySelector("summary")?.textContent).toContain("Full brief");
+      expect(node.querySelector("p")?.textContent).toBe(briefs[index]);
+    });
+  });
+
+  it("sends the chosen topic, effective agent and webhook plus local delivery from the form", async () => {
+    vi.mocked(agentApi.listEffectiveAgentDefinitions).mockImplementation(async (topic) => [
+      makeAgentDefinition("gateway", "built_in"),
+      ...(topic === "topic-b" ? [makeAgentDefinition("researcher", "topic", { display_name: "Research assistant" })] : []),
+    ]);
+    vi.mocked(workflowApi.createSchedule).mockResolvedValue(SCHEDULE);
+    component = mount(ScheduleAutomationPanel, { target: document.body, props: {
+      topicId: null, sessionId: null, topics: [{ id: "topic-b", name: "Orchard", slug: "orchard", description: "", created_at: "2026-01-01T00:00:00Z" }],
+    } });
+    await flushUi();
+    const topic = document.querySelector<HTMLSelectElement>('select[aria-label="Run topic"]');
+    if (topic) topic.value = "topic-b";
+    topic?.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUi();
+    const agent = document.querySelector<HTMLSelectElement>('select[aria-label="Agent"]');
+    if (agent) agent.value = "researcher";
+    agent?.dispatchEvent(new Event("change", { bubbles: true }));
+    setFieldValue(document.querySelector<HTMLTextAreaElement>('textarea[placeholder="Run the review checklist."]')!, "Check the trees");
+    [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("Add destination"))?.click();
+    await flushUi();
+    const destination = document.querySelector<HTMLSelectElement>('select[aria-label="Destination type"]')!;
+    if (destination) destination.value = "webhook";
+    destination?.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUi();
+    const webhook = document.querySelector<HTMLInputElement>('input[aria-label="Webhook URL"]');
+    if (webhook) setFieldValue(webhook, "https://example.test/results");
+    clickButton("Create schedule");
+    await flushUi();
+    expect(workflowApi.createSchedule).toHaveBeenCalledWith(expect.objectContaining({
+      session: { policy: "fresh", topic_id: "topic-b", agent_id: "researcher" },
+      routing: { deliver_to_origin: false, store_local_output: true, explicit_targets: [
+        { kind: "webhook", url: "https://example.test/results" },
+      ] },
+    }));
+  });
+
+  it("sends multiple explicit destinations including channel and the continuation's surface", async () => {
+    vi.mocked(surfaceApi.listSurfaces).mockResolvedValue({ surfaces: [{ id: "11111111-1111-4111-8111-111111111111", title: "Digest", updated_at: "2026-01-01T00:00:00Z" }] });
+    vi.mocked(workflowApi.createSchedule).mockResolvedValue(SCHEDULE);
+    component = mount(ScheduleAutomationPanel, { target: document.body, props: { topicId: null, sessionId: "session-1" } });
+    await flushUi();
+    setFieldValue(document.querySelector<HTMLTextAreaElement>('textarea[placeholder="Run the review checklist."]')!, "Deliver the digest");
+    clickButton("This conversation");
+    [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("Add destination"))?.click();
+    await flushUi();
+    const selectType = async (index: number, kind: string) => {
+      const select = document.querySelectorAll<HTMLSelectElement>('select[aria-label="Destination type"]')[index];
+      if (select) select.value = kind;
+      select?.dispatchEvent(new Event("change", { bubbles: true }));
+      await flushUi();
+    };
+    await selectType(0, "channel");
+    { const field = document.querySelector<HTMLInputElement>('input[aria-label="Channel account"]'); if (field) setFieldValue(field, "personal"); }
+    { const field = document.querySelector<HTMLInputElement>('input[aria-label="Channel conversation"]'); if (field) setFieldValue(field, "orchard-chat"); }
+    [...document.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("Add destination"))?.click();
+    await flushUi();
+    await selectType(1, "surface");
+    const surface = document.querySelector<HTMLSelectElement>('select[aria-label="Conversation surface"]');
+    if (surface) surface.value = "11111111-1111-4111-8111-111111111111";
+    surface?.dispatchEvent(new Event("change", { bubbles: true }));
+    clickButton("Create schedule");
+    await flushUi();
+    expect(workflowApi.createSchedule).toHaveBeenCalledWith(expect.objectContaining({
+      session: { policy: "continuation", session_id: "session-1" },
+      routing: { deliver_to_origin: false, store_local_output: true, explicit_targets: [
+        { kind: "channel", integration: "telegram", account: "personal", conversation: "orchard-chat" },
+        { kind: "surface", surface_id: "11111111-1111-4111-8111-111111111111" },
+      ] },
+    }));
+  });
+
+  it("clears an agent when the run topic changes and keeps default creation available", async () => {
+    vi.mocked(agentApi.listEffectiveAgentDefinitions).mockResolvedValue([
+      makeAgentDefinition("gateway", "built_in"), makeAgentDefinition("researcher", "topic"),
+    ]);
+    vi.mocked(workflowApi.createSchedule).mockResolvedValue(SCHEDULE);
+    component = mount(ScheduleAutomationPanel, { target: document.body, props: { topicId: "topic-a", sessionId: null } });
+    await flushUi();
+    const agent = document.querySelector<HTMLSelectElement>('select[aria-label="Agent"]');
+    if (agent) agent.value = "researcher";
+    agent?.dispatchEvent(new Event("change", { bubbles: true }));
+    setFieldValue(document.querySelector<HTMLTextAreaElement>('textarea[placeholder="Run the review checklist."]')!, "Topic review");
+    clickButton("Create schedule");
+    await flushUi();
+    expect(workflowApi.createSchedule).toHaveBeenLastCalledWith(expect.objectContaining({ session: { policy: "fresh", topic_id: "topic-a", agent_id: "researcher" } }));
+    vi.mocked(agentApi.listEffectiveAgentDefinitions).mockResolvedValue([makeAgentDefinition("gateway", "built_in")]);
+    const topic = document.querySelector<HTMLSelectElement>('select[aria-label="Run topic"]')!;
+    topic.value = "";
+    topic.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUi();
+    expect(agent!.value).toBe("");
+    setFieldValue(document.querySelector<HTMLTextAreaElement>('textarea[placeholder="Run the review checklist."]')!, "General review");
+    clickButton("Create schedule");
+    await flushUi();
+    expect(workflowApi.createSchedule).toHaveBeenCalledWith(expect.objectContaining({ session: { policy: "fresh", agent_id: "gateway" } }));
   });
 
   it("shows a paused schedule's overlap policy and pending cap", async () => {
@@ -453,6 +577,8 @@ describe("passed one-shot cards", () => {
     error_message: "405 Method Not Allowed",
   };
   beforeEach(() => {
+    vi.mocked(agentApi.listEffectiveAgentDefinitions).mockReset();
+    vi.mocked(agentApi.listEffectiveAgentDefinitions).mockResolvedValue([makeAgentDefinition("gateway", "built_in")]);
     vi.clearAllMocks();
     vi.mocked(operatorApi.fetchScheduleRuns).mockResolvedValue({ runs: [older, latest] });
     vi.mocked(operatorApi.listSchedules).mockResolvedValue({ schedules: [schedule] });

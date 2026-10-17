@@ -1014,3 +1014,34 @@ async fn schedule_outcomes_tool_policy_is_persisted_and_updated() {
         "an omitted cap survives policy edits"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schedule_agent_registry_refuses_unknown_agents_through_the_tool() {
+    let state = test_state();
+    let topic = state.topic_store.general_scope().await.unwrap();
+    let dispatcher = dispatcher(permissions(&["scheduling"], &[]));
+    let ctx = host_context(&state, "researcher", tool_session(&state, topic.id).await);
+    let mut responses = Vec::new();
+    for agent_id in ["nonexistent-heron", "Luna"] {
+        responses.push(
+            dispatcher
+                .dispatch(
+                    "schedule",
+                    json!({
+                        "action": "create", "message": "Check the orchard", "timing": "every",
+                        "every": "every 1 hours", "session": "fresh", "agent_id": agent_id,
+                    }),
+                    &ctx,
+                    "researcher",
+                )
+                .await,
+        );
+    }
+    assert!(
+        responses
+            .iter()
+            .all(|result| matches!(result, Err(swage_core::ToolError::InvalidParameters { .. }))),
+        "unknown agents must be refused through the tool: {responses:?}"
+    );
+    assert!(state.storage.list_schedules().await.unwrap().is_empty());
+}
