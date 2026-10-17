@@ -232,9 +232,18 @@ impl TurnQueueStore for SqliteStorage {
                 .map(|item| item.content.as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n");
+            let attribution = crate::model::TurnAttribution {
+                attended: queued.iter().any(|input| input.attended),
+                delivery_targets: queued
+                    .iter()
+                    .flat_map(|input| input.delivery_targets.clone())
+                    .collect(),
+            };
+            let delivery_targets_json = serde_json::to_string(&attribution.delivery_targets)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             match tx.execute(
-                "INSERT INTO turns (id, thread_id, agent_id, user_input, state, created_at, parent_turn_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
+                "INSERT INTO turns (id, thread_id, agent_id, user_input, state, created_at, parent_turn_id, attended, delivery_targets)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8)",
                 params![
                     turn_id.to_string(),
                     thread_id.to_string(),
@@ -242,6 +251,8 @@ impl TurnQueueStore for SqliteStorage {
                     &user_input,
                     TurnState::Pending.to_string(),
                     &now_str,
+                    attribution.attended,
+                    &delivery_targets_json,
                 ],
             ) {
                 Ok(_) => {}
@@ -323,8 +334,8 @@ impl TurnQueueStore for SqliteStorage {
             tx.commit()?;
             let queued_ids = queued.iter().map(|item| item.id).collect();
             Ok(Some(DrainedTurnQueue {
-                delivery_targets: queued.iter().flat_map(|input| input.delivery_targets.clone()).collect(),
-                attended: queued.iter().any(|input| input.attended),
+                delivery_targets: attribution.delivery_targets.clone(),
+                attended: attribution.attended,
                 turn: Turn {
                     id: turn_id,
                     thread_id,
@@ -344,7 +355,8 @@ impl TurnQueueStore for SqliteStorage {
                     delegated_output_tokens: None,
                     execution_isolation: None,
                     failure_message: None,
-                },
+                                    attribution: Some(attribution),
+},
                 messages,
                 queued_ids,
                 schedule_run_ids,

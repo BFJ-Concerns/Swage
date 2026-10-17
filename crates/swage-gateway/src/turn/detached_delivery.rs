@@ -77,23 +77,32 @@ pub(super) async fn deliver_detached_results(
 /// delivered rather than dropped.
 pub(super) fn render_delegation_result(result: &swage_storage::model::AgentMessage) -> String {
     let sender = &result.sender_agent_id;
-    let mut text = match result.payload.get("response").and_then(|v| v.as_str()) {
-        Some(response) => match result
-            .payload
-            .get("incomplete_reason")
-            .and_then(|v| v.as_str())
-        {
+    let text_of = |key: &str| result.payload.get(key).and_then(|v| v.as_str());
+    // A fate is read from the payload's error first: a refusal or a
+    // failure may carry the text the child produced, and that text does
+    // not make it a completion.
+    let mut text = match (text_of("error"), text_of("response")) {
+        (Some(error), response) => {
+            let refused = result.payload.get("refused").and_then(|v| v.as_bool()) == Some(true);
+            let heading = if refused {
+                format!("Delegated agent {sender} refused the task")
+            } else {
+                format!("Delegated agent {sender} failed: {error}")
+            };
+            match response.filter(|text| !text.is_empty()) {
+                Some(response) => format!("{heading}:\n{response}"),
+                None => heading,
+            }
+        }
+        (None, Some(response)) => match text_of("incomplete_reason") {
             Some(reason) => format!("Delegated agent {sender} incomplete ({reason}):\n{response}"),
             None => format!("Delegated agent {sender} completed:\n{response}"),
         },
-        None => match result.payload.get("error").and_then(|v| v.as_str()) {
-            Some(error) => format!("Delegated agent {sender} failed: {error}"),
-            None => format!(
-                "Delegated agent {sender} finished:\n{}",
-                serde_json::to_string_pretty(&result.payload)
-                    .unwrap_or_else(|_| result.payload.to_string())
-            ),
-        },
+        (None, None) => format!(
+            "Delegated agent {sender} finished:\n{}",
+            serde_json::to_string_pretty(&result.payload)
+                .unwrap_or_else(|_| result.payload.to_string())
+        ),
     };
     if let Some(structured) = result.payload.get("structured_output") {
         let rendered =

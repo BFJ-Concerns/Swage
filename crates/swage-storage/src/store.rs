@@ -1061,6 +1061,16 @@ pub trait AgentMessageStore: Send + Sync {
         payload: serde_json::Value,
     ) -> Result<(), StorageError>;
 
+    /// Reissue a pending message with a new payload, dated now: a message
+    /// written before a restart and readdressed by its recovery is as new
+    /// as the restart, so the startup expiry of stale messages does not
+    /// take it before the drain delivers it.
+    async fn reissue_agent_message(
+        &self,
+        id: Uuid,
+        payload: serde_json::Value,
+    ) -> Result<(), StorageError>;
+
     /// The delegate message that started a turn on the child thread
     /// `thread_id`: the newest delegate annotated with that thread and
     /// created no later than `started_by` — a named child's thread is
@@ -3042,6 +3052,13 @@ mod tests {
             unimplemented!()
         }
         async fn update_agent_message_payload(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn reissue_agent_message(
             &self,
             _: Uuid,
             _: serde_json::Value,
