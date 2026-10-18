@@ -160,7 +160,7 @@ pub fn error_code(error: &GatewayError) -> ErrorCode {
             | StorageError::CapacityExceeded { .. }
             | StorageError::ConnectionFailed(_)
             | StorageError::QueryFailed(_)
-            | StorageError::MigrationFailed(_)
+            | StorageError::SchemaFailed(_)
             | StorageError::UnknownSchema { .. } => ErrorCode::InternalError,
         },
         GatewayError::ConfigError(_)

@@ -12,11 +12,11 @@ pub mod delivery;
 pub mod device;
 pub mod material;
 pub mod message;
-pub mod migrations;
 pub mod observation;
 pub mod orientation_card;
 pub mod provider_round;
 pub mod schedule;
+pub mod schema;
 pub mod secret;
 pub mod session;
 pub mod session_variable;
@@ -38,7 +38,7 @@ use rusqlite::{Connection, ErrorCode};
 use swage_core::StorageError;
 use tokio::sync::Mutex;
 
-use migrations::run_migrations;
+use schema::ensure_schema;
 
 /// SQLite-backed storage with WAL mode and async-safe connection access.
 pub struct SqliteStorage {
@@ -50,18 +50,18 @@ impl SqliteStorage {
     pub fn open(path: &Path) -> Result<Self, StorageError> {
         let conn =
             Connection::open(path).map_err(|e| StorageError::ConnectionFailed(e.to_string()))?;
-        Self::configure_and_migrate(conn)
+        Self::configure_and_open(conn)
     }
 
     /// Open an in-memory database. Primarily used in tests.
     pub fn in_memory() -> Result<Self, StorageError> {
         let conn = Connection::open_in_memory()
             .map_err(|e| StorageError::ConnectionFailed(e.to_string()))?;
-        Self::configure_and_migrate(conn)
+        Self::configure_and_open(conn)
     }
 
-    /// Configure connection pragmas, check or initialise the schema, and wrap in Self.
-    fn configure_and_migrate(conn: Connection) -> Result<Self, StorageError> {
+    /// Configure connection pragmas, build or check the schema, and wrap in Self.
+    fn configure_and_open(conn: Connection) -> Result<Self, StorageError> {
         // WAL mode: concurrent reads with a single writer, better crash safety.
         conn.execute_batch("PRAGMA journal_mode=WAL;")
             .map_err(|e| StorageError::ConnectionFailed(e.to_string()))?;
@@ -74,7 +74,7 @@ impl SqliteStorage {
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|e| StorageError::ConnectionFailed(e.to_string()))?;
 
-        run_migrations(&conn)?;
+        ensure_schema(&conn)?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -111,7 +111,7 @@ mod tests {
     use super::*;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn in_memory_opens_and_migrates() {
+    async fn in_memory_opens_and_builds_the_schema() {
         let storage = SqliteStorage::in_memory().expect("in_memory should succeed");
 
         // Schema should be present — query the topics table.
@@ -120,7 +120,7 @@ mod tests {
                 conn.query_row("SELECT COUNT(*) FROM topics", [], |r| r.get::<_, i64>(0))
             })
             .await
-            .expect("topics table should exist after migration");
+            .expect("topics table should exist once the schema is built");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -133,13 +133,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn migration_idempotency() {
-        // Running migrations twice (via two separate opens) must not fail.
+    async fn a_store_this_build_made_reopens() {
+        // A second open finds the definitions it built and accepts them.
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("idempotent.db");
 
         SqliteStorage::open(&path).expect("first open");
-        SqliteStorage::open(&path).expect("second open — migrations already applied");
+        SqliteStorage::open(&path).expect("second open — the schema is already built");
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -251,9 +251,9 @@ Everything is under `~/.swage/` (or `$SWAGE_HOME`):
 - `general/` and `scratch/` — memory for sessions without a topic, and scratch
   directories for sessions without a workspace.
 - `swage.db` — the SQLite store: conversations, turns, the audit trail, the
-  knowledge base and workflow runs. The store refuses to open if its migration
-  history does not match the build, rather than applying anything
-  half-finished.
+  knowledge base and workflow runs. A fresh store is built from the build's
+  one schema definition in a single transaction; a store whose definitions
+  do not match the build is refused on open, never upgraded in place.
 
 Configuration cascades Global → Topic → Agent; the more specific level
 extends or shadows the more general one.

@@ -28,6 +28,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- A fresh store is built from one schema definition in a single transaction, so a first start cut off part-way leaves no partial store behind; the numbered migration chain and its legacy table rebuilds are gone, and a store another build made is refused on open and rebuilt.
 - The README names Debian/Ubuntu build prerequisites, supported Node versions, and the binary path setup, with frontend install and build commands.
 
 - Provider setup documentation uses governed credentials through Settings → Providers, distinguishes GPT Responses from Chat Completions, and explains model-bound routing and the disabled Codex integration.

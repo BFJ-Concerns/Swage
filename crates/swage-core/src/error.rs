@@ -187,15 +187,15 @@ pub enum StorageError {
     #[error("query failed: {0}")]
     QueryFailed(String),
 
-    /// Schema migration failed (permanent).
-    #[error("migration failed: {0}")]
-    MigrationFailed(String),
+    /// The schema could not be built into an empty store or read from an
+    /// existing one (permanent).
+    #[error("schema failed: {0}")]
+    SchemaFailed(String),
 
-    /// The store's recorded schema history is not one this build produced
-    /// (permanent for this binary): it names a migration this build does not
-    /// know, or skips one this build applies before a later one it records.
-    /// The store belongs to another build and is refused before any migration
-    /// runs, so nothing is half-applied.
+    /// The store was not built from this build's schema definition
+    /// (permanent for this binary): its object definitions differ from the
+    /// ones this build creates. The store belongs to another build and is
+    /// refused before any query runs.
     #[error("store schema is not one this build knows: {message}")]
     UnknownSchema { message: String },
 
@@ -783,8 +783,8 @@ mod tests {
     }
 
     #[test]
-    fn storage_migration_failed_is_permanent() {
-        let err = StorageError::MigrationFailed("schema mismatch".to_string());
+    fn storage_schema_failed_is_permanent() {
+        let err = StorageError::SchemaFailed("schema mismatch".to_string());
         assert!(!err.is_retriable());
     }
 
