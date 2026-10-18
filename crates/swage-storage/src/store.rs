@@ -39,7 +39,8 @@ pub trait TopicStore: Send + Sync {
     async fn get(&self, id: Uuid) -> Result<Option<Topic>, StorageError>;
     async fn get_by_name(&self, name: &str) -> Result<Option<Topic>, StorageError>;
     /// The general scope — the scope of sessions started without a topic.
-    /// Seeded by migration; created here only for a store that predates it.
+    /// Seeded when the store is built; created here only if the row is
+    /// missing from a live store.
     async fn general_scope(&self) -> Result<Topic, StorageError>;
     /// The topics a user can choose, ordered by created_at ascending. Never
     /// includes the general scope.

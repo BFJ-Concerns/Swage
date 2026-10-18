@@ -122,7 +122,7 @@ async fn create_full_hierarchy(
 // ---------------------------------------------------------------------------
 // Test 1: Full hierarchy round-trip through file-backed SQLite
 //
-// Spans: migrations, session SQL, thread SQL,
+// Spans: the schema build, session SQL, thread SQL,
 //        turn SQL, message SQL, tool_call SQL
 //
 // Proves: "Storage trait hierarchy" — create full entity hierarchy through
@@ -244,7 +244,7 @@ async fn agent_id_isolation_across_entity_types() {
 // ---------------------------------------------------------------------------
 // Test 3: Cascade deletion from topic level
 //
-// Spans: migrations with FK cascades, all store impls
+// Spans: the schema build with FK cascades, all store impls
 //
 // Proves: "Data model" — deleting a topic cascades through
 //         sessions → threads → turns → messages and tool calls.
@@ -499,7 +499,7 @@ async fn turn_recovery_finds_pending_and_processing() {
 // ---------------------------------------------------------------------------
 // Test 6: Default topic cannot be deleted
 //
-// Spans: migrations/seeding, topic SQL impl
+// Spans: the schema build and seeding, topic SQL impl
 //
 // Proves: "Data model" — deleting the default topic is rejected.
 // ---------------------------------------------------------------------------

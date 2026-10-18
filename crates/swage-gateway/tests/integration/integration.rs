@@ -657,7 +657,7 @@ async fn startup_recovery_marks_orphaned_turns() {
 
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
 
-    // Get the default topic (seeded by migration).
+    // Get the default topic (seeded when the store is built).
     let topic = storage.general_scope().await.unwrap();
 
     // Session 1: an orphaned Processing simulates a crash mid-turn.
@@ -927,7 +927,7 @@ async fn queued_messages_reach_real_sockets_in_turn_order_and_stay_in_their_sess
 ///
 /// Journey: Task Execution — activity display persistence
 /// Spans: tool-call-storage-model, tool-call-store-trait,
-///   tool-calls-migration, sqlite-tool-call-store,
+///   tool-calls-schema, sqlite-tool-call-store,
 ///   api-tool-calls
 ///
 /// Proves: the HTTP API response for conversation detail includes a tool_calls

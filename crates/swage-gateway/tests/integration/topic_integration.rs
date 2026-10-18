@@ -379,7 +379,7 @@ async fn each_session_list_uses_one_activity_statement_for_multiple_sessions() {
 // ---------------------------------------------------------------------------
 // Test 1: Topic session isolation
 // ---------------------------------------------------------------------------
-// Spans: slug migration, slug model, full CRUD,
+// Spans: slug column, slug model, full CRUD,
 // topic CRUD routes, topic-scoped session routes
 //
 // Proves: conversations created in one topic are absent

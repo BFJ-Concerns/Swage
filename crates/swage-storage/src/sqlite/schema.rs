@@ -9,7 +9,8 @@ use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 use swage_core::StorageError;
 
-/// The DDL that creates every object in the store, in dependency order.
+/// The DDL that creates every object in the store, in the order a fresh
+/// store creates them.
 /// Editing it is the whole of a schema change: there is nothing to add
 /// elsewhere, and the fingerprint check below refuses stores built from the
 /// previous text.
@@ -20,7 +21,7 @@ const SCHEMA: &str = include_str!("schema.sql");
 pub fn ensure_schema(conn: &Connection) -> Result<(), StorageError> {
     let populated: bool = conn
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%')",
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE substr(name, 1, 7) <> 'sqlite_')",
             [],
             |row| row.get(0),
         )
@@ -47,28 +48,30 @@ fn build_schema(conn: &Connection) -> Result<(), StorageError> {
 }
 
 /// The fingerprint a store built from this definition carries, computed once
-/// per process from a fresh in-memory build.
+/// per process from a fresh in-memory build. A failure is returned as it
+/// is and not kept, so the next open computes again.
 fn expected_fingerprint() -> Result<&'static Vec<u8>, StorageError> {
-    static EXPECTED: OnceLock<Result<Vec<u8>, StorageError>> = OnceLock::new();
-    EXPECTED
-        .get_or_init(|| {
-            let fresh = Connection::open_in_memory()
-                .map_err(|e| StorageError::ConnectionFailed(e.to_string()))?;
-            build_schema(&fresh)?;
-            schema_fingerprint(&fresh)
-        })
-        .as_ref()
-        .map_err(|e| StorageError::SchemaFailed(e.to_string()))
+    static EXPECTED: OnceLock<Vec<u8>> = OnceLock::new();
+    if let Some(fingerprint) = EXPECTED.get() {
+        return Ok(fingerprint);
+    }
+    let fresh =
+        Connection::open_in_memory().map_err(|e| StorageError::ConnectionFailed(e.to_string()))?;
+    build_schema(&fresh)?;
+    let fingerprint = schema_fingerprint(&fresh)?;
+    Ok(EXPECTED.get_or_init(|| fingerprint))
 }
 
 /// A digest of every object definition the store holds, as SQLite stores
 /// it, so two stores built from the same text fingerprint alike and any
 /// difference in a definition — a column, a constraint, an index — refuses.
+/// Only SQLite's own `sqlite_` objects are left out, by their exact prefix:
+/// `LIKE` would read the underscore as a wildcard.
 fn schema_fingerprint(conn: &Connection) -> Result<Vec<u8>, StorageError> {
     let mut statement = conn
         .prepare(
             "SELECT type, name, tbl_name, sql FROM sqlite_schema
-         WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+         WHERE substr(name, 1, 7) <> 'sqlite_' ORDER BY type, name",
         )
         .map_err(schema_failed)?;
     let definitions = statement
@@ -179,7 +182,7 @@ mod tests {
         Connection::open(path)
             .unwrap()
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
+                "SELECT COUNT(*) FROM sqlite_schema WHERE substr(name, 1, 7) <> 'sqlite_'",
                 [],
                 |row| row.get(0),
             )
@@ -187,19 +190,24 @@ mod tests {
     }
 
     #[test]
-    fn a_build_cut_off_before_commit_leaves_nothing_and_the_next_open_builds_whole() {
+    fn a_build_cut_off_part_way_leaves_nothing_and_the_next_open_builds_whole() {
         let dir = tempfile::tempdir().expect("temporary store");
         let path = dir.path().join("interrupted.db");
         {
+            // The store as the gateway opens it, on a file too small for the
+            // definitions: the build fails part-way through them, inside its
+            // own transaction, and the connection goes away as a start killed
+            // mid-build would leave it.
             let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(&format!("BEGIN; {}", super::SCHEMA))
-                .expect("the definitions run inside the open transaction");
-            // Dropped without COMMIT: the process died before the build landed.
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA max_page_count=20;")
+                .unwrap();
+            let error = super::ensure_schema(&conn).expect_err("the definitions outgrow the file");
+            assert!(matches!(error, StorageError::SchemaFailed(_)), "{error:?}");
         }
         assert_eq!(
             table_count(&path),
             0,
-            "an uncommitted build leaves no object behind"
+            "a build that did not commit leaves no object behind"
         );
 
         let storage = open_store(&path).expect("the next open builds the store whole");

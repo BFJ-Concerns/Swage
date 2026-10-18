@@ -61,7 +61,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     init_logging(&config);
 
     // Step 3: Resolve the canonical Swage data root and make sure managed
-    // secrets have an encryption key before migrations or provider setup can
+    // secrets have an encryption key before the store opens or provider setup can
     // read/write encrypted rows.
     let root = {
         match swage_config::discovery::resolve_root() {
