@@ -18662,6 +18662,12 @@ async fn a_worker_call_records_what_it_was_dispatched_with_and_what_it_resolved(
         rounds[0].completed_at.is_some(),
         "the round that came back is settled, not left outstanding"
     );
+    assert!(call.turn_id.is_some(), "the settled call names its turn");
+    assert_eq!(
+        Some(rounds[0].turn_id),
+        call.turn_id,
+        "the round names the worker turn whose context report holds its request"
+    );
     assert_eq!(
         rounds[0].outcome,
         swage_protocol::client::workflow::WorkflowProviderRoundOutcome::Responded { tool_calls: 0 }

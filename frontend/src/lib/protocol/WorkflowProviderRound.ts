@@ -18,4 +18,11 @@ export type WorkflowProviderRound = {
  * run's end interrupted and replay re-dispatched runs its rounds again
  * under a later attempt; the number is what keeps the two apart.
  */
-attempt: number, round: number, started_at: string, completed_at?: string | null, outcome: WorkflowProviderRoundOutcome, };
+attempt: number, round: number,
+/**
+ * The worker turn that ran this round. Its context report records the
+ * request the round sent under this round number, so the turn and the
+ * round together address the request: the conversation's turn route
+ * opens that turn's inspector at it.
+ */
+turn_id: string, started_at: string, completed_at?: string | null, outcome: WorkflowProviderRoundOutcome, };

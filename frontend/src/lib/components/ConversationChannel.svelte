@@ -37,6 +37,8 @@
     onNewConversation?: (agentId?: string) => void;
     /** The turn the address names: the transcript opens at it. */
     focusTurnId?: string | null;
+    /** The provider round the address names on that turn: its inspector opens at that request. */
+    focusRequestRound?: number | null;
   }
 
   let {
@@ -53,6 +55,7 @@
     onNavigate,
     onNewConversation,
     focusTurnId = null,
+    focusRequestRound = null,
   }: Props = $props();
 
   // The session bar is sticky at the top of the channel's scroll, so a
@@ -193,7 +196,7 @@
     </div>
   {/if}
   {#if activeConversation}<ConnectionIndicator store={connectionStore} {onRetry} />{/if}
-  <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} {focusTurnId} focusMargin={sessionBarHeight} />
+  <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} {focusTurnId} {focusRequestRound} focusMargin={sessionBarHeight} />
   <!-- Pinned to the foot of the channel's scroll, so a turn waiting on the
        user's decision shows its approval card in view however long the
        history above it is. -->

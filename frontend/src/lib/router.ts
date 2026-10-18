@@ -36,6 +36,10 @@ export interface Route {
   // turns: the transcript opens at that turn, so a run or a record can
   // point at the exchange it produced.
   turnId: string | null;
+  // Set with `turnId` when the URL's `?request=` names one of that turn's
+  // provider rounds: the turn's context inspector opens at the request
+  // that round sent, so a run's round row can point at the request itself.
+  turnRequestRound: number | null;
   // Set when the URL is the shared surface library's catalogue.
   library: boolean;
   // Set when the URL names a workflow run, so the run's recorded journal
@@ -60,6 +64,7 @@ function rootRoute(pathname = "/", notFound = false): Route {
     conversationId: null,
     surfaceId: null,
     turnId: null,
+    turnRequestRound: null,
     library: false,
     workflowRunId: null,
     settingsTab: null,
@@ -102,6 +107,12 @@ export interface MemoryPageAddress {
   reference: string;
 }
 
+// The provider round `?request=` names: a counting number, or nothing.
+function requestRound(query: URLSearchParams): number | null {
+  const round = Number(query.get("request"));
+  return Number.isInteger(round) && round > 0 ? round : null;
+}
+
 function memoryPageAddress(query: URLSearchParams): MemoryPageAddress | null {
   const reference = query.get("reference");
   return reference ? { scope: query.get("scope"), reference } : null;
@@ -115,6 +126,7 @@ function memoryPageAddress(query: URLSearchParams): MemoryPageAddress | null {
  *   /conversations/:id                  → load conversation with that ID
  *   /conversations/:id/surfaces/:sid    → that conversation with one of its surfaces open
  *   /conversations/:id/turns/:tid       → that conversation, the transcript opened at that turn
+ *   /conversations/:id/turns/:tid?request=:n → the same, with the turn's inspector open at provider round n
  *   /library                            → the shared surface library's catalogue
  *   /workflow-runs/:id                  → read back that run's record and terminal account
  *   /settings/memory?reference=:ref     → the memory settings tab with that page open
@@ -133,6 +145,7 @@ export function parseRoute(location: string): Route {
       conversationId: match[1],
       surfaceId: match[2] === undefined ? null : decodeURIComponent(match[2]),
       turnId: match[3] === undefined ? null : decodeURIComponent(match[3]),
+      turnRequestRound: match[3] === undefined ? null : requestRound(query),
     };
   }
   if (pathname === "/library") {
@@ -187,6 +200,15 @@ export function conversationPath(conversationId: string, surfaceId?: string | nu
 /** The address of one turn of a conversation: the transcript opens there. */
 export function turnPath(conversationId: string, turnId: string): string {
   return `${conversationPath(conversationId)}/turns/${encodeURIComponent(turnId)}`;
+}
+
+/**
+ * The address of one provider request of a turn — the request its round
+ * `round` sent: the transcript opens at the turn and its inspector at that
+ * request.
+ */
+export function turnRequestPath(conversationId: string, turnId: string, round: number): string {
+  return `${turnPath(conversationId, turnId)}?request=${round}`;
 }
 
 // ---------------------------------------------------------------------------

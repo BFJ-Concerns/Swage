@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 import { ApiError } from "../api/error";
-import { createRouter, parseRoute, turnPath } from "../router";
+import { createRouter, parseRoute, turnPath, turnRequestPath } from "../router";
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -31,6 +31,7 @@ describe("parseRoute", () => {
       conversationId: null,
       surfaceId: null,
       turnId: null,
+      turnRequestRound: null,
       library: false,
       workflowRunId: null,
       settingsTab: null,
@@ -47,6 +48,7 @@ describe("parseRoute", () => {
       conversationId: "abc-123",
       surfaceId: null,
       turnId: null,
+      turnRequestRound: null,
       library: false,
       workflowRunId: null,
       settingsTab: null,
@@ -63,6 +65,7 @@ describe("parseRoute", () => {
       conversationId: "abc-123",
       surfaceId: null,
       turnId: "turn-9",
+      turnRequestRound: null,
       library: false,
       workflowRunId: null,
       settingsTab: null,
@@ -74,12 +77,26 @@ describe("parseRoute", () => {
     expect(turnPath("abc-123", "turn 9")).toBe("/conversations/abc-123/turns/turn%209");
   });
 
+  it("reads '?request=' on a turn address as the provider round to open", () => {
+    const route = parseRoute("/conversations/abc-123/turns/turn-9?request=2");
+    expect(route.conversationId).toBe("abc-123");
+    expect(route.turnId).toBe("turn-9");
+    expect(route.turnRequestRound).toBe(2);
+    // A round that is not a counting number names nothing; the turn still opens.
+    expect(parseRoute("/conversations/abc-123/turns/turn-9?request=later").turnRequestRound).toBeNull();
+    expect(parseRoute("/conversations/abc-123/turns/turn-9?request=0").turnRequestRound).toBeNull();
+    // The query means nothing without a turn.
+    expect(parseRoute("/conversations/abc-123?request=2").turnRequestRound).toBeNull();
+    expect(turnRequestPath("abc-123", "turn 9", 2)).toBe("/conversations/abc-123/turns/turn%209?request=2");
+  });
+
   it("maps '/workflow-runs/:id' to that run's own surface", () => {
     expect(parseRoute("/workflow-runs/run-42")).toEqual({
       path: "/workflow-runs/run-42",
       conversationId: null,
       surfaceId: null,
       turnId: null,
+      turnRequestRound: null,
       library: false,
       workflowRunId: "run-42",
       settingsTab: null,
@@ -96,6 +113,7 @@ describe("parseRoute", () => {
       conversationId: null,
       surfaceId: null,
       turnId: null,
+      turnRequestRound: null,
       library: false,
       workflowRunId: null,
       settingsTab: null,
@@ -112,6 +130,7 @@ describe("parseRoute", () => {
       conversationId: null,
       surfaceId: null,
       turnId: null,
+      turnRequestRound: null,
       library: false,
       workflowRunId: null,
       settingsTab: null,
@@ -128,6 +147,7 @@ describe("parseRoute", () => {
       conversationId: null,
       surfaceId: null,
       turnId: null,
+      turnRequestRound: null,
       library: false,
       workflowRunId: "run-9",
       settingsTab: null,
@@ -144,6 +164,7 @@ describe("parseRoute", () => {
       conversationId: null,
       surfaceId: null,
       turnId: null,
+      turnRequestRound: null,
       library: false,
       workflowRunId: null,
       settingsTab: "generation",
@@ -183,6 +204,7 @@ describe("parseRoute", () => {
       conversationId: null,
       surfaceId: null,
       turnId: null,
+      turnRequestRound: null,
       library: false,
       workflowRunId: null,
       settingsTab: null,
@@ -196,6 +218,7 @@ describe("parseRoute", () => {
       conversationId: null,
       surfaceId: null,
       turnId: null,
+      turnRequestRound: null,
       library: false,
       workflowRunId: null,
       settingsTab: null,
@@ -520,6 +543,7 @@ describe("init with conversation store", () => {
       conversationId: "new-conv",
       surfaceId: null,
       turnId: null,
+      turnRequestRound: null,
       library: false,
       workflowRunId: null,
       settingsTab: null,
@@ -568,6 +592,7 @@ describe("init with conversation store", () => {
       conversationId: "second-conv",
       surfaceId: null,
       turnId: null,
+      turnRequestRound: null,
       library: false,
       workflowRunId: null,
       settingsTab: null,

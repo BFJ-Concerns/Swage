@@ -31,7 +31,7 @@
     type StreamingStore,
   } from "./lib/stores/streaming";
   import { createTopicStore } from "./lib/stores/topics";
-  import { conversationPath, createRouter, turnPath } from "./lib/router";
+  import { conversationPath, createRouter, turnPath, turnRequestPath } from "./lib/router";
   import type { Route } from "./lib/router";
   import { getDesktopRuntime } from "./lib/runtime";
   import {
@@ -128,7 +128,14 @@
     const surfaceId =
       currentRoute.conversationId === id ? currentRoute.surfaceId : null;
     const turnId = currentRoute.conversationId === id ? currentRoute.turnId : null;
-    router.navigate(turnId ? turnPath(id, turnId) : conversationPath(id, surfaceId));
+    const requestRound = turnId ? currentRoute.turnRequestRound : null;
+    router.navigate(
+      turnId && requestRound !== null
+        ? turnRequestPath(id, turnId, requestRound)
+        : turnId
+          ? turnPath(id, turnId)
+          : conversationPath(id, surfaceId),
+    );
   }
 
   // The sidebar and agent list follow the session's scope: its topic, or

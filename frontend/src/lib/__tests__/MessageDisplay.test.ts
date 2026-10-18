@@ -289,6 +289,44 @@ describe("turn context inspector trigger", () => {
     expect(streaming.startTurn).toHaveBeenCalledExactlyOnceWith("Inspect the files.\n\nInclude their sizes.");
   });
 
+  it("opens the focused turn's inspector at the round the address names", async () => {
+    vi.mocked(fetchTurnContext).mockImplementation(async () => ({
+      assembly_name: "balanced",
+      elements: [],
+      total_tokens: 12,
+      budget: null,
+      budget_remaining: null,
+      compaction_applied: [],
+      warnings: [],
+      errors: [],
+      declared_omissions: [],
+      effective_tool_permissions: undefined,
+      provider_visible: { requests: [
+        { round: 1, request: { body: "first round" } },
+        { round: 2, request: { body: "second round" } },
+      ] },
+      duration: { secs: 0, nanos: 1 },
+    }));
+    const store = makeConversationStore([
+      makeAssistantMessage("First recorded response", undefined, undefined, "completed", "turn-42"),
+      makeAssistantMessage("Second recorded response", undefined, undefined, "completed", "turn-43"),
+    ]);
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore: makeStreamingStore(), focusTurnId: "turn-43", focusRequestRound: 2, focusMargin: 0 },
+    });
+
+    await vi.waitFor(() => expect(document.querySelector(".context-inspector")).not.toBeNull());
+    expect(vi.mocked(fetchTurnContext)).toHaveBeenCalledWith("turn-43");
+    expect(vi.mocked(fetchTurnContext)).not.toHaveBeenCalledWith("turn-42");
+    await vi.waitFor(() => expect(document.querySelectorAll('[aria-label="Provider requests"] details')).toHaveLength(2));
+    const [first, focused] = [...document.querySelectorAll<HTMLDetailsElement>('[aria-label="Provider requests"] details')];
+    expect(focused.open).toBe(true);
+    expect(first.open).toBe(false);
+    expect(focused.textContent).toContain("second round");
+  });
+
   it("switches the shared inspector when two completed turns are opened in sequence", async () => {
     vi.mocked(fetchTurnContext).mockImplementation(async (turnId) => ({
       assembly_name: "balanced",

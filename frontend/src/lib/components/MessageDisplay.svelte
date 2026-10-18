@@ -132,6 +132,12 @@
      */
     focusTurnId?: string | null;
     /**
+     * The provider round the address names on the focused turn: that
+     * turn's context inspector opens at the request the round sent, so a
+     * run's round row lands the reader on the request itself.
+     */
+    focusRequestRound?: number | null;
+    /**
      * The height of whatever sits sticky above the transcript in the
      * channel's scroll, in pixels: a scrolled-to message keeps that much
      * margin so it lands below it. `null` until measured; the focus waits
@@ -145,6 +151,7 @@
     streamingStore,
     displayPreferences = DEFAULT_DISPLAY_PREFERENCES,
     focusTurnId = null,
+    focusRequestRound = null,
     focusMargin = null,
   }: Props = $props();
 
@@ -437,6 +444,7 @@
             turnId={message.turn_id}
             presentation="message"
             {inspectorTarget}
+            openAtRound={message.turn_id === focusTurnId ? focusRequestRound : null}
           />
         {/if}
         {#if message.id !== undefined && store?.branchFrom}

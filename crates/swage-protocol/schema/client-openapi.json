@@ -8490,11 +8490,17 @@
           "started_at": {
             "format": "date-time",
             "type": "string"
+          },
+          "turn_id": {
+            "description": "The worker turn that ran this round. Its context report records the\nrequest the round sent under this round number, so the turn and the\nround together address the request: the conversation's turn route\nopens that turn's inspector at it.",
+            "format": "uuid",
+            "type": "string"
           }
         },
         "required": [
           "attempt",
           "round",
+          "turn_id",
           "started_at",
           "outcome"
         ],

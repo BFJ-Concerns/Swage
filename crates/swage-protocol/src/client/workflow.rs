@@ -651,6 +651,11 @@ pub struct WorkflowProviderRound {
     /// under a later attempt; the number is what keeps the two apart.
     pub attempt: u32,
     pub round: u32,
+    /// The worker turn that ran this round. Its context report records the
+    /// request the round sent under this round number, so the turn and the
+    /// round together address the request: the conversation's turn route
+    /// opens that turn's inspector at it.
+    pub turn_id: Uuid,
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
     pub outcome: WorkflowProviderRoundOutcome,

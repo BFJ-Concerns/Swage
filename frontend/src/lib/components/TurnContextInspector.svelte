@@ -15,11 +15,17 @@
 
   interface Props {
     turnId: string;
+    // The provider round to open at: that round's full request is shown
+    // open and scrolled into view once the report is on the page. `null`
+    // opens the report at its head, as a click on the trigger does.
+    focusRound?: number | null;
     // Called when the user dismisses the inspector.
     onClose: () => void;
   }
 
-  let { turnId, onClose }: Props = $props();
+  let { turnId, focusRound = null, onClose }: Props = $props();
+
+  let panel: HTMLElement | undefined = $state();
 
   let report = $state<TurnContextReport | null>(null);
   let loadState = $state<"loading" | "loaded" | "absent" | "error">("loading");
@@ -84,6 +90,16 @@
   // (or the last request tried when the whole round failed).
   const fullRequests = $derived(Array.from(new Map(requests.map(request => [request.round, request])).values()));
   const totalTokens = $derived(report?.total_tokens ?? 0);
+
+  // Land the reader on the named round's request once it is rendered; a
+  // round the report does not carry leaves the inspector at its head.
+  $effect(() => {
+    const round = focusRound;
+    void fullRequests.length;
+    if (round === null || loadState !== "loaded" || !panel) return;
+    const target = panel.querySelector<HTMLElement>(`[data-request-round="${round}"]`);
+    if (target && typeof target.scrollIntoView === "function") target.scrollIntoView({ block: "start" });
+  });
   const durationMs = $derived(
     report
       ? Math.round(
@@ -93,7 +109,7 @@
   );
 </script>
 
-<aside class="context-inspector" aria-label="Turn context">
+<aside class="context-inspector" aria-label="Turn context" bind:this={panel}>
   <header>
     <h2>Context for this turn</h2>
     <button type="button" class="close" onclick={onClose} aria-label="Close">
@@ -136,12 +152,12 @@
         <h3>Provider requests</h3>
         {#each fullRequests as request}
           {#if request.request != null}
-            <details>
+            <details data-request-round={request.round} open={request.round === focusRound}>
               <summary>Full request · round {String(request.round)}</summary>
               <pre>{JSON.stringify(blind(request.request), null, 2)}</pre>
             </details>
           {:else}
-            <p>Full request unavailable · round {String(request.round)}</p>
+            <p data-request-round={request.round}>Full request unavailable · round {String(request.round)}</p>
           {/if}
           {#if list(object(request.request).divergences).length > 0}
             <section aria-label="Request divergences">

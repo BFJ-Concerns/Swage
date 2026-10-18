@@ -146,6 +146,41 @@ it.each([
   for (const text of expected) expect(document.body.textContent).toContain(text);
 });
 
+it("opens at the round the address names, its request shown without a click", async () => {
+  const report = recordedRequest();
+  const second = { body: { messages: [{ role: "user", content: "Second round body" }] } };
+  vi.mocked(fetchTurnContext).mockResolvedValue({ ...report,
+    provider_visible: { ...report.provider_visible, requests: [
+      ...report.provider_visible.requests,
+      { round: 2, request: second },
+    ] },
+  });
+  const scrolled: Element[] = [];
+  Element.prototype.scrollIntoView = function () {
+    scrolled.push(this);
+  };
+  component = mount(TurnContextInspector, { target: document.body, props: { turnId: "recorded-turn", focusRound: 2, onClose: () => {} } });
+  await vi.waitFor(() => expect(document.querySelectorAll('[aria-label="Provider requests"] details')).toHaveLength(2));
+  const [first, focused] = [...document.querySelectorAll<HTMLDetailsElement>('[aria-label="Provider requests"] details')];
+  expect(focused.getAttribute("data-request-round")).toBe("2");
+  expect(focused.open).toBe(true);
+  expect(first.open).toBe(false);
+  await vi.waitFor(() => expect(scrolled).toHaveLength(1));
+  expect(scrolled[0]).toBe(focused);
+});
+
+it("opens at its head when the address names a round the report lacks", async () => {
+  vi.mocked(fetchTurnContext).mockResolvedValue(recordedRequest());
+  const scrolled: Element[] = [];
+  Element.prototype.scrollIntoView = function () {
+    scrolled.push(this);
+  };
+  component = mount(TurnContextInspector, { target: document.body, props: { turnId: "recorded-turn", focusRound: 7, onClose: () => {} } });
+  await vi.waitFor(() => expect(document.querySelector("table.elements")).not.toBeNull());
+  expect(document.querySelector<HTMLDetailsElement>('[aria-label="Provider requests"] details')!.open).toBe(false);
+  expect(scrolled).toHaveLength(0);
+});
+
 it("keeps assignment metadata out of an opened provider request", async () => {
   vi.mocked(fetchTurnContext).mockResolvedValue(recordedRequest());
   component = mount(TurnContextInspector, { target: document.body, props: { turnId: "recorded-turn", onClose: () => {} } });

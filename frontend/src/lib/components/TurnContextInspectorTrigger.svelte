@@ -1,6 +1,8 @@
 <script module lang="ts">
   let nextTriggerId = 0;
-  let inspectedTurn = $state<{ triggerId: number; turnId: string } | null>(null);
+  // One inspector is open at a time, on the trigger that opened it; `round`
+  // is the provider round it opens at, when an address named one.
+  let inspectedTurn = $state<{ triggerId: number; turnId: string; round: number | null } | null>(null);
 </script>
 
 <script lang="ts">
@@ -12,6 +14,12 @@
     label?: string;
     presentation?: "message" | "history";
     inspectorTarget?: HTMLElement;
+    /**
+     * A provider round the address names on this turn: the inspector opens
+     * as if the trigger were clicked, at that round's request. `null` when
+     * the address names none; opening is then the reader's click.
+     */
+    openAtRound?: number | null;
   }
 
   let {
@@ -19,9 +27,18 @@
     label = "context",
     presentation = "message",
     inspectorTarget,
+    openAtRound = null,
   }: Props = $props();
 
   const triggerId = nextTriggerId++;
+
+  // An address that names a round opens the inspector once per round it
+  // names; a later click or close is the reader's and is not overruled.
+  $effect(() => {
+    const round = openAtRound;
+    if (round === null) return;
+    inspectedTurn = { triggerId, turnId, round };
+  });
 
   onDestroy(() => {
     if (inspectedTurn?.triggerId === triggerId) {
@@ -57,7 +74,7 @@
   class:message={presentation === "message"}
   class:history={presentation === "history"}
   class="context-link"
-  onclick={() => (inspectedTurn = { triggerId, turnId })}
+  onclick={() => (inspectedTurn = { triggerId, turnId, round: null })}
 >
   {label}
 </button>
@@ -66,6 +83,7 @@
   {#if inspectedTurn?.triggerId === triggerId}
     <TurnContextInspector
       turnId={inspectedTurn.turnId}
+      focusRound={inspectedTurn.round}
       onClose={() => (inspectedTurn = null)}
     />
   {/if}

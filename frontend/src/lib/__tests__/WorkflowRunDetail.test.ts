@@ -99,6 +99,7 @@ const baseCall: WorkflowAgentCallDetail = {
     {
       attempt: 1,
       round: 1,
+      turn_id: "turn-1",
       started_at: "2026-09-02T10:00:01Z",
       completed_at: "2026-09-02T10:00:02Z",
       outcome: { outcome: "responded", tool_calls: 0 },
@@ -291,6 +292,7 @@ describe("WorkflowRunDetail", () => {
           {
             attempt: 1,
             round: 1,
+            turn_id: "turn-1",
             started_at: "2026-09-02T10:00:01Z",
             completed_at: "2026-09-02T10:00:02Z",
             outcome: { outcome: "responded", tool_calls: 2 },
@@ -298,6 +300,7 @@ describe("WorkflowRunDetail", () => {
           {
             attempt: 1,
             round: 2,
+            turn_id: "turn-1",
             started_at: "2026-09-02T10:00:03Z",
             completed_at: null,
             outcome: { outcome: "outstanding" },
@@ -312,6 +315,52 @@ describe("WorkflowRunDetail", () => {
     expect(rows[1].textContent).toContain("no response yet");
   });
 
+  it("links each round to the request its worker turn sent", async () => {
+    const navigated: string[] = [];
+    const first = baseCall.dispatch!.attempts[0];
+    component = mount(WorkflowRunDetail, {
+      target: document.body,
+      props: {
+        detail: runWith({
+          ...baseCall,
+          session_id: "worker-session",
+          dispatch: {
+            ...baseCall.dispatch!,
+            attempts: [
+              { ...first, session_id: "first-session", turn_id: "turn-1" },
+              { ...first, cause: { cause: "after_interruption" }, session_id: null, turn_id: "turn-2" },
+            ],
+          },
+          provider_rounds: [
+            { attempt: 1, round: 1, turn_id: "turn-1", started_at: "2026-09-02T10:00:01Z", completed_at: "2026-09-02T10:00:02Z", outcome: { outcome: "responded", tool_calls: 1 } },
+            { attempt: 1, round: 2, turn_id: "turn-1", started_at: "2026-09-02T10:00:03Z", completed_at: "2026-09-02T10:00:04Z", outcome: { outcome: "responded", tool_calls: 0 } },
+            { attempt: 2, round: 1, turn_id: "turn-2", started_at: "2026-09-02T10:05:01Z", completed_at: null, outcome: { outcome: "outstanding" } },
+          ],
+        } as unknown as WorkflowAgentCallDetail),
+        loadState: "loaded",
+        errorMessage: "",
+        onNavigate: (path: string) => navigated.push(path),
+      },
+    });
+
+    const links = [...document.querySelectorAll<HTMLAnchorElement>("table.rounds a.request-link")];
+    // The attempt's own session where it recorded one, the call's otherwise;
+    // the round's own turn and number name the request.
+    expect(links.map((link) => link.getAttribute("href"))).toEqual([
+      "/conversations/first-session/turns/turn-1?request=1",
+      "/conversations/first-session/turns/turn-1?request=2",
+      "/conversations/worker-session/turns/turn-2?request=1",
+    ]);
+    links[1].dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+    expect(navigated).toEqual(["/conversations/first-session/turns/turn-1?request=2"]);
+  });
+
+  it("gives a round no request link when no session is recorded for it", async () => {
+    await render(runWith({ ...baseCall, session_id: null }));
+    expect(document.querySelector("table.rounds a.request-link")).toBeNull();
+    expect(document.querySelector("table.rounds tbody tr")!.textContent).toContain("—");
+  });
+
   it("renders a failed provider round as failed rather than outstanding", async () => {
     await render(
       runWith({
@@ -324,6 +373,7 @@ describe("WorkflowRunDetail", () => {
           {
             attempt: 1,
             round: 1,
+            turn_id: "turn-1",
             started_at: "2026-09-02T10:00:01Z",
             completed_at: "2026-09-02T10:00:02Z",
             outcome: {
@@ -371,6 +421,7 @@ describe("WorkflowRunDetail", () => {
           {
             attempt: 1,
             round: 1,
+            turn_id: "turn-1",
             started_at: "2026-09-02T10:00:01Z",
             completed_at: "2026-09-02T10:00:02Z",
             outcome: { outcome: "responded", tool_calls: 1 },
@@ -378,6 +429,7 @@ describe("WorkflowRunDetail", () => {
           {
             attempt: 1,
             round: 2,
+            turn_id: "turn-1",
             started_at: "2026-09-02T10:00:03Z",
             completed_at: "2026-09-02T10:04:07Z",
             outcome: { outcome: "interrupted" },
@@ -385,6 +437,7 @@ describe("WorkflowRunDetail", () => {
           {
             attempt: 2,
             round: 1,
+            turn_id: "turn-2",
             started_at: "2026-09-02T10:05:01Z",
             completed_at: "2026-09-02T10:05:02Z",
             outcome: { outcome: "responded", tool_calls: 0 },

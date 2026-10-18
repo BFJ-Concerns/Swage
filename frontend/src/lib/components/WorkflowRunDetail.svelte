@@ -10,13 +10,14 @@
   never reported reads "not recorded" with its reason, never as zero spend.
 -->
 <script lang="ts">
-  import { conversationPath } from "../router";
+  import { conversationPath, turnRequestPath } from "../router";
   import type { WorkflowJournalEntry } from "../protocol/WorkflowJournalEntry";
   import type { WorkflowRunDetailResponse } from "../protocol/WorkflowRunDetailResponse";
   import type { WorkflowCallUsage } from "../protocol/WorkflowCallUsage";
   import type { WorkflowWorkerTermination } from "../protocol/WorkflowWorkerTermination";
   import type { WorkflowProviderRound } from "../protocol/WorkflowProviderRound";
   import type { WorkflowAgentCallResolution } from "../protocol/WorkflowAgentCallResolution";
+  import type { WorkflowAgentCallDetail } from "../protocol/WorkflowAgentCallDetail";
 
   interface Props {
     onNavigate?: (path: string) => void;
@@ -112,6 +113,16 @@
   function resolvedLabel(attempt: WorkflowAgentCallResolution): string {
     if (attempt.turn_id == null) return "opened, not yet resolved by a turn";
     return [attempt.model ?? "default model", attempt.effort ?? "default effort"].join(", ");
+  }
+
+  // Where a round's request is read: the worker session of the attempt
+  // that ran the round, at the round's turn, with the inspector open at
+  // that round. The session is the attempt's where the attempt recorded
+  // one, the call's otherwise; a round whose session the record does not
+  // name has no address.
+  function requestPath(call: WorkflowAgentCallDetail, round: WorkflowProviderRound): string | null {
+    const session = call.dispatch?.attempts[round.attempt - 1]?.session_id ?? call.session_id;
+    return session ? turnRequestPath(session, round.turn_id, round.round) : null;
   }
 
   function navigate(event: MouseEvent, path: string) {
@@ -235,16 +246,25 @@
                   <th>Started</th>
                   <th>Ended</th>
                   <th>Outcome</th>
+                  <th>Request</th>
                 </tr>
               </thead>
               <tbody>
                 {#each call.provider_rounds as round (`${round.attempt}-${round.round}`)}
+                  {@const request = requestPath(call, round)}
                   <tr>
                     <td class="numeric">{round.attempt}</td>
                     <td class="numeric">{round.round}</td>
                     <td>{round.started_at}</td>
                     <td>{round.completed_at ?? "—"}</td>
                     <td>{roundLabel(round)}</td>
+                    <td>
+                      {#if request}
+                        <a class="request-link" href={request} onclick={(event) => navigate(event, request)}>Open request</a>
+                      {:else}
+                        —
+                      {/if}
+                    </td>
                   </tr>
                 {/each}
               </tbody>

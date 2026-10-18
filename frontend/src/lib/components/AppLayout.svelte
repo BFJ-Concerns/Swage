@@ -200,6 +200,9 @@
   const routedSurfaceId = $derived(route?.surfaceId ?? null);
   // The turn the URL names, if any: the transcript opens at it.
   const routedTurnId = $derived(route?.turnId ?? null);
+  // The provider round the URL names on that turn, if any: the turn's
+  // inspector opens at the request that round sent.
+  const routedTurnRequestRound = $derived(route?.turnRequestRound ?? null);
 
   function closeSettings(): void {
     onNavigate?.(activeConversation?.id ? conversationPath(activeConversation.id) : "/");
@@ -381,12 +384,12 @@
         <p class="no-session">Surfaces belong to a session: send the first message to start one, then its surfaces open here.</p>
       {/if}
     </div>
-    <ConversationChannel {conversationStore} {connectionStore} {streamingStore} {onRetry} {displayPreferences} {modelOptions} {modelCatalogueReady} {defaultModelId} {agentDefinitions} bind:selectedAgentId {onNavigate} {onNewConversation} focusTurnId={routedTurnId} />
+    <ConversationChannel {conversationStore} {connectionStore} {streamingStore} {onRetry} {displayPreferences} {modelOptions} {modelCatalogueReady} {defaultModelId} {agentDefinitions} bind:selectedAgentId {onNavigate} {onNewConversation} focusTurnId={routedTurnId} focusRequestRound={routedTurnRequestRound} />
   </main>
 {:else}
   <main class="conversation">
     <aside><ConversationList store={conversationStore} onNewConversation={() => onNewConversation?.(selectedAgentId || undefined)} /></aside>
-    <ConversationChannel {conversationStore} {connectionStore} {streamingStore} {onRetry} {displayPreferences} {modelOptions} {modelCatalogueReady} {defaultModelId} {agentDefinitions} bind:selectedAgentId {onNavigate} {onNewConversation} focusTurnId={routedTurnId} />
+    <ConversationChannel {conversationStore} {connectionStore} {streamingStore} {onRetry} {displayPreferences} {modelOptions} {modelCatalogueReady} {defaultModelId} {agentDefinitions} bind:selectedAgentId {onNavigate} {onNewConversation} focusTurnId={routedTurnId} focusRequestRound={routedTurnRequestRound} />
   </main>
 {/if}
 

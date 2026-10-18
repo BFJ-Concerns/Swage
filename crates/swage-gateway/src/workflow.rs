@@ -642,6 +642,7 @@ fn provider_round_wire(
     Ok(swage_protocol::client::workflow::WorkflowProviderRound {
         attempt,
         round: round.round as u32,
+        turn_id: round.turn_id,
         started_at: round.started_at,
         completed_at: round.completed_at,
         outcome: serde_json::from_value(round.outcome).map_err(|error| {
