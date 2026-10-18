@@ -316,6 +316,14 @@ pub trait TurnQueueStore: Send + Sync {
         &self,
         input: NewQueuedTurnInput,
     ) -> Result<QueuedTurnInput, StorageError>;
+    /// Atomically interrupt a delegating parent and enqueue its continuation,
+    /// transferring only its named presented inbox rows back to pending and
+    /// claiming them for the queued input. A failed claim changes nothing.
+    async fn enqueue_delegation_continuation(
+        &self,
+        parent_turn_id: Uuid,
+        input: NewQueuedTurnInput,
+    ) -> Result<QueuedTurnInput, StorageError>;
     /// Everything queued for a session, in arrival order.
     async fn list_queued_turn_inputs(
         &self,
@@ -1204,6 +1212,18 @@ pub trait ChannelQueueStore: Send + Sync {
         reason: &str,
     ) -> Result<u64, StorageError>;
 
+    /// Every inbox row a turn presented — the channel messages it drained
+    /// as its inputs — in arrival order; empty for a turn no channel started.
+    async fn list_channel_messages_by_turn(
+        &self,
+        turn_id: Uuid,
+    ) -> Result<Vec<ChannelInboundMessage>, StorageError>;
+
+    /// Return the presented rows of turns a restart cut off to the inbox,
+    /// so they are drained again. A turn cut off while delegating is left
+    /// out: recovery resumes it with its rows on the continuation
+    /// (`list_channel_messages_by_turn`), so its reply still reaches the
+    /// chat, and a second presentation would run its input twice.
     async fn requeue_presented_for_inflight_turns(&self) -> Result<u64, StorageError>;
 }
 
@@ -2085,6 +2105,13 @@ mod tests {
             unimplemented!()
         }
 
+        async fn list_channel_messages_by_turn(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<ChannelInboundMessage>, StorageError> {
+            unimplemented!()
+        }
+
         async fn requeue_presented_for_inflight_turns(&self) -> Result<u64, StorageError> {
             unimplemented!()
         }
@@ -2177,6 +2204,13 @@ mod tests {
         }
         async fn enqueue_turn_input(
             &self,
+            _: NewQueuedTurnInput,
+        ) -> Result<QueuedTurnInput, StorageError> {
+            unimplemented!()
+        }
+        async fn enqueue_delegation_continuation(
+            &self,
+            _: Uuid,
             _: NewQueuedTurnInput,
         ) -> Result<QueuedTurnInput, StorageError> {
             unimplemented!()

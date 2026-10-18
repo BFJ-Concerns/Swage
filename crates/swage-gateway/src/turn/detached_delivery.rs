@@ -5,6 +5,7 @@
 //! mailbox into the thread record, append-before-claim, before history is
 //! rebuilt. Failing the turn when delivery fails stays the coordinator's.
 
+use swage_agent::AgentError;
 use swage_storage::MessageOrigin;
 
 use super::{AppState, GatewayError, Uuid};
@@ -24,6 +25,13 @@ use crate::service::{PlatformMessage, append_platform_message};
 /// Append-before-claim: a failure between the two re-delivers next
 /// turn rather than losing the result, and a lost claim race leaves a
 /// duplicate row, not a gap.
+///
+/// Each Result is put to the message router's delivery hooks first, as a
+/// Result the synchronous path hands straight to its parent is: a hook
+/// that blocks it ends it — the router marks it failed with the reason,
+/// nothing of it enters the thread, and the thread is told the result was
+/// blocked, so the parent knows the child answered and why it cannot read
+/// the answer.
 pub(super) async fn deliver_detached_results(
     state: &AppState,
     session_id: Uuid,
@@ -34,22 +42,31 @@ pub(super) async fn deliver_detached_results(
     let pending_results = swage_agent::mailbox::pending_results(&state.storage, agent_id)
         .await
         .map_err(|error| GatewayError::WebSocketError(error.to_string()))?;
-    // The mailbox is the agent's, and an agent may run several sessions: a
-    // Result that names the parent session it belongs to (recovery writes
-    // one so) is delivered only there; one that names none is the agent's
-    // to take in whichever of its sessions turns next.
-    let here = session_id.to_string();
+    // The mailbox is the agent's, and an agent may run several sessions,
+    // each with several threads: a Result that names the parent session
+    // and thread it belongs to (recovery writes one so) is delivered only
+    // there; one that names none is the agent's to take in whichever of
+    // its sessions turns next.
+    let here_session = session_id.to_string();
+    let here_thread = thread_id.to_string();
     let addressed_here = |result: &swage_storage::model::AgentMessage| {
-        result
-            .payload
-            .get("parent_session_id")
-            .and_then(|value| value.as_str())
-            .is_none_or(|parent| parent == here)
+        let named = |key: &str| result.payload.get(key).and_then(|value| value.as_str());
+        named("parent_session_id").is_none_or(|parent| parent == here_session)
+            && named("parent_thread_id").is_none_or(|parent| parent == here_thread)
     };
+    let router = state.message_router();
     for result in pending_results
         .iter()
         .filter(|result| addressed_here(result))
     {
+        let content = match router.check_delivery(result).await {
+            Ok(()) => render_delegation_result(result),
+            Err(AgentError::HookBlocked { reason, .. }) => format!(
+                "Delegated agent {}'s result was blocked before delivery ({reason}).",
+                result.sender_agent_id
+            ),
+            Err(error) => return Err(GatewayError::WebSocketError(error.to_string())),
+        };
         append_platform_message(
             state,
             PlatformMessage {
@@ -58,10 +75,13 @@ pub(super) async fn deliver_detached_results(
                 turn_id: Some(prepared_turn_id),
                 agent_id: agent_id.to_owned(),
                 origin: MessageOrigin::Delegation,
-                content: render_delegation_result(result),
+                content,
             },
         )
         .await?;
+        // A blocked Result is already failed by the router and no longer
+        // pending; the claim is a no-op for it and marks a passed one
+        // delivered.
         swage_agent::mailbox::claim_result(&state.storage, result.id)
             .await
             .map_err(|error| GatewayError::WebSocketError(error.to_string()))?;

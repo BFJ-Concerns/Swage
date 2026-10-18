@@ -821,3 +821,14 @@ mod tests {
         assert!(state.approval_channels.lock().unwrap().is_empty());
     }
 }
+
+impl AppState {
+    /// The inter-agent message router over this gateway's store and its
+    /// lifecycle hooks: every path that sends or delivers an agent message —
+    /// a delegation, a Result carried into a thread, the agent-message API —
+    /// builds its router here, so no path delivers past the hooks another
+    /// honours.
+    pub(crate) fn message_router(&self) -> swage_agent::MessageRouter {
+        swage_agent::MessageRouter::new(self.storage.clone(), self.hook_registry.clone())
+    }
+}

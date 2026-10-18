@@ -30,7 +30,7 @@ use swage_context::tokeniser::TiktokenTokeniser;
 
 use swage_agent::{
     AgentBuilder, AgentConfig, AgentError, AgentEvent, DelegationExecutor, DelegationHandler,
-    MessageRouter, TurnRequest,
+    TurnRequest,
 };
 use swage_safety::LeakDetector;
 use swage_sandbox::{Sandbox, llm_handler::HostLlmHandler};

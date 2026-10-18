@@ -1621,7 +1621,6 @@ pub async fn send_agent_message(
     State(state): State<AppState>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    use swage_agent::MessageRouter;
     use swage_core::MessageKind;
     use swage_storage::model::NewAgentMessage;
 
@@ -1640,7 +1639,7 @@ pub async fn send_agent_message(
 
     // Durable messages are persisted first; delegate messages then start
     // background execution so the caller can poll the message status.
-    let router = MessageRouter::new(state.storage.clone(), None);
+    let router = state.message_router();
     let sender_agent_id = req.sender_agent_id;
     let recipient_agent_id = req.recipient_agent_id;
     let payload = req.payload;
@@ -1672,7 +1671,7 @@ pub async fn send_agent_message(
             .await
             {
                 tracing::warn!(error = ?error, "external delegate execution failed");
-                let router = MessageRouter::new(state_for_task.storage.clone(), None);
+                let router = state_for_task.message_router();
                 if let Err(fail_error) = router.fail_message(message_id, error.message()).await {
                     tracing::warn!(
                         message_id = %message_id,
@@ -1701,7 +1700,7 @@ async fn execute_external_delegate_message(
 ) -> Result<(), ApiError> {
     use std::sync::Arc;
 
-    use swage_agent::{DelegationExecutor, MessageRouter};
+    use swage_agent::DelegationExecutor;
 
     let topic = state
         .topic_store
@@ -1791,7 +1790,7 @@ async fn execute_external_delegate_message(
     .await
     .map_err(|error| ApiError::internal(error.to_string()))?;
 
-    let router = Arc::new(MessageRouter::new(state.storage.clone(), None));
+    let router = Arc::new(state.message_router());
 
     let executor = DelegationExecutor {
         storage: state.storage.clone(),

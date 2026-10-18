@@ -2680,6 +2680,7 @@ pub(crate) struct InMemoryDb {
     pub(crate) provider_rounds: Vec<swage_storage::ProviderRoundRecord>,
     pub(crate) session_variables: Vec<swage_storage::SessionVariable>,
     pub(crate) turn_queue: Vec<swage_storage::QueuedTurnInput>,
+    pub(crate) channel_messages: Vec<swage_storage::ChannelInboundMessage>,
 }
 
 impl MockStorage {
@@ -5334,12 +5335,31 @@ impl swage_storage::store::DeliveryStore for MockStorage {
 impl swage_storage::store::ChannelQueueStore for MockStorage {
     async fn ingest_channel_inbound(
         &self,
-        _messages: Vec<swage_storage::NewChannelInboundMessage>,
+        messages: Vec<swage_storage::NewChannelInboundMessage>,
         _cursor_integration: &str,
         _cursor_account: &str,
         _cursor: &str,
     ) -> Result<usize, StorageError> {
-        Ok(0)
+        let mut db = self.db.lock().await;
+        let count = messages.len();
+        for message in messages {
+            db.channel_messages
+                .push(swage_storage::ChannelInboundMessage {
+                    id: Uuid::new_v4(),
+                    integration: message.integration,
+                    account: message.account,
+                    conversation: message.conversation,
+                    external_id: message.external_id,
+                    sender: message.sender,
+                    content: message.content,
+                    state: swage_storage::ChannelInboundMessageState::Pending,
+                    discard_reason: None,
+                    turn_id: None,
+                    received_at: chrono::Utc::now(),
+                    presented_at: None,
+                });
+        }
+        Ok(count)
     }
 
     async fn get_channel_cursor(
@@ -5353,7 +5373,13 @@ impl swage_storage::store::ChannelQueueStore for MockStorage {
     async fn list_pending_channel_messages(
         &self,
     ) -> Result<Vec<swage_storage::ChannelInboundMessage>, StorageError> {
-        Ok(Vec::new())
+        let db = self.db.lock().await;
+        Ok(db
+            .channel_messages
+            .iter()
+            .filter(|row| row.state == swage_storage::ChannelInboundMessageState::Pending)
+            .cloned()
+            .collect())
     }
 
     async fn list_pending_channel_origins(
@@ -5364,9 +5390,20 @@ impl swage_storage::store::ChannelQueueStore for MockStorage {
 
     async fn list_pending_by_origin(
         &self,
-        _origin: swage_storage::PendingChannelOrigin,
+        origin: swage_storage::PendingChannelOrigin,
     ) -> Result<Vec<swage_storage::ChannelInboundMessage>, StorageError> {
-        Ok(Vec::new())
+        let db = self.db.lock().await;
+        Ok(db
+            .channel_messages
+            .iter()
+            .filter(|row| {
+                row.state == swage_storage::ChannelInboundMessageState::Pending
+                    && row.integration == origin.integration
+                    && row.account == origin.account
+                    && row.conversation == origin.conversation
+            })
+            .cloned()
+            .collect())
     }
 
     async fn begin_channel_turn(
@@ -5385,6 +5422,19 @@ impl swage_storage::store::ChannelQueueStore for MockStorage {
         _reason: &str,
     ) -> Result<u64, StorageError> {
         Ok(0)
+    }
+
+    async fn list_channel_messages_by_turn(
+        &self,
+        turn_id: Uuid,
+    ) -> Result<Vec<swage_storage::ChannelInboundMessage>, StorageError> {
+        let db = self.db.lock().await;
+        Ok(db
+            .channel_messages
+            .iter()
+            .filter(|row| row.turn_id == Some(turn_id))
+            .cloned()
+            .collect())
     }
 
     async fn requeue_presented_for_inflight_turns(&self) -> Result<u64, StorageError> {
@@ -5488,6 +5538,36 @@ impl swage_storage::store::AuditStore for MockStorage {
     }
 }
 
+fn enqueue_mock_turn_input(
+    db: &mut InMemoryDb,
+    input: swage_storage::NewQueuedTurnInput,
+) -> swage_storage::QueuedTurnInput {
+    let seq = db
+        .turn_queue
+        .iter()
+        .filter(|queued| queued.session_id == input.session_id)
+        .map(|queued| queued.seq)
+        .max()
+        .map_or(0, |seq| seq + 1);
+    let queued = swage_storage::QueuedTurnInput {
+        delivery_targets: input.delivery_targets,
+        attended: input.attended,
+        client_id: input.client_id,
+        id: Uuid::new_v4(),
+        session_id: input.session_id,
+        thread_id: input.thread_id,
+        seq,
+        origin: input.origin,
+        content: input.content,
+        attachments: input.attachments,
+        schedule_run_id: input.schedule_run_id,
+        channel_message_ids: input.channel_message_ids,
+        created_at: chrono::Utc::now(),
+    };
+    db.turn_queue.push(queued.clone());
+    queued
+}
+
 #[async_trait]
 impl swage_storage::store::TurnQueueStore for MockStorage {
     async fn enqueue_turn_inputs(
@@ -5506,30 +5586,54 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
         input: swage_storage::NewQueuedTurnInput,
     ) -> Result<swage_storage::QueuedTurnInput, StorageError> {
         let mut db = self.db.lock().await;
-        let seq = db
-            .turn_queue
-            .iter()
-            .filter(|queued| queued.session_id == input.session_id)
-            .map(|queued| queued.seq)
-            .max()
-            .map_or(0, |seq| seq + 1);
-        let queued = swage_storage::QueuedTurnInput {
-            delivery_targets: input.delivery_targets,
-            attended: input.attended,
-            client_id: input.client_id,
-            id: Uuid::new_v4(),
-            session_id: input.session_id,
-            thread_id: input.thread_id,
-            seq,
-            origin: input.origin,
-            content: input.content,
-            attachments: input.attachments,
-            schedule_run_id: input.schedule_run_id,
-            channel_message_ids: input.channel_message_ids,
-            created_at: chrono::Utc::now(),
-        };
-        db.turn_queue.push(queued.clone());
-        Ok(queued)
+        Ok(enqueue_mock_turn_input(&mut db, input))
+    }
+
+    async fn enqueue_delegation_continuation(
+        &self,
+        parent_turn_id: Uuid,
+        input: swage_storage::NewQueuedTurnInput,
+    ) -> Result<swage_storage::QueuedTurnInput, StorageError> {
+        use swage_storage::ChannelInboundMessageState::{Pending, Presented};
+        let mut db = self.db.lock().await;
+        let parent_valid = db.turns.get(&parent_turn_id).is_some_and(|parent| {
+            parent.state == TurnState::Delegating
+                && parent.parent_turn_id.is_none()
+                && parent.thread_id == input.thread_id
+        }) && db
+            .threads
+            .get(&input.thread_id)
+            .is_some_and(|thread| thread.session_id == input.session_id);
+        let mut seen = std::collections::HashSet::new();
+        if !parent_valid
+            || input.channel_message_ids.iter().any(|id| {
+                !seen.insert(*id)
+                    || !db.channel_messages.iter().any(|row| {
+                        row.id == *id
+                            && row.state == Presented
+                            && row.turn_id == Some(parent_turn_id)
+                    })
+                    || db
+                        .turn_queue
+                        .iter()
+                        .any(|queued| queued.channel_message_ids.contains(id))
+            })
+        {
+            return Err(StorageError::QueryFailed(
+                "continuation could not claim parent or inbox rows".into(),
+            ));
+        }
+        for row in &mut db.channel_messages {
+            if seen.contains(&row.id) {
+                row.state = Pending;
+                row.turn_id = None;
+                row.presented_at = None;
+            }
+        }
+        let parent = db.turns.get_mut(&parent_turn_id).unwrap();
+        parent.state = TurnState::Interrupted;
+        parent.completed_at = Some(chrono::Utc::now());
+        Ok(enqueue_mock_turn_input(&mut db, input))
     }
 
     async fn list_queued_turn_inputs(
@@ -5605,11 +5709,37 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
             );
         }
         let queued_ids = queued.iter().map(|item| item.id).collect();
-        self.db
-            .lock()
-            .await
-            .turn_queue
-            .retain(|item| item.session_id != session_id);
+        // The inbox rows the inputs name are presented by this turn, as the
+        // real drain presents them, and their chats are the turn's
+        // destinations.
+        let mut channel_origins: Vec<swage_storage::PendingChannelOrigin> = Vec::new();
+        {
+            let mut db = self.db.lock().await;
+            for item in &queued {
+                for message_id in &item.channel_message_ids {
+                    if let Some(row) = db
+                        .channel_messages
+                        .iter_mut()
+                        .find(|row| row.id == *message_id)
+                    {
+                        let origin = swage_storage::PendingChannelOrigin {
+                            integration: row.integration.clone(),
+                            account: row.account.clone(),
+                            conversation: row.conversation.clone(),
+                        };
+                        if !channel_origins.contains(&origin) {
+                            channel_origins.push(origin);
+                        }
+                        if row.state == swage_storage::ChannelInboundMessageState::Pending {
+                            row.state = swage_storage::ChannelInboundMessageState::Presented;
+                            row.turn_id = Some(turn.id);
+                            row.presented_at = Some(chrono::Utc::now());
+                        }
+                    }
+                }
+            }
+            db.turn_queue.retain(|item| item.session_id != session_id);
+        }
         Ok(Some(swage_storage::DrainedTurnQueue {
             delivery_targets: attribution.delivery_targets,
             attended: attribution.attended,
@@ -5617,7 +5747,7 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
             messages,
             queued_ids,
             schedule_run_ids: Vec::new(),
-            channel_origins: Vec::new(),
+            channel_origins,
         }))
     }
 
@@ -21301,6 +21431,270 @@ async fn a_delegation_result_reads_its_fate_before_its_text() {
 /// A child's Result readdressed to its parent's session after a restart is
 /// delivered by that session's next turn and by no other session of the
 /// same agent: the other session's turn leaves it in the mailbox.
+/// A recovered Result names the parent's thread as well as its session: a
+/// sibling thread of the same session turning first — a queued message on
+/// it drains before the continuation — takes nothing, and the parent's
+/// thread takes it.
+#[tokio::test]
+async fn a_readdressed_result_is_delivered_only_on_the_parents_thread() {
+    use swage_core::{MessageKind, MessageStatus};
+    use swage_storage::model::NewAgentMessage;
+    use swage_storage::store::AgentMessageStore;
+
+    let storage = Arc::new(MockStorage::new());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage
+        .create_session(NewSession {
+            agent_id: "lead".to_string(),
+            ..new_session(topic.id)
+        })
+        .await
+        .unwrap();
+    let mut threads = Vec::new();
+    for _ in 0..2 {
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "lead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "lead".to_string(),
+                state: TurnState::Pending,
+                user_input: Some("next".to_string()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        threads.push((thread.id, turn.id));
+    }
+    let (parent_thread, parent_turn) = threads[0];
+    let (sibling_thread, sibling_turn) = threads[1];
+    let delegate = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "lead".to_string(),
+            recipient_agent_id: "scout".to_string(),
+            kind: MessageKind::Delegate,
+            correlation_id: None,
+            payload: serde_json::json!({ "task": "work" }),
+        })
+        .await
+        .unwrap();
+    let result = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "scout".to_string(),
+            recipient_agent_id: "lead".to_string(),
+            kind: MessageKind::Result,
+            correlation_id: Some(delegate.id),
+            payload: serde_json::json!({
+                "response": "Scouted.",
+                "parent_session_id": session.id,
+                "parent_thread_id": parent_thread,
+            }),
+        })
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+
+    super::detached_delivery::deliver_detached_results(
+        &state,
+        session.id,
+        "lead",
+        sibling_thread,
+        sibling_turn,
+    )
+    .await
+    .unwrap();
+    assert!(
+        storage
+            .list_messages_by_thread(sibling_thread)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the sibling thread's turn takes nothing"
+    );
+    assert_eq!(
+        storage
+            .get_agent_message(result.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MessageStatus::Pending
+    );
+
+    super::detached_delivery::deliver_detached_results(
+        &state,
+        session.id,
+        "lead",
+        parent_thread,
+        parent_turn,
+    )
+    .await
+    .unwrap();
+    let delivered = storage
+        .list_messages_by_thread(parent_thread)
+        .await
+        .unwrap();
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert!(delivered[0].content.contains("Scouted."));
+    assert_eq!(
+        storage
+            .get_agent_message(result.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MessageStatus::Delivered
+    );
+}
+
+/// A Result carried from the mailbox into a thread is put to the same
+/// delivery hooks as one handed straight to its parent: a receive hook
+/// that blocks it fails it with the reason, nothing of it enters the
+/// thread, and the thread is told the result was blocked.
+#[tokio::test]
+async fn a_mailbox_result_a_receive_hook_blocks_is_failed_and_named_not_delivered() {
+    use swage_core::{MessageKind, MessageStatus};
+    use swage_storage::model::NewAgentMessage;
+    use swage_storage::store::AgentMessageStore;
+
+    struct BlockResultReceipt;
+
+    #[async_trait]
+    impl Hook for BlockResultReceipt {
+        fn name(&self) -> &str {
+            "block-result-receipt"
+        }
+
+        async fn execute(&self, event: &HookEvent) -> HookOutcome {
+            match event {
+                HookEvent::MessageReceive { kind, .. } if kind == "result" => {
+                    HookOutcome::Block("results from scouts are quarantined".into())
+                }
+                _ => HookOutcome::Continue,
+            }
+        }
+    }
+
+    let storage = Arc::new(MockStorage::new());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage
+        .create_session(NewSession {
+            agent_id: "lead".to_string(),
+            ..new_session(topic.id)
+        })
+        .await
+        .unwrap();
+    let thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "lead".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let turn = storage
+        .create_turn(NewTurn {
+            thread_id: thread.id,
+            agent_id: "lead".to_string(),
+            state: TurnState::Pending,
+            user_input: Some("next".to_string()),
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+    let delegate = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "lead".to_string(),
+            recipient_agent_id: "scout".to_string(),
+            kind: MessageKind::Delegate,
+            correlation_id: None,
+            payload: serde_json::json!({ "task": "work" }),
+        })
+        .await
+        .unwrap();
+    let result = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "scout".to_string(),
+            recipient_agent_id: "lead".to_string(),
+            kind: MessageKind::Result,
+            correlation_id: Some(delegate.id),
+            payload: serde_json::json!({ "response": "The quarantined text." }),
+        })
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    let mut hook_registry = HookRegistry::new();
+    hook_registry.register(HookRegistration::new(Arc::new(BlockResultReceipt)));
+    state.hook_registry = Some(Arc::new(hook_registry));
+
+    super::detached_delivery::deliver_detached_results(
+        &state, session.id, "lead", thread.id, turn.id,
+    )
+    .await
+    .unwrap();
+
+    let delivered = storage.list_messages_by_thread(thread.id).await.unwrap();
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert_eq!(
+        delivered[0].origin,
+        swage_storage::MessageOrigin::Delegation
+    );
+    assert!(
+        delivered[0]
+            .content
+            .contains("Delegated agent scout's result was blocked before delivery (results from scouts are quarantined)"),
+        "{}",
+        delivered[0].content
+    );
+    assert!(!delivered[0].content.contains("The quarantined text."));
+    let blocked = storage.get_agent_message(result.id).await.unwrap().unwrap();
+    assert_eq!(blocked.status, MessageStatus::Failed);
+    assert_eq!(
+        blocked.failure_reason.as_deref(),
+        Some("results from scouts are quarantined")
+    );
+    // Nothing waits: a second turn delivers nothing more.
+    super::detached_delivery::deliver_detached_results(
+        &state, session.id, "lead", thread.id, turn.id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        storage
+            .list_messages_by_thread(thread.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 #[tokio::test]
 async fn a_readdressed_result_is_delivered_only_in_the_parents_session() {
     use swage_core::{MessageKind, MessageStatus};

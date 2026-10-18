@@ -1112,7 +1112,7 @@ mod tests {
         crate::shutdown::recover_orphaned_turns(
             state.storage.as_ref(),
             state.topic_store.as_ref(),
-            &swage_agent::MessageRouter::new(state.storage.clone(), state.hook_registry.clone()),
+            &state.message_router(),
         )
         .await
         .unwrap();

@@ -144,7 +144,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     match crate::shutdown::recover_orphaned_turns(
         &*state.storage,
         &*state.topic_store,
-        &swage_agent::MessageRouter::new(state.storage.clone(), state.hook_registry.clone()),
+        &state.message_router(),
     )
     .await
     {
