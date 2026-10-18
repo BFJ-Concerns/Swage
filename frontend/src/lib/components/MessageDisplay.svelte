@@ -423,6 +423,17 @@
           <p class="interrupted-notice">
             {message.turn_state === "interrupted" ? "↩ Interrupted before a reply" : "⚠ No reply — the turn failed"}
           </p>
+          {#if message.turn_id}
+            <!-- The turn's context is read from its request, there being no
+                 reply to carry the affordance; an address naming one of its
+                 rounds opens here. -->
+            <TurnContextInspectorTrigger
+              turnId={message.turn_id}
+              presentation="message"
+              {inspectorTarget}
+              openAtRound={message.turn_id === focusTurnId ? focusRequestRound : null}
+            />
+          {/if}
         {/if}
         {#if message.failure_message}
           <div class="turn-error" role="alert">

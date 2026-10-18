@@ -327,6 +327,48 @@ describe("turn context inspector trigger", () => {
     expect(focused.textContent).toContain("second round");
   });
 
+  it("opens the inspector of a turn that ended without a reply from its request", async () => {
+    vi.mocked(fetchTurnContext).mockImplementation(async () => ({
+      assembly_name: "balanced",
+      elements: [],
+      total_tokens: 12,
+      budget: null,
+      budget_remaining: null,
+      compaction_applied: [],
+      warnings: [],
+      errors: [],
+      declared_omissions: [],
+      effective_tool_permissions: undefined,
+      provider_visible: { requests: [{ round: 1, request: { body: "the request that failed" } }] },
+      duration: { secs: 0, nanos: 1 },
+    }));
+    // A failed turn has no assistant message: its account, and its context,
+    // sit on the request.
+    const store = makeConversationStore([
+      {
+        role: "user",
+        origin: "user",
+        content: "Hello?",
+        timestamp: "2026-03-20T10:00:07Z",
+        turn_id: "turn-7",
+        turn_state: "failed",
+        failure_message: "provider unreachable: connection refused",
+      } as MessageView,
+    ]);
+
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store, streamingStore: makeStreamingStore(), focusTurnId: "turn-7", focusRequestRound: 1, focusMargin: 0 },
+    });
+
+    await vi.waitFor(() => expect(document.querySelector(".context-inspector")).not.toBeNull());
+    expect(vi.mocked(fetchTurnContext)).toHaveBeenCalledWith("turn-7");
+    await vi.waitFor(() => expect(document.querySelectorAll('[aria-label="Provider requests"] details')).toHaveLength(1));
+    const [request] = [...document.querySelectorAll<HTMLDetailsElement>('[aria-label="Provider requests"] details')];
+    expect(request.open).toBe(true);
+    expect(request.textContent).toContain("the request that failed");
+  });
+
   it("switches the shared inspector when two completed turns are opened in sequence", async () => {
     vi.mocked(fetchTurnContext).mockImplementation(async (turnId) => ({
       assembly_name: "balanced",

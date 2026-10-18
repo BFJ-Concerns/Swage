@@ -326,10 +326,10 @@ describe("WorkflowRunDetail", () => {
           session_id: "worker-session",
           dispatch: {
             ...baseCall.dispatch!,
-            attempts: [
-              { ...first, session_id: "first-session", turn_id: "turn-1" },
-              { ...first, cause: { cause: "after_interruption" }, session_id: null, turn_id: "turn-2" },
-            ],
+            // One attempt record. The settled turn, turn-2, is named by the
+            // call's result and by no attempt record, so the journal lists
+            // its rounds under the attempt after the last recorded one.
+            attempts: [{ ...first, session_id: "first-session", turn_id: "turn-1" }],
           },
           provider_rounds: [
             { attempt: 1, round: 1, turn_id: "turn-1", started_at: "2026-09-02T10:00:01Z", completed_at: "2026-09-02T10:00:02Z", outcome: { outcome: "responded", tool_calls: 1 } },
@@ -344,7 +344,8 @@ describe("WorkflowRunDetail", () => {
     });
 
     const links = [...document.querySelectorAll<HTMLAnchorElement>("table.rounds a.request-link")];
-    // The attempt's own session where it recorded one, the call's otherwise;
+    // The attempt's own session where an attempt record names the round's
+    // attempt, the call's for a round of the settled turn no record names;
     // the round's own turn and number name the request.
     expect(links.map((link) => link.getAttribute("href"))).toEqual([
       "/conversations/first-session/turns/turn-1?request=1",
@@ -353,6 +354,24 @@ describe("WorkflowRunDetail", () => {
     ]);
     links[1].dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
     expect(navigated).toEqual(["/conversations/first-session/turns/turn-1?request=2"]);
+  });
+
+  it("addresses every round through the call's session when no dispatch is recorded", async () => {
+    await render(
+      runWith({
+        ...baseCall,
+        session_id: "worker-session",
+        dispatch: null,
+        provider_rounds: [
+          { attempt: 1, round: 0, turn_id: "turn-1", started_at: "2026-09-02T10:00:01Z", completed_at: "2026-09-02T10:00:02Z", outcome: { outcome: "responded", tool_calls: 0 } },
+        ],
+      } as unknown as WorkflowAgentCallDetail),
+    );
+    const links = [...document.querySelectorAll<HTMLAnchorElement>("table.rounds a.request-link")];
+    // Round 0 is the Codex engine's bootstrap round, addressed like any other.
+    expect(links.map((link) => link.getAttribute("href"))).toEqual([
+      "/conversations/worker-session/turns/turn-1?request=0",
+    ]);
   });
 
   it("gives a round no request link when no session is recorded for it", async () => {

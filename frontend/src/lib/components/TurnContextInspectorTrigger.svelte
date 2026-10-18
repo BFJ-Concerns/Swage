@@ -3,6 +3,9 @@
   // One inspector is open at a time, on the trigger that opened it; `round`
   // is the provider round it opens at, when an address named one.
   let inspectedTurn = $state<{ triggerId: number; turnId: string; round: number | null } | null>(null);
+  // The address last honoured: an address opens the inspector once, however
+  // many triggers mount for its turn afterwards, until it is withdrawn.
+  let honouredAddress: { turnId: string; round: number } | null = null;
 </script>
 
 <script lang="ts">
@@ -32,11 +35,20 @@
 
   const triggerId = nextTriggerId++;
 
-  // An address that names a round opens the inspector once per round it
-  // names; a later click or close is the reader's and is not overruled.
+  // An address that names a round opens the inspector once; a later click
+  // or close is the reader's and is not overruled, and a trigger mounting
+  // later for the same address — another message of the turn, the
+  // transcript rebuilt beside a surface — finds it already honoured. The
+  // address withdrawn in place (the focus moved to another turn) lets the
+  // next address for this turn open again.
   $effect(() => {
     const round = openAtRound;
-    if (round === null) return;
+    if (round === null) {
+      if (honouredAddress?.turnId === turnId) honouredAddress = null;
+      return;
+    }
+    if (honouredAddress?.turnId === turnId && honouredAddress.round === round) return;
+    honouredAddress = { turnId, round };
     inspectedTurn = { triggerId, turnId, round };
   });
 

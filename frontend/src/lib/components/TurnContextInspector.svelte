@@ -92,13 +92,18 @@
   const totalTokens = $derived(report?.total_tokens ?? 0);
 
   // Land the reader on the named round's request once it is rendered; a
-  // round the report does not carry leaves the inspector at its head.
+  // round the report does not carry returns the inspector to its head,
+  // wherever an earlier address had scrolled it.
   $effect(() => {
     const round = focusRound;
     void fullRequests.length;
     if (round === null || loadState !== "loaded" || !panel) return;
     const target = panel.querySelector<HTMLElement>(`[data-request-round="${round}"]`);
-    if (target && typeof target.scrollIntoView === "function") target.scrollIntoView({ block: "start" });
+    if (!target) {
+      panel.scrollTop = 0;
+      return;
+    }
+    if (typeof target.scrollIntoView === "function") target.scrollIntoView({ block: "start" });
   });
   const durationMs = $derived(
     report

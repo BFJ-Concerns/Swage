@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mount, unmount } from "svelte";
+import { flushSync, mount, unmount } from "svelte";
 
 vi.mock("../api/turns", () => ({
   fetchTurnContext: vi.fn(),
@@ -8,6 +8,7 @@ vi.mock("../api/turns", () => ({
 
 import { fetchTurnContext } from "../api/turns";
 import TurnContextInspector from "../components/TurnContextInspector.svelte";
+import { reactiveProps } from "./fixtures/reactive-props.svelte";
 
 let component: ReturnType<typeof mount> | undefined;
 
@@ -179,6 +180,34 @@ it("opens at its head when the address names a round the report lacks", async ()
   await vi.waitFor(() => expect(document.querySelector("table.elements")).not.toBeNull());
   expect(document.querySelector<HTMLDetailsElement>('[aria-label="Provider requests"] details')!.open).toBe(false);
   expect(scrolled).toHaveLength(0);
+});
+
+it("returns a retained inspector to its head when a later address names a round the report lacks", async () => {
+  const report = recordedRequest();
+  vi.mocked(fetchTurnContext).mockResolvedValue({ ...report,
+    provider_visible: { ...report.provider_visible, requests: [
+      ...report.provider_visible.requests,
+      { round: 2, request: { body: { messages: [{ role: "user", content: "Second round body" }] } } },
+    ] },
+  });
+  const scrolled: Element[] = [];
+  Element.prototype.scrollIntoView = function () {
+    scrolled.push(this);
+  };
+  const props = reactiveProps({ turnId: "recorded-turn", focusRound: 2 as number | null, onClose: () => {} });
+  component = mount(TurnContextInspector, { target: document.body, props });
+  await vi.waitFor(() => expect(scrolled).toHaveLength(1));
+
+  // The panel stays mounted and scrolled to round 2; the next address on the
+  // same turn names a round the report lacks.
+  const panel = document.querySelector<HTMLElement>(".context-inspector")!;
+  const tops: number[] = [];
+  Object.defineProperty(panel, "scrollTop", { configurable: true, get: () => 0, set: (value: number) => tops.push(value) });
+  flushSync(() => {
+    props.focusRound = 7;
+  });
+  expect(tops).toEqual([0]);
+  expect(scrolled).toHaveLength(1);
 });
 
 it("keeps assignment metadata out of an opened provider request", async () => {

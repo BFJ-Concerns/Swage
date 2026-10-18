@@ -108,9 +108,12 @@ export interface MemoryPageAddress {
 }
 
 // The provider round `?request=` names: a counting number, or nothing.
+// A round is a whole number from the turn's own counter — the agent loop
+// counts from 1, the Codex engine records its thread bootstrap as round 0 —
+// so the address takes exactly the digits the record wrote and nothing else.
 function requestRound(query: URLSearchParams): number | null {
-  const round = Number(query.get("request"));
-  return Number.isInteger(round) && round > 0 ? round : null;
+  const request = query.get("request");
+  return request !== null && /^\d+$/.test(request) ? Number(request) : null;
 }
 
 function memoryPageAddress(query: URLSearchParams): MemoryPageAddress | null {

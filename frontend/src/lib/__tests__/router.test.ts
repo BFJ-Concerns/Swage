@@ -82,9 +82,12 @@ describe("parseRoute", () => {
     expect(route.conversationId).toBe("abc-123");
     expect(route.turnId).toBe("turn-9");
     expect(route.turnRequestRound).toBe(2);
-    // A round that is not a counting number names nothing; the turn still opens.
-    expect(parseRoute("/conversations/abc-123/turns/turn-9?request=later").turnRequestRound).toBeNull();
-    expect(parseRoute("/conversations/abc-123/turns/turn-9?request=0").turnRequestRound).toBeNull();
+    // Round 0 is real: the Codex engine records its thread bootstrap as it.
+    expect(parseRoute("/conversations/abc-123/turns/turn-9?request=0").turnRequestRound).toBe(0);
+    // Anything but a whole number names nothing; the turn still opens.
+    for (const malformed of ["later", "", " 2 ", "-1", "2.5", "1e1"]) {
+      expect(parseRoute(`/conversations/abc-123/turns/turn-9?request=${malformed}`).turnRequestRound).toBeNull();
+    }
     // The query means nothing without a turn.
     expect(parseRoute("/conversations/abc-123?request=2").turnRequestRound).toBeNull();
     expect(turnRequestPath("abc-123", "turn 9", 2)).toBe("/conversations/abc-123/turns/turn%209?request=2");
