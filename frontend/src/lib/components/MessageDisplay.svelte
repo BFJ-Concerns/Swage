@@ -3,6 +3,8 @@
   Handles markdown rendering, syntax highlighting, auto-scroll, and streaming.
 -->
 <script lang="ts">
+  import { on } from "svelte/events";
+  import { parseRoute } from "../router";
   import DOMPurify from "dompurify";
   import { marked, Tokenizer } from "marked";
   import { markedHighlight } from "marked-highlight";
@@ -125,9 +127,35 @@
     /** Injected by App.svelte — provides streaming state. */
     streamingStore?: StreamingStore;
     displayPreferences?: DisplayPreferences;
+    onNavigate?: (path: string) => void;
   }
 
-  let { store, streamingStore, displayPreferences = DEFAULT_DISPLAY_PREFERENCES }: Props = $props();
+  let { store, streamingStore, onNavigate, displayPreferences = DEFAULT_DISPLAY_PREFERENCES }: Props = $props();
+
+  function messageLinks(node: HTMLElement) {
+    return {
+      destroy: on(node, "click", (event) => {
+        if (!onNavigate || event.defaultPrevented || event.button !== 0 ||
+            event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+        const link = event.target instanceof Element ? event.target.closest("a[href]") : null;
+        if (!(link instanceof HTMLAnchorElement) || !node.contains(link) ||
+            link.hasAttribute("download") || (link.target && link.target !== "_self")) return;
+        const url = new URL(link.href);
+        if (url.origin !== window.location.origin) return;
+        // Unknown paths are gateway resources; fragments keep browser scrolling.
+        if (url.hash) return;
+        try {
+          if (parseRoute(url.pathname).path !== url.pathname) return;
+        } catch {
+          // Malformed encoded addresses are not app routes.
+          return;
+        }
+        const path = url.pathname + url.search;
+        event.preventDefault();
+        onNavigate(path);
+      }),
+    };
+  }
 
   // ---- Auto-scroll ----------------------------------------------------------
 
@@ -275,6 +303,7 @@
   bind:this={scrollEl}
   onscroll={handleScroll}
   role="region"
+  use:messageLinks
   aria-label="Conversation messages"
 >
   <!-- Dedicated, throttled assistive status — see streamingStatus above. -->
