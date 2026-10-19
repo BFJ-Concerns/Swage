@@ -1259,3 +1259,50 @@ describe("authorship of platform-written messages", () => {
     expect(document.body.querySelectorAll(".message.platform")).toHaveLength(3);
   });
 });
+
+
+describe("message link navigation", () => {
+  afterEach(() => { document.body.replaceChildren(); });
+
+  it.each(["/settings/memory?scope=general&reference=general%2Fprofile", `${window.location.origin}/settings/memory?scope=general&reference=general%2Fprofile`])("routes a memory notice inside the app: %s", (href) => {
+    const onNavigate = vi.fn();
+    const component = mount(MessageDisplay, {
+      target: document.body,
+      props: {
+        store: makeConversationStore([makeAssistantMessage(`Memory updated from this conversation: [page](${href})`)]),
+        onNavigate,
+      },
+    });
+    onTestFinished(() => unmount(component));
+    flushSync();
+    const location = window.location.href;
+    const link = document.querySelector<HTMLAnchorElement>(".markdown-body a")!;
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+    link.dispatchEvent(click);
+    expect(onNavigate).toHaveBeenCalledExactlyOnceWith("/settings/memory?scope=general&reference=general%2Fprofile");
+    expect(click.defaultPrevented).toBe(true);
+    expect(window.location.href).toBe(location);
+  });
+
+  it.each([
+    { href: "https://elsewhere.example/page", ctrlKey: false },
+    { href: "/settings/memory", ctrlKey: true },
+    { href: "/api/memory/pages", ctrlKey: false },
+  ])("leaves ordinary browser navigation intact: $href ($ctrlKey)", ({ href, ctrlKey }) => {
+    const onNavigate = vi.fn();
+    const component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store: makeConversationStore([makeAssistantMessage(`[page](${href})`)]), onNavigate },
+    });
+    onTestFinished(() => unmount(component));
+    flushSync();
+    const link = document.querySelector<HTMLAnchorElement>(".markdown-body a")!;
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, ctrlKey });
+    let intercepted: boolean | undefined;
+    // Observe the component's decision, then suppress jsdom's unsupported document navigation.
+    document.addEventListener("click", (event) => { intercepted = event.defaultPrevented; event.preventDefault(); }, { once: true });
+    link.dispatchEvent(click);
+    expect(onNavigate).not.toHaveBeenCalled();
+    expect(intercepted).toBe(false);
+  });
+});
