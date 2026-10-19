@@ -1272,6 +1272,7 @@ async fn continuity_degradation_successor_keeps_established_facts_beside_the_dia
             1,
             false,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -21041,10 +21042,21 @@ async fn settlement_identical_failure_bound_ends_unattended_turn_with_cause() {
             Some(_home.path().to_path_buf()),
         )
         .await;
-        let mut config = serde_json::to_value(state.active_config()).unwrap();
-        config["tools"]["max_identical_failures"] = serde_json::json!(limit);
+        let mut config = state.active_config();
+        config.tools.max_identical_failures = u32::try_from(limit).unwrap();
+        std::fs::write(
+            _home.path().join("config.toml"),
+            toml::to_string(&swage_config::PartialConfig::from(config)).unwrap(),
+        )
+        .unwrap();
+        let config = swage_config::load_resolved_config_from(
+            _home.path(),
+            &swage_core::ScopeLocation::General,
+            "default",
+        )
+        .unwrap();
         state.replace_runtime(
-            serde_json::from_value(config).unwrap(),
+            config,
             state.active_provider(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
         );

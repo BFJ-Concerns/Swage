@@ -192,6 +192,7 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
         // Scalar tool settings plus flattened permission fields (allow, deny,
         // bundles, require_approval) which live at the [tools] level in TOML.
         "tools" => &[
+            "max_identical_failures",
             "shell_timeout_secs",
             "python_execute",
             "max_output_bytes",
@@ -300,6 +301,7 @@ fn check_field_type(
             ("boolean", matches!(value, Value::Boolean(_)))
         }
         ("logging", "level") => ("string", matches!(value, Value::String(_))),
+        ("tools", "max_identical_failures") => ("integer", matches!(value, Value::Integer(_))),
         ("tools", "shell_timeout_secs") => ("integer", matches!(value, Value::Integer(_))),
         ("tools", "python_execute") => ("table", matches!(value, Value::Table(_))),
         ("tools", "max_output_bytes") => ("integer", matches!(value, Value::Integer(_))),
@@ -1987,6 +1989,18 @@ allowed_fields = ["user"]
                 .any(|p| matches!(&p.kind, ConfigProblemKind::TypeError { .. })),
             "string value for shell_timeout_secs should produce TypeError"
         );
+    }
+
+    #[test]
+    fn tools_failure_bound_rejects_non_integer_values() {
+        let problems = validate_toml_string(
+            "[tools]\nmax_identical_failures = \"three\"",
+            &path("config.toml"),
+        );
+        assert!(problems.iter().any(|problem| {
+            problem.field_path.as_deref() == Some("tools.max_identical_failures")
+                && matches!(&problem.kind, ConfigProblemKind::TypeError { .. })
+        }));
     }
 
     #[test]
