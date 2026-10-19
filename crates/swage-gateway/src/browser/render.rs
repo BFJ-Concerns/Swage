@@ -36,6 +36,7 @@ struct RenderLineMeta {
     subtree_nodes: usize,
     subtree_weight: usize,
     has_interactive: bool,
+    has_opening: bool,
 }
 
 pub fn render_snapshot(
@@ -50,12 +51,12 @@ pub fn render_snapshot(
     let mut renderer = Renderer::new(header.clone(), snapshot_seq, masked_backend_nodes);
     let roots = root_nodes(nodes);
     for node in &roots {
-        renderer.render_node(nodes, node, 0);
+        renderer.render_node(nodes, node, 0, false, false);
     }
     if renderer.only_rendered_root_refs() && nodes.len() > roots.len() {
         renderer = Renderer::new(header, snapshot_seq, masked_backend_nodes);
         for node in nodes.iter().filter(|node| node.parent_id.is_some()) {
-            renderer.render_node(nodes, node, 0);
+            renderer.render_node(nodes, node, 0, false, false);
         }
     }
     let full_output = join_render_lines(&renderer.lines);
@@ -74,6 +75,7 @@ struct Renderer {
     snapshot_seq: u64,
     masked_backend_nodes: HashSet<BackendNodeId>,
     lines: Vec<RenderLine>,
+    opening_started: bool,
 }
 
 impl Renderer {
@@ -88,6 +90,7 @@ impl Renderer {
             snapshot_seq,
             masked_backend_nodes: masked_backend_nodes.clone(),
             lines,
+            opening_started: false,
         }
     }
 
@@ -99,17 +102,51 @@ impl Renderer {
                 .all(|entry| entry.role.eq_ignore_ascii_case("RootWebArea"))
     }
 
-    fn render_node(&mut self, nodes: &[AxNode], node: &AxNode, depth: usize) {
+    fn render_node(
+        &mut self,
+        nodes: &[AxNode],
+        node: &AxNode,
+        depth: usize,
+        in_main: bool,
+        in_opening: bool,
+    ) {
         if should_drop(node) {
             return;
         }
+        // Ignored AX nodes can still own exposed descendants. Traverse these
+        // wrappers without rendering them so content keeps its landmark ancestry.
+        if node.ignored {
+            if !self.is_masked(node) {
+                for child in child_nodes(nodes, node) {
+                    self.render_node(nodes, child, depth, in_main, in_opening);
+                }
+            }
+            return;
+        }
         let role = ax_value_string(node.role.as_ref()).unwrap_or_else(|| "node".to_string());
+        // Supporting content can contain paragraphs before the article's lead,
+        // such as an infobox table or navigation within the main landmark.
+        let in_main = (in_main || matches!(role.as_str(), "main" | "article"))
+            && !matches!(
+                role.as_str(),
+                "table"
+                    | "grid"
+                    | "treegrid"
+                    | "navigation"
+                    | "complementary"
+                    | "contentinfo"
+                    | "banner"
+                    | "note"
+            );
+        let starts_opening = in_main && role == "paragraph" && !self.opening_started;
+        self.opening_started |= starts_opening;
+        let in_opening = in_opening || starts_opening;
         let name = ax_value_string(node.name.as_ref())
             .map(|name| name.trim().to_string())
             .unwrap_or_default();
         if role == "generic" && name.is_empty() && !has_interesting_state(node) {
             for child in child_nodes(nodes, node) {
-                self.render_node(nodes, child, depth);
+                self.render_node(nodes, child, depth, in_main, in_opening);
             }
             return;
         }
@@ -164,13 +201,13 @@ impl Renderer {
             meta: None,
         });
         if masked {
-            self.finish_render_line(line_index, actionable);
+            self.finish_render_line(line_index, actionable, in_opening);
             return;
         }
         for child in child_nodes(nodes, node) {
-            self.render_node(nodes, child, depth + 1);
+            self.render_node(nodes, child, depth + 1, in_main, in_opening);
         }
-        self.finish_render_line(line_index, actionable);
+        self.finish_render_line(line_index, actionable, in_opening);
     }
 
     fn is_masked(&self, node: &AxNode) -> bool {
@@ -178,16 +215,18 @@ impl Renderer {
             .is_some_and(|id| self.masked_backend_nodes.contains(&id))
     }
 
-    fn finish_render_line(&mut self, line_index: usize, is_interactive: bool) {
+    fn finish_render_line(&mut self, line_index: usize, is_interactive: bool, in_opening: bool) {
         let subtree_end = self.lines.len();
         let mut subtree_nodes = 1;
         let mut subtree_weight = self.lines[line_index].text.len();
         let mut has_interactive = is_interactive;
+        let mut has_opening = in_opening;
         for child in &self.lines[line_index + 1..subtree_end] {
             if child.meta.is_some() {
                 subtree_nodes += 1;
                 subtree_weight += child.text.len();
             }
+            has_opening |= child.meta.as_ref().is_some_and(|meta| meta.has_opening);
             if child.meta.as_ref().is_some_and(|meta| meta.has_interactive) {
                 has_interactive = true;
             }
@@ -197,6 +236,7 @@ impl Renderer {
             subtree_nodes,
             subtree_weight,
             has_interactive,
+            has_opening,
         });
     }
 }
@@ -258,7 +298,7 @@ fn child_nodes<'a>(nodes: &'a [AxNode], node: &AxNode) -> Vec<&'a AxNode> {
 }
 
 fn should_drop(node: &AxNode) -> bool {
-    node.ignored || ax_value_string(node.role.as_ref()).is_some_and(|role| role == "InlineTextBox")
+    ax_value_string(node.role.as_ref()).is_some_and(|role| role == "InlineTextBox")
 }
 
 fn is_actionable(node: &AxNode, role: &str) -> bool {
@@ -393,7 +433,7 @@ fn truncate_snapshot(lines: &[RenderLine], max_bytes: usize) -> String {
         .enumerate()
         .filter_map(|(index, line)| {
             let meta = line.meta.as_ref()?;
-            (meta.subtree_nodes > 1).then_some(ElisionCandidate {
+            (meta.subtree_nodes > 1 && !meta.has_opening).then_some(ElisionCandidate {
                 index,
                 depth: line.depth,
                 subtree_weight: meta.subtree_weight,
@@ -402,7 +442,8 @@ fn truncate_snapshot(lines: &[RenderLine], max_bytes: usize) -> String {
         })
         .collect::<Vec<_>>();
 
-    // Prefer large leaf-ish prose subtrees. Interactive subtrees are a fallback
+    // Keep the opening paragraph of main content and its ancestors. Prefer
+    // large leaf-ish prose subtrees elsewhere. Interactive subtrees are a fallback
     // only for pathological pages where text-only elision cannot reach budget.
     candidates.sort_by(|left, right| {
         left.has_interactive
@@ -578,6 +619,93 @@ mod tests {
             rendered.full_output.is_some(),
             "full snapshot should still spill"
         );
+    }
+
+    #[test]
+    fn over_budget_article_keeps_its_opening() {
+        let nodes: Vec<AxNode> =
+            serde_json::from_str(include_str!("../../tests/fixtures/browser/ax/article.json"))
+                .expect("article AX fixture");
+        let rendered = render_snapshot(
+            &nodes,
+            "https://fixture.local/article",
+            "Heron",
+            1,
+            650,
+            &HashSet::new(),
+        );
+        assert!(rendered.output.contains("Herons are long-legged, long-necked freshwater and coastal birds in the family Ardeidae."), "article opening was elided:\n{}", rendered.output);
+        assert_eq!(
+            rendered.output.trim_end(),
+            include_str!("../../tests/fixtures/browser/ax/article-over-budget.rendered").trim_end()
+        );
+        assert!(rendered.output.len() <= 650);
+        assert!(
+            rendered
+                .full_output
+                .as_ref()
+                .expect("full snapshot spill")
+                .contains("Detailed discussion")
+        );
+        assert!(rendered.output.contains("ref=s1e3"), "article link lost");
+    }
+
+    #[test]
+    fn over_budget_chromium_article_keeps_its_opening() {
+        // Chromium Accessibility.getFullAXTree for /wiki/Heron, 2026-10-16.
+        // Pruned sibling branches and their childIds only: the ignored wrappers,
+        // infobox paragraphs before the lead, and split inline text are intact.
+        let nodes: Vec<AxNode> = serde_json::from_str(include_str!(
+            "../../tests/fixtures/browser/ax/heron-chromium.json"
+        ))
+        .expect("Chromium article AX fixture");
+        let rendered = render_snapshot(
+            &nodes,
+            "https://en.wikipedia.org/wiki/Heron",
+            "Heron - Wikipedia",
+            1,
+            6_000,
+            &HashSet::new(),
+        );
+        // Compare with the independently captured paragraph, joining the quoted
+        // node names because inline links split the prose into separate lines.
+        let paragraph = "Herons are long-legged, long-necked, freshwater and coastal birds \
+            in the family Ardeidae, with 75 recognised species, some of which are \
+            referred to as egrets or bitterns rather than herons. Members of the \
+            genus Botaurus are referred to as bitterns, and, together with the \
+            zigzag heron, or zigzag bittern, in the monotypic genus Zebrilus, form \
+            a monophyletic group, Botaurinae, within the Ardeidae family. Egrets \
+            do not form a biologically distinct group from herons, and tend to \
+            be named differently because they are mainly white or have decorative \
+            plumes in breeding plumage. Herons, by evolutionary adaptation, have \
+            long beaks.";
+        let names = rendered.output.lines().filter_map(|line| {
+            let start = line.find('"')?;
+            serde_json::Deserializer::from_str(&line[start..])
+                .into_iter::<String>()
+                .next()?
+                .ok()
+        });
+        let rendered_text: String = names
+            .flat_map(|name| {
+                name.chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let expected: String = paragraph.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            rendered_text.contains(&expected),
+            "article opening was elided or incomplete:\n{}",
+            rendered.output
+        );
+        assert!(rendered.output.len() <= 6_000);
+        assert!(
+            rendered
+                .output
+                .contains("nodes elided - full snapshot saved")
+        );
+        assert!(rendered.full_output.is_some(), "full snapshot must spill");
     }
 
     #[test]

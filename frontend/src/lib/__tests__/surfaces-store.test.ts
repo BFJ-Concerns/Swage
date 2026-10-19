@@ -544,4 +544,31 @@ describe("surfaces store", () => {
     expect(store.surfaces).toHaveLength(1);
     expect(store.library.map((entry) => entry.name)).toEqual(["Planning", "Standup"]);
   });
+  it("sends rename and resolution requests then refetches authoritative state", async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/surfaces") && url.includes("/sessions")) return jsonResponse(listBody);
+      if (url === "/api/surface-library") return jsonResponse(libraryBody);
+      return jsonResponse(surfaceBody("# Draft"));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const store = createSurfacesStore({ channelFactory: fakeChannel });
+    await store.loadSurfaces(SESSION_ID);
+    let renameError: unknown;
+    try { await store.renameSurface(SURFACE_ID, "Boreal"); } catch (error) { renameError = error; }
+    expect(renameError).toBeUndefined();
+    expect(fetchMock.mock.calls.slice(2).map(([url, init]) => [url, init?.method ?? "GET"])).toEqual([
+      [`/api/surfaces/${SURFACE_ID}`, "POST"],
+      [`/api/surfaces/${SURFACE_ID}`, "GET"],
+      [`/api/sessions/${SESSION_ID}/surfaces`, "GET"],
+    ]);
+    expect(requestBody(fetchMock.mock.calls[2])).toEqual({ title: "Boreal" });
+    fetchMock.mockClear();
+    await store.resolveAnnotation(SURFACE_ID, ANNOTATION_ID);
+    expect(fetchMock.mock.calls.map(([url, init]) => [url, init?.method ?? "GET"])).toEqual([
+      [`/api/surfaces/${SURFACE_ID}/annotations/${ANNOTATION_ID}/resolve`, "POST"],
+      [`/api/surfaces/${SURFACE_ID}`, "GET"],
+    ]);
+    store.stopListening();
+  });
+
 });

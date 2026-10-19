@@ -46,7 +46,7 @@ pub struct SqliteStorage {
 }
 
 impl SqliteStorage {
-    /// Open a file-backed database at `path`, applying migrations on first run.
+    /// Open a file-backed database, creating a fresh schema or refusing an incompatible one.
     pub fn open(path: &Path) -> Result<Self, StorageError> {
         let conn =
             Connection::open(path).map_err(|e| StorageError::ConnectionFailed(e.to_string()))?;
@@ -60,7 +60,7 @@ impl SqliteStorage {
         Self::configure_and_migrate(conn)
     }
 
-    /// Configure connection pragmas, run migrations, and wrap in Self.
+    /// Configure connection pragmas, check or initialise the schema, and wrap in Self.
     fn configure_and_migrate(conn: Connection) -> Result<Self, StorageError> {
         // WAL mode: concurrent reads with a single writer, better crash safety.
         conn.execute_batch("PRAGMA journal_mode=WAL;")
