@@ -2030,6 +2030,15 @@ async fn workflow_journal_preserves_and_recomposes_call_scoped_context() {
                 *text = text.replace(root.as_str(), "<call tool root>");
             }
         }
+        // Each call reads the clock when it is composed, so the two calls'
+        // times may differ by a second.
+        if let Some(current_time) = report["elements"].as_array_mut().and_then(|elements| {
+            elements
+                .iter_mut()
+                .find(|element| element["name"] == "current_time")
+        }) {
+            current_time["full_text"] = Value::String("<call time>".to_owned());
+        }
         reports.push(report);
     }
     assert_ne!(
