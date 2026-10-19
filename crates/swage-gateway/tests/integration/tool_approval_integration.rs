@@ -191,6 +191,31 @@ async fn start_test_server_with_tools(
     (router, addr, storage)
 }
 
+/// Like `start_test_server_with_tools`, but serving from `data_root`, so a test
+/// can place gateway-owned files there before the gateway reads them.
+async fn start_test_server_with_tools_at(
+    provider: impl LlmProvider + 'static,
+    config: ResolvedConfig,
+    tools: Vec<Arc<dyn swage_tool::tool::Tool>>,
+    data_root: &std::path::Path,
+) -> (Router, SocketAddr, Arc<SqliteStorage>) {
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
+        Arc::new(provider),
+        config,
+        swage_gateway::tool::ToolDispatcher::allow_all(tools),
+        None,
+        data_root.to_path_buf(),
+    );
+    let router = build_router(state);
+
+    let (addr, _server) = start_live_server(router.clone()).await;
+
+    (router, addr, storage)
+}
+
 async fn http(router: &Router, method: &str, uri: &str) -> (StatusCode, Value) {
     let resp = router
         .clone()
@@ -1884,9 +1909,13 @@ async fn shipped_guidance_reads_without_approval_and_stays_read_only() {
         // Exercise location approvals, without per-tool write approval masking
         // the projection's own write refusal.
         config.tools.permissions.require_approval.clear();
-        let (router, addr, storage) =
-            start_test_server_with_tools(MockProvider::new(responses), config, native_file_tools())
-                .await;
+        let (router, addr, storage) = start_test_server_with_tools_at(
+            MockProvider::new(responses),
+            config,
+            native_file_tools(),
+            data_root,
+        )
+        .await;
         let (_, conversation) = http(&router, "POST", "/api/conversations").await;
         let id = conversation["id"].as_str().unwrap();
         attach_native_workspace(&storage, id, &project).await;
