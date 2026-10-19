@@ -76,7 +76,15 @@ pub fn read_instruction_files(dir: &Path) -> Result<Vec<String>, ConfigProblem> 
 /// Levels that have no `.md` files (or a missing directory) contribute
 /// nothing — no attribution header is emitted for empty levels.
 pub fn assemble_instructions(levels: &[(HierarchyLevel, &Path)]) -> Result<String, ConfigProblem> {
+    assemble_instructions_with_sources(levels).map(|(text, _)| text)
+}
+
+/// Retain one source level per instruction file alongside the unchanged text.
+pub(crate) fn assemble_instructions_with_sources(
+    levels: &[(HierarchyLevel, &Path)],
+) -> Result<(String, Vec<HierarchyLevel>), ConfigProblem> {
     let mut parts: Vec<String> = Vec::new();
+    let mut sources = Vec::new();
 
     for (level, dir) in levels {
         let contents = read_instruction_files(dir)?;
@@ -89,11 +97,12 @@ pub fn assemble_instructions(levels: &[(HierarchyLevel, &Path)]) -> Result<Strin
         // markdown while remaining visible in the raw source.
         parts.push(format!("<!-- level: {level} -->"));
         for content in contents {
+            sources.push(level.clone());
             parts.push(content);
         }
     }
 
-    Ok(parts.join("\n\n"))
+    Ok((parts.join("\n\n"), sources))
 }
 
 // ---------------------------------------------------------------------------

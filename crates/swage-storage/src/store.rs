@@ -7,22 +7,23 @@ use crate::model::{
     ActiveSkillRecord, AgentDefinition, AgentMessage, AppendMessage, ApprovalRequest,
     ApprovalState, Attachment, AttachmentStatus, AuditEvent, AuditEventFilter, BackgroundJob,
     ChannelInboundMessage, ChannelLink, ContextSnapshotRecord, CurationAssertion, DeliveryRecord,
-    DeviceRegistration, DrainedTurnQueue, ExtractionDerivation, InboundAudit, KnowledgeCitation,
-    KnowledgeSearchHit, LibraryEntry, LibraryEntryModule, LibrarySeeding, Material, Message,
-    ModuleSourceReplacement, NewAgentDefinition, NewAgentMessage, NewApprovalRequest,
-    NewAttachment, NewAuditEvent, NewBackgroundJob, NewChannelInboundMessage, NewChannelLink,
-    NewCurationAssertion, NewDeliveryRecord, NewDeviceRegistration, NewKnowledgeCitation,
-    NewLibraryEntry, NewLibraryEntryModule, NewMaterial, NewMessage, NewOrientationCard,
-    NewSchedule, NewScheduleRun, NewSecretRecord, NewSession, NewSourceObservation, NewSurface,
-    NewSurfaceAnnotation, NewSurfaceModule, NewTaskDefinition, NewThread, NewToolCall, NewTopic,
-    NewTurn, NewWorkflowJournalIntent, NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowRunHold,
-    NewWorkflowRunHoldRejection, NewWorkflowScript, NewWorkspaceAttachment, OrientationCard,
-    OrientationCardLifecycle, PendingChannelOrigin, ProviderRoundRecord, RemovedSurfaceModule,
-    Schedule, ScheduleRun, ScheduleRunUpdate, SecretRecord, Session, SessionActivity,
-    SessionListing, SessionVariable, SourceCapture, SourceObservation, Surface, SurfaceAnnotation,
-    SurfaceModule, TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord, Topic,
-    TopicSlug, Turn, TurnIsolation, TurnState, UpdateSchedule, WorkflowHoldSettlement,
-    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
+    DeviceRegistration, DrainedTurnQueue, ExtractionDerivation, GatewayInterruptionCounts,
+    InboundAudit, KnowledgeCitation, KnowledgeSearchHit, LibraryEntry, LibraryEntryModule,
+    LibrarySeeding, Material, Message, ModuleDelivery, ModuleSourceReplacement, NewAgentDefinition,
+    NewAgentMessage, NewApprovalRequest, NewAttachment, NewAuditEvent, NewBackgroundJob,
+    NewChannelInboundMessage, NewChannelLink, NewCurationAssertion, NewDeliveryRecord,
+    NewDeviceRegistration, NewKnowledgeCitation, NewLibraryEntry, NewLibraryEntryModule,
+    NewMaterial, NewMessage, NewOrientationCard, NewSchedule, NewScheduleRun, NewSecretRecord,
+    NewSession, NewSourceObservation, NewSurface, NewSurfaceAnnotation, NewSurfaceModule,
+    NewTaskDefinition, NewThread, NewToolCall, NewTopic, NewTurn, NewWorkflowJournalIntent,
+    NewWorkflowRun, NewWorkflowRunEvent, NewWorkflowRunHold, NewWorkflowRunHoldRejection,
+    NewWorkflowScript, NewWorkspaceAttachment, OrientationCard, OrientationCardLifecycle,
+    PendingChannelOrigin, ProviderRoundRecord, RemovedSurfaceModule, Schedule, ScheduleRun,
+    ScheduleRunUpdate, SecretRecord, Session, SessionActivity, SessionListing, SessionVariable,
+    SourceCapture, SourceObservation, Surface, SurfaceAnnotation, SurfaceModule, TaskDefinition,
+    Thread, ThreadBranch, ThreadState, ToolCallRecord, Topic, TopicSlug, Turn, TurnIsolation,
+    TurnState, UpdateSchedule, WorkflowHoldSettlement, WorkflowJournalRecord,
+    WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
     WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowScriptRecord, WorkflowScriptVersion,
     WorkspaceAttachment,
 };
@@ -199,6 +200,20 @@ pub trait DeviceStore: Send + Sync {
 
 #[async_trait]
 pub trait ChannelLinkStore: Send + Sync {
+    async fn save_channel_link_code(
+        &self,
+        code: crate::model::ChannelLinkCode,
+    ) -> Result<(), StorageError>;
+    async fn list_channel_link_codes(
+        &self,
+    ) -> Result<Vec<crate::model::ChannelLinkCode>, StorageError>;
+    /// Atomically redeem a still-valid code and save its validated link.
+    async fn redeem_channel_link_code(
+        &self,
+        code: &str,
+        link: NewChannelLink,
+    ) -> Result<Option<ChannelLink>, StorageError>;
+
     async fn upsert_channel_link(&self, link: NewChannelLink) -> Result<ChannelLink, StorageError>;
     async fn get_channel_link(
         &self,
@@ -292,6 +307,11 @@ pub trait TaskDefinitionStore: Send + Sync {
 /// as one batch by the drain that starts the next turn.
 #[async_trait]
 pub trait TurnQueueStore: Send + Sync {
+    /// Enqueue one arrival batch atomically, retaining a row per input.
+    async fn enqueue_turn_inputs(
+        &self,
+        inputs: Vec<NewQueuedTurnInput>,
+    ) -> Result<Vec<QueuedTurnInput>, StorageError>;
     async fn enqueue_turn_input(
         &self,
         input: NewQueuedTurnInput,
@@ -301,9 +321,9 @@ pub trait TurnQueueStore: Send + Sync {
         &self,
         session_id: Uuid,
     ) -> Result<Vec<QueuedTurnInput>, StorageError>;
-    /// Run the session's queue as one turn, atomically: the turn row created
+    /// Run the first consecutive thread group as one turn, atomically: the turn row created
     /// (its input the queued texts joined by a blank line), one message row per
-    /// queued input in arrival order with its origin, and the queue rows
+    /// input in that group in arrival order with its origin, and those queue rows
     /// removed — all or nothing. `None` when nothing was queued, or when the
     /// thread already holds a live turn and the one-live-turn index refused the
     /// claim; the queue is then untouched.
@@ -562,6 +582,16 @@ pub trait MaterialStore: Send + Sync {
 pub trait TurnStore: Send + Sync {
     async fn create_turn(&self, turn: NewTurn) -> Result<Turn, StorageError>;
     async fn get_turn(&self, id: Uuid) -> Result<Option<Turn>, StorageError>;
+    /// Read state and its observation time together, while the storage snapshot is held.
+    async fn get_turn_observation(
+        &self,
+        _id: Uuid,
+    ) -> Result<Option<(Turn, chrono::DateTime<chrono::Utc>)>, StorageError> {
+        Err(StorageError::QueryFailed(
+            "turn observations are unsupported by this store".into(),
+        ))
+    }
+
     /// List all turns for a thread ordered by created_at ascending.
     async fn list_turns_by_thread(&self, thread_id: Uuid) -> Result<Vec<Turn>, StorageError>;
     /// Update a turn's state.
@@ -1109,6 +1139,11 @@ pub trait ChannelQueueStore: Send + Sync {
         account: &str,
     ) -> Result<Option<String>, StorageError>;
 
+    /// Pending inbox rows not yet transferred, in global arrival order.
+    async fn list_pending_channel_messages(
+        &self,
+    ) -> Result<Vec<ChannelInboundMessage>, StorageError>;
+
     async fn list_pending_channel_origins(&self)
     -> Result<Vec<PendingChannelOrigin>, StorageError>;
 
@@ -1137,6 +1172,19 @@ pub trait ChannelQueueStore: Send + Sync {
 /// Durable saved workflow definitions and detached run state.
 #[async_trait]
 pub trait WorkflowStore: Send + Sync {
+    async fn list_unacknowledged_workflow_runs(
+        &self,
+        topic_id: Uuid,
+        consumer: &str,
+        limit: usize,
+    ) -> Result<Vec<WorkflowRunRecord>, StorageError>;
+    async fn acknowledge_workflow_runs(
+        &self,
+        topic_id: Uuid,
+        consumer: &str,
+        run_ids: &[Uuid],
+    ) -> Result<(), StorageError>;
+
     async fn create_workflow_script(
         &self,
         script: NewWorkflowScript,
@@ -1180,6 +1228,16 @@ pub trait WorkflowStore: Send + Sync {
         run: NewWorkflowRun,
     ) -> Result<WorkflowRunRecord, StorageError>;
     async fn get_workflow_run(&self, id: Uuid) -> Result<Option<WorkflowRunRecord>, StorageError>;
+    /// Read state and its observation time together, while the storage snapshot is held.
+    async fn get_workflow_run_observation(
+        &self,
+        _id: Uuid,
+    ) -> Result<Option<(WorkflowRunRecord, chrono::DateTime<chrono::Utc>)>, StorageError> {
+        Err(StorageError::QueryFailed(
+            "workflow run observations are unsupported by this store".into(),
+        ))
+    }
+
     /// The child run a parent's journalled `workflow()` call already started,
     /// if any — how a resumed parent finds its child instead of duplicating it.
     async fn find_child_workflow_run(
@@ -1221,7 +1279,15 @@ pub trait WorkflowStore: Send + Sync {
         journal_error: Option<&str>,
         journal_termination: Option<serde_json::Value>,
     ) -> Result<bool, StorageError>;
-    async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError>;
+    /// A boot's interruption pass, in one transaction: every run still
+    /// `running` is marked `interrupted` (the process that ran it is gone;
+    /// the waker relaunches it by replay), and every run that was running
+    /// or parked gets an interruption entry stamped `detected_at` — the
+    /// gateway's absence over a parked wait is a fact the record shows too.
+    async fn record_gateway_interruption(
+        &self,
+        detected_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<GatewayInterruptionCounts, StorageError>;
     /// Atomically move a run from one expected state to another. `false`
     /// means the run was no longer in `from` — the caller lost the race
     /// (a concurrent cancellation, another waker) and must not proceed.
@@ -1394,11 +1460,24 @@ pub trait WorkflowStore: Send + Sync {
         id: Uuid,
         dispatch: serde_json::Value,
     ) -> Result<(), StorageError>;
-    async fn record_workflow_call_attempt(
+    /// Append an attempt to the call's record before its turn starts: the
+    /// attempt's cause and opening time, with no resolution yet. Returns
+    /// the earlier attempts it supersedes, oldest first, so what they left
+    /// outstanding can end the moment nothing can answer it any more.
+    async fn open_workflow_call_attempt(
         &self,
         id: Uuid,
         attempt: serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, StorageError>;
+    /// Resolve the call's open attempt — the latest one with no turn — with
+    /// what its turn resolved, merged over the opened record. An entry with
+    /// no open attempt is an error: a turn nobody opened an attempt for
+    /// must not run.
+    async fn resolve_workflow_call_attempt(
+        &self,
+        id: Uuid,
+        resolution: serde_json::Value,
+    ) -> Result<(), StorageError>;
     async fn cut_short_workflow_journal_entry(
         &self,
         id: Uuid,
@@ -1448,6 +1527,13 @@ pub trait ProviderRoundStore: Send + Sync {
 
 #[async_trait]
 pub trait SurfaceStore: Send + Sync {
+    /// Rename and audit one surface atomically, returning the displaced title.
+    async fn rename_surface(
+        &self,
+        id: Uuid,
+        title: &str,
+        audit_event: NewAuditEvent,
+    ) -> Result<Option<String>, StorageError>;
     async fn create_page(&self, surface: NewSurface) -> Result<Surface, StorageError>;
     async fn get_page(&self, id: Uuid) -> Result<Option<Surface>, StorageError>;
     /// A session's surfaces, oldest first — the surfaces open with it.
@@ -1461,12 +1547,14 @@ pub trait SurfaceStore: Send + Sync {
     ) -> Result<SurfaceModule, StorageError>;
     async fn get_surface_module(&self, id: Uuid) -> Result<Option<SurfaceModule>, StorageError>;
     /// Append a module instance after the surface's last one, its position
-    /// assigned under the connection lock so two appends never share one.
+    /// assigned under the connection lock so two appends never share one;
+    /// `delivery` records the run or turn whose output it is, when one is.
     async fn append_surface_module(
         &self,
         surface_id: Uuid,
         kind: &str,
         source: &str,
+        delivery: Option<ModuleDelivery>,
     ) -> Result<SurfaceModule, StorageError>;
     /// A surface's module instances in position order.
     async fn list_surface_modules(
@@ -1478,11 +1566,14 @@ pub trait SurfaceStore: Send + Sync {
     /// and returns it as it now stands. A landed replace advances the
     /// revision and the owning surface's updated_at. `None` when there is no
     /// such module.
+    /// `delivery` names the run or turn whose output the new source is;
+    /// `None` is an edit by hand, which keeps the delivery the module has.
     async fn replace_surface_module_source(
         &self,
         id: Uuid,
         expected_revision: i64,
         source: &str,
+        delivery: Option<ModuleDelivery>,
     ) -> Result<Option<ModuleSourceReplacement>, StorageError>;
     /// Remove a module instance and the notes hung on it, closing the gap in
     /// the surface's positions. `None` when there is no such module.
@@ -1560,6 +1651,12 @@ pub trait SurfaceStore: Send + Sync {
 /// a superseded body survives in the audit trail, not in a version row.
 #[async_trait]
 pub trait SurfaceAnnotationStore: Send + Sync {
+    /// Resolve and audit a note and stamp its surface atomically. False if already resolved or absent.
+    async fn resolve_surface_annotation(
+        &self,
+        id: Uuid,
+        audit_event: NewAuditEvent,
+    ) -> Result<bool, StorageError>;
     async fn create_surface_annotation(
         &self,
         annotation: NewSurfaceAnnotation,
@@ -1828,6 +1925,25 @@ mod tests {
 
     #[async_trait]
     impl ChannelLinkStore for StubStorage {
+        async fn save_channel_link_code(
+            &self,
+            _: crate::model::ChannelLinkCode,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn list_channel_link_codes(
+            &self,
+        ) -> Result<Vec<crate::model::ChannelLinkCode>, StorageError> {
+            unimplemented!()
+        }
+        async fn redeem_channel_link_code(
+            &self,
+            _: &str,
+            _: NewChannelLink,
+        ) -> Result<Option<ChannelLink>, StorageError> {
+            unimplemented!()
+        }
+
         async fn upsert_channel_link(
             &self,
             _: NewChannelLink,
@@ -1891,6 +2007,12 @@ mod tests {
             _: &str,
             _: &str,
         ) -> Result<Option<String>, StorageError> {
+            unimplemented!()
+        }
+
+        async fn list_pending_channel_messages(
+            &self,
+        ) -> Result<Vec<ChannelInboundMessage>, StorageError> {
             unimplemented!()
         }
 
@@ -2009,6 +2131,12 @@ mod tests {
 
     #[async_trait]
     impl TurnQueueStore for StubStorage {
+        async fn enqueue_turn_inputs(
+            &self,
+            _: Vec<NewQueuedTurnInput>,
+        ) -> Result<Vec<QueuedTurnInput>, StorageError> {
+            unimplemented!()
+        }
         async fn enqueue_turn_input(
             &self,
             _: NewQueuedTurnInput,
@@ -2421,6 +2549,14 @@ mod tests {
 
     #[async_trait]
     impl SurfaceStore for StubStorage {
+        async fn rename_surface(
+            &self,
+            _id: Uuid,
+            _title: &str,
+            _audit_event: NewAuditEvent,
+        ) -> Result<Option<String>, StorageError> {
+            unimplemented!()
+        }
         async fn create_page(&self, _: NewSurface) -> Result<Surface, StorageError> {
             unimplemented!()
         }
@@ -2444,6 +2580,7 @@ mod tests {
             _: Uuid,
             _: &str,
             _: &str,
+            _: Option<ModuleDelivery>,
         ) -> Result<SurfaceModule, StorageError> {
             unimplemented!()
         }
@@ -2455,6 +2592,7 @@ mod tests {
             _: Uuid,
             _: i64,
             _: &str,
+            _: Option<ModuleDelivery>,
         ) -> Result<Option<ModuleSourceReplacement>, StorageError> {
             unimplemented!()
         }
@@ -2518,6 +2656,13 @@ mod tests {
 
     #[async_trait]
     impl SurfaceAnnotationStore for StubStorage {
+        async fn resolve_surface_annotation(
+            &self,
+            _id: Uuid,
+            _audit_event: NewAuditEvent,
+        ) -> Result<bool, StorageError> {
+            unimplemented!()
+        }
         async fn create_surface_annotation(
             &self,
             _: NewSurfaceAnnotation,
@@ -2908,6 +3053,23 @@ mod tests {
 
     #[async_trait]
     impl WorkflowStore for StubStorage {
+        async fn list_unacknowledged_workflow_runs(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<WorkflowRunRecord>, StorageError> {
+            Ok(vec![])
+        }
+        async fn acknowledge_workflow_runs(
+            &self,
+            _: Uuid,
+            _: &str,
+            _: &[Uuid],
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
         async fn create_workflow_script(
             &self,
             _: NewWorkflowScript,
@@ -3006,7 +3168,10 @@ mod tests {
         ) -> Result<bool, StorageError> {
             unimplemented!()
         }
-        async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {
+        async fn record_gateway_interruption(
+            &self,
+            _: chrono::DateTime<chrono::Utc>,
+        ) -> Result<GatewayInterruptionCounts, StorageError> {
             unimplemented!()
         }
         async fn try_transition_workflow_run_state(
@@ -3185,11 +3350,18 @@ mod tests {
         ) -> Result<(), StorageError> {
             unimplemented!()
         }
-        async fn record_workflow_call_attempt(
+        async fn open_workflow_call_attempt(
             &self,
             _: Uuid,
             _: serde_json::Value,
         ) -> Result<Vec<serde_json::Value>, StorageError> {
+            unimplemented!()
+        }
+        async fn resolve_workflow_call_attempt(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
             unimplemented!()
         }
         async fn cut_short_workflow_journal_entry(
