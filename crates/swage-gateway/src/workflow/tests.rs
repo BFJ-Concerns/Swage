@@ -19489,19 +19489,42 @@ async fn run_accounts_start_observes_immediate_outcomes() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
     let (state, _) = scripted_state(&storage, vec![]);
-    let session = storage
-        .create_session(swage_storage::fixtures::new_session(topic.id))
-        .await
-        .expect("session");
     for (source, expected) in [
         ("return 42;", "completed"),
         ("await agent('bad', {bogusOption: true});", "failed"),
     ] {
-        let before = chrono::Utc::now();
-        let result = GatewayWorkflowLauncher::new(state.clone())
-            .start_inline(session.id, source, Value::Null, None, false)
+        let session = storage
+            .create_session(swage_storage::fixtures::new_session(topic.id))
             .await
-            .expect("start");
+            .expect("session");
+        let pause = workflow_pause_test_hook::install("start-snapshot-pending", session.id);
+        let before = chrono::Utc::now();
+        let launcher = GatewayWorkflowLauncher::new(state.clone());
+        let start = tokio::spawn(async move {
+            launcher
+                .start_inline(session.id, source, Value::Null, None, false)
+                .await
+                .expect("start")
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(45), pause.entered.acquire())
+            .await
+            .expect("start reaches snapshot pause")
+            .expect("snapshot pause remains open")
+            .forget();
+        let run = storage
+            .list_workflow_runs(topic.id)
+            .await
+            .expect("runs")
+            .into_iter()
+            .find(|run| run.dispatching_session_id == Some(session.id))
+            .expect("session run");
+        // Observe real settlement before letting the start path take its snapshot.
+        wait_for_terminal(&state, run.id).await;
+        pause.release.add_permits(1);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(45), start)
+            .await
+            .expect("start returns after settlement")
+            .expect("start task");
         assert_eq!(
             result["state"], expected,
             "the start result must observe an immediately settled run"
