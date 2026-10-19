@@ -17,6 +17,7 @@
     topicId: string | null;
     label: string;
     pages: MemoryPageSummary[];
+    error: string | null;
   }
 
   let { topics, page }: Props = $props();
@@ -29,37 +30,58 @@
   let sending = $state(false);
   let result = $state<MemoryInstructionResponse | null>(null);
   let loadGeneration = 0;
+  let readGeneration = 0;
+  let selected: { topicId: string | null; reference: string } | null = null;
+  const scopes = $derived([
+    { topicId: null, label: "General" },
+    ...topics.map((topic) => ({ topicId: topic.id, label: topic.name })),
+  ]);
 
   function message(err: unknown, fallback: string): string {
     return err instanceof Error ? err.message : fallback;
   }
 
-  async function loadGroups(scopes: Array<{ topicId: string | null; label: string }>): Promise<ScopeGroup[]> {
-    return Promise.all(
-      scopes.map(async (scope) => ({ ...scope, pages: await listMemoryPages(scope.topicId) })),
-    );
+  async function loadGroups(
+    requested: Array<{ topicId: string | null; label: string }>,
+    previous: ScopeGroup[] = [],
+  ): Promise<ScopeGroup[]> {
+    return Promise.all(requested.map(async (scope) => {
+      try {
+        return { ...scope, pages: await listMemoryPages(scope.topicId), error: null };
+      } catch (err) {
+        return {
+          ...scope,
+          pages: previous.find((group) => group.topicId === scope.topicId)?.pages ?? [],
+          error: `${scope.label}: ${message(err, "Failed to load memory pages.")}`,
+        };
+      }
+    }));
   }
 
   async function openPage(topicId: string | null, pageReference: string): Promise<void> {
+    const generation = ++readGeneration;
+    selected = { topicId, reference: pageReference };
+    instructionScope = topicId ?? "";
+    opened = null;
     error = null;
     try {
-      opened = { topicId, page: await getMemoryPage(pageReference, topicId) };
+      const page = await getMemoryPage(pageReference, topicId);
+      if (generation === readGeneration) opened = { topicId, page };
     } catch (err) {
-      error = message(err, "Failed to read the memory page.");
+      if (generation === readGeneration) error = message(err, "Failed to read the memory page.");
     }
   }
 
   $effect(() => {
-    const scopes = [
-      { topicId: null, label: "General" },
-      ...topics.map((topic) => ({ topicId: topic.id, label: topic.name })),
-    ];
+    const requestedScopes = scopes;
     const requested = page;
     const generation = ++loadGeneration;
+    const selectionGeneration = ++readGeneration;
+    selected = null;
     loading = true;
     error = null;
     opened = null;
-    void loadGroups(scopes)
+    void loadGroups(requestedScopes)
       .then((loaded) => {
         if (generation !== loadGeneration) return;
         groups = loaded;
@@ -72,15 +94,17 @@
                 group.pages.some((listed) => listed.reference === requested.reference),
             )
           : undefined;
-        if (holder && requested) void openPage(holder.topicId, requested.reference);
-      })
-      .catch((err: unknown) => {
-        if (generation !== loadGeneration) return;
-        error = message(err, "Failed to load memory.");
+        if (holder && requested && selectionGeneration === readGeneration) {
+          void openPage(holder.topicId, requested.reference);
+        }
       })
       .finally(() => {
         if (generation === loadGeneration) loading = false;
       });
+    return () => {
+      ++loadGeneration;
+      ++readGeneration;
+    };
   });
 
   async function send(): Promise<void> {
@@ -89,23 +113,38 @@
     const topicId = instructionScope || null;
     sending = true;
     error = null;
+    result = null;
+    let applied: MemoryInstructionResponse;
     try {
-      result = await instructCurator(topicId, text);
-      instruction = "";
-      groups = await loadGroups(groups.map(({ topicId: id, label }) => ({ topicId: id, label })));
-      const reopened = opened;
-      const changed = result.pages_changed.find(
-        (page) => reopened && reopened.topicId === topicId && page.reference === reopened.page.reference,
-      );
-      if (changed) opened = { topicId, page: changed };
+      applied = await instructCurator(topicId, text);
     } catch (err) {
       error = message(err, "The curator could not apply the instruction.");
+      sending = false;
+      return;
+    }
+    result = applied;
+    instruction = "";
+    const changed = applied.pages_changed.find((page) => {
+      const changedTopicId = page.reference.startsWith("general/") ? null : topicId;
+      return selected?.topicId === changedTopicId && selected.reference === page.reference;
+    });
+    if (changed && selected) {
+      ++readGeneration;
+      opened = { topicId: selected.topicId, page: changed };
+    }
+    const generation = ++loadGeneration;
+    try {
+      const refreshed = await loadGroups(scopes, groups);
+      if (generation === loadGeneration) {
+        groups = refreshed;
+        loading = false;
+      }
     } finally {
       sending = false;
     }
   }
 
-  const empty = $derived(groups.every((group) => group.pages.length === 0));
+  const empty = $derived(groups.every((group) => group.pages.length === 0 && !group.error));
 </script>
 
 <section class="memory" aria-label="Memory">
@@ -120,9 +159,10 @@
       <p class="note">No memory pages yet. The curator writes them from your conversations.</p>
     {:else}
       {#each groups as group (group.topicId ?? "general")}
-        {#if group.pages.length > 0}
+        {#if group.pages.length > 0 || group.error}
           <div class="scope" role="list" aria-label={`${group.label} memory pages`}>
             <p class="scope-label">{group.label}</p>
+            {#if group.error}<p class="note" role="alert">{group.error}</p>{/if}
             {#each group.pages as page (page.reference)}
               {@const selected = opened?.topicId === group.topicId && opened?.page.reference === page.reference}
               <button

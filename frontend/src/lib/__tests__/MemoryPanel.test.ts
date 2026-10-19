@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 import MemoryPanel from "../components/MemoryPanel.svelte";
+import { writable, fromStore } from "svelte/store";
 import type { Topic } from "../types";
 
 type MountedComponent = ReturnType<typeof mount>;
@@ -24,7 +25,7 @@ function gateway(options: {
   topic: Array<{ reference: string; summary: string | null }>;
   secondTopic?: Array<{ reference: string; summary: string | null }>;
   bodies: Record<string, string>;
-  instruct?: (body: unknown) => Response;
+  instruct?: (body: unknown) => Response | Promise<Response>;
 }) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = new URL(String(input), "http://swage.test");
@@ -53,6 +54,26 @@ function gateway(options: {
 
 function buttonNamed(text: string): HTMLButtonElement | undefined {
   return Array.from(document.querySelectorAll("button")).find((button) => button.textContent?.includes(text));
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => { resolve = settle; });
+  return { promise, resolve };
+}
+
+function enterInstruction(text: string, topicId?: string) {
+  flushSync(() => {
+    if (topicId !== undefined) {
+      const scope = document.querySelector<HTMLSelectElement>('select[aria-label="Memory to instruct about"]')!;
+      scope.value = topicId;
+      scope.dispatchEvent(new Event("change"));
+    }
+    const input = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Instruction to the curator"]')!;
+    input.value = text;
+    input.dispatchEvent(new Event("input"));
+  });
+  flushSync(() => buttonNamed("Send to curator")!.click());
 }
 
 describe("MemoryPanel", () => {
@@ -237,4 +258,173 @@ describe("MemoryPanel", () => {
     await vi.waitFor(() => expect(document.querySelector('[role="alert"]')).not.toBeNull());
     expect(document.querySelector('[role="alert"]')?.textContent).toMatch(/curator pass failed|502/);
   });
+  it.each([200, 502])("ignores an older page read completing with status %s after a newer selection", async (status) => {
+    const late = deferred<Response>();
+    const fetch = gateway({
+      general: [{ reference: "general/profile", summary: null }],
+      topic: [{ reference: "topic/conventions", summary: null }],
+      bodies: { [`${TOPIC_ID}:topic/conventions`]: "Current selection" },
+    });
+    const serve = fetch.getMockImplementation()!;
+    fetch.mockImplementation((input, init) => {
+      const url = new URL(String(input), "http://swage.test");
+      return url.pathname === "/api/memory/page" && url.searchParams.get("reference") === "general/profile"
+        ? late.promise : serve(input, init);
+    });
+    component = mount(MemoryPanel, { target: document.body, props: { topics, page: null } });
+    await vi.waitFor(() => expect(buttonNamed("general/profile")).toBeDefined());
+    flushSync(() => buttonNamed("general/profile")!.click());
+    flushSync(() => buttonNamed("topic/conventions")!.click());
+    await vi.waitFor(() => expect(document.querySelector(".detail pre")?.textContent).toBe("Current selection"));
+    late.resolve(json(status === 200
+      ? { reference: "general/profile", body: "Obsolete selection" }
+      : { error: "Obsolete read failed" }, status));
+    await late.promise;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    flushSync();
+    expect(document.querySelector(".detail pre")?.textContent).toBe("Current selection");
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("invalidates an in-flight read when a notice target changes", async () => {
+    const late = deferred<Response>();
+    const fetch = gateway({
+      general: [{ reference: "general/profile", summary: null }],
+      topic: [{ reference: "topic/conventions", summary: null }],
+      bodies: { [`${TOPIC_ID}:topic/conventions`]: "Notice target" },
+    });
+    const serve = fetch.getMockImplementation()!;
+    fetch.mockImplementation((input, init) => String(input).includes("/api/memory/page?") && String(input).includes("general%2Fprofile")
+      ? late.promise : serve(input, init));
+    const targetStore = writable({ scope: "general", reference: "general/profile" });
+    const target = fromStore(targetStore);
+    component = mount(MemoryPanel, {
+      target: document.body,
+      props: { topics, get page() { return target.current; } },
+    });
+    await vi.waitFor(() => expect(fetch.mock.calls.some(([input]) => String(input).includes("general%2Fprofile"))).toBe(true));
+    flushSync(() => { targetStore.set({ scope: TOPIC_ID, reference: "topic/conventions" }); });
+    await vi.waitFor(() => expect(document.querySelector(".detail pre")?.textContent).toBe("Notice target"));
+    late.resolve(json({ reference: "general/profile", body: "Obsolete notice" }));
+    await late.promise;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    flushSync();
+    expect(document.querySelector(".detail pre")?.textContent).toBe("Notice target");
+  });
+
+  it("keeps successful curation and its open page when the following listing fails", async () => {
+    let curated = false;
+    const fetch = gateway({
+      general: [{ reference: "general/profile", summary: null }], topic: [],
+      bodies: { "general:general/profile": "Old profile" },
+      instruct: () => {
+        curated = true;
+        return json({ reply: "Updated successfully", pages_changed: [{ reference: "general/profile", body: "Current profile" }] });
+      },
+    });
+    const serve = fetch.getMockImplementation()!;
+    fetch.mockImplementation((input, init) => curated && new URL(String(input), "http://swage.test").pathname === "/api/memory/pages"
+      ? Promise.resolve(json({ error: "Listing unavailable" }, 503)) : serve(input, init));
+    component = mount(MemoryPanel, { target: document.body, props: { topics: [], page: { scope: "general", reference: "general/profile" } } });
+    await vi.waitFor(() => expect(document.querySelector(".detail > article pre")?.textContent).toBe("Old profile"));
+    enterInstruction("Update my profile");
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Listing unavailable"));
+    expect(document.querySelector(".reply")?.textContent).toBe("Updated successfully");
+    expect(document.querySelector(".detail > article pre")?.textContent).toBe("Current profile");
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("General");
+  });
+
+  it("refreshes an open general page changed by an instruction sent to a topic", async () => {
+    let sent: unknown;
+    gateway({
+      general: [{ reference: "general/profile", summary: null }], topic: [],
+      bodies: { "general:general/profile": "Old profile" },
+      instruct: (body) => {
+        sent = body;
+        return json({ reply: "Updated", pages_changed: [{ reference: "general/profile", body: "Current profile" }] });
+      },
+    });
+    component = mount(MemoryPanel, { target: document.body, props: { topics, page: { scope: "general", reference: "general/profile" } } });
+    await vi.waitFor(() => expect(document.querySelector(".detail > article pre")?.textContent).toBe("Old profile"));
+    enterInstruction("Update my profile", TOPIC_ID);
+    await vi.waitFor(() => expect(document.querySelector(".reply")?.textContent).toBe("Updated"));
+    expect(sent).toEqual({ scope: { kind: "topic", topic_id: TOPIC_ID }, instruction: "Update my profile" });
+    await vi.waitFor(() => expect(document.querySelector(".detail > article pre")?.textContent).toBe("Current profile"));
+  });
+
+  it("shows healthy scope listings when another scope fails", async () => {
+    const fetch = gateway({
+      general: [{ reference: "general/profile", summary: null }],
+      topic: [], secondTopic: [{ reference: "topic/stock", summary: null }], bodies: {},
+    });
+    const serve = fetch.getMockImplementation()!;
+    fetch.mockImplementation((input, init) => new URL(String(input), "http://swage.test").searchParams.get("topic_id") === TOPIC_ID
+      ? Promise.resolve(json({ error: "Garden unavailable" }, 503)) : serve(input, init));
+    component = mount(MemoryPanel, { target: document.body, props: { topics, page: null } });
+    await vi.waitFor(() => expect(document.querySelector('[role="alert"]')?.textContent).toContain("Garden unavailable"));
+    expect(document.querySelector('[aria-label="General memory pages"]')?.textContent ?? "").toContain("general/profile");
+    expect(document.querySelector('[aria-label="Kitchen memory pages"]')?.textContent ?? "").toContain("topic/stock");
+    expect(document.body.textContent).not.toContain("No memory pages yet");
+  });
+
+  it.each([false, true])("targets the opened page's scope for instructions (notice: %s)", async (notice) => {
+    let sent: unknown;
+    gateway({
+      general: [], topic: [{ reference: "topic/conventions", summary: null }],
+      bodies: { [`${TOPIC_ID}:topic/conventions`]: "Topic page" },
+      instruct: (body) => { sent = body; return json({ reply: "Done", pages_changed: [] }); },
+    });
+    component = mount(MemoryPanel, { target: document.body, props: { topics, page: notice ? { scope: TOPIC_ID, reference: "topic/conventions" } : null } });
+    await vi.waitFor(() => expect(buttonNamed("topic/conventions")).toBeDefined());
+    if (!notice) flushSync(() => buttonNamed("topic/conventions")!.click());
+    await vi.waitFor(() => expect(document.querySelector(".detail > article pre")?.textContent).toBe("Topic page"));
+    enterInstruction("Change this convention");
+    await vi.waitFor(() => expect(sent).toBeDefined());
+    expect(sent).toEqual({ scope: { kind: "topic", topic_id: TOPIC_ID }, instruction: "Change this convention" });
+  });
+
+  it("keeps a curated page when a read started before the edit finishes later", async () => {
+    const late = deferred<Response>();
+    const fetch = gateway({
+      general: [{ reference: "general/profile", summary: null }], topic: [], bodies: {},
+      instruct: () => json({ reply: "Updated", pages_changed: [{ reference: "general/profile", body: "Current profile" }] }),
+    });
+    const serve = fetch.getMockImplementation()!;
+    fetch.mockImplementation((input, init) => new URL(String(input), "http://swage.test").pathname === "/api/memory/page"
+      ? late.promise : serve(input, init));
+    component = mount(MemoryPanel, { target: document.body, props: { topics: [], page: null } });
+    await vi.waitFor(() => expect(buttonNamed("general/profile")).toBeDefined());
+    flushSync(() => buttonNamed("general/profile")!.click());
+    enterInstruction("Update my profile");
+    await vi.waitFor(() => expect(document.querySelector(".reply")?.textContent).toBe("Updated"));
+    late.resolve(json({ reference: "general/profile", body: "Before the edit" }));
+    await late.promise;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    flushSync();
+    expect(document.querySelector(".detail > article pre")?.textContent).toBe("Current profile");
+  });
+
+  it("returns instruction targeting to general memory when a general page is selected", async () => {
+    let sent: unknown;
+    gateway({
+      general: [{ reference: "general/profile", summary: null }],
+      topic: [{ reference: "topic/conventions", summary: null }],
+      bodies: { "general:general/profile": "General page", [`${TOPIC_ID}:topic/conventions`]: "Topic page" },
+      instruct: (body) => { sent = body; return json({ reply: "Done", pages_changed: [] }); },
+    });
+    component = mount(MemoryPanel, { target: document.body, props: { topics, page: null } });
+    await vi.waitFor(() => expect(buttonNamed("topic/conventions")).toBeDefined());
+    // An explicit topic choice predates opening the general page.
+    flushSync(() => {
+      const scope = document.querySelector<HTMLSelectElement>('select[aria-label="Memory to instruct about"]')!;
+      scope.value = TOPIC_ID;
+      scope.dispatchEvent(new Event("change"));
+      buttonNamed("general/profile")!.click();
+    });
+    await vi.waitFor(() => expect(document.querySelector(".detail > article pre")?.textContent).toBe("General page"));
+    enterInstruction("Update this profile");
+    await vi.waitFor(() => expect(sent).toBeDefined());
+    expect(sent).toEqual({ scope: { kind: "general" }, instruction: "Update this profile" });
+  });
+
 });
