@@ -13,6 +13,26 @@
       }
     },
     "schemas": {
+      "AnswerWorkflowRunHoldResponse": {
+        "properties": {
+          "hold": {
+            "$ref": "#/components/schemas/WorkflowRunHold"
+          },
+          "run_state": {
+            "$ref": "#/components/schemas/WorkflowRunState"
+          },
+          "wake_provisioned": {
+            "description": "Whether answering made a parked run due again. False when the run was\nstill holding its engine and will take the answer directly.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "hold",
+          "wake_provisioned",
+          "run_state"
+        ],
+        "type": "object"
+      },
       "ApiErrorBody": {
         "description": "The body of every failed client-surface HTTP response.",
         "properties": {
@@ -116,6 +136,13 @@
           "errors": {
             "items": {
               "$ref": "#/components/schemas/AssemblyError"
+            },
+            "type": "array"
+          },
+          "provider_attempts": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProviderAttemptRecord"
             },
             "type": "array"
           },
@@ -225,6 +252,23 @@
         ],
         "type": "object"
       },
+      "AttachmentsConfig": {
+        "additionalProperties": false,
+        "description": "Admission policy for image references submitted with a turn.",
+        "properties": {
+          "accepted_schemes": {
+            "description": "URI schemes accepted before checking the selected provider's capabilities.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "accepted_schemes"
+        ],
+        "type": "object"
+      },
       "BackgroundJobResponse": {
         "properties": {
           "attachment_id": {
@@ -288,6 +332,13 @@
         ],
         "type": "object"
       },
+      "ChannelLinkCodeListResponse": {
+        "description": "The readable, unredeemed codes, represented on the wire as an array.",
+        "items": {
+          "$ref": "#/components/schemas/ChannelLinkCodeResponse"
+        },
+        "type": "array"
+      },
       "ChannelLinkCodeResponse": {
         "description": "A short-lived, single-use channel link code.",
         "properties": {
@@ -302,6 +353,116 @@
         "required": [
           "link_code",
           "expires_at"
+        ],
+        "type": "object"
+      },
+      "ChannelLinkListResponse": {
+        "description": "All linked channel conversations.",
+        "properties": {
+          "links": {
+            "items": {
+              "$ref": "#/components/schemas/ChannelLinkResponse"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "links"
+        ],
+        "type": "object"
+      },
+      "ChannelLinkResponse": {
+        "description": "A channel conversation linked to a topic and agent.",
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "agent_id": {
+            "type": "string"
+          },
+          "conversation": {
+            "type": "string"
+          },
+          "home_target": true,
+          "integration": {
+            "type": "string"
+          },
+          "linked_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "topic_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "integration",
+          "account",
+          "conversation",
+          "topic_id",
+          "agent_id",
+          "linked_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "ChannelStatusListResponse": {
+        "properties": {
+          "channels": {
+            "items": {
+              "$ref": "#/components/schemas/ChannelStatusResponse"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "channels"
+        ],
+        "type": "object"
+      },
+      "ChannelStatusResponse": {
+        "properties": {
+          "delivery_count": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "integration": {
+            "type": "string"
+          },
+          "last_delivery_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "route_count": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "integration",
+          "status",
+          "route_count",
+          "delivery_count"
         ],
         "type": "object"
       },
@@ -820,6 +981,10 @@
       },
       "ConversationDetail": {
         "properties": {
+          "agent_display_name": {
+            "description": "The display name resolved in the session's topic scope.",
+            "type": "string"
+          },
           "agent_id": {
             "description": "The agent definition the session runs under.",
             "type": "string"
@@ -872,6 +1037,7 @@
         "required": [
           "id",
           "agent_id",
+          "agent_display_name",
           "created_at",
           "last_activity",
           "root_thread_id",
@@ -895,6 +1061,10 @@
       },
       "ConversationResponse": {
         "properties": {
+          "agent_display_name": {
+            "description": "The display name resolved in the session's topic scope.",
+            "type": "string"
+          },
           "agent_id": {
             "description": "The agent definition the session runs under.",
             "type": "string"
@@ -929,6 +1099,7 @@
         "required": [
           "id",
           "agent_id",
+          "agent_display_name",
           "created_at",
           "last_activity"
         ],
@@ -1376,6 +1547,61 @@
         ],
         "type": "object"
       },
+      "DelegationStartResult": {
+        "description": "A delegated child's state observed when its start request returns.",
+        "properties": {
+          "child_session_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "child_thread_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "child_turn_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "completion_mode": {
+            "type": "string"
+          },
+          "delegate_message_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "error_message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status_as_of": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_agent_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "completion_mode",
+          "delegate_message_id",
+          "child_session_id",
+          "child_thread_id",
+          "child_turn_id",
+          "target_agent_id"
+        ],
+        "type": "object"
+      },
       "DeleteSurfaceAnnotationResponse": {
         "description": "Confirms that an annotation was removed.",
         "properties": {
@@ -1820,6 +2046,13 @@
       },
       "ElementReport": {
         "properties": {
+          "full_text": {
+            "description": "The element's rendered text after substitution and assembly compaction.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "name": {
             "type": "string"
           },
@@ -2798,6 +3031,90 @@
         ],
         "type": "object"
       },
+      "ModuleDelivery": {
+        "description": "What delivered a module to its surface, recorded as the module is\nwritten: the run or turn whose output it is, and when. A module a person\nor an agent writes by hand carries none.",
+        "oneOf": [
+          {
+            "description": "A scheduled run's output, routed to the surface.",
+            "properties": {
+              "by": {
+                "const": "schedule_run",
+                "type": "string"
+              },
+              "delivered_at": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "run_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "schedule_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "by",
+              "run_id",
+              "schedule_id",
+              "delivered_at"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A workflow run's delivery to its granted surface target; the effect\nkey is the run's durable name for that one delivery, so a recovery\nafter a crash finds the module already written instead of writing\nit again.",
+            "properties": {
+              "by": {
+                "const": "workflow_run",
+                "type": "string"
+              },
+              "delivered_at": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "effect_key": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "run_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "by",
+              "run_id",
+              "effect_key",
+              "delivered_at"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A conversation turn's response, routed to the surface.",
+            "properties": {
+              "by": {
+                "const": "turn",
+                "type": "string"
+              },
+              "delivered_at": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "turn_id": {
+                "format": "uuid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "by",
+              "turn_id",
+              "delivered_at"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "MoveSurfaceModuleRequest": {
         "description": "Place a module among its surface's modules: 0 is first, and a position\npast the end is the end.",
         "properties": {
@@ -2986,6 +3303,80 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "ProviderAttemptOutcome": {
+        "enum": [
+          "outstanding",
+          "succeeded",
+          "failed",
+          "interrupted"
+        ],
+        "type": "string"
+      },
+      "ProviderAttemptRecord": {
+        "description": "One actual stream attempt, including the initial request and any retries.",
+        "properties": {
+          "attempt": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "ended_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "model_id": {
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ProviderAttemptOutcome"
+          },
+          "provider": {
+            "description": "Provider adapter that opened this attempt (for example, `anthropic`).",
+            "type": "string"
+          },
+          "request": {
+            "description": "Concrete provider-visible request for this attempt, omitted if secret\nredaction could not be completed."
+          },
+          "round": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "route_id": {
+            "description": "Stable position in the provider chain, independent of retry number and\ncooldown order. A standalone provider uses `direct`.",
+            "type": "string"
+          },
+          "started_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "round",
+          "attempt",
+          "provider",
+          "model_id",
+          "route_id",
+          "started_at_ms",
+          "outcome"
+        ],
         "type": "object"
       },
       "ProviderProtocol": {
@@ -3473,6 +3864,18 @@
         ],
         "type": "object"
       },
+      "RenameSurfaceRequest": {
+        "description": "Rename only this session's surface, leaving its saved origin untouched.",
+        "properties": {
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "type": "object"
+      },
       "RequireApprovalEntry": {
         "anyOf": [
           {
@@ -3609,6 +4012,17 @@
       },
       "SaveSettingsRequest": {
         "properties": {
+          "attachments": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AttachmentsConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "communication": {
             "anyOf": [
               {
@@ -4476,6 +4890,10 @@
                 "format": "uuid",
                 "type": "string"
               },
+              "thread_id": {
+                "format": "uuid",
+                "type": "string"
+              },
               "turn_id": {
                 "format": "uuid",
                 "type": "string"
@@ -4489,6 +4907,7 @@
               "type",
               "session_id",
               "turn_id",
+              "thread_id",
               "queued_ids"
             ],
             "type": "object"
@@ -5296,6 +5715,9 @@
       },
       "SettingsResponse": {
         "properties": {
+          "attachments": {
+            "$ref": "#/components/schemas/AttachmentsConfig"
+          },
           "can_restart": {
             "type": "boolean"
           },
@@ -5376,6 +5798,7 @@
           "communication",
           "sessions",
           "memory",
+          "attachments",
           "voice",
           "restart_required",
           "can_restart"
@@ -5664,6 +6087,15 @@
             "format": "uuid",
             "type": "string"
           },
+          "resolved_at": {
+            "default": null,
+            "description": "Resolution time; the note remains in the record after leaving the working view.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "tags": {
             "items": {
               "type": "string"
@@ -5708,6 +6140,17 @@
               "$ref": "#/components/schemas/SurfaceAnnotationView"
             },
             "type": "array"
+          },
+          "delivery": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModuleDelivery"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The run or turn that delivered this module, when one did."
           },
           "id": {
             "format": "uuid",
@@ -5790,6 +6233,10 @@
             "format": "uuid",
             "type": "string"
           },
+          "shape_only": {
+            "description": "True when the copy starts with shape alone, without its origin's content.",
+            "type": "boolean"
+          },
           "title": {
             "type": "string"
           },
@@ -5799,6 +6246,7 @@
           }
         },
         "required": [
+          "shape_only",
           "id",
           "session_id",
           "title",
@@ -6579,7 +7027,7 @@
             ]
           },
           "attempts": {
-            "description": "Every attempt the call ran, oldest first, each stamped once its turn\nresolved the options it actually ran with. A call interrupted and\nre-dispatched by replay has more than one, and each names its own\nturn — so the record keeps the interrupted attempt rather than only\nthe one that settled. Empty until the first turn resolves.",
+            "description": "Every attempt the call was dispatched for, oldest first: opened by\nthe run with its cause before the turn starts, and resolved by the\nturn with the options it actually ran with. A call interrupted and\nre-dispatched by replay, or served by its declared fallback, has more\nthan one, each naming its own turn — so the record keeps the attempt\nthat was cut off beside the one that followed. An attempt with no\nturn was opened and never resolved.",
             "items": {
               "$ref": "#/components/schemas/WorkflowAgentCallResolution"
             },
@@ -6635,8 +7083,11 @@
         "type": "object"
       },
       "WorkflowAgentCallResolution": {
-        "description": "The options a dispatched worker's turn resolved for itself.",
+        "description": "One attempt of a dispatched call: why it was dispatched, when it was\nopened, and the options its turn resolved for itself. Opened by the run\nbefore the turn starts and resolved by the turn before any provider work,\nso an attempt the gateway dies between the two writes of stays in the\nrecord with its cause and no resolution.",
         "properties": {
+          "cause": {
+            "$ref": "#/components/schemas/WorkflowAttemptCause"
+          },
           "effort": {
             "anyOf": [
               {
@@ -6652,6 +7103,10 @@
               "string",
               "null"
             ]
+          },
+          "opened_at": {
+            "format": "date-time",
+            "type": "string"
           },
           "session_id": {
             "format": "uuid",
@@ -6675,6 +7130,10 @@
             ]
           }
         },
+        "required": [
+          "cause",
+          "opened_at"
+        ],
         "type": "object"
       },
       "WorkflowArgumentContract": {
@@ -6703,6 +7162,54 @@
             },
             "required": [
               "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WorkflowAttemptCause": {
+        "description": "Why an attempt of an agent call was dispatched.",
+        "oneOf": [
+          {
+            "description": "The call's first dispatch.",
+            "properties": {
+              "cause": {
+                "const": "first",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cause"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Replay re-dispatched the call after a gateway death cut the attempt\nbefore it off: that attempt's outcome is unknown, and the tool calls\nit issued may have been applied.",
+            "properties": {
+              "cause": {
+                "const": "after_interruption",
+                "type": "string"
+              }
+            },
+            "required": [
+              "cause"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "The model the call named refused before any output, and the call's\ndeclared fallback served it instead; no interruption occurred.",
+            "properties": {
+              "cause": {
+                "const": "provider_fallback",
+                "type": "string"
+              },
+              "primary_failure": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "cause",
+              "primary_failure"
             ],
             "type": "object"
           }
@@ -7006,6 +7513,20 @@
           "answers_rejected"
         ],
         "type": "object"
+      },
+      "WorkflowInterruptedRunState": {
+        "oneOf": [
+          {
+            "const": "running",
+            "description": "The run was executing: its workers in flight lost their process, and\nreplay re-dispatches the calls that had not settled.",
+            "type": "string"
+          },
+          {
+            "const": "parked",
+            "description": "The run was parked on a durable wait: nothing of it was executing,\nand the waker relaunches it when its wake is due.",
+            "type": "string"
+          }
+        ]
       },
       "WorkflowJournalEntry": {
         "properties": {
@@ -7992,6 +8513,14 @@
             "format": "date-time",
             "type": "string"
           },
+          "dispatching_session_id": {
+            "description": "The conversation whose turn launched this run, when there is one.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "error_message": {
             "type": [
               "string",
@@ -8012,6 +8541,13 @@
           "id": {
             "format": "uuid",
             "type": "string"
+          },
+          "interruptions": {
+            "description": "Every gateway interruption the run lived through, oldest first: a\nboot that found the run running (so it was marked interrupted and\nrelaunched by replay) or parked (its wait outlived the gateway).",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowRunInterruption"
+            },
+            "type": "array"
           },
           "script_id": {
             "format": "uuid",
@@ -8069,6 +8605,14 @@
           "topic_id": {
             "format": "uuid",
             "type": "string"
+          },
+          "wake_at": {
+            "description": "The next timer wake recorded for a parked run.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -8078,7 +8622,38 @@
           "state",
           "args",
           "budget",
+          "interruptions",
           "created_at"
+        ],
+        "type": "object"
+      },
+      "WorkflowRunCancellation": {
+        "description": "The recorded request which cancelled a run.",
+        "properties": {
+          "actor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requested_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "requested_at"
         ],
         "type": "object"
       },
@@ -8163,6 +8738,23 @@
             "type": "object"
           },
           {
+            "description": "Invalid workflow input refused before its worker spawned.",
+            "properties": {
+              "ending": {
+                "const": "author_error",
+                "type": "string"
+              },
+              "error": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "ending",
+              "error"
+            ],
+            "type": "object"
+          },
+          {
             "description": "An operator or a parent run cancelled it.",
             "properties": {
               "ending": {
@@ -8210,6 +8802,36 @@
             "type": "object"
           }
         ]
+      },
+      "WorkflowRunEndingNotice": {
+        "description": "An ended run awaiting acknowledgement by a lead or schedule gate.",
+        "properties": {
+          "completed_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "run_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "script_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "state"
+        ],
+        "type": "object"
       },
       "WorkflowRunEvent": {
         "properties": {
@@ -8269,6 +8891,22 @@
       "WorkflowRunHandover": {
         "description": "The durable account a failed run leaves behind: what stopped it, which\ncall failed, and where the pending event queue stood, so whoever picks\nthe work up starts from the record instead of a re-run.",
         "oneOf": [
+          {
+            "properties": {
+              "classification": {
+                "const": "author_error",
+                "type": "string"
+              },
+              "failure": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "classification",
+              "failure"
+            ],
+            "type": "object"
+          },
           {
             "description": "An attributed agent-call failure stopped the run.",
             "properties": {
@@ -8485,6 +9123,25 @@
         ],
         "type": "string"
       },
+      "WorkflowRunInterruption": {
+        "description": "A gateway interruption a run lived through, recorded by the boot that\nfound the run with no gateway alive to serve it.",
+        "properties": {
+          "detected_at": {
+            "description": "When the boot recorded it; the gateway's death itself left no stamp.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "run_state": {
+            "$ref": "#/components/schemas/WorkflowInterruptedRunState",
+            "description": "How the run stood when the gateway stopped."
+          }
+        },
+        "required": [
+          "detected_at",
+          "run_state"
+        ],
+        "type": "object"
+      },
       "WorkflowRunListResponse": {
         "properties": {
           "runs": {
@@ -8496,6 +9153,162 @@
         },
         "required": [
           "runs"
+        ],
+        "type": "object"
+      },
+      "WorkflowRunStartResult": {
+        "description": "A run's observed state when its start request returns.",
+        "properties": {
+          "args": true,
+          "budget": {
+            "$ref": "#/components/schemas/WorkflowBudget"
+          },
+          "carrying_skill": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "completed_at": {
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "dispatching_session_id": {
+            "description": "The conversation whose turn launched this run, when there is one.",
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error_message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "final_output": true,
+          "handover": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowRunHandover"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "interruptions": {
+            "description": "Every gateway interruption the run lived through, oldest first: a\nboot that found the run running (so it was marked interrupted and\nrelaunched by replay) or parked (its wait outlived the gateway).",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowRunInterruption"
+            },
+            "type": "array"
+          },
+          "script_id": {
+            "format": "uuid",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "script_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "script_version": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "source": {
+            "description": "Source retained for runs whose workflow was not a saved script version.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_hash": {
+            "description": "SHA-256 of the exact source executed by this run.",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/WorkflowRunState"
+          },
+          "status_as_of": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "task": {
+            "description": "Opaque identity declared by the workflow script for grouping its runs.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "terminal_account": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowRunTerminalAccount"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The run's terminal account: how it ended and where its workers stood.\nAbsent only while the run is still going."
+          },
+          "topic_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "view_url": {
+            "description": "Gateway-relative address, resolved against the origin the reader uses.",
+            "type": "string"
+          },
+          "wake_at": {
+            "description": "The next timer wake recorded for a parked run.",
+            "format": "date-time",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workers_dispatched": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "view_url",
+          "id",
+          "topic_id",
+          "source_hash",
+          "state",
+          "args",
+          "budget",
+          "interruptions",
+          "created_at",
+          "status_as_of"
         ],
         "type": "object"
       },
@@ -8529,9 +9342,42 @@
           }
         ]
       },
+      "WorkflowRunStatusRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "acknowledge_run_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 100,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "WorkflowRunTerminalAccount": {
         "description": "The one terminal record of a run: what ended it, where every worker stood,\nand — when the script never returned — the completed work still recoverable\nfrom it.",
         "properties": {
+          "cancellation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowRunCancellation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "ending": {
             "$ref": "#/components/schemas/WorkflowRunEnding"
           },
@@ -8544,7 +9390,7 @@
                 "type": "null"
               }
             ],
-            "description": "Present exactly when the run ended without its script returning."
+            "description": "Present when a run ended without returning and has completed worker output."
           },
           "settled_at": {
             "format": "date-time",
@@ -8715,6 +9561,10 @@
               "null"
             ]
           },
+          "redispatched_after_interruption": {
+            "description": "Whether any attempt of this worker followed a gateway interruption:\nthe interrupted attempt's outcome is unknown and the tool calls it\nissued may have been applied, so this worker's effects may have been\nrepeated.",
+            "type": "boolean"
+          },
           "seq": {
             "format": "uint64",
             "minimum": 0,
@@ -8745,7 +9595,53 @@
         },
         "required": [
           "journal_entry_id",
-          "seq"
+          "seq",
+          "redispatched_after_interruption"
+        ],
+        "type": "object"
+      },
+      "WorkflowWorkerActivity": {
+        "description": "One worker's activity in an open-run overview.",
+        "properties": {
+          "agent_definition_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "liveness": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkflowWorkerLiveness"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "seq": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/WorkflowJournalEntryStatus"
+          }
+        },
+        "required": [
+          "id",
+          "seq",
+          "status"
         ],
         "type": "object"
       },
@@ -9079,6 +9975,28 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/channels": {
+      "get": {
+        "operationId": "list_channel_statuses",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelStatusListResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List channel statuses."
+      }
+    },
     "/api/conversations": {
       "get": {
         "operationId": "list_conversations",
@@ -9413,6 +10331,50 @@
           }
         },
         "summary": "List every memory page of one scope — general memory, or a topic's."
+      }
+    },
+    "/api/onboarding/channels": {
+      "get": {
+        "operationId": "list_channel_links",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelLinkListResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List linked channel conversations."
+      }
+    },
+    "/api/onboarding/channels/link-codes": {
+      "get": {
+        "operationId": "list_channel_link_codes",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelLinkCodeListResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read unredeemed channel link codes."
       }
     },
     "/api/sessions": {
@@ -9996,6 +10958,46 @@
           }
         },
         "summary": "Read a surface."
+      },
+      "post": {
+        "operationId": "rename_surface",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "surface_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameSurfaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurfaceResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Rename this session's surface."
       }
     },
     "/api/surfaces/{surface_id}/annotations": {
@@ -10038,6 +11040,47 @@
           }
         },
         "summary": "Create a surface annotation."
+      }
+    },
+    "/api/surfaces/{surface_id}/annotations/{annotation_id}/resolve": {
+      "post": {
+        "operationId": "resolve_surface_annotation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "surface_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "annotation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurfaceAnnotationView"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Resolve a note while keeping it in the record."
       }
     },
     "/api/surfaces/{surface_id}/modules": {

@@ -132,11 +132,19 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>) {
         }
     }
 
-    match raw_storage.interrupt_running_workflow_runs().await {
-        Ok(0) => {}
+    match raw_storage
+        .record_gateway_interruption(chrono::Utc::now())
+        .await
+    {
         // Marking is half the recovery; the workflow wake loop spawned at
         // server start relaunches these (and due parked runs) by replay.
-        Ok(n) => info!("Marked {n} workflow run(s) interrupted by a previous shutdown; resuming"),
+        // Every run the gateway's absence touched — running or parked —
+        // carries the interruption on its record.
+        Ok(counts) if counts.running_interrupted > 0 || counts.parked > 0 => info!(
+            "Marked {} workflow run(s) interrupted by a previous shutdown and {} parked run(s) as having outlived it; resuming",
+            counts.running_interrupted, counts.parked
+        ),
+        Ok(_) => {}
         Err(e) => {
             eprintln!("Workflow startup recovery failed: {e}");
             std::process::exit(1);
@@ -184,15 +192,14 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>) {
     let telegram = create_telegram_client(&config, &startup_secret_manager).await;
 
     // Step 7: Build the tool dispatch pipeline from the root selected above.
-    let browser_host = Some(crate::browser::BrowserHost::new(
-        crate::browser::BrowserConfig::from_tool_config(&config.tools.browser, &root),
-    ));
-    let tool_dispatcher = build_tool_dispatcher_with_browser(
+    let browser_host_slot = Arc::new(std::sync::OnceLock::new());
+    let tool_dispatcher = build_tool_dispatcher(
         &config,
         Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>,
-        browser_host.clone(),
         &root,
+        &browser_host_slot,
     );
+    let browser_host = browser_host_slot.get().cloned();
 
     // Step 8: Assemble application state and build the router.
     let storage: Arc<dyn swage_storage::store::Storage> =
@@ -207,6 +214,7 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>) {
         None,
         root,
     );
+    state.browser_host = browser_host_slot;
     state.replace_voice_provider(voice_provider);
     state.telegram = telegram;
     // The Codex CLI's auth store lives under a Swage-owned state directory;
@@ -723,11 +731,15 @@ pub(crate) fn build_tool_dispatcher(
     config: &swage_config::ResolvedConfig,
     storage: Arc<dyn swage_storage::store::Storage>,
     config_root: &std::path::Path,
+    browser_host: &std::sync::OnceLock<Arc<crate::browser::BrowserHost>>,
 ) -> crate::tool::ToolDispatcher {
-    let browser_host = Some(crate::browser::BrowserHost::new(
-        crate::browser::BrowserConfig::from_tool_config(&config.tools.browser, config_root),
-    ));
-    build_tool_dispatcher_with_browser(config, storage, browser_host, config_root)
+    let browser_host = browser_host.get_or_init(|| {
+        crate::browser::BrowserHost::new(crate::browser::BrowserConfig::from_tool_config(
+            &config.tools.browser,
+            config_root,
+        ))
+    });
+    build_tool_dispatcher_with_browser(config, storage, Some(Arc::clone(browser_host)), config_root)
 }
 
 pub(crate) fn build_tool_dispatcher_with_browser(
@@ -2343,6 +2355,7 @@ mod tests {
             &swage_config::ResolvedConfig::default(),
             storage as Arc<dyn swage_storage::store::Storage>,
             std::path::Path::new(".swage"),
+            &std::sync::OnceLock::new(),
         );
 
         assert!(
@@ -2362,6 +2375,7 @@ mod tests {
             &swage_config::ResolvedConfig::default(),
             storage as Arc<dyn swage_storage::store::Storage>,
             std::path::Path::new(".swage"),
+            &std::sync::OnceLock::new(),
         );
 
         assert!(
@@ -2384,6 +2398,7 @@ mod tests {
             &config,
             storage as Arc<dyn swage_storage::store::Storage>,
             std::path::Path::new(".swage"),
+            &std::sync::OnceLock::new(),
         );
 
         assert!(dispatcher.registry().get("python_execute").is_none());
@@ -2397,6 +2412,7 @@ mod tests {
             &swage_config::ResolvedConfig::default(),
             storage as Arc<dyn swage_storage::store::Storage>,
             std::path::Path::new(".swage"),
+            &std::sync::OnceLock::new(),
         );
 
         assert!(
@@ -2413,6 +2429,7 @@ mod tests {
             &swage_config::ResolvedConfig::default(),
             storage as Arc<dyn swage_storage::store::Storage>,
             std::path::Path::new(".swage"),
+            &std::sync::OnceLock::new(),
         );
 
         assert!(
@@ -2471,6 +2488,7 @@ mod tests {
             &config,
             storage as Arc<dyn swage_storage::store::Storage>,
             temp_dir.path(),
+            &std::sync::OnceLock::new(),
         );
 
         assert!(dispatcher.registry().get("echo_plugin").is_some());

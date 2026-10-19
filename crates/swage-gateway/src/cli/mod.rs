@@ -29,7 +29,7 @@ use clap::Parser;
 ///
 /// Run prompts and manage the gateway or connected devices.
 #[derive(Debug, Parser)]
-#[command(name = "swage", version, about = "Swage AI assistant platform")]
+#[command(name = "swage", version)]
 pub struct Cli {
     // None causes callers to show help.
     /// The command to run.
@@ -427,14 +427,40 @@ mod tests {
                     "help exposes developer commentary {internal_note:?}:\n{help}"
                 );
             }
-            assert!(help.contains("Swage AI assistant platform"));
+            assert_eq!(
+                help.matches("Swage AI assistant platform").count(),
+                1,
+                "{help}"
+            );
+            let commands = help
+                .split_once("Commands:")
+                .expect("command list")
+                .1
+                .split_once("Options:")
+                .expect("options section")
+                .0;
             for user_command in ["run", "gateway", "device", "generate-completion"] {
                 assert!(
-                    help.contains(user_command),
-                    "help omits user command {user_command:?}:\n{help}"
+                    commands
+                        .lines()
+                        .any(|line| line.split_whitespace().next() == Some(user_command)),
+                    "help omits command entry {user_command}: {help}"
                 );
             }
         }
+    }
+
+    #[test]
+    fn long_help_has_one_product_description() {
+        use clap::CommandFactory;
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.starts_with("Swage AI assistant platform."), "{help}");
+        assert_eq!(
+            help.matches("Run prompts and manage the gateway or connected devices.")
+                .count(),
+            1,
+            "{help}"
+        );
     }
 
     #[test]

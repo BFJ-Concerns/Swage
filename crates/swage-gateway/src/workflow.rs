@@ -17,16 +17,16 @@ use swage_protocol::client::workflow::{
     AnswerWorkflowRunHoldRequest, AnswerWorkflowRunHoldResponse, CreateWorkflowScriptRequest,
     PostWorkflowRunEventRequest, PostWorkflowRunEventResponse, StartInlineWorkflowRunRequest,
     StartWorkflowRunRequest, UpdateWorkflowScriptRequest, WorkflowAgentCallDispatch,
-    WorkflowArgumentContract, WorkflowBudget, WorkflowCallUsage, WorkflowCutShortCause,
-    WorkflowHandoverEvent, WorkflowHandoverEventDelivery, WorkflowHandoverFailedCall,
-    WorkflowHandoverFailedCallRef, WorkflowJournalEntryKind, WorkflowJournalResult,
-    WorkflowPartialResult, WorkflowPartialResults, WorkflowRouteBudget, WorkflowRun,
-    WorkflowRunDetailResponse, WorkflowRunEnding, WorkflowRunEvent, WorkflowRunEventSource,
-    WorkflowRunHandover, WorkflowRunHold, WorkflowRunHoldRejection, WorkflowRunHoldState,
-    WorkflowRunListResponse, WorkflowRunState, WorkflowRunTerminalAccount, WorkflowScript,
-    WorkflowScriptListResponse, WorkflowUsageUnavailableReason, WorkflowWorkerAccount,
-    WorkflowWorkerPartition, WorkflowWorkerPlacementRecord, WorkflowWorkerTermination,
-    WorkflowWorktreeCompletion,
+    WorkflowAgentCallResolution, WorkflowArgumentContract, WorkflowAttemptCause, WorkflowBudget,
+    WorkflowCallUsage, WorkflowCutShortCause, WorkflowHandoverEvent, WorkflowHandoverEventDelivery,
+    WorkflowHandoverFailedCall, WorkflowHandoverFailedCallRef, WorkflowJournalEntryKind,
+    WorkflowJournalResult, WorkflowPartialResult, WorkflowPartialResults, WorkflowRouteBudget,
+    WorkflowRun, WorkflowRunDetailResponse, WorkflowRunEnding, WorkflowRunEvent,
+    WorkflowRunEventSource, WorkflowRunHandover, WorkflowRunHold, WorkflowRunHoldRejection,
+    WorkflowRunHoldState, WorkflowRunInterruption, WorkflowRunListResponse, WorkflowRunState,
+    WorkflowRunTerminalAccount, WorkflowScript, WorkflowScriptListResponse,
+    WorkflowUsageUnavailableReason, WorkflowWorkerAccount, WorkflowWorkerPartition,
+    WorkflowWorkerPlacementRecord, WorkflowWorkerTermination, WorkflowWorktreeCompletion,
 };
 use swage_storage::WorkflowJournalRecord;
 use swage_storage::{
@@ -65,6 +65,24 @@ use crate::{
 
 const CARRIED_WORKFLOW_ID_DOMAIN: &[u8] = b"swage skill carried workflow";
 const BARE_WORKFLOW_AGENT_ID: &str = swage_config::RESERVED_WORKFLOW_AGENT_ID;
+
+/// Resolve the name of any session agent in its own scope, including workers
+/// whose definition belongs to their workflow rather than the registry.
+pub(crate) async fn session_agent_display_name(
+    storage: &dyn swage_storage::Storage,
+    agent_id: &str,
+    topic_id: Uuid,
+) -> Result<String, swage_core::GatewayError> {
+    if agent_id == BARE_WORKFLOW_AGENT_ID {
+        return Ok("Workflow worker".into());
+    }
+    Ok(
+        crate::service::resolve_effective_agent_definition(storage, agent_id, topic_id)
+            .await?
+            .map(|agent| agent.definition.display_name)
+            .unwrap_or_else(|| "Unavailable agent".into()),
+    )
+}
 
 fn store_worker_placement(placement: ResolvedWorkerDirectory) -> WorkflowRunWorkerPlacement {
     WorkflowRunWorkerPlacement {
@@ -495,23 +513,39 @@ impl AppState {
     }
 }
 
-/// Append one attempt of an agent call to its journal entry, and settle what
-/// the attempts it supersedes left outstanding.
+/// Open one attempt of an agent call on its journal entry before its turn
+/// starts: the cause the run dispatches it for, and when. The turn resolves
+/// it before any provider work (`resolve_agent_call_attempt`); an attempt
+/// the gateway dies between the two writes of stays in the record with its
+/// cause and no resolution.
 ///
-/// Replay re-dispatches an unfinished call under a new turn. The attempts it
-/// follows can no longer receive a provider response, so their open rounds
-/// are ended as interrupted at the moment that becomes true — leaving them
-/// reading as outstanding would say a request might still come back when
-/// nothing can answer it.
-pub(crate) async fn record_agent_call_attempt(
+/// Opening also settles what the attempts it supersedes left outstanding.
+/// Replay re-dispatches an unfinished call under a new turn; the attempts
+/// it follows can no longer receive a provider response, so their open
+/// rounds end as interrupted here, the moment that becomes true — not when
+/// the new turn resolves, which a dispatcher that cannot be built never
+/// reaches. Leaving them outstanding would say a request might still come
+/// back when nothing can answer it.
+pub(crate) async fn open_agent_call_attempt(
     storage: &dyn Storage,
     journal_entry_id: Uuid,
-    attempt: Value,
+    cause: WorkflowAttemptCause,
 ) -> Result<(), swage_core::StorageError> {
+    let opened = WorkflowAgentCallResolution {
+        cause,
+        opened_at: chrono::Utc::now(),
+        model: None,
+        effort: None,
+        session_id: None,
+        thread_id: None,
+        turn_id: None,
+    };
+    let opened = serde_json::to_value(opened)
+        .map_err(|error| swage_core::StorageError::QueryFailed(error.to_string()))?;
     let superseded = storage
-        .record_workflow_call_attempt(journal_entry_id, attempt)
+        .open_workflow_call_attempt(journal_entry_id, opened)
         .await?;
-    let superseded: Vec<swage_protocol::client::workflow::WorkflowAgentCallResolution> = superseded
+    let superseded: Vec<WorkflowAgentCallResolution> = superseded
         .into_iter()
         .map(serde_json::from_value)
         .collect::<Result<_, _>>()
@@ -526,6 +560,17 @@ pub(crate) async fn record_agent_call_attempt(
         superseded.into_iter().filter_map(|attempt| attempt.turn_id),
     )
     .await
+}
+
+/// Resolve the open attempt of an agent call with what its turn resolved.
+pub(crate) async fn resolve_agent_call_attempt(
+    storage: &dyn Storage,
+    journal_entry_id: Uuid,
+    resolution: Value,
+) -> Result<(), swage_core::StorageError> {
+    storage
+        .resolve_workflow_call_attempt(journal_entry_id, resolution)
+        .await
 }
 
 /// End every round still outstanding on these turns as interrupted.
@@ -558,18 +603,21 @@ async fn interrupt_outstanding_rounds(
 /// would hide the interrupted attempt's provider rounds, so the attempt
 /// records are the source and the settled result only adds a turn they did
 /// not already name.
-fn agent_call_attempt_turns(entry: &WorkflowJournalRecord) -> Result<Vec<Uuid>, String> {
-    let mut turns: Vec<Uuid> = Vec::new();
+fn agent_call_attempt_turns(entry: &WorkflowJournalRecord) -> Result<Vec<Option<Uuid>>, String> {
+    // One slot per attempt, in the record's order: an attempt opened and
+    // never resolved keeps its position with no turn, so the attempts after
+    // it number as the record numbers them.
+    let mut turns: Vec<Option<Uuid>> = Vec::new();
     if let Some(attempts) = entry.dispatch_attempts.as_ref() {
-        let attempts: Vec<swage_protocol::client::workflow::WorkflowAgentCallResolution> =
-            serde_json::from_value(attempts.clone()).map_err(|error| {
-                format!(
-                    "workflow journal entry {} carries an attempt record outside \
+        let attempts: Vec<WorkflowAgentCallResolution> = serde_json::from_value(attempts.clone())
+            .map_err(|error| {
+            format!(
+                "workflow journal entry {} carries an attempt record outside \
                      WorkflowAgentCallResolution: {error}",
-                    entry.id
-                )
-            })?;
-        turns.extend(attempts.into_iter().filter_map(|attempt| attempt.turn_id));
+                entry.id
+            )
+        })?;
+        turns.extend(attempts.into_iter().map(|attempt| attempt.turn_id));
     }
     let settled = entry
         .result
@@ -577,9 +625,9 @@ fn agent_call_attempt_turns(entry: &WorkflowJournalRecord) -> Result<Vec<Uuid>, 
         .and_then(|result| result.get("turn_id"))
         .and_then(|value| serde_json::from_value::<Uuid>(value.clone()).ok());
     if let Some(settled) = settled
-        && !turns.contains(&settled)
+        && !turns.contains(&Some(settled))
     {
-        turns.push(settled);
+        turns.push(Some(settled));
     }
     Ok(turns)
 }
@@ -1688,28 +1736,54 @@ impl GatewayWorkflowLauncher {
         )
         .await
         .map_err(|error| error.message().to_owned())?;
-        if !wait {
-            return serde_json::to_value(run).map_err(|error| error.to_string());
-        }
-        let record = tokio::time::timeout(std::time::Duration::from_secs(600), async {
-            loop {
-                let record = self
-                    .state
-                    .storage
-                    .get_workflow_run(run.id)
-                    .await
-                    .map_err(|error| error.to_string())?
-                    .ok_or_else(|| "workflow run disappeared".to_string())?;
-                if record.state != "running" {
-                    return Ok::<_, String>(record);
+        if wait {
+            tokio::time::timeout(std::time::Duration::from_secs(600), async {
+                loop {
+                    let record = self
+                        .state
+                        .storage
+                        .get_workflow_run(run.id)
+                        .await
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| "workflow run disappeared".to_string())?;
+                    if record.state != "running" {
+                        return Ok::<_, String>(());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
+            })
+            .await
+            .map_err(|_| "workflow wait timed out".to_string())??;
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        #[cfg(test)]
+        workflow_pause_test_hook::pause("start-snapshot-pending", session.id).await;
+        // State, worker count and observation time share one storage snapshot.
+        let (record, status_as_of) = self
+            .state
+            .storage
+            .get_workflow_run_observation(run.id)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "workflow run disappeared".to_string())?;
+        #[cfg(test)]
+        workflow_pause_test_hook::pause("start-snapshot-read", session.id).await;
+        let run = run_wire(record).map_err(|error| error.message().to_owned())?;
+        let workers_dispatched = run.terminal_account.as_ref().map(|account| {
+            let workers = &account.workers;
+            (workers.done.len()
+                + workers.failed.len()
+                + workers.cut_short.len()
+                + workers.unsettled.len()) as u32
+        });
+        serde_json::to_value(swage_protocol::client::workflow::WorkflowRunStartResult {
+            view_url: format!("/workflow-runs/{}", run.id),
+            run,
+            workers_dispatched,
+            status_as_of,
         })
-        .await
-        .map_err(|_| "workflow wait timed out".to_string())??;
-        serde_json::to_value(run_wire(record).map_err(|error| error.message().to_owned())?)
-            .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())
     }
 }
 
@@ -2581,6 +2655,32 @@ async fn persist_workflow_worker_liveness(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Why the run dispatches an attempt of `journal_entry_id` now: the call's
+/// first, or one following attempts an interruption cut off — the entry
+/// already carries attempts only when replay re-dispatches it, since a call
+/// that settled is never dispatched again.
+async fn attempt_cause_for(
+    storage: &dyn Storage,
+    run_id: Uuid,
+    journal_entry_id: Uuid,
+) -> Result<WorkflowAttemptCause, WorkflowHostError> {
+    let journal = storage
+        .list_workflow_journal(run_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let earlier = journal
+        .iter()
+        .find(|entry| entry.id == journal_entry_id)
+        .and_then(|entry| entry.dispatch_attempts.as_ref())
+        .and_then(Value::as_array)
+        .is_some_and(|attempts| !attempts.is_empty());
+    Ok(if earlier {
+        WorkflowAttemptCause::AfterInterruption
+    } else {
+        WorkflowAttemptCause::First
+    })
+}
+
 async fn execute_workflow_agent_turn(
     state: &AppState,
     session_id: Uuid,
@@ -2595,7 +2695,14 @@ async fn execute_workflow_agent_turn(
     journal_entry_id: Uuid,
     requested_model: Option<String>,
     reuse_persisted_input: bool,
+    cause: WorkflowAttemptCause,
 ) -> Result<WorkflowTurnAttempt, WorkflowHostError> {
+    // The attempt is opened with its cause before the turn exists, so the
+    // record says why a worker was dispatched even if nothing ever resolves
+    // what it ran with.
+    open_agent_call_attempt(state.storage.as_ref(), journal_entry_id, cause)
+        .await
+        .map_err(|error| format!("failed to open the agent call attempt: {error}"))?;
     let (event_tx, mut events_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let mut events = Vec::new();
     let provider_failure = Arc::new(std::sync::Mutex::new(None));
@@ -3088,6 +3195,7 @@ async fn run_ephemeral_agent_call_with_admission(
         assembly: request.assembly.clone(),
         skills: persisted_skills.or_else(|| request.skills.clone()),
     };
+    let cause = attempt_cause_for(state.storage.as_ref(), run_id, journal_entry_id).await?;
     let primary = execute_workflow_agent_turn(
         state,
         session_id,
@@ -3102,6 +3210,7 @@ async fn run_ephemeral_agent_call_with_admission(
         journal_entry_id,
         request.model.clone(),
         false,
+        cause,
     )
     .await?;
     let emitted_output = primary
@@ -3209,6 +3318,9 @@ async fn run_ephemeral_agent_call_with_admission(
                 journal_entry_id,
                 Some(fallback_model.clone()),
                 reuse_persisted_input,
+                WorkflowAttemptCause::ProviderFallback {
+                    primary_failure: error.clone(),
+                },
             )
             .await?;
             fallback.outcome.map_err(|fallback_error| {
@@ -3346,7 +3458,9 @@ const CANCELLED_JOURNAL_SETTLEMENT: &str = "WorkflowCancelledError: run cancelle
 fn run_end_settlement_detail(ending: &WorkflowRunEnding) -> &'static str {
     match ending {
         WorkflowRunEnding::Cancelled => CANCELLED_JOURNAL_SETTLEMENT,
-        WorkflowRunEnding::Threw { .. } => "WorkflowRunEndedError: the run failed",
+        WorkflowRunEnding::Threw { .. } | WorkflowRunEnding::AuthorError { .. } => {
+            "WorkflowRunEndedError: the run failed"
+        }
         WorkflowRunEnding::WoundDown { .. } => "WorkflowRunEndedError: the run wound down",
         WorkflowRunEnding::Returned => "WorkflowRunEndedError: the run returned",
         WorkflowRunEnding::InterruptedWithoutResume { .. } => {
@@ -3358,7 +3472,9 @@ fn run_end_settlement_detail(ending: &WorkflowRunEnding) -> &'static str {
 fn cut_short_termination(ending: &WorkflowRunEnding) -> Option<WorkflowWorkerTermination> {
     let cause = match ending {
         WorkflowRunEnding::Returned => WorkflowCutShortCause::RunReturned,
-        WorkflowRunEnding::Threw { .. } => WorkflowCutShortCause::RunFailed,
+        WorkflowRunEnding::Threw { .. } | WorkflowRunEnding::AuthorError { .. } => {
+            WorkflowCutShortCause::RunFailed
+        }
         WorkflowRunEnding::Cancelled => WorkflowCutShortCause::RunCancelled,
         WorkflowRunEnding::WoundDown { .. } => WorkflowCutShortCause::RunWoundDown,
         WorkflowRunEnding::InterruptedWithoutResume { .. } => return None,
@@ -3374,10 +3490,33 @@ fn cut_short_termination(ending: &WorkflowRunEnding) -> Option<WorkflowWorkerTer
 /// A failed run may have ended under its closing boundary rather than on its
 /// own terms; `refine_ending` separates the two from the journal, so the
 /// coarse reading here never has to guess.
+fn author_error_sentence(error: Option<&str>) -> Option<String> {
+    let sentence = error?
+        .strip_prefix("workflow script failed: ")
+        .unwrap_or(error?)
+        .lines()
+        .next()?;
+    let name = sentence.split_once(':')?.0;
+    matches!(
+        name,
+        "UnknownAgentOptionError"
+            | "AgentRequiredError"
+            | "InvalidAgentOptionError"
+            | "InvalidAgentPromptError"
+            | "InvalidAgentSchemaError"
+            | "WorkflowReferenceError"
+            | "WorkflowArgumentsError"
+    )
+    .then(|| sentence.to_owned())
+}
+
 fn ending_of_terminal_state(run_state: &str, error: Option<&str>) -> WorkflowRunEnding {
     match run_state {
         "completed" => WorkflowRunEnding::Returned,
         "cancelled" => WorkflowRunEnding::Cancelled,
+        _ if author_error_sentence(error).is_some() => WorkflowRunEnding::AuthorError {
+            error: author_error_sentence(error).expect("author error sentence"),
+        },
         _ => WorkflowRunEnding::Threw {
             error: error
                 .unwrap_or("the run failed without a recorded error")
@@ -3466,12 +3605,26 @@ fn worker_worktree_completion(entry: &WorkflowJournalRecord) -> Option<WorkflowW
         })
 }
 
+/// One worker's standing for the terminal account. An attempt record the
+/// contract cannot read is an error, as it is for every other reader of the
+/// column: a flag read as `false` from an unreadable record would be a
+/// positive statement the record does not make.
 fn worker_account(
     entry: &WorkflowJournalRecord,
     placements: &HashMap<u64, String>,
     termination: Option<WorkflowWorkerTermination>,
-) -> WorkflowWorkerAccount {
-    WorkflowWorkerAccount {
+) -> Result<WorkflowWorkerAccount, String> {
+    let attempts: Vec<WorkflowAgentCallResolution> = match entry.dispatch_attempts.as_ref() {
+        Some(attempts) => serde_json::from_value(attempts.clone()).map_err(|error| {
+            format!(
+                "workflow journal entry {} carries an attempt record outside \
+                 WorkflowAgentCallResolution: {error}",
+                entry.id
+            )
+        })?,
+        None => Vec::new(),
+    };
+    Ok(WorkflowWorkerAccount {
         journal_entry_id: entry.id,
         seq: entry.seq,
         label: entry
@@ -3487,7 +3640,10 @@ fn worker_account(
         placement: worker_placement_of(entry, placements),
         worktree: worker_worktree_completion(entry),
         termination,
-    }
+        redispatched_after_interruption: attempts
+            .iter()
+            .any(|attempt| attempt.cause == WorkflowAttemptCause::AfterInterruption),
+    })
 }
 
 /// Account for every worker the run dispatched, at the instant it ends.
@@ -3517,7 +3673,13 @@ async fn account_for_run_end(
     };
     let ending = refine_ending(ending, &journal);
     let cut_short = cut_short_termination(&ending);
-    let account = terminal_account_from_journal(&journal, ending.clone(), cut_short.clone());
+    let account = match terminal_account_from_journal(&journal, ending.clone(), cut_short.clone()) {
+        Ok(account) => account,
+        Err(problem) => {
+            tracing::warn!(%run_id, %problem, "could not account for the run's end");
+            return None;
+        }
+    };
     if matches!(ending, WorkflowRunEnding::Cancelled) {
         interrupt_cut_short_worker_rounds(storage, run_id, &journal).await;
         let termination =
@@ -3555,7 +3717,9 @@ async fn interrupt_cut_short_worker_rounds(
     for entry in journal.iter().filter(|entry| entry.status == "started") {
         match agent_call_attempt_turns(entry) {
             Ok(turns) => {
-                if let Err(error) = interrupt_outstanding_rounds(storage, turns).await {
+                if let Err(error) =
+                    interrupt_outstanding_rounds(storage, turns.into_iter().flatten()).await
+                {
                     tracing::warn!(
                         %run_id,
                         journal_entry_id = %entry.id,
@@ -3578,7 +3742,7 @@ fn terminal_account_from_journal(
     journal: &[WorkflowJournalRecord],
     ending: WorkflowRunEnding,
     cut_short_termination: Option<WorkflowWorkerTermination>,
-) -> WorkflowRunTerminalAccount {
+) -> Result<WorkflowRunTerminalAccount, String> {
     let placements = provisioned_placements(journal);
     let mut workers = WorkflowWorkerPartition::default();
     let mut recovered = Vec::new();
@@ -3590,12 +3754,12 @@ fn terminal_account_from_journal(
                 entry,
                 &placements,
                 cut_short_termination.clone(),
-            ));
+            )?);
             continue;
         }
         match entry.status.as_str() {
             "completed" => {
-                workers.done.push(worker_account(entry, &placements, None));
+                workers.done.push(worker_account(entry, &placements, None)?);
                 if let Some(WorkflowJournalResult::AgentCall { output, .. }) =
                     entry.result.as_ref().and_then(|result| {
                         journal_result_from_storage(WorkflowJournalEntryKind::AgentCall, result)
@@ -3624,34 +3788,37 @@ fn terminal_account_from_journal(
                         .clone()
                         .unwrap_or_else(|| "the worker failed without a recorded error".into()),
                 }),
-            )),
+            )?),
             _ => workers.unsettled.push(worker_account(
                 entry,
                 &placements,
                 Some(WorkflowWorkerTermination::Unsettled),
-            )),
+            )?),
         }
     }
     // A run that returned has a result of its own; its completed workers are
     // accounted for, not offered as a stand-in for one.
-    let partial_results =
-        (!matches!(ending, WorkflowRunEnding::Returned)).then(|| WorkflowPartialResults {
+    let partial_results = (!matches!(ending, WorkflowRunEnding::Returned) && !recovered.is_empty())
+        .then(|| WorkflowPartialResults {
             reason: partial_reason(&ending),
             results: recovered,
         });
-    WorkflowRunTerminalAccount {
+    Ok(WorkflowRunTerminalAccount {
         ending,
         workers,
         partial_results,
         settled_at: chrono::Utc::now(),
-    }
+        cancellation: None,
+    })
 }
 
 /// Why the run's completed work is partial rather than a result.
 fn partial_reason(ending: &WorkflowRunEnding) -> String {
     match ending {
         WorkflowRunEnding::Returned => "the run returned".into(),
-        WorkflowRunEnding::Threw { error } => format!("the run failed before returning: {error}"),
+        WorkflowRunEnding::Threw { error } | WorkflowRunEnding::AuthorError { error } => {
+            format!("the run failed before returning: {error}")
+        }
         WorkflowRunEnding::Cancelled => "the run was cancelled before returning".into(),
         WorkflowRunEnding::WoundDown { error } => {
             format!("the run wound down before returning: {error}")
@@ -3701,8 +3868,11 @@ async fn record_terminal_account(
     storage: &dyn Storage,
     worktree_host: &crate::worktree::WorktreeHost,
     run_id: Uuid,
-    account: WorkflowRunTerminalAccount,
+    mut account: WorkflowRunTerminalAccount,
 ) -> Result<(), swage_core::StorageError> {
+    if matches!(account.ending, WorkflowRunEnding::Cancelled) {
+        account.cancellation = recorded_cancellation(storage, run_id).await?;
+    }
     let placements = retained_placements(&account);
     let claim = worktree_host.retain(run_id, &placements).await;
     let account = serde_json::to_value(&account).expect("terminal account serialises to JSON");
@@ -6501,6 +6671,7 @@ async fn run_host_commands_inner(
                     } else if let Some(key) = entry.idempotency_key {
                         let capability = match capability_from_grant(
                             Some(state.clone()),
+                            run_id,
                             topic_id,
                             Arc::clone(&state.storage),
                             delivery_grant.as_ref(),
@@ -6531,6 +6702,7 @@ async fn run_host_commands_inner(
                     let key = Uuid::new_v4();
                     let capability = match capability_from_grant(
                         Some(state.clone()),
+                        run_id,
                         topic_id,
                         Arc::clone(&state.storage),
                         delivery_grant.as_ref(),
@@ -7218,9 +7390,15 @@ pub(crate) async fn answer_run_hold(
         .await
         .map_err(internal)?;
     if !settlement.settled {
+        let settled_run = state
+            .storage
+            .get_workflow_run(hold.run_id)
+            .await
+            .map_err(internal)?
+            .ok_or_else(|| ApiError::not_found("workflow run", hold.run_id))?;
         return Err(ApiError::conflict(format!(
-            "hold {} was answered by someone else first",
-            hold.id
+            "hold {} did not settle; workflow run {} is {}",
+            hold.id, hold.run_id, settled_run.state
         )));
     }
     #[cfg(test)]
@@ -7230,7 +7408,7 @@ pub(crate) async fn answer_run_hold(
         // Relaunching is a claim on the run's state, so a cancellation that
         // got there first simply refuses this resume: the verdict stands on
         // the record and nothing runs.
-        resume_owed_workflow_runs(state).await;
+        Box::pin(resume_owed_workflow_runs(state)).await;
     }
     let answered = state
         .storage
@@ -7238,9 +7416,16 @@ pub(crate) async fn answer_run_hold(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow run hold", hold.id))?;
+    let settled_run = state
+        .storage
+        .get_workflow_run(hold.run_id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| ApiError::not_found("workflow run", hold.run_id))?;
     Ok(AnswerWorkflowRunHoldResponse {
         hold: hold_projection(state, answered).await?,
         wake_provisioned,
+        run_state: run_wire(settled_run)?.state,
     })
 }
 
@@ -7962,12 +8147,19 @@ fn budget_wire(value: &Value) -> WorkflowBudget {
     serde_json::from_value(value.clone()).unwrap_or_default()
 }
 
-fn run_wire(record: WorkflowRunRecord) -> Result<WorkflowRun, ApiError> {
+pub(crate) fn run_wire(record: WorkflowRunRecord) -> Result<WorkflowRun, ApiError> {
+    let script_name = match (record.script_name, record.source.as_deref()) {
+        (Some(name), _) => Some(name),
+        (None, Some(source)) => swage_workflow::script_meta(source).map_err(internal)?.name,
+        (None, None) => None,
+    };
     Ok(WorkflowRun {
+        dispatching_session_id: record.dispatching_session_id,
+        wake_at: record.wake_at,
         id: record.id,
         topic_id: record.topic_id,
         script_id: record.script_id,
-        script_name: record.script_name,
+        script_name,
         script_version: record.script_version,
         carrying_skill: record.carrying_skill,
         task: record.task,
@@ -7994,6 +8186,17 @@ fn run_wire(record: WorkflowRunRecord) -> Result<WorkflowRun, ApiError> {
             .map_err(|error| {
                 internal(format!(
                     "workflow run {} terminal account does not match the recorded contract: {error}",
+                    record.id
+                ))
+            })?,
+        interruptions: record
+            .interruptions
+            .into_iter()
+            .map(serde_json::from_value::<WorkflowRunInterruption>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                internal(format!(
+                    "workflow run {} interruption record does not match the recorded contract: {error}",
                     record.id
                 ))
             })?,
@@ -8263,6 +8466,9 @@ async fn failed_agent_call_handover(
 }
 
 fn degraded_failed_run_handover(terminal_error: Option<&str>) -> WorkflowRunHandover {
+    if let Some(failure) = author_error_sentence(terminal_error) {
+        return WorkflowRunHandover::AuthorError { failure };
+    }
     WorkflowRunHandover::InterruptedUnattributed {
         failure: "The workflow failed without an attributable agent-call identity.".to_string(),
         terminal_error: terminal_error.map(str::to_string),
@@ -8588,17 +8794,9 @@ async fn launch_existing_run(
             }
             None => (run_state, output, handover, error),
         };
-        // Once the run has genuinely ended, no outstanding decision can
-        // affect it. Stop their in-process watchers and remove the remaining
-        // rows from the answering queue before publishing the terminal run.
-        // An ending left interrupted resumes by replay and reads its holds
-        // back, so those stay open.
+        // Stop in-process watchers; the state write closes open holds in
+        // the same transaction that publishes the terminal run.
         cancellation.cancel();
-        if run_state != "interrupted"
-            && let Err(error) = storage.close_open_workflow_run_holds(run_id).await
-        {
-            tracing::warn!(%run_id, %error, "could not close unanswered workflow holds");
-        }
         let state_update = storage
             .update_workflow_run_state(run_id, run_state, output, handover, error.as_deref())
             .await;
@@ -8747,7 +8945,7 @@ mod workflow_cleanup_test_hook {
 }
 
 #[cfg(test)]
-mod workflow_pause_test_hook {
+pub(crate) mod workflow_pause_test_hook {
     use std::{
         collections::HashMap,
         sync::{Arc, Mutex, OnceLock},
@@ -8756,9 +8954,9 @@ mod workflow_pause_test_hook {
     use tokio::sync::Semaphore;
     use uuid::Uuid;
 
-    pub(super) struct Pause {
-        pub(super) entered: Semaphore,
-        pub(super) release: Semaphore,
+    pub(crate) struct Pause {
+        pub(crate) entered: Semaphore,
+        pub(crate) release: Semaphore,
     }
 
     /// A staged pause is keyed by the point it holds and the run or hold it
@@ -8774,7 +8972,7 @@ mod workflow_pause_test_hook {
     /// Hold the next pass through `point` for `subject` until the test lets
     /// it go, so an interleaving a race depends on can be staged rather than
     /// hoped for.
-    pub(super) fn install(point: &'static str, subject: Uuid) -> Arc<Pause> {
+    pub(crate) fn install(point: &'static str, subject: Uuid) -> Arc<Pause> {
         let pause = Arc::new(Pause {
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
@@ -8786,7 +8984,7 @@ mod workflow_pause_test_hook {
         pause
     }
 
-    pub(super) async fn pause(point: &'static str, subject: Uuid) {
+    pub(crate) async fn pause(point: &'static str, subject: Uuid) {
         let pause = pauses()
             .lock()
             .expect("workflow pause test-hook registry")
@@ -8922,6 +9120,75 @@ async fn reconcile_workflow_worker_liveness(
     Ok(())
 }
 
+pub(crate) fn ending_notice(
+    run: WorkflowRunRecord,
+) -> swage_protocol::client::workflow::WorkflowRunEndingNotice {
+    swage_protocol::client::workflow::WorkflowRunEndingNotice {
+        run_id: run.id,
+        script_name: run.script_name,
+        state: run.state,
+        completed_at: run.completed_at,
+    }
+}
+
+pub(crate) async fn journal_with_rounds(
+    state: &AppState,
+    entries: Vec<WorkflowJournalRecord>,
+) -> Result<Vec<swage_protocol::client::workflow::WorkflowJournalEntry>, String> {
+    let mut journal = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let rounds = match entry.kind == "agent_call" {
+            true => {
+                // An entry with no attempt turns resolved nothing and so ran
+                // no rounds.
+                let turns = agent_call_attempt_turns(&entry).map_err(|error| error.to_string())?;
+                let mut rounds = Vec::new();
+                for (index, turn_id) in turns.into_iter().enumerate() {
+                    let attempt = index as u32 + 1;
+                    let Some(turn_id) = turn_id else {
+                        continue;
+                    };
+                    for round in state
+                        .storage
+                        .list_provider_rounds_by_turn(turn_id)
+                        .await
+                        .map_err(|error| error.to_string())?
+                    {
+                        rounds.push(
+                            provider_round_wire(round, attempt)
+                                .map_err(|error| error.to_string())?,
+                        );
+                    }
+                }
+                Some(rounds)
+            }
+            false => None,
+        };
+        journal.push(journal_wire(entry, rounds).map_err(|error| error.to_string())?);
+    }
+    Ok(journal)
+}
+
+pub(crate) async fn journal_with_live_workers(
+    state: &AppState,
+    run_id: Uuid,
+    mut entries: Vec<WorkflowJournalRecord>,
+) -> Result<Vec<swage_protocol::client::workflow::WorkflowJournalEntry>, String> {
+    let live_workers = state.active_workflow_workers.lock().await.clone();
+    reconcile_workflow_worker_liveness(state, run_id, &mut entries, &live_workers)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut journal = journal_with_rounds(state, entries).await?;
+    for entry in &mut journal {
+        if let Some(liveness) = live_workers.get(&entry.id)
+            && let Some(agent_call) = entry.agent_call.as_mut()
+        {
+            agent_call.liveness = Some(workflow_worker_liveness_wire(liveness.clone())?);
+        }
+    }
+    Ok(journal)
+}
+
 pub async fn get_run(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -8932,7 +9199,7 @@ pub async fn get_run(
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow run", id))?;
-    let mut entries = state
+    let entries = state
         .storage
         .list_workflow_journal(id)
         .await
@@ -8980,43 +9247,9 @@ pub async fn get_run(
     // interrupted one actually made.
     #[cfg(test)]
     workflow_test_hook::pause_once(id).await;
-    let live_workers = state.active_workflow_workers.lock().await.clone();
-    reconcile_workflow_worker_liveness(&state, id, &mut entries, &live_workers)
+    let journal = journal_with_live_workers(&state, id, entries)
         .await
         .map_err(internal)?;
-    let mut journal = Vec::with_capacity(entries.len());
-    for entry in entries {
-        let rounds = match entry.kind == "agent_call" {
-            true => {
-                // An entry with no attempt turns resolved nothing and so ran
-                // no rounds.
-                let turns = agent_call_attempt_turns(&entry).map_err(internal)?;
-                let mut rounds = Vec::new();
-                for (index, turn_id) in turns.into_iter().enumerate() {
-                    let attempt = index as u32 + 1;
-                    for round in state
-                        .storage
-                        .list_provider_rounds_by_turn(turn_id)
-                        .await
-                        .map_err(internal)?
-                    {
-                        rounds.push(provider_round_wire(round, attempt).map_err(internal)?);
-                    }
-                }
-                Some(rounds)
-            }
-            false => None,
-        };
-        journal.push(journal_wire(entry, rounds).map_err(internal)?);
-    }
-    for entry in &mut journal {
-        if let Some(liveness) = live_workers.get(&entry.id)
-            && let Some(agent_call) = entry.agent_call.as_mut()
-        {
-            agent_call.liveness =
-                Some(workflow_worker_liveness_wire(liveness.clone()).map_err(internal)?);
-        }
-    }
     let holds = run_hold_projections(&state, id).await?;
     // Hold economics are derived the same way the wake economics are: the
     // hold rows and their rejections are the history, and a stored counter
@@ -9120,19 +9353,89 @@ pub async fn list_runs(
     Ok(Json(WorkflowRunListResponse { runs }))
 }
 
+async fn recorded_cancellation(
+    storage: &dyn Storage,
+    run_id: Uuid,
+) -> Result<
+    Option<swage_protocol::client::workflow::WorkflowRunCancellation>,
+    swage_core::StorageError,
+> {
+    let events = storage
+        .list_audit_events_filtered(swage_storage::AuditEventFilter {
+            entity_kind: Some("workflow_run".into()),
+            entity_id: Some(run_id.to_string()),
+            event_kind: Some("cancellation_requested".into()),
+            limit: 1,
+            ..Default::default()
+        })
+        .await?;
+    events
+        .into_iter()
+        .next()
+        .map(|event| {
+            serde_json::from_value(event.metadata)
+                .map_err(|error| swage_core::StorageError::QueryFailed(error.to_string()))
+        })
+        .transpose()
+}
+
+async fn record_cancellation_request(
+    storage: &dyn Storage,
+    id: Uuid,
+    cancellation: &swage_protocol::client::workflow::WorkflowRunCancellation,
+) -> Result<(), ApiError> {
+    storage
+        .create_audit_event(NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: None,
+            entity_kind: "workflow_run".into(),
+            entity_id: id.to_string(),
+            event_kind: "cancellation_requested".into(),
+            summary: "Workflow cancellation requested through the API".into(),
+            metadata: serde_json::to_value(cancellation).expect("cancellation serialises"),
+        })
+        .await
+        .map_err(internal)?;
+    Ok(())
+}
+
 pub async fn cancel_run(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<WorkflowRun>, ApiError> {
-    if let Some(token) = state.active_workflow_runs.lock().await.get(&id).cloned() {
-        token.cancel();
-    }
     let run = state
         .storage
         .get_workflow_run(id)
         .await
         .map_err(internal)?
         .ok_or_else(|| ApiError::not_found("workflow run", id))?;
+    if crate::tool::workflow_run_status::is_terminal_run_state(&run.state) {
+        return Ok(Json(run_wire(run)?));
+    }
+    if run.state == "interrupted" {
+        return Err(ApiError::conflict(
+            "interrupted workflow runs must resume before cancellation".into(),
+        ));
+    }
+    let cancellation = swage_protocol::client::workflow::WorkflowRunCancellation {
+        source: "API request".into(),
+        session_id: None,
+        actor: None,
+        requested_at: chrono::Utc::now(),
+    };
+    if run.state != "parked" {
+        let active = state.active_workflow_runs.lock().await;
+        let token = active
+            .get(&id)
+            .filter(|token| !token.is_cancelled())
+            .ok_or_else(|| {
+                ApiError::conflict(format!(
+                    "workflow run {id} has no active execution to cancel"
+                ))
+            })?;
+        record_cancellation_request(state.storage.as_ref(), id, &cancellation).await?;
+        token.cancel();
+    }
     #[cfg(test)]
     workflow_test_hook::pause_once(id).await;
     // A parked run has no engine to signal: cancel it in the record so the
@@ -9153,7 +9456,11 @@ pub async fn cancel_run(
         let journal_termination = cut_short
             .clone()
             .map(|termination| serde_json::to_value(termination).expect("termination serialises"));
-        let account = terminal_account_from_journal(&journal, ending, cut_short);
+        let mut account =
+            terminal_account_from_journal(&journal, ending, cut_short).map_err(internal)?;
+        if matches!(account.ending, WorkflowRunEnding::Cancelled) {
+            account.cancellation = Some(cancellation.clone());
+        }
         let placements = retained_placements(&account);
         let claim = state.worktree_host.retain(id, &placements).await;
         #[cfg(test)]
@@ -9189,6 +9496,7 @@ pub async fn cancel_run(
                 "workflow run {id} is no longer parked; not cancelling"
             )));
         }
+        record_cancellation_request(state.storage.as_ref(), id, &cancellation).await?;
         if placements.is_empty() {
             state.worktree_host.release(id).await;
         }
@@ -9199,15 +9507,7 @@ pub async fn cancel_run(
         if let Err(problem) = record_terminal_budget_from_journal(&state, id, &budget).await {
             tracing::warn!(%id, %problem, "could not record terminal budget audit entry");
         }
-        // The claim is also the decision against any answer racing it: an
-        // answer settles the same run row, so winning here is proof no answer
-        // has relaunched an engine, and the holds left open can be closed
-        // without one to miss.
-        state
-            .storage
-            .close_open_workflow_run_holds(id)
-            .await
-            .map_err(internal)?;
+        // The parked cancellation claim also closed its open holds atomically.
         let cancelled = state
             .storage
             .get_workflow_run(id)

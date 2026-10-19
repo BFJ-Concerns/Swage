@@ -228,10 +228,13 @@ impl SessionStore for SqliteStorage {
 
     async fn delete_session(&self, id: Uuid) -> Result<bool, StorageError> {
         self.with_conn(|conn| {
-            let affected = conn.execute(
+            let tx = conn.unchecked_transaction()?;
+            tx.execute("UPDATE schedule_runs SET state = 'failed', error_message = 'target session deleted', completed_at = ?2 WHERE session_id = ?1 AND state IN ('pending', 'running')", params![id.to_string(), Utc::now().to_rfc3339()])?;
+            let affected = tx.execute(
                 "DELETE FROM sessions WHERE id = ?1",
                 params![id.to_string()],
             )?;
+            tx.commit()?;
             Ok(affected > 0)
         })
         .await

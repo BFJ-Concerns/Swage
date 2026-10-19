@@ -14,6 +14,36 @@ pub(super) struct GatewayService {
     user: bool,
 }
 
+trait ServiceManager {
+    async fn output(
+        &self,
+        service: &GatewayService,
+        args: &[&str],
+    ) -> std::io::Result<std::process::Output>;
+}
+
+struct Systemd;
+impl ServiceManager for Systemd {
+    async fn output(
+        &self,
+        service: &GatewayService,
+        args: &[&str],
+    ) -> std::io::Result<std::process::Output> {
+        service.command().args(args).output().await
+    }
+}
+
+trait HealthProbe {
+    async fn healthy(&self, address: &str) -> bool;
+}
+
+struct HttpHealthProbe;
+impl HealthProbe for HttpHealthProbe {
+    async fn healthy(&self, address: &str) -> bool {
+        GatewayClient::new(address).health().await.is_ok()
+    }
+}
+
 fn refused(reason: impl Into<String>) -> ClientError {
     ClientError::GatewayRestartRefused {
         reason: reason.into(),
@@ -36,6 +66,18 @@ impl GatewayService {
         previous: &RuntimeMetadata,
         metadata_path: &Path,
     ) -> Result<(), ClientError> {
+        self.restart_with(args, previous, metadata_path, &Systemd, &HttpHealthProbe)
+            .await
+    }
+
+    async fn restart_with(
+        &self,
+        args: &RestartArgs,
+        previous: &RuntimeMetadata,
+        metadata_path: &Path,
+        manager: &impl ServiceManager,
+        probe: &impl HealthProbe,
+    ) -> Result<(), ClientError> {
         if args.port.is_some()
             || args.host.is_some()
             || args.foreground
@@ -47,10 +89,8 @@ impl GatewayService {
                 self.unit
             )));
         }
-        let output = self
-            .command()
-            .args(["restart", "--", &self.unit])
-            .output()
+        let output = manager
+            .output(self, &["restart", "--", &self.unit])
             .await
             .map_err(|error| refused(error.to_string()))?;
         if !output.status.success() {
@@ -62,15 +102,19 @@ impl GatewayService {
                 ),
             });
         }
-        let address =
-            wait_for_restarted_gateway(metadata_path, previous.pid, RESTART_HEALTH_TIMEOUT)
-                .await
-                .map_err(|reason| ClientError::GatewayRestartFailed {
-                    reason: format!(
-                        "{} restarted but {reason}; inspect the service journal",
-                        self.unit
-                    ),
-                })?;
+        let address = wait_for_restarted_gateway_with(
+            metadata_path,
+            previous.pid,
+            RESTART_HEALTH_TIMEOUT,
+            probe,
+        )
+        .await
+        .map_err(|reason| ClientError::GatewayRestartFailed {
+            reason: format!(
+                "{} restarted but {reason}; inspect the service journal",
+                self.unit
+            ),
+        })?;
         println!(
             "Gateway restarted through {} and is healthy on {address}",
             self.unit
@@ -87,26 +131,42 @@ impl GatewayService {
 /// still naming the previous process is the old gateway's, not evidence of
 /// the new one, and is skipped: the old process may still be draining, or a
 /// stranger may answer on its former address.
+#[cfg(test)]
 async fn wait_for_restarted_gateway(
     metadata_path: &Path,
     previous_pid: u32,
     timeout: Duration,
 ) -> Result<String, String> {
+    wait_for_restarted_gateway_with(metadata_path, previous_pid, timeout, &HttpHealthProbe).await
+}
+
+async fn wait_for_restarted_gateway_with(
+    metadata_path: &Path,
+    previous_pid: u32,
+    timeout: Duration,
+    probe: &impl HealthProbe,
+) -> Result<String, String> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        if let Ok(metadata) = RuntimeMetadata::load_from(metadata_path)
-            && metadata.pid != previous_pid
-            && GatewayClient::new(&metadata.address).health().await.is_ok()
-        {
-            return Ok(metadata.address);
-        }
         if tokio::time::Instant::now() >= deadline {
             return Err(format!(
                 "no new gateway process recorded a healthy address within {} seconds",
                 timeout.as_secs()
             ));
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        if let Ok(metadata) = RuntimeMetadata::load_from(metadata_path)
+            && metadata.pid != previous_pid
+            && matches!(
+                tokio::time::timeout_at(deadline, probe.healthy(&metadata.address)).await,
+                Ok(true)
+            )
+        {
+            return Ok(metadata.address);
+        }
+        tokio::time::sleep_until(
+            (tokio::time::Instant::now() + Duration::from_millis(250)).min(deadline),
+        )
+        .await;
     }
 }
 
@@ -117,33 +177,43 @@ pub(super) async fn gateway_service(pid: u32) -> Result<Option<GatewayService>, 
     {
         let cgroup = std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
             .map_err(|error| refused(format!("cannot determine gateway supervision: {error}")))?;
-        let Some(service) = service_from_cgroup(&cgroup) else {
-            return Ok(None);
-        };
-        let output = service
-            .command()
-            .args(["show", "--property=MainPID", "--value", "--", &service.unit])
-            .output()
-            .await
-            .map_err(|error| refused(format!("cannot inspect gateway supervisor: {error}")))?;
-        if !output.status.success() {
-            return Err(refused(format!(
-                "cannot inspect gateway service {}: {}",
-                service.unit,
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-        let main_pid = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .parse::<u32>()
-            .map_err(|error| refused(format!("invalid gateway service MainPID: {error}")))?;
-        Ok((main_pid == pid).then_some(service))
+        service_for_cgroup(pid, &cgroup, &Systemd).await
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = pid;
         Ok(None)
     }
+}
+
+#[cfg(any(target_os = "linux", test))]
+async fn service_for_cgroup(
+    pid: u32,
+    cgroup: &str,
+    manager: &impl ServiceManager,
+) -> Result<Option<GatewayService>, ClientError> {
+    let Some(service) = service_from_cgroup(cgroup) else {
+        return Ok(None);
+    };
+    let output = manager
+        .output(
+            &service,
+            &["show", "--property=MainPID", "--value", "--", &service.unit],
+        )
+        .await
+        .map_err(|error| refused(format!("cannot inspect gateway supervisor: {error}")))?;
+    if !output.status.success() {
+        return Err(refused(format!(
+            "cannot inspect gateway service {}: {}",
+            service.unit,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let main_pid = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .map_err(|error| refused(format!("invalid gateway service MainPID: {error}")))?;
+    Ok((main_pid == pid).then_some(service))
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -212,6 +282,210 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("without CLI overrides"));
+    }
+
+    struct FakeManager {
+        success: bool,
+        main_pid: u32,
+        calls: std::cell::RefCell<Vec<Vec<String>>>,
+    }
+
+    impl ServiceManager for FakeManager {
+        fn output(
+            &self,
+            _service: &GatewayService,
+            args: &[&str],
+        ) -> impl Future<Output = std::io::Result<std::process::Output>> {
+            #[cfg(unix)]
+            use std::os::unix::process::ExitStatusExt;
+            #[cfg(windows)]
+            use std::os::windows::process::ExitStatusExt;
+            self.calls
+                .borrow_mut()
+                .push(args.iter().map(|arg| (*arg).to_owned()).collect());
+            std::future::ready(Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(if self.success { 0 } else { 256 }),
+                stdout: self.main_pid.to_string().into_bytes(),
+                stderr: b"service start refused".to_vec(),
+            }))
+        }
+    }
+
+    struct Probe {
+        healthy: bool,
+        delay: Duration,
+    }
+    impl HealthProbe for Probe {
+        async fn healthy(&self, _address: &str) -> bool {
+            tokio::time::sleep(self.delay).await;
+            self.healthy
+        }
+    }
+
+    fn manager(success: bool, main_pid: u32) -> FakeManager {
+        FakeManager {
+            success,
+            main_pid,
+            calls: Default::default(),
+        }
+    }
+
+    fn restart_args() -> RestartArgs {
+        RestartArgs {
+            force: false,
+            port: None,
+            host: None,
+            foreground: false,
+            log_file: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn main_pid_alone_establishes_service_ownership() {
+        let cgroup = "0::/system.slice/swage.service\n";
+        let manager = manager(true, 42);
+        assert!(
+            service_for_cgroup(42, cgroup, &manager)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            service_for_cgroup(43, cgroup, &manager)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            manager.calls.borrow()[0],
+            [
+                "show",
+                "--property=MainPID",
+                "--value",
+                "--",
+                "swage.service"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_restart_reports_the_service_managers_error() {
+        let service = GatewayService {
+            unit: "swage.service".into(),
+            user: false,
+        };
+        let manager = manager(false, 42);
+        let error = service
+            .restart_with(
+                &restart_args(),
+                &RuntimeMetadata::new(42, "http://unused".into()),
+                Path::new("/nonexistent/metadata.json"),
+                &manager,
+                &Probe {
+                    healthy: true,
+                    delay: Duration::ZERO,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, ClientError::GatewayRestartFailed { reason } if reason.contains("service start refused")),
+            "{error}"
+        );
+        assert_eq!(
+            manager.calls.borrow()[0],
+            ["restart", "--", "swage.service"]
+        );
+    }
+
+    #[tokio::test]
+    async fn all_overrides_are_refused_before_any_service_command() {
+        let service = GatewayService {
+            unit: "swage.service".into(),
+            user: false,
+        };
+        for index in 0..5 {
+            let mut args = restart_args();
+            match index {
+                0 => args.port = Some(4321),
+                1 => args.host = Some("127.0.0.1".into()),
+                2 => args.foreground = true,
+                3 => args.log_file = Some("other.log".into()),
+                _ => args.force = true,
+            }
+            let manager = manager(false, 42);
+            let error = service
+                .restart_with(
+                    &args,
+                    &RuntimeMetadata::new(42, "http://unused".into()),
+                    Path::new("/nonexistent/metadata.json"),
+                    &manager,
+                    &Probe {
+                        healthy: false,
+                        delay: Duration::ZERO,
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, ClientError::GatewayRestartRefused { .. }),
+                "override {index}: {error}"
+            );
+            assert!(
+                manager.calls.borrow().is_empty(),
+                "override {index} contacted systemd"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn slow_probe_cannot_outlive_the_remaining_readiness_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("metadata.json");
+        RuntimeMetadata::new(43, "http://unused".into())
+            .save_to(&path)
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_millis(250),
+            wait_for_restarted_gateway_with(
+                &path,
+                42,
+                Duration::from_millis(30),
+                &Probe {
+                    healthy: true,
+                    delay: Duration::from_secs(2),
+                },
+            ),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "health probe exceeded the readiness deadline"
+        );
+        assert!(
+            result.unwrap().is_err(),
+            "a late healthy response must not admit the gateway"
+        );
+    }
+
+    #[tokio::test]
+    async fn unhealthy_replacement_is_not_admitted_by_its_new_pid() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("metadata.json");
+        RuntimeMetadata::new(43, "http://unused".into())
+            .save_to(&path)
+            .unwrap();
+        let result = wait_for_restarted_gateway_with(
+            &path,
+            42,
+            Duration::from_millis(30),
+            &Probe {
+                healthy: false,
+                delay: Duration::ZERO,
+            },
+        )
+        .await;
+        assert!(result.is_err(), "an unhealthy replacement was admitted");
     }
 
     async fn serve_health() -> String {
