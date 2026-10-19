@@ -165,12 +165,13 @@ impl ReleaseOptions {
     }
 }
 
+#[derive(Clone)]
 struct InstallOptions {
     prefix: PathBuf,
     skip_frontend: bool,
     lan_mode: bool,
-    host: String,
-    port: u16,
+    host: Option<String>,
+    port: Option<u16>,
 }
 
 impl InstallOptions {
@@ -179,11 +180,10 @@ impl InstallOptions {
             prefix: home_dir()?.join(".local/bin"),
             skip_frontend: false,
             lan_mode: false,
-            host: "0.0.0.0".into(),
-            port: 3000,
+            host: None,
+            port: None,
         };
 
-        let mut explicit_binding = false;
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--prefix" => {
@@ -193,12 +193,10 @@ impl InstallOptions {
                 "--skip-frontend" => options.skip_frontend = true,
                 "--lan" => options.lan_mode = true,
                 "--host" => {
-                    explicit_binding = true;
-                    options.host = args.next().ok_or("missing value after --host")?;
+                    options.host = Some(args.next().ok_or("missing value after --host")?);
                 }
                 "--port" => {
-                    explicit_binding = true;
-                    options.port = args.next().ok_or("missing value after --port")?.parse()?
+                    options.port = Some(args.next().ok_or("missing value after --port")?.parse()?);
                 }
                 "-h" | "--help" => {
                     println!(
@@ -213,11 +211,29 @@ impl InstallOptions {
             }
         }
 
-        if explicit_binding && !options.lan_mode {
+        if (options.host.is_some() || options.port.is_some()) && !options.lan_mode {
             return Err(
                 "--host and --port require --lan; the default installation stays loopback-only"
                     .into(),
             );
+        }
+        Ok(options)
+    }
+
+    fn with_missing_lan_defaults(&self, path: &Path) -> Result<Self> {
+        let saved: Value = match fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Value::Null,
+            Err(error) => return Err(error.into()),
+        };
+        let mut options = self.clone();
+        // Initialise an unset LAN binding without forwarding an override for
+        // a saved field. The CLI merges omitted fields with its persisted state.
+        if options.host.is_none() && saved.get("host").is_none_or(Value::is_null) {
+            options.host = Some("0.0.0.0".into());
+        }
+        if options.port.is_none() && saved.get("port").is_none_or(Value::is_null) {
+            options.port = Some(3000);
         }
         Ok(options)
     }
@@ -842,18 +858,23 @@ fn install(options: &InstallOptions) -> Result<()> {
     )?;
     println!("==> Installed swage to {}", installed_binary.display());
 
-    if options.lan_mode {
+    let options = if options.lan_mode {
+        let path = swage_config::discovery::effective_root_path().join("service.json");
+        let options = options.with_missing_lan_defaults(&path)?;
         run_command(
             "Saving gateway binding defaults",
-            lan_configuration_command(&installed_binary, options),
+            lan_configuration_command(&installed_binary, &options),
         )?;
-    }
+        options
+    } else {
+        options.clone()
+    };
 
     hot_swap_gateway_if_running(&installed_binary)?;
     print_install_next_steps(
         &options.prefix,
         options.lan_mode,
-        &options.host,
+        options.host.as_deref(),
         options.port,
     )?;
     Ok(())
@@ -893,14 +914,13 @@ fn release_binary_path(target_directory: &Path) -> PathBuf {
 
 fn lan_configuration_command(binary: &Path, options: &InstallOptions) -> Command {
     let mut command = Command::new(binary);
-    command.args([
-        "gateway",
-        "set-defaults",
-        "--host",
-        &options.host,
-        "--port",
-        &options.port.to_string(),
-    ]);
+    command.args(["gateway", "set-defaults"]);
+    if let Some(host) = &options.host {
+        command.args(["--host", host]);
+    }
+    if let Some(port) = options.port {
+        command.args(["--port", &port.to_string()]);
+    }
     command
 }
 
@@ -1369,8 +1389,8 @@ fn print_dev_urls(options: &DevOptions) {
 fn print_install_next_steps(
     prefix: &Path,
     lan_mode: bool,
-    host: &str,
-    port: u16,
+    host: Option<&str>,
+    port: Option<u16>,
 ) -> io::Result<()> {
     write_install_next_steps(&mut std::io::stdout(), prefix, lan_mode, host, port)
 }
@@ -1379,8 +1399,8 @@ fn write_install_next_steps(
     output: &mut impl std::io::Write,
     prefix: &Path,
     lan_mode: bool,
-    host: &str,
-    port: u16,
+    host: Option<&str>,
+    port: Option<u16>,
 ) -> std::io::Result<()> {
     writeln!(output)?;
     writeln!(output, "Next steps:")?;
@@ -1402,12 +1422,9 @@ fn write_install_next_steps(
     }
 
     if lan_mode {
-        if port == 0 {
-            writeln!(
-                output,
-                "  2. Find the bound address after startup: swage gateway status"
-            )?;
-        } else {
+        if let (Some(host), Some(port)) = (host, port)
+            && port != 0
+        {
             let host = if host == "0.0.0.0" {
                 lan_ip().unwrap_or_else(|| "<this-machine-ip>".to_string())
             } else {
@@ -1424,6 +1441,11 @@ fn write_install_next_steps(
                 }
             )?;
             writeln!(output)?;
+        } else {
+            writeln!(
+                output,
+                "  2. Find the bound address after startup: swage gateway status"
+            )?;
         }
         writeln!(output, "LAN exposure warning:")?;
         writeln!(
@@ -1575,8 +1597,14 @@ mod tests {
 
     fn next_steps(host: &str, port: u16) -> String {
         let mut output = Vec::new();
-        super::write_install_next_steps(&mut output, Path::new("/isolated/bin"), true, host, port)
-            .unwrap();
+        super::write_install_next_steps(
+            &mut output,
+            Path::new("/isolated/bin"),
+            true,
+            Some(host),
+            Some(port),
+        )
+        .unwrap();
         String::from_utf8(output).unwrap()
     }
 
@@ -1682,6 +1710,107 @@ mod tests {
                 "4321"
             ]
         );
+    }
+
+    fn lan_args_with_saved_defaults(flags: &[&str], saved: Option<&str>) -> Vec<String> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT_ROOT: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::var_os("SWAGE_TEST_SCRATCH_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!(
+                "install-binding-{}-{}",
+                std::process::id(),
+                NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+            ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("service.json");
+        if let Some(saved) = saved {
+            std::fs::write(&path, saved).unwrap();
+        }
+        let parsed = InstallOptions::parse(flags.iter().map(|flag| (*flag).to_owned())).unwrap();
+        let options = parsed.with_missing_lan_defaults(&path).unwrap();
+        let command = lan_configuration_command(Path::new("/isolated/swage"), &options);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap().to_owned())
+            .collect();
+        std::fs::remove_dir_all(&root).unwrap();
+        args
+    }
+
+    #[test]
+    fn lan_defaults_preserve_unspecified_saved_bindings() {
+        let saved = r#"{"host":"[::1]","port":6789,"config":"chosen-topic"}"#;
+        for (flags, expected) in [
+            (
+                vec!["--lan", "--port", "4321"],
+                vec!["gateway", "set-defaults", "--port", "4321"],
+            ),
+            (
+                vec!["--lan", "--host", "192.0.2.10"],
+                vec!["gateway", "set-defaults", "--host", "192.0.2.10"],
+            ),
+            (vec!["--lan"], vec!["gateway", "set-defaults"]),
+            (
+                vec!["--lan", "--host", "0.0.0.0", "--port", "3000"],
+                vec![
+                    "gateway",
+                    "set-defaults",
+                    "--host",
+                    "0.0.0.0",
+                    "--port",
+                    "3000",
+                ],
+            ),
+        ] {
+            assert_eq!(
+                lan_args_with_saved_defaults(&flags, Some(saved)),
+                expected,
+                "{flags:?}"
+            );
+        }
+        assert_eq!(
+            lan_args_with_saved_defaults(&["--lan"], Some(r#"{"host":"[::1]","port":0}"#)),
+            ["gateway", "set-defaults"]
+        );
+        for saved in [
+            None,
+            Some(r#"{"host":null,"port":null,"config":"chosen-topic"}"#),
+        ] {
+            assert_eq!(
+                lan_args_with_saved_defaults(&["--lan"], saved),
+                [
+                    "gateway",
+                    "set-defaults",
+                    "--host",
+                    "0.0.0.0",
+                    "--port",
+                    "3000"
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn next_steps_for_unspecified_bindings_use_status() {
+        for (host, port) in [(None, Some(4321)), (Some("127.0.0.1"), None), (None, None)] {
+            let mut output = Vec::new();
+            super::write_install_next_steps(
+                &mut output,
+                Path::new("/isolated/bin"),
+                true,
+                host,
+                port,
+            )
+            .unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert!(
+                !output.contains("://"),
+                "unspecified saved binding was guessed: {output}"
+            );
+            assert!(output.contains("swage gateway status"), "{output}");
+        }
     }
 
     #[test]

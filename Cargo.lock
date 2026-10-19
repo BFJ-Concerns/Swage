@@ -4138,6 +4138,7 @@ version = "0.2.0"
 dependencies = [
  "serde_json",
  "sha2",
+ "swage-config",
  "swage-workflow",
 ]
 
