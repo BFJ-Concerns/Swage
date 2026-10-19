@@ -130,7 +130,7 @@ describe("OperatorHistoryPane", () => {
       Array.from(row.querySelectorAll("th, td")).map((cell) => cell.textContent?.trim()),
     );
     expect(rows).toEqual([
-      ["Context › Assembly", "default", "compact"],
+      ["Context assembly", "default", "compact"],
       ["Default model", "sonnet", "sol"],
     ]);
     const whole = document.querySelector(".configuration-entry details") as HTMLDetailsElement;
@@ -139,6 +139,126 @@ describe("OperatorHistoryPane", () => {
     expect(whole.querySelector("pre")?.textContent).toContain('"default_model": "sonnet"');
     expect(document.querySelector(".configuration-entry > .state-grid")).toBeNull();
     expect(document.body.textContent).toContain("[REDACTED]");
+  });
+
+  it.each([
+    {
+      name: "creation",
+      prior: null,
+      next: { memory: { curator_idle_minutes: 10 }, sessions: { archive_after_days: 7 } },
+      rows: [["Memory curation", "unset", "10"], ["Session archiving", "unset", "7"]],
+    },
+    {
+      name: "deletion",
+      prior: { memory: { curator_idle_minutes: 10 }, sessions: { archive_after_days: 7 } },
+      next: null,
+      rows: [["Memory curation", "10", "unset"], ["Session archiving", "7", "unset"]],
+    },
+    {
+      name: "image reference schemes",
+      prior: { attachments: { accepted_schemes: ["https", "data"] } },
+      next: { attachments: { accepted_schemes: ["https"] } },
+      rows: [["Image reference schemes", '["https","data"]', '["https"]']],
+    },
+    {
+      name: "array change",
+      prior: { tool_permissions: { allow: ["file_read"], deny: ["shell"] } },
+      next: { tool_permissions: { allow: ["file_read", "file_write"], deny: ["shell"] } },
+      rows: [["Tool allow rules", '["file_read"]', '["file_read","file_write"]']],
+    },
+    {
+      name: "single-field change",
+      prior: { voice: { transcription_model: "whisper-1", speech_model: "tts-1" } },
+      next: { voice: { transcription_model: "whisper-2", speech_model: "tts-1" } },
+      rows: [["Transcription model", "whisper-1", "whisper-2"]],
+    },
+    {
+      name: "named provider change",
+      prior: { providers: { "my.proxy": { base_url: "http://a", has_credential: true } } },
+      next: { providers: { "my.proxy": { base_url: "http://b", has_credential: true } } },
+      rows: [["Providers › my.proxy › Base URL", "http://a", "http://b"]],
+    },
+    {
+      name: "explicit null value",
+      prior: { voice: { speech_model: null } },
+      next: { voice: { speech_model: "tts-1" } },
+      rows: [["Speech model", "unset", "tts-1"]],
+    },
+    {
+      name: "new null value",
+      prior: { voice: { speech_model: "tts-1" } },
+      next: { voice: { speech_model: null } },
+      rows: [["Speech model", "tts-1", "unset"]],
+    },
+    {
+      name: "provider credential labels",
+      prior: { providers: { google: { api_key: "[REDACTED]", api_key_env: "OLD_KEY", api_key_secret_ref: "secret-old", has_credential: false, base_url: "http://a" } } },
+      next: { providers: { google: { api_key: "", api_key_env: "NEW_KEY", api_key_secret_ref: "secret-new", has_credential: true, base_url: "http://b" } } },
+      rows: [
+        ["Providers › google › API key", "[REDACTED]", ""],
+        ["Providers › google › API key environment variable", "OLD_KEY", "NEW_KEY"],
+        ["Providers › google › Stored credential", "secret-old", "secret-new"],
+        ["Providers › google › Base URL", "http://a", "http://b"],
+        ["Providers › google › Credential", "false", "true"],
+      ],
+    },
+    ...(["set", "clear"] as const).map((action) => ({
+      name: `literal unset environment variable ${action}`,
+      prior: { providers: { google: { api_key_env: action === "set" ? null : "unset" } } },
+      next: { providers: { google: { api_key_env: action === "set" ? "unset" : null } } },
+      rows: [["Providers › google › API key environment variable", "unset", "unset"]],
+    })),
+    ...(["creation", "deletion"] as const).map((action) => {
+      const snapshot = { providers: { google: {
+        api_key: null, api_key_env: null, api_key_secret_ref: null, base_url: null,
+        command: null, has_credential: false, protocol: "google",
+        state_dir: null, worker_staleness_threshold_ms: null,
+      } } };
+      return {
+        name: `null-valued provider ${action}`,
+        prior: action === "creation" ? null : snapshot,
+        next: action === "creation" ? snapshot : null,
+        rows: [
+          ["Credential", "false"], ["Protocol", "google"],
+        ].map(([label, value]) => [
+          `Providers › google › ${label}`,
+          action === "creation" ? "unset" : value,
+          action === "creation" ? value : "unset",
+        ]),
+      };
+    }),
+  ])("renders $name as Settings-labelled field rows", async ({ prior, next, rows }) => {
+    vi.mocked(fetchOperatorHistory).mockResolvedValue({
+      configuration_changes: [{
+        id: "field-change", resource_kind: "settings", resource_id: "global",
+        action: "save_settings", source: "operator_http", session_id: null,
+        prior_state: prior, new_state: next, recorded_at: "2026-10-04T10:00:00Z",
+      }],
+      variant_selections: [], assembly_reports: [],
+    });
+    component = mount(OperatorHistoryPane, { target: document.body });
+    await vi.waitFor(() => expect(document.querySelector(".configuration-entry")).not.toBeNull());
+    expect(Array.from(document.querySelectorAll(".changed-fields tbody tr"), (row) =>
+      Array.from(row.querySelectorAll("th, td"), (cell) => cell.textContent?.trim()),
+    )).toEqual(rows);
+  });
+
+  it("shows unchanged saves without field rows even with reordered object keys", async () => {
+    vi.mocked(fetchOperatorHistory).mockResolvedValue({
+      configuration_changes: [{
+        id: "unchanged", resource_kind: "settings", resource_id: "global",
+        action: "save_settings", source: "operator_http", session_id: null,
+        prior_state: { voice: { speech_model: null, transcription_model: "whisper-1" }, tool_permissions: { allow: ["file_read"] } },
+        new_state: { tool_permissions: { allow: ["file_read"] }, voice: { transcription_model: "whisper-1", speech_model: null } },
+        recorded_at: "2026-10-04T10:00:00Z",
+      }],
+      variant_selections: [], assembly_reports: [],
+    });
+    component = mount(OperatorHistoryPane, { target: document.body });
+    await vi.waitFor(() => expect(document.querySelector(".configuration-entry")).not.toBeNull());
+    expect(document.querySelectorAll(".changed-fields tbody tr")).toHaveLength(0);
+    expect(document.querySelector(".configuration-entry .empty-copy")?.textContent)
+      .toBe("No field differs between the recorded states.");
   });
 
   it("shows a loading state while the history request is pending", () => {
