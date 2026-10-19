@@ -84,6 +84,7 @@ function makeConversationStore(
   const detail: ConversationDetail = {
     id: "conv-1",
     agent_id: "gateway",
+    agent_display_name: "Swage default",
     topic_id: "proj-1",
     created_at: "2026-03-20T10:00:00Z",
     last_activity: "2026-03-20T10:00:00Z",
@@ -214,6 +215,7 @@ describe("provider failure notice", () => {
 
   it("shows the submitted model when a queued turn fails", () => {
     const store = makeConversationStore([{ role: "user", content: "Queued", timestamp: "2026-10-15T12:00:00Z" }]);
+    Object.defineProperty(store.activeConversation!, "root_thread_id", { value: "main-thread" });
     const sendMessage = vi.fn();
     const streaming = createStreamingStore({ conversationStore: store, connectionStore: { sendMessage, cancelTurn: vi.fn() } });
     streaming.startTurn("First", "first-model");
@@ -223,7 +225,7 @@ describe("provider failure notice", () => {
       client_id: clientId, id: "q-1", origin: "user", content: "Queued", queued_at: "2026-10-15T12:00:00Z",
     } });
     streaming.handleServerEvent({ type: "turn_complete", turn_id: "first-turn" });
-    streaming.handleServerEvent({ type: "queue_drained", session_id: "conv-1", turn_id: "queued-turn", queued_ids: ["q-1"] });
+    streaming.handleServerEvent({ type: "queue_drained", thread_id: "main-thread", session_id: "conv-1", turn_id: "queued-turn", queued_ids: ["q-1"] });
     streaming.handleServerEvent({ type: "error", code: "provider_error", message: "Request rejected" });
     component = mount(MessageDisplay, { target: document.body, props: { store, streamingStore: streaming } });
     flushSync();
@@ -643,6 +645,7 @@ describe("turns that ended without a reply, as loaded", () => {
     vi.spyOn(api, "createConversation").mockResolvedValue({
       id: "conv-live",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: "proj-1",
       created_at: "2026-03-20T10:00:00Z",
       last_activity: "2026-03-20T10:00:00Z",

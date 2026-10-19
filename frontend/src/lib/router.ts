@@ -232,6 +232,21 @@ export function createRouter(options?: RouterOptions): Router {
     }
   }
 
+  // A navigation that loads a conversation can fail after the URL changes.
+  // Restore the active conversation on a transient failure; applyLocation
+  // handles a missing conversation with its own not-found route.
+  function followLocation(generation: number): void {
+    void applyLocation(generation).catch(() => {
+      if (generation !== navigationGeneration) return;
+      const activeConversationId = options?.conversationStore?.activeConversationId;
+      const fallbackPath = activeConversationId
+        ? conversationPath(activeConversationId)
+        : "/";
+      window.history.replaceState(null, "", fallbackPath);
+      updateRoute(parseRoute(fallbackPath));
+    });
+  }
+
   return {
     get currentRoute() {
       return currentRoute;
@@ -242,10 +257,18 @@ export function createRouter(options?: RouterOptions): Router {
       if (currentLocation() !== path) {
         window.history.pushState(null, "", path);
       }
-      // navigate() is always intentional — no async store call needed here.
-      // The calling code (e.g. selectConversation in conversation list) has
-      // already updated the store; we just sync the URL.
-      updateRoute(parseRoute(path));
+      const route = parseRoute(path);
+      if (
+        options?.conversationStore &&
+        route.conversationId &&
+        route.conversationId !== options.conversationStore.activeConversationId
+      ) {
+        followLocation(navigationGeneration);
+      } else {
+        // Session selectors install their conversation before navigating;
+        // links to other sessions use the same loading path as a deep link.
+        updateRoute(route);
+      }
     },
 
     async init(): Promise<void> {
@@ -254,17 +277,7 @@ export function createRouter(options?: RouterOptions): Router {
         // popstate is synchronous in terms of the URL update; async selection
         // runs in the background and updates currentRoute when it settles.
         const generation = ++navigationGeneration;
-        void applyLocation(generation).catch(() => {
-          if (generation !== navigationGeneration) {
-            return;
-          }
-          const activeConversationId = options?.conversationStore?.activeConversationId;
-          const fallbackPath = activeConversationId
-            ? `/conversations/${activeConversationId}`
-            : "/";
-          window.history.replaceState(null, "", fallbackPath);
-          updateRoute(parseRoute(fallbackPath));
-        });
+        followLocation(generation);
       });
 
       // Apply the initial URL — this kicks off conversation selection if

@@ -14,6 +14,7 @@ use std::borrow::Cow;
 use schemars::JsonSchema;
 
 use super::{
+    channel::{ChannelLinkCodeListResponse, ChannelLinkListResponse},
     context::TurnContextResponse,
     conversation::{
         ConversationBranchListResponse, ConversationBranchResponse, ConversationDetail,
@@ -35,8 +36,8 @@ use super::{
     surface::{
         CreateSurfaceAnnotationRequest, CreateSurfaceRequest, DeleteSurfaceAnnotationResponse,
         DeleteSurfaceModuleResponse, LibraryEntryResponse, LibraryListResponse,
-        MoveSurfaceModuleRequest, SaveSurfaceToLibraryRequest, SurfaceAnnotationView,
-        SurfaceListResponse, SurfaceResponse, TopicDefaultSurfaceRequest,
+        MoveSurfaceModuleRequest, RenameSurfaceRequest, SaveSurfaceToLibraryRequest,
+        SurfaceAnnotationView, SurfaceListResponse, SurfaceResponse, TopicDefaultSurfaceRequest,
         UpdateSurfaceAnnotationRequest, WriteSurfaceModuleRequest, WriteSurfaceModuleResponse,
     },
     topic::{
@@ -168,6 +169,48 @@ fn schema<T: JsonSchema>() -> Option<Cow<'static, str>> {
 /// this table.
 pub fn routes() -> Vec<Route> {
     vec![
+        Route {
+            operation_id: "list_channel_statuses",
+            method: Method::Get,
+            path: "/api/channels",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "List channel statuses.",
+            request_optional: false,
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<crate::channel::ChannelStatusListResponse>(),
+            },
+        },
+        Route {
+            operation_id: "list_channel_links",
+            method: Method::Get,
+            path: "/api/onboarding/channels",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "List linked channel conversations.",
+            request_optional: false,
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<ChannelLinkListResponse>(),
+            },
+        },
+        Route {
+            operation_id: "list_channel_link_codes",
+            method: Method::Get,
+            path: "/api/onboarding/channels/link-codes",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "Read unredeemed channel link codes.",
+            request_optional: false,
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<ChannelLinkCodeListResponse>(),
+            },
+        },
         Route {
             operation_id: "list_topics",
             method: Method::Get,
@@ -738,6 +781,46 @@ pub fn routes() -> Vec<Route> {
             response: Response {
                 status: 200,
                 body: schema::<SurfaceResponse>(),
+            },
+        },
+        Route {
+            operation_id: "rename_surface",
+            method: Method::Post,
+            path: "/api/surfaces/{surface_id}",
+            path_parameters: vec![Parameter {
+                name: "surface_id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Rename this session's surface.",
+            request_optional: false,
+            request: schema::<RenameSurfaceRequest>(),
+            response: Response {
+                status: 200,
+                body: schema::<SurfaceResponse>(),
+            },
+        },
+        Route {
+            operation_id: "resolve_surface_annotation",
+            method: Method::Post,
+            path: "/api/surfaces/{surface_id}/annotations/{annotation_id}/resolve",
+            path_parameters: vec![
+                Parameter {
+                    name: "surface_id",
+                    kind: ParameterType::Uuid,
+                },
+                Parameter {
+                    name: "annotation_id",
+                    kind: ParameterType::Uuid,
+                },
+            ],
+            query_parameters: vec![],
+            summary: "Resolve a note while keeping it in the record.",
+            request_optional: false,
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<SurfaceAnnotationView>(),
             },
         },
         Route {

@@ -27,7 +27,7 @@ use swage_storage::{
     store::{Storage, TopicStore},
 };
 
-use crate::channel_gateway::{ChannelOrigin, DeliveryTarget, ExternalChannelIntegration};
+use crate::channel_gateway::ChannelOrigin;
 use crate::{
     capabilities::WorkflowCapabilities, device::DeviceRuntime, lifecycle::ActivityTracker,
     onboarding::RecoveryExportSnapshot, presence::PresenceRuntime, secret::SecretManager,
@@ -159,8 +159,6 @@ pub struct AppState {
     pub devices: Arc<AsyncMutex<DeviceRuntime>>,
     /// One-time device pairing codes awaiting redemption by a remote device.
     pub pairing_codes: Arc<AsyncMutex<HashMap<String, PairingCodeRecord>>>,
-    /// One-time external-channel link codes awaiting redemption by a chat sender.
-    pub channel_link_codes: Arc<AsyncMutex<HashMap<String, ChannelLinkCodeRecord>>>,
     /// Canonical secret-management and resolution surface.
     pub secret_manager: Arc<SecretManager>,
     /// Configured Telegram bot client, if the channel is enabled.
@@ -210,15 +208,6 @@ struct AgentMessageExpiryRuntime {
 
 #[derive(Debug, Clone)]
 pub struct PairingCodeRecord {
-    pub expires_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ChannelLinkCodeRecord {
-    pub integration: ExternalChannelIntegration,
-    pub topic_id: Option<Uuid>,
-    pub agent_id: Option<String>,
-    pub home_target: Option<DeliveryTarget>,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -393,7 +382,6 @@ impl AppState {
             presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
             devices: Arc::new(AsyncMutex::new(DeviceRuntime::default())),
             pairing_codes: Arc::new(AsyncMutex::new(HashMap::new())),
-            channel_link_codes: Arc::new(AsyncMutex::new(HashMap::new())),
             secret_manager: Arc::new(SecretManager::new(storage.clone())),
             telegram: None,
             recovery_exports: Arc::new(AsyncMutex::new(Vec::new())),

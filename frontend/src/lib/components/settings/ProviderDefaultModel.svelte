@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { SETTINGS_LABELS } from "../../settings-labels";
   interface Props {
     models: Record<string, import("../../types").ModelSettings>;
     providerName: (id: string) => string;
@@ -12,7 +13,7 @@
 
 <div class="field">
   <div class="key">
-    Default model
+    {SETTINGS_LABELS["default_model"]}
     <small>The model selects the provider. There is no separate provider default.</small>
   </div>
   <div class="val">

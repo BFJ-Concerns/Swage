@@ -150,7 +150,7 @@
   $effect(() => {
     // These accesses establish reactive tracking once the stores use $state.
     void (store?.activeConversation?.messages?.length ?? 0);
-    void (streamingStore?.streamFor?.(store?.activeConversation?.id ?? null).streamedContent.length ?? 0);
+    void streamedContent.length;
 
     if (!userScrolledUp && scrollEl) {
       requestAnimationFrame(() => {
@@ -168,9 +168,14 @@
   const stream = $derived(
     streamingStore?.streamFor?.(store?.activeConversation?.id ?? null),
   );
-  const isStreaming = $derived(stream?.isStreaming ?? streamingStore?.isStreaming ?? false);
-  const streamedContent = $derived(stream?.streamedContent ?? streamingStore?.streamedContent ?? "");
-  const turnError = $derived(stream?.turnError ?? streamingStore?.turnError ?? null);
+  const streamInView = $derived(
+    (stream?.threadId ?? store?.activeConversation?.root_thread_id ?? null) ===
+      (store?.activeThreadId ?? store?.activeConversation?.root_thread_id ?? null),
+  );
+  const isStreaming = $derived(streamInView && (stream?.isStreaming ?? streamingStore?.isStreaming ?? false));
+  const streamedContent = $derived(streamInView ? (stream?.streamedContent ?? streamingStore?.streamedContent ?? "") : "");
+  const turnError = $derived(streamInView ? (stream?.turnError ?? streamingStore?.turnError ?? null) : null);
+  const providerRetry = $derived(streamInView ? (stream?.providerRetry ?? streamingStore?.providerRetry ?? null) : null);
   const recordedFailure = $derived(messages.at(-1)?.failure_message === turnError?.message);
   function errorSummary(detail: string, model?: string | null, catalogueSelection = false): string {
     // The diagnostic belongs to this failure; a conversation selection can
@@ -189,7 +194,6 @@
     const selection = namedModel ? ` using model ${namedModel}` : "";
     return `The request${route}${selection} failed. ${reportedCause ? `Reported cause: ${reportedCause}` : "See the details for the reported cause."}`;
   }
-  const providerRetry = $derived(stream?.providerRetry ?? streamingStore?.providerRetry ?? null);
   const retryWaitSeconds = $derived(
     providerRetry ? Math.max(1, Math.ceil(providerRetry.wait_ms / 1000)) : 0,
   );
@@ -197,11 +201,11 @@
   // A turn blocked on the user's decision is not generating: its approval
   // card speaks for it, so no empty generating bubble stands in.
   const awaitingApproval = $derived(
-    (stream?.pendingApproval ?? streamingStore?.pendingApproval ?? null) !== null,
+    streamInView && (stream?.pendingApproval ?? streamingStore?.pendingApproval ?? null) !== null,
   );
   const isGenerating = $derived(isStreaming && !awaitingApproval);
   // Live tool calls for the current in-progress turn.
-  const activeToolCalls = $derived(stream?.activeToolCalls ?? streamingStore?.activeToolCalls ?? []);
+  const activeToolCalls = $derived(streamInView ? (stream?.activeToolCalls ?? streamingStore?.activeToolCalls ?? []) : []);
 
   // A turn that ended without a reply carries its account — state, tool
   // calls, failure explanation — on its request, since no assistant message

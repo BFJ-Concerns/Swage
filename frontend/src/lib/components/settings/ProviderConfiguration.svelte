@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { SETTINGS_LABELS } from "../../settings-labels";
   import { untrack } from "svelte";
   import { providerBaseUrlError } from "./provider-endpoint";
   import type { DiscoveredModel, ModelSettings, ProviderSettings } from "../../types";
@@ -44,7 +45,7 @@
   }
   const selectedSecret = $derived(secrets.find((secret) => secret.reference === provider.api_key_secret_ref));
   const credentialSource = $derived(provider.api_key_secret_ref
-    ? selectedSecret?.backend_kind === "managed" ? "Stored credential"
+    ? selectedSecret?.backend_kind === "managed" ? SETTINGS_LABELS["providers.*.api_key_secret_ref"]
       : selectedSecret?.backend_kind === "env" ? "Environment credential"
       : selectedSecret?.backend_kind === "file" ? "File credential" : "Governed credential"
     : provider.api_key_env ? "Environment credential" : "No credential");
@@ -74,7 +75,7 @@
   {#if !collapsed}
     <div class="provider-body">
       {#if provider.protocol !== "codex"}
-        <div class="field"><div class="key">Base URL<small>Override the provider's canonical endpoint when needed.</small></div><div class="val"><input type="text" class="text" aria-label={`Base URL for ${displayName}`} aria-invalid={!!baseUrlError} aria-describedby={baseUrlError ? `provider-${id}-base-url-error` : undefined} value={baseUrlDraft} oninput={editBaseUrl} placeholder="Provider default" autocomplete="off" />{#if baseUrlError}<p id={`provider-${id}-base-url-error`} class="field-error" role="alert">{baseUrlError}</p>{/if}</div></div>
+        <div class="field"><div class="key">{SETTINGS_LABELS["providers.*.base_url"]}<small>Override the provider's canonical endpoint when needed.</small></div><div class="val"><input type="text" class="text" aria-label={`${SETTINGS_LABELS["providers.*.base_url"]} for ${displayName}`} aria-invalid={!!baseUrlError} aria-describedby={baseUrlError ? `provider-${id}-base-url-error` : undefined} value={baseUrlDraft} oninput={editBaseUrl} placeholder="Provider default" autocomplete="off" />{#if baseUrlError}<p id={`provider-${id}-base-url-error`} class="field-error" role="alert">{baseUrlError}</p>{/if}</div></div>
         <div class="field"><div class="key">Governed credential<small>Choose an existing governed provider credential.</small></div><div class="val">
           <select class="text" aria-label={`Governed credential for ${displayName}`} value={provider.api_key_secret_ref ?? ""} onchange={selectSecret}>
             <option value="">No governed credential selected</option>
@@ -83,7 +84,7 @@
           </select>
           {#if secretsError}<p role="status">{secretsError}</p>{/if}
         </div></div>
-        <div class="field"><div class="key">API key<small>{credentialGuidance}</small></div><div class="val key-val"><input aria-label={`API key for ${displayName}`} type="password" class="text" disabled={!canPasteCredential} bind:value={provider.api_key} placeholder={provider.api_key_secret_ref ? credentialSource : provider.api_key_env ? "Resolved from environment" : "Paste to store"} autocomplete="off" /><span class="credential-status" class:set={!!provider.api_key_secret_ref || !!provider.api_key_env}>{provider.api_key ? isPersisting ? "Saving credential" : "Credential not saved" : credentialSource}</span></div></div>
+        <div class="field"><div class="key">{SETTINGS_LABELS["providers.*.api_key"]}<small>{credentialGuidance}</small></div><div class="val key-val"><input aria-label={`${SETTINGS_LABELS["providers.*.api_key"]} for ${displayName}`} type="password" class="text" disabled={!canPasteCredential} bind:value={provider.api_key} placeholder={provider.api_key_secret_ref ? credentialSource : provider.api_key_env ? "Resolved from environment" : "Paste to store"} autocomplete="off" /><span class="credential-status" class:set={!!provider.api_key_secret_ref || !!provider.api_key_env}>{provider.api_key ? isPersisting ? "Saving credential" : "Credential not saved" : credentialSource}</span></div></div>
         {#if models.some(([key]) => key === defaultModel) && !provider.api_key_secret_ref && !provider.api_key_env}<p class="readiness-note" role="status">Authenticated turns cannot run with this default model until a credential is set.</p>{/if}
       {:else}
         <CodexProviderAuthentication providerId={id} {saved} state={signInState} {deviceCode} {onbegin} {oncheck} {oncopy} {onend} />
