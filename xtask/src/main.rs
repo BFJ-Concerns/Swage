@@ -1408,13 +1408,16 @@ fn write_install_next_steps(
                 "  2. Find the bound address after startup: swage gateway status"
             )?;
         } else {
+            let host = if host == "0.0.0.0" {
+                lan_ip().unwrap_or_else(|| "<this-machine-ip>".to_string())
+            } else {
+                host.to_owned()
+            };
             writeln!(output, "  2. Open the UI:")?;
             writeln!(
                 output,
                 "     LAN:   http://{}:{port}",
-                if host == "0.0.0.0" {
-                    lan_ip().unwrap_or_else(|| "<this-machine-ip>".to_string())
-                } else if host.contains(':') {
+                if host.contains(':') {
                     format!("[{}]", host.trim_start_matches('[').trim_end_matches(']'))
                 } else {
                     host.to_owned()
