@@ -6,7 +6,8 @@ use super::{
 use swage_context::briefing::BriefingElement;
 use swage_context::named_element::discover_named_elements;
 use swage_context::orientation::{
-    AvailableSkill, ChannelOrientation, OrientationElement, SessionEnvironment, ToolRoot,
+    AvailableSkill, ChannelOrientation, OrientationElement, ReadableWorkspace, SessionEnvironment,
+    ToolRoot,
 };
 use swage_context::working_norms::{WorkingNormsElement, WorkingNormsScaffold};
 use swage_core::ScopeLocation;
@@ -56,6 +57,9 @@ pub(crate) fn build_assembly_elements(
             environment,
             available_skills,
             offered_tools,
+        )),
+        Box::new(swage_context::current_time::CurrentTimeElement::new(
+            chrono::Utc::now(),
         )),
         // Models arrive over the proxy bare: the norms their own harness
         // would have supplied come from the assembly, keyed by the coming
@@ -137,6 +141,7 @@ pub(crate) fn build_session_environment(
     topic: &swage_storage::Topic,
     tool_root: &ResolvedToolRoot,
     session: &swage_storage::Session,
+    workspace_policy: &super::TrustedWorkspacePolicy,
 ) -> SessionEnvironment {
     let session_metadata = session.metadata.as_ref();
     // A channel session's origin was stamped at session creation; surface the
@@ -180,6 +185,42 @@ pub(crate) fn build_session_environment(
             ToolRootSource::ManagedScratch => {
                 ToolRoot::ManagedScratch(tool_root.path.display().to_string())
             }
+        },
+        workspaces: {
+            let placement_can_write = session_metadata
+                .and_then(|metadata| metadata.get(super::WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let mut workspaces = Vec::new();
+            for workspace in workspace_policy
+                .active_workspace
+                .iter()
+                .chain(&workspace_policy.attachments)
+                .filter(|workspace| workspace.can_read)
+            {
+                let (path, can_write) = if tool_root.source == ToolRootSource::WorkerPlacement {
+                    if tool_root.path.starts_with(&workspace.path) {
+                        // The placement is the effective root; its write grant
+                        // is resolved independently of the topic attachment.
+                        (&tool_root.path, placement_can_write)
+                    } else if workspace.path.starts_with(&tool_root.path) {
+                        (&workspace.path, workspace.can_write && placement_can_write)
+                    } else {
+                        continue;
+                    }
+                } else {
+                    (&workspace.path, workspace.can_write)
+                };
+                let readable = ReadableWorkspace {
+                    path: path.display().to_string(),
+                    can_write,
+                    is_trusted: workspace.is_trusted,
+                };
+                if !workspaces.contains(&readable) {
+                    workspaces.push(readable);
+                }
+            }
+            workspaces
         },
         // The session row's creation time, not the turn's clock: the block
         // renders identically on every turn of the session, keeping the

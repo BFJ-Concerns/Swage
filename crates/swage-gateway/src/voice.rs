@@ -18,6 +18,7 @@ pub async fn voice_capabilities(state: &AppState) -> VoiceCapabilitiesResponse {
     VoiceCapabilitiesResponse {
         transcription: capabilities.transcription,
         synthesis: capabilities.synthesis,
+        synthesis_unverified: capabilities.synthesis_unverified,
         default_voice: capabilities.default_voice,
         supported_voices: capabilities.supported_voices,
         unavailable_reason: capabilities.unavailable_reason,
@@ -64,12 +65,8 @@ pub async fn synthesise_speech(
     request: SynthesiseSpeechRequest,
 ) -> Result<SynthesiseSpeechResponse, ApiError> {
     let voice_provider = state.active_voice_provider();
-    let capabilities = voice_provider.capabilities();
-    if !capabilities.synthesis {
-        return Err(ApiError::validation(
-            "voice synthesis is unavailable for the configured runtime".to_string(),
-        ));
-    }
+    // A direct request also checks recovery after a failed speech request.
+    // The provider validates its configured route before contacting upstream.
     if request.text.trim().is_empty() {
         return Err(ApiError::validation("text must not be empty".to_string()));
     }

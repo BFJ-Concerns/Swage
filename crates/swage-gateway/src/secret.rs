@@ -26,8 +26,8 @@ use uuid::Uuid;
 
 use swage_core::{GatewayError, StorageError};
 use swage_storage::{
-    ManagedSecretEncryptionDiagnostics, NewAuditEvent, NewSecretRecord, SecretRecord,
-    managed_secret_encryption_diagnostics, store::Storage,
+    NewAuditEvent, NewSecretRecord, SecretRecord, managed_secret_encryption_diagnostics,
+    store::Storage,
 };
 
 /// Backend identifiers as stored in `secrets.backend_kind`.
@@ -70,29 +70,7 @@ pub struct GenerateSecretRequest {
     pub metadata: Option<Value>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SecretResponse {
-    pub id: Uuid,
-    pub name: String,
-    pub material_kind: String,
-    pub owner_kind: String,
-    pub backend_kind: String,
-    pub scope_kind: String,
-    pub scope_id: Option<String>,
-    pub reference: String,
-    pub metadata: Value,
-    pub status: String,
-    pub created_at: chrono::DateTime<Utc>,
-    pub updated_at: chrono::DateTime<Utc>,
-    pub revoked_at: Option<chrono::DateTime<Utc>>,
-    pub revealed_value: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct SecretListResponse {
-    pub secrets: Vec<SecretResponse>,
-    pub managed_backend: ManagedSecretEncryptionDiagnostics,
-}
+pub use swage_protocol::hosting::{SecretListResponse, SecretResponse};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SecretValidationResponse {
@@ -710,7 +688,7 @@ fn validate_secret_request(request: &CreateSecretRequest) -> Result<(), GatewayE
     Ok(())
 }
 
-fn parse_secret_reference(reference: &str) -> Result<Uuid, GatewayError> {
+pub(crate) fn parse_secret_reference(reference: &str) -> Result<Uuid, GatewayError> {
     let (scheme, tail) = reference.split_once("://").ok_or_else(|| {
         GatewayError::ValidationError(format!("invalid secret reference '{reference}'"))
     })?;
@@ -804,7 +782,7 @@ fn make_base32_secret(minimum_length: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 
     use std::sync::{Mutex, MutexGuard};
 
@@ -817,7 +795,7 @@ mod tests {
     // awaits so concurrent secret tests cannot race the managed key value.
     static SECRET_ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn with_secret_env() -> MutexGuard<'static, ()> {
+    pub(crate) fn with_secret_env() -> MutexGuard<'static, ()> {
         let guard = SECRET_ENV_LOCK.lock().unwrap();
         unsafe {
             env::set_var(MANAGED_SECRET_KEY_ENV, BASE64.encode([9_u8; 32]));

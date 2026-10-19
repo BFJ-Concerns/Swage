@@ -16,7 +16,7 @@ use super::support::{CapturingProvider, live_http_json, start_live_server};
 fn router() -> Router {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let (provider, _requests) = CapturingProvider::new("stub", vec![]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         storage as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
