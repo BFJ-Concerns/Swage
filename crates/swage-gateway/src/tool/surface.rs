@@ -343,7 +343,7 @@ impl Tool for SurfaceWriteTool {
                 },
                 "expected_revision": {
                     "type": "integer",
-                    "description": "When replacing: the module's revision as surface_read gave it. The write lands only if the module is still at that revision."
+                    "description": "When changing an existing module, by source or by replace: the module's revision as surface_read gave it. The write lands only if the module is still at that revision."
                 },
                 "remove": {
                     "type": "boolean",
@@ -1019,18 +1019,34 @@ mod tests {
         assert!(muddled.to_string().contains("remove"));
     }
 
+    /// Whether `name` appears in `text` as a whole word — bounded by
+    /// characters that cannot be part of an identifier — so a name that is a
+    /// substring of another word (`tag` in `tags`, `all` in `alleged`) does
+    /// not count as described.
+    fn names_as_a_word(text: &str, name: &str) -> bool {
+        let is_identifier_char = |c: char| c.is_alphanumeric() || c == '_';
+        text.match_indices(name).any(|(start, _)| {
+            let before = text[..start].chars().next_back();
+            let after = text[start + name.len()..].chars().next();
+            !before.is_some_and(is_identifier_char) && !after.is_some_and(is_identifier_char)
+        })
+    }
+
     /// The descriptions are the model's only account of what the schemas
     /// offer, so every parameter of each schema and every write operation is
-    /// named in the prose — a parameter added to a schema without a sentence
-    /// fails here.
+    /// named in the prose as a whole word — a parameter added to a schema
+    /// without a sentence fails here.
     #[test]
     fn the_descriptions_name_every_parameter_and_operation_the_schemas_offer() {
+        assert!(names_as_a_word("pass tags on a note", "tags"));
+        assert!(!names_as_a_word("pass tags on a note", "tag"));
+        assert!(!names_as_a_word("regardless of all_fields", "all"));
         for tool in [&SurfaceReadTool as &dyn Tool, &SurfaceWriteTool] {
             let description = tool.description();
             let schema = tool.parameters();
             for parameter in schema["properties"].as_object().expect("properties").keys() {
                 assert!(
-                    description.contains(parameter.as_str()),
+                    names_as_a_word(description, parameter),
                     "{} describes {parameter}",
                     tool.name()
                 );
@@ -1039,7 +1055,7 @@ mod tests {
         let description = SurfaceWriteTool.description();
         for operation in WRITE_OPERATIONS {
             assert!(
-                description.contains(operation),
+                names_as_a_word(description, operation),
                 "surface_write describes {operation}"
             );
         }

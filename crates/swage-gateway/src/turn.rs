@@ -519,7 +519,16 @@ pub(super) async fn process_turn_with_composition_and_focus(
             crate::memory::load_memory_index(swage_root, &scope)
                 .await
                 .into_element(
-                    memory_reach(state, &config, &agent_config, session.metadata.as_ref()).await,
+                    memory_reach(
+                        state,
+                        &config,
+                        &agent_config,
+                        session.metadata.as_ref(),
+                        Some(topic_id),
+                        Some(session_id),
+                        &session_approval_grants,
+                    )
+                    .await,
                 ),
         )
     } else {

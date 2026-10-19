@@ -586,24 +586,32 @@ pub(crate) async fn record_degraded_execution(
     Ok(())
 }
 
-/// Whether the dispatcher `build_gateway_dispatcher` will build for this turn
-/// offers `tool_name` to the model, read before that dispatcher exists —
-/// context is assembled first, and text in it that names a tool must not name
-/// one the model cannot call. The three gates are the build's own: the tool
-/// registered for the agent (`ToolRegistry::for_agent`), permitted by the
-/// resolved config (`build_permission_config`, whose topic, session and
-/// approval grants are left out because they only move a granted tool between
-/// allowed and approval-gated, both of which are offered), and admitted by the
-/// device advertisement filter for the session's host
-/// (`build_gateway_advertisement_filter`). Where the dispatcher already
-/// exists, ask it (`ToolDispatcher::offers`) instead.
+/// Whether the model will be offered `tool_name` on this turn, read before
+/// the turn's dispatcher exists — context is assembled first, and text in it
+/// that names a tool must not name one the model cannot call. The gates are
+/// the ones the turn applies: the tool registered for the agent
+/// (`ToolRegistry::for_agent`), permitted by the resolved config with this
+/// session's approval grants (`build_permission_config`, as the dispatcher
+/// build and the Codex launch build it), and admitted by the device
+/// advertisement filter for the session's host
+/// (`build_gateway_advertisement_filter`). A granted tool that still needs
+/// approval is offered by the agent runtime, which pauses for the approval,
+/// and withheld by the Codex runtime (`codex::dynamic_tools`), so under the
+/// Codex protocol only an outright `Allowed` answer offers it. Where the
+/// dispatcher already exists and the agent runtime will run it, ask it
+/// (`ToolDispatcher::offers`) instead.
 pub(crate) async fn turn_offers_tool(
     state: &AppState,
     config: &swage_config::ResolvedConfig,
     agent_config: &AgentConfig,
     session_metadata: Option<&serde_json::Value>,
+    topic_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+    session_approval_grants: &std::collections::HashSet<crate::state::ApprovalGrantKey>,
     tool_name: &str,
 ) -> bool {
+    use swage_tool::permission::{PermissionCheckResult, check_permission};
+
     let Some(tool) = state
         .active_tool_dispatcher()
         .registry()
@@ -615,11 +623,18 @@ pub(crate) async fn turn_offers_tool(
     let permissions = build_permission_config(
         config,
         &state.config,
-        None,
-        None,
-        &std::collections::HashSet::new(),
+        topic_id,
+        session_id,
+        session_approval_grants,
     );
-    if swage_tool::permission::check_permission(&permissions, tool_name).is_err() {
+    let permitted = match check_permission(&permissions, tool_name) {
+        Ok(PermissionCheckResult::Allowed) => true,
+        Ok(PermissionCheckResult::RequiresApproval { .. }) => {
+            config.default_provider_protocol() != swage_config::Protocol::Codex
+        }
+        Err(_) => false,
+    };
+    if !permitted {
         return false;
     }
     let device = crate::device::resolve_device(state, session_metadata).await;

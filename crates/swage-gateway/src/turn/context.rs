@@ -120,13 +120,16 @@ pub(crate) fn session_carries_memory(session: &swage_storage::Session) -> bool {
 
 /// How far this turn's session reaches into memory: the standing memory text
 /// names `memory_read` only when the model can call it, so the answer is
-/// whether the turn's dispatcher will offer that tool (`turn_offers_tool`),
-/// never a list kept beside it.
+/// whether the turn will offer that tool (`turn_offers_tool`), never a list
+/// kept beside it.
 pub(crate) async fn memory_reach(
     state: &crate::state::AppState,
     config: &swage_config::ResolvedConfig,
     agent_config: &swage_agent::AgentConfig,
     session_metadata: Option<&serde_json::Value>,
+    topic_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+    session_approval_grants: &std::collections::HashSet<crate::state::ApprovalGrantKey>,
 ) -> swage_context::memory::MemoryReach {
     swage_context::memory::MemoryReach::with_read_tool(
         super::dispatcher::turn_offers_tool(
@@ -134,6 +137,9 @@ pub(crate) async fn memory_reach(
             config,
             agent_config,
             session_metadata,
+            topic_id,
+            session_id,
+            session_approval_grants,
             crate::tool::memory::MEMORY_READ_TOOL,
         )
         .await,

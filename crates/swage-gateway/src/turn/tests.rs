@@ -8374,21 +8374,30 @@ async fn make_state_offering_memory_read(
     (state, session_id, captured)
 }
 
-/// The memory text of the one request a turn makes, read from the captured
-/// provider request.
-fn memory_text_of(captured: &Arc<std::sync::Mutex<Option<CompletionRequest>>>) -> String {
-    captured
+/// The memory text of the one request a turn makes, and whether that request
+/// offered `memory_read`, both read from the captured provider request so
+/// the text is held against the tools the model was actually given.
+fn memory_text_and_offer_of(
+    captured: &Arc<std::sync::Mutex<Option<CompletionRequest>>>,
+) -> (String, bool) {
+    let request = captured
         .lock()
         .unwrap()
         .take()
-        .expect("the provider saw one request")
+        .expect("the provider saw one request");
+    let offered = request
+        .tool_definitions
+        .iter()
+        .any(|definition| definition["name"] == crate::tool::memory::MEMORY_READ_TOOL);
+    let memory = request
         .messages
         .iter()
         .find(|message| {
             message.role() == Role::System && message.text_content().contains("## Memory index")
         })
         .expect("the memory element is in the system messages")
-        .text_content()
+        .text_content();
+    (memory, offered)
 }
 
 /// The memory text names `memory_read` only in a session whose tools offer
@@ -8416,10 +8425,14 @@ async fn memory_guidance_names_the_read_tool_only_when_the_session_has_it() {
         .await
         .expect("turn should complete");
 
-        let memory = memory_text_of(&captured);
+        let (memory, offered_to_model) = memory_text_and_offer_of(&captured);
+        assert_eq!(
+            offered_to_model, offered,
+            "allow {allow:?} deny {deny:?}: the request's tool list"
+        );
         assert_eq!(
             memory.contains("`memory_read`"),
-            offered,
+            offered_to_model,
             "allow {allow:?} deny {deny:?}: {memory}"
         );
         if !offered {
@@ -8468,12 +8481,90 @@ async fn memory_guidance_follows_the_device_hosts_advertised_tools() {
     .await
     .expect("turn should complete");
 
-    let memory = memory_text_of(&captured);
+    let (memory, offered_to_model) = memory_text_and_offer_of(&captured);
+    assert!(
+        !offered_to_model,
+        "the device host withholds memory_read from the request's tool list"
+    );
     assert!(
         !memory.contains("`memory_read`"),
         "a tool the device does not advertise is not named: {memory}"
     );
     assert!(memory.contains("the summaries are all of memory you can read"));
+}
+
+/// The offering answer follows the runtime that will run the turn: a granted
+/// tool that still needs approval is offered by the agent runtime, which
+/// pauses for the approval, and withheld by the Codex runtime until a grant
+/// lifts the gate.
+#[tokio::test]
+async fn an_approval_gated_tool_is_offered_only_where_the_runtime_offers_it() {
+    use crate::tool::memory::MEMORY_READ_TOOL;
+    use crate::turn::dispatcher::turn_offers_tool;
+
+    let (state, _session_id, _captured) = make_state_offering_memory_read(&["*"], &[], None).await;
+    let agent_config = swage_agent::AgentConfig::new("gateway");
+    let mut gated = swage_config::ResolvedConfig::default();
+    gated.tools.permissions.allow = vec!["*".into()];
+    gated.tools.permissions.require_approval =
+        vec![swage_config::model::RequireApprovalEntry::Simple(
+            MEMORY_READ_TOOL.into(),
+        )];
+    let no_grants = std::collections::HashSet::new();
+    assert!(
+        turn_offers_tool(
+            &state,
+            &gated,
+            &agent_config,
+            None,
+            None,
+            None,
+            &no_grants,
+            MEMORY_READ_TOOL
+        )
+        .await,
+        "the agent runtime offers a gated tool and pauses for the approval"
+    );
+
+    let mut codex = codex_turn_config();
+    codex.tools.permissions = gated.tools.permissions.clone();
+    assert!(
+        !turn_offers_tool(
+            &state,
+            &codex,
+            &agent_config,
+            None,
+            None,
+            None,
+            &no_grants,
+            MEMORY_READ_TOOL
+        )
+        .await,
+        "the Codex runtime withholds a gated tool"
+    );
+
+    let session_id = Uuid::new_v4();
+    let granted = std::collections::HashSet::from([crate::state::ApprovalGrantKey {
+        session_id: Some(session_id),
+        topic_id: None,
+        kind: swage_storage::model::ApprovalKind::Tool,
+        name: MEMORY_READ_TOOL.into(),
+        access: None,
+    }]);
+    assert!(
+        turn_offers_tool(
+            &state,
+            &codex,
+            &agent_config,
+            None,
+            None,
+            Some(session_id),
+            &granted,
+            MEMORY_READ_TOOL
+        )
+        .await,
+        "a session's grant lifts the gate and the Codex runtime offers the tool"
+    );
 }
 
 pub(crate) async fn make_state_with_approval_gated_echo(
