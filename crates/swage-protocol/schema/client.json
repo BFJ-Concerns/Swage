@@ -3345,6 +3345,15 @@
             }
           ]
         },
+        "output_limit": {
+          "description": "The most output tokens one response may carry, when the catalogue\ndeclares it; absent, the provider adapter's account for the models it\nserves applies, and a model neither declares takes the adapter's\nfloor. A caller's own `max_tokens` is sent as it is either way.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "reasoning_replay": {
           "type": "boolean",
           "default": false

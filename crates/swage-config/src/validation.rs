@@ -1168,6 +1168,17 @@ pub fn validate_resolved_catalog_references(
                 },
             ));
         }
+        if model.capabilities.output_limit == Some(0) {
+            problems.push(make_problem(
+                file_path,
+                Some(format!("models.entries.{model_id}.capabilities.output_limit")),
+                ConfigProblemKind::SemanticError {
+                    message: format!(
+                        "model '{model_id}' declares an output limit of zero tokens; declare the most output tokens one response may carry, or leave it unset"
+                    ),
+                },
+            ));
+        }
     }
 
     for (field, model) in [
@@ -2547,6 +2558,7 @@ message_ttl_secs = 86400
                         max_tokens: 10,
                         can_disable: false,
                     }),
+                    output_limit: None,
                 },
                 ..Default::default()
             },
@@ -2560,6 +2572,36 @@ message_ttl_secs = 86400
             problems.iter().any(|problem| {
                 problem.field_path.as_deref() == Some("models.entries.m.capabilities.effort")
                     && problem.to_string().contains("inverted")
+            }),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn an_output_limit_of_zero_is_a_semantic_problem() {
+        let mut config = ResolvedConfig::default();
+        config.models.default = "m".into();
+        config.models.entries.insert(
+            "m".into(),
+            crate::ModelEndpointConfig {
+                provider_id: "p".into(),
+                model_id: "m".into(),
+                capabilities: crate::ModelCapabilitiesConfig {
+                    output_limit: Some(0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        config
+            .providers
+            .entries
+            .insert("p".into(), crate::ProviderEndpointConfig::default());
+        let problems = validate_resolved_catalog_references(&config, Path::new("config.toml"));
+        assert!(
+            problems.iter().any(|problem| {
+                problem.field_path.as_deref() == Some("models.entries.m.capabilities.output_limit")
+                    && problem.to_string().contains("zero tokens")
             }),
             "{problems:?}"
         );

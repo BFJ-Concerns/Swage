@@ -9064,6 +9064,7 @@ async fn second_tool_round_request_replays_reasoning_when_model_capability_opts_
             capabilities: swage_config::ModelCapabilitiesConfig {
                 reasoning_replay: true,
                 effort: None,
+                output_limit: None,
             },
         },
     )]
@@ -13636,6 +13637,7 @@ async fn process_turn_resolves_effort_against_the_declared_capability_and_record
                     levels: vec![swage_core::Effort::Low, swage_core::Effort::High],
                     can_disable: false,
                 }),
+                output_limit: None,
             },
             ..Default::default()
         },
@@ -13738,6 +13740,135 @@ fn effort_capability_falls_back_from_the_catalogue_to_the_adapter() {
     assert_eq!(
         super::effort_capability_for_model(&config, "unknown", &mock),
         swage_core::EffortCapability::None
+    );
+}
+
+/// The output limit resolves beside the effort: the caller's own value
+/// first, then the catalogue entry's declaration, then the adapter's account
+/// of the documented limit.
+#[test]
+fn output_limit_falls_back_from_the_caller_to_the_catalogue_to_the_adapter() {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "claude".into();
+    config.models.entries.insert(
+        "claude".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "anthropic".into(),
+            model_id: "claude-opus-5-5".into(),
+            ..Default::default()
+        },
+    );
+    let anthropic = swage_provider::anthropic::AnthropicProvider::new("key", "claude-opus-5-5");
+    assert_eq!(
+        super::output_limit_for_model(None, &config, "claude", &anthropic),
+        Some(swage_core::ResolvedOutputLimit {
+            tokens: 128_000,
+            source: swage_core::OutputLimitSource::Adapter,
+        })
+    );
+
+    config
+        .models
+        .entries
+        .get_mut("claude")
+        .unwrap()
+        .capabilities
+        .output_limit = Some(50_000);
+    assert_eq!(
+        super::output_limit_for_model(None, &config, "claude", &anthropic),
+        Some(swage_core::ResolvedOutputLimit {
+            tokens: 50_000,
+            source: swage_core::OutputLimitSource::Catalogue,
+        }),
+        "the catalogue's own declaration wins over the adapter's"
+    );
+    assert_eq!(
+        super::output_limit_for_model(Some(512), &config, "claude", &anthropic),
+        Some(swage_core::ResolvedOutputLimit {
+            tokens: 512,
+            source: swage_core::OutputLimitSource::Caller,
+        }),
+        "a caller's own limit is sent as it is"
+    );
+
+    let mock = MockProvider::new(vec![]);
+    assert_eq!(
+        super::output_limit_for_model(None, &config, "unknown", &mock),
+        None
+    );
+}
+
+/// An interactive turn with no preset limit carries the model's declared
+/// output limit to the provider, and the turn's snapshot names its source.
+#[tokio::test]
+async fn process_turn_carries_the_declared_output_limit_and_records_its_source() {
+    let chunks = vec![
+        StreamChunk::Delta {
+            content: "Hello".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ];
+    let (provider, captured_request) = CapturingProvider::new(chunks);
+    let (storage, session_id) = make_storage_with_session().await;
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "local".into();
+    config.models.entries.insert(
+        "local".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "local".into(),
+            model_id: "local-model".into(),
+            capabilities: swage_config::ModelCapabilitiesConfig {
+                output_limit: Some(50_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        crate::test_support::with_mock_provider_entries(config),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("hi"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("turn ok");
+
+    let request = captured_request
+        .lock()
+        .unwrap()
+        .take()
+        .expect("provider request");
+    assert_eq!(request.max_tokens, Some(50_000));
+
+    let snapshot = storage
+        .db
+        .lock()
+        .await
+        .snapshots
+        .values()
+        .next()
+        .map(|(report, _)| report.clone())
+        .expect("context snapshot recorded");
+    let report: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+    assert_eq!(report["provider_visible"]["output_limit"]["tokens"], 50_000);
+    assert_eq!(
+        report["provider_visible"]["output_limit"]["source"],
+        "catalogue"
     );
 }
 

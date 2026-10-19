@@ -188,10 +188,17 @@ pub struct ModelCapabilitiesConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, as = "Option<_>")]
     pub effort: Option<EffortCapability>,
+    /// The most output tokens one response may carry, when the catalogue
+    /// declares it; absent, the provider adapter's account for the models it
+    /// serves applies, and a model neither declares takes the adapter's
+    /// floor. A caller's own `max_tokens` is sent as it is either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, as = "Option<_>")]
+    pub output_limit: Option<u32>,
 }
 impl ModelCapabilitiesConfig {
     pub fn is_empty(&self) -> bool {
-        !self.reasoning_replay && self.effort.is_none()
+        !self.reasoning_replay && self.effort.is_none() && self.output_limit.is_none()
     }
 }
 

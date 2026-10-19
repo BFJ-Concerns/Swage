@@ -41,7 +41,7 @@ const ANTHROPIC_REQUEST_DIVERGENCES: &[(&str, &str)] = &[
     ),
     (
         "swage_supplied",
-        "max_tokens is caller supplied when present and otherwise uses Swage's 4096-token default",
+        "max_tokens is the caller's value when present, else the model's documented output limit, else Swage's 4096-token floor for a model the adapter cannot vouch for",
     ),
 ];
 
@@ -93,6 +93,37 @@ pub(crate) fn anthropic_effort_capability() -> EffortCapability {
         can_disable: true,
     }
 }
+
+/// The Messages API's largest `max_tokens` for the models Anthropic documents
+/// (platform.claude.com/docs/en/about-claude/models/overview, read
+/// 2026-10-19): 128K on the 5 generation, on Opus 4.6 onward and on Sonnet
+/// 4.6; 64K on Opus 4.5 and Haiku 4.5. Matched by family prefix, so a dated
+/// snapshot id resolves as its family does. `None` for a model the adapter
+/// cannot vouch for — the catalogue's declaration governs there.
+pub(crate) fn anthropic_output_limit(model: &str) -> Option<u32> {
+    const DOCUMENTED: &[(&str, u32)] = &[
+        ("claude-fable-5", 128_000),
+        ("claude-mythos-5", 128_000),
+        ("claude-opus-5", 128_000),
+        ("claude-sonnet-5", 128_000),
+        ("claude-haiku-5", 128_000),
+        ("claude-opus-4-8", 128_000),
+        ("claude-opus-4-7", 128_000),
+        ("claude-opus-4-6", 128_000),
+        ("claude-sonnet-4-6", 128_000),
+        ("claude-opus-4-5", 64_000),
+        ("claude-haiku-4-5", 64_000),
+    ];
+    let model = model.trim().to_ascii_lowercase();
+    DOCUMENTED
+        .iter()
+        .find(|(family, _)| model.starts_with(family))
+        .map(|(_, limit)| *limit)
+}
+
+/// The `max_tokens` every Claude model honours, sent for a model the adapter
+/// cannot vouch for when the caller set no limit of its own.
+const ANTHROPIC_OUTPUT_FLOOR: u32 = 4096;
 
 /// The two Anthropic request fields a resolved effort becomes. Adapters
 /// express the resolved `control` only — the intent has already been
@@ -714,7 +745,7 @@ impl AnthropicProvider {
             output_config: None,
             thinking: None,
             messages,
-            max_tokens: request.max_tokens.unwrap_or(4096),
+            max_tokens: Self::max_tokens_for(request.max_tokens, &self.config.model),
             system: request.system_prompt.clone(),
             stream: if stream { Some(true) } else { None },
             tools,
@@ -1018,15 +1049,17 @@ impl AnthropicProvider {
             .as_ref()
             .map(|effort| anthropic_effort_controls(effort.control))
             .unwrap_or((None, None));
+        let model = request
+            .model
+            .clone()
+            .unwrap_or_else(|| self.config.model.clone());
+        let max_tokens = Self::max_tokens_for(request.max_tokens, &model);
         MessagesRequest {
-            model: request
-                .model
-                .clone()
-                .unwrap_or_else(|| self.config.model.clone()),
+            model,
             output_config,
             thinking,
             messages,
-            max_tokens: request.max_tokens.unwrap_or(4096),
+            max_tokens,
             system,
             stream: if stream { Some(true) } else { None },
             tools: request
@@ -1085,22 +1118,36 @@ impl AnthropicProvider {
             })
             .collect();
 
+        let model = request
+            .model
+            .clone()
+            .unwrap_or_else(|| self.config.model.clone());
+        let max_tokens = Self::max_tokens_for(request.max_tokens, &model);
         MessagesRequest {
-            model: request
-                .model
-                .clone()
-                .unwrap_or_else(|| self.config.model.clone()),
+            model,
             // ToolCompletionRequest has no per-call effort surface.
             output_config: None,
             thinking: None,
             messages,
-            max_tokens: request.max_tokens.unwrap_or(4096),
+            max_tokens,
             system,
             stream: if stream { Some(true) } else { None },
             tools,
             // Completion metadata is Swage/provider-specific free-form data,
             // not Anthropic's narrowly defined user_id metadata object.
         }
+    }
+
+    /// The `max_tokens` a request sends: the caller's own value, else the
+    /// documented limit of the model the request names, else the floor. A
+    /// caller that set a limit — compaction, a gate, a bounded summary — is
+    /// honoured as is; an interactive turn with none gets the whole of what
+    /// the model can produce, which is also what leaves adaptive thinking
+    /// its room.
+    fn max_tokens_for(caller: Option<u32>, model: &str) -> u32 {
+        caller
+            .or_else(|| anthropic_output_limit(model))
+            .unwrap_or(ANTHROPIC_OUTPUT_FLOOR)
     }
 
     /// Build a `CountTokensRequest` from a `CompletionRequest` — the same
@@ -1133,6 +1180,10 @@ impl LlmProvider for AnthropicProvider {
             .to_ascii_lowercase()
             .starts_with("claude")
             .then(anthropic_effort_capability)
+    }
+
+    fn output_limit(&self, model: &str) -> Option<u32> {
+        anthropic_output_limit(model)
     }
 
     fn provider_request_snapshot(
@@ -1674,19 +1725,25 @@ mod tests {
         assert!(body.stream.is_none());
     }
 
+    /// Each of the three request builders sends the caller's own limit as
+    /// it is, fills an absent one with the documented limit of the model the
+    /// request names, and falls to the floor only for a model the adapter
+    /// cannot vouch for.
     #[test]
     fn request_paths_preserve_explicit_and_default_token_limits() {
-        let provider = AnthropicProvider::new("key", "model");
+        let provider = AnthropicProvider::new("key", "claude-opus-5-5");
         let legacy_default = LlmRequest {
             max_tokens: None,
-            ..LlmRequest::builder("model").build()
+            ..LlmRequest::builder("claude-opus-5-5").build()
         };
-        let legacy_explicit = LlmRequest::builder("model").max_tokens(73).build();
+        let legacy_explicit = LlmRequest::builder("claude-opus-5-5")
+            .max_tokens(73)
+            .build();
         assert_eq!(
             provider
                 .build_messages_request(&legacy_default, false)
                 .max_tokens,
-            4096
+            128_000
         );
         assert_eq!(
             provider
@@ -1709,13 +1766,34 @@ mod tests {
             provider
                 .build_request_for_completion(&completion(None), false)
                 .max_tokens,
-            4096
+            128_000
         );
         assert_eq!(
             provider
                 .build_request_for_completion(&completion(Some(91)), false)
                 .max_tokens,
             91
+        );
+        let overriding_model = CompletionRequest {
+            model: Some("claude-haiku-4-5-20251001".into()),
+            ..completion(None)
+        };
+        assert_eq!(
+            provider
+                .build_request_for_completion(&overriding_model, false)
+                .max_tokens,
+            64_000,
+            "the request's own model, not the configured one, names the limit"
+        );
+        let unvouched_model = CompletionRequest {
+            model: Some("some-other-model".into()),
+            ..completion(None)
+        };
+        assert_eq!(
+            provider
+                .build_request_for_completion(&unvouched_model, false)
+                .max_tokens,
+            ANTHROPIC_OUTPUT_FLOOR
         );
 
         let tool_completion = |max_tokens| ToolCompletionRequest {
@@ -1731,7 +1809,7 @@ mod tests {
             provider
                 .build_request_for_tool_completion(&tool_completion(None), false)
                 .max_tokens,
-            4096
+            128_000
         );
         assert_eq!(
             provider
@@ -1875,6 +1953,29 @@ mod tests {
         let provider = AnthropicProvider::new("key", "claude-opus-5");
         assert!(provider.effort_capability("claude-opus-5").is_some());
         assert!(provider.effort_capability("some-other-model").is_none());
+    }
+
+    /// The declaration is bound to the documented limits: each family the
+    /// docs list resolves, a dated snapshot as its family, and a model the
+    /// docs do not list is left to the catalogue.
+    #[test]
+    fn output_limit_is_declared_for_documented_models_only() {
+        let provider = AnthropicProvider::new("key", "claude-opus-5-5");
+        for (model, limit) in [
+            ("claude-fable-5-1", 128_000),
+            ("claude-opus-5-5", 128_000),
+            ("claude-sonnet-5", 128_000),
+            ("claude-haiku-5-5", 128_000),
+            ("claude-opus-4-6", 128_000),
+            ("claude-sonnet-4-6", 128_000),
+            (" Claude-Opus-4-5-20251101 ", 64_000),
+            ("claude-haiku-4-5", 64_000),
+        ] {
+            assert_eq!(provider.output_limit(model), Some(limit), "{model}");
+        }
+        for model in ["claude-3-5-sonnet-20241022", "some-other-model", ""] {
+            assert_eq!(provider.output_limit(model), None, "{model}");
+        }
     }
 
     /// The declaration is bound to the documented control: every level the
@@ -2208,7 +2309,7 @@ mod tests {
                 ],
                 [
                     "swage_supplied",
-                    "max_tokens is caller supplied when present and otherwise uses Swage's 4096-token default"
+                    "max_tokens is the caller's value when present, else the model's documented output limit, else Swage's 4096-token floor for a model the adapter cannot vouch for"
                 ]
             ])
         );
