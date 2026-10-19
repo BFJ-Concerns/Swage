@@ -4613,6 +4613,20 @@ impl TurnStore for MockStorage {
         Ok(turns)
     }
 
+    async fn list_child_turns(&self, parent_turn_id: Uuid) -> Result<Vec<Turn>, StorageError> {
+        let mut turns: Vec<Turn> = self
+            .db
+            .lock()
+            .await
+            .turns
+            .values()
+            .filter(|t| t.parent_turn_id == Some(parent_turn_id))
+            .cloned()
+            .collect();
+        turns.sort_by_key(|t| t.created_at);
+        Ok(turns)
+    }
+
     async fn update_turn_state(&self, id: Uuid, state: TurnState) -> Result<(), StorageError> {
         if state == TurnState::Interrupted {
             self.interrupted_turn_writes.fetch_add(1, Ordering::SeqCst);
@@ -5917,6 +5931,27 @@ impl swage_storage::store::AgentMessageStore for MockStorage {
         message.payload = payload;
         Ok(())
     }
+    async fn find_delegate_for_thread(
+        &self,
+        thread_id: Uuid,
+    ) -> Result<Option<AgentMessage>, StorageError> {
+        let thread = thread_id.to_string();
+        let mut delegates: Vec<_> = self
+            .db
+            .lock()
+            .await
+            .agent_messages
+            .values()
+            .filter(|message| {
+                message.kind == swage_core::MessageKind::Delegate
+                    && message.payload.get("_thread_id").and_then(|v| v.as_str()) == Some(&thread)
+            })
+            .cloned()
+            .collect();
+        delegates.sort_by_key(|message| message.created_at);
+        Ok(delegates.pop())
+    }
+
     async fn list_by_correlation(
         &self,
         correlation_id: Uuid,
@@ -18782,7 +18817,7 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
     };
     use swage_storage::{NewSession, NewThread, NewToolCall, NewTurn, TurnState};
 
-    let storage = SqliteStorage::in_memory().expect("sqlite");
+    let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite"));
     let topic = storage.general_scope().await.unwrap();
     let session = storage
         .create_session(NewSession {
@@ -18795,7 +18830,7 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
         .await
         .unwrap();
     let thread = ThreadStore::create(
-        &storage,
+        &*storage,
         NewThread {
             session_id: session.id,
             agent_id: "gateway".into(),
@@ -18867,9 +18902,13 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
         .await
         .unwrap();
 
-    crate::shutdown::recover_orphaned_turns(&storage, &storage)
-        .await
-        .expect("recovery");
+    crate::shutdown::recover_orphaned_turns(
+        &*storage,
+        &*storage,
+        &swage_agent::MessageRouter::new(storage.clone(), None),
+    )
+    .await
+    .expect("recovery");
 
     let calls = storage.list_tool_calls_by_turn(turn.id).await.unwrap();
     assert_eq!(calls[0].status.as_deref(), Some("success"));
@@ -18880,7 +18919,7 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
         Some(swage_storage::store::INTERRUPTED_TOOL_RESULT)
     );
 
-    let rebuilt = super::history::rebuild_thread_history_messages(&storage, thread.id)
+    let rebuilt = super::history::rebuild_thread_history_messages(&*storage, thread.id)
         .await
         .unwrap();
     let replay_parts: Vec<&swage_core::ToolReplayPart> = rebuilt

@@ -1109,9 +1109,13 @@ mod tests {
             .requeue_presented_for_inflight_turns()
             .await
             .unwrap();
-        crate::shutdown::recover_orphaned_turns(state.storage.as_ref(), state.topic_store.as_ref())
-            .await
-            .unwrap();
+        crate::shutdown::recover_orphaned_turns(
+            state.storage.as_ref(),
+            state.topic_store.as_ref(),
+            &swage_agent::MessageRouter::new(state.storage.clone(), state.hook_registry.clone()),
+        )
+        .await
+        .unwrap();
         crate::turn_queue::drain_queues_at_startup(state)
             .await
             .unwrap();

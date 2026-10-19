@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- A turn interrupted by a gateway restart while waiting on a delegated agent resumes when the gateway comes back: each child's result, failure or cut-off note reaches the parent as a delegation notice and the parent's conversation continues from there.
 - Session surfaces can be renamed from their header or by the agent without changing the library entry or original surface.
 - Either party can resolve a surface note; it leaves the working view and remains in the surface record.
 - Agents can replace or remove a uniquely matched passage of a module without resubmitting unrelated content.

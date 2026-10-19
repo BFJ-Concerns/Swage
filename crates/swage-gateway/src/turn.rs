@@ -810,15 +810,37 @@ pub(super) async fn process_turn_with_composition_and_focus(
     release_active_turn(state, session_id, prepared_turn_id).await?;
 
     // A turn that ended on its own hands the session to whatever queued
-    // behind it; a stopped turn leaves the queue standing.
-    let final_state = state
-        .storage
-        .get_turn(turn_id.unwrap_or(prepared_turn_id))
-        .await
-        .ok()
-        .flatten()
-        .map(|turn| turn.state)
-        .unwrap_or(TurnState::Completed);
+    // behind it; a stopped turn leaves the queue standing. The state is
+    // read back from the turn's row — a reconstructive read (record
+    // durability contract): a row that cannot be read is a recorded gap,
+    // and the queue drains as the safe default, since a queue held for a
+    // stop nobody recorded would wait on a person who may not be there.
+    let final_turn_id = turn_id.unwrap_or(prepared_turn_id);
+    let final_state = match state.storage.get_turn(final_turn_id).await {
+        Ok(Some(turn)) => turn.state,
+        Ok(None) => {
+            crate::record_durability::record_reconstruction_gap(
+                state.storage.as_ref(),
+                Some(session_id),
+                final_turn_id,
+                "final turn state",
+                &"the turn's row is gone at the end of the turn",
+            )
+            .await?;
+            TurnState::Completed
+        }
+        Err(error) => {
+            crate::record_durability::record_reconstruction_gap(
+                state.storage.as_ref(),
+                Some(session_id),
+                final_turn_id,
+                "final turn state",
+                &error,
+            )
+            .await?;
+            TurnState::Completed
+        }
+    };
     if crate::turn_queue::drains_queue_after(final_state) {
         crate::turn_queue::spawn_drain(state.clone(), session_id);
     }
