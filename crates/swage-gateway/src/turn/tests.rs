@@ -8318,13 +8318,14 @@ pub(crate) async fn make_state_with_capturing_tools(
     (state, session_id, captured)
 }
 
-/// A state whose registry offers `memory_read`, under an agent allow and deny
-/// list of the test's choosing and a session carrying the given metadata, with
-/// the provider's one request captured.
+/// A state registering file tools and `memory_read`, filtered by the chosen
+/// allow and deny lists, with the given session metadata and origin. The
+/// provider captures its one request.
 async fn make_state_offering_memory_read(
     allow: &[&str],
     deny: &[&str],
     session_metadata: Option<serde_json::Value>,
+    origin: Option<swage_storage::SessionOrigin>,
 ) -> (
     AppState,
     Uuid,
@@ -8335,6 +8336,7 @@ async fn make_state_offering_memory_read(
     let session = storage
         .create_session(NewSession {
             metadata: session_metadata,
+            origin: origin.unwrap_or(swage_storage::SessionOrigin::Direct),
             ..new_session(topic.id)
         })
         .await
@@ -8367,16 +8369,22 @@ async fn make_state_offering_memory_read(
         Arc::new(provider) as Arc<dyn LlmProvider>,
         config,
         crate::tool::ToolDispatcher::allow_all(vec![
-            Arc::new(crate::tool::memory::MemoryReadTool) as Arc<dyn crate::tool::Tool>
+            Arc::new(crate::tool::memory::MemoryReadTool) as Arc<dyn crate::tool::Tool>,
+            Arc::new(crate::tool::file_read::FileReadTool {
+                max_output_bytes: 64 * 1024,
+            }),
+            Arc::new(crate::tool::file_list::FileListTool),
+            Arc::new(crate::tool::file_write::FileWriteTool),
+            Arc::new(crate::tool::file_edit::FileEditTool),
         ]),
         None,
     );
     (state, session_id, captured)
 }
 
-/// The memory text of the one request a turn makes, and whether that request
-/// offered `memory_read`, both read from the captured provider request so
-/// the text is held against the tools the model was actually given.
+/// All system text of the one captured provider request, and whether it
+/// offered `memory_read`, so guidance in any system message is checked
+/// against the tools the model was actually given.
 fn memory_text_and_offer_of(
     captured: &Arc<std::sync::Mutex<Option<CompletionRequest>>>,
 ) -> (String, bool) {
@@ -8388,16 +8396,117 @@ fn memory_text_and_offer_of(
     let offered = request
         .tool_definitions
         .iter()
-        .any(|definition| definition["name"] == crate::tool::memory::MEMORY_READ_TOOL);
+        .any(|definition| definition["name"] == "memory_read");
     let memory = request
         .messages
         .iter()
-        .find(|message| {
-            message.role() == Role::System && message.text_content().contains("## Memory index")
-        })
-        .expect("the memory element is in the system messages")
-        .text_content();
+        .filter(|message| message.role() == Role::System)
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    assert!(memory.contains("## Memory index"), "{memory}");
     (memory, offered)
+}
+
+/// A scheduled turn reaches the same context assembly as a direct turn,
+/// with real entries indexed from the session's retained configuration root.
+async fn scheduled_memory_request(with_read_tool: bool) -> (String, bool) {
+    let allow = if with_read_tool {
+        vec![
+            "file_read",
+            "file_list",
+            "file_write",
+            "file_edit",
+            "memory_read",
+        ]
+    } else {
+        vec!["file_read", "file_list", "file_write", "file_edit"]
+    };
+    let (mut state, session_id, captured) = make_state_offering_memory_read(
+        &allow,
+        &[],
+        None,
+        Some(swage_storage::SessionOrigin::ScheduleRun {
+            schedule_id: Uuid::new_v4(),
+        }),
+    )
+    .await;
+    let root = tempfile::Builder::new()
+        .prefix("scheduled-memory-")
+        .tempdir_in(&state.config_root)
+        .expect("isolated memory root inside the test home");
+    state.config_root = root.path().to_path_buf();
+    crate::memory::write_entry(
+        root.path(),
+        &ScopeLocation::General,
+        &crate::memory::MemoryReference::parse("general/planning").unwrap(),
+        "The operator plans the following week on Friday.",
+        "Private entry detail beyond the summary.",
+    )
+    .await
+    .expect("populate the on-disk memory index");
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Review my weekly planning preference.".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("scheduled turn should complete");
+    {
+        let request = captured.lock().unwrap();
+        let request = request.as_ref().expect("provider received the turn");
+        let mut offered = request
+            .tool_definitions
+            .iter()
+            .map(|definition| definition["name"].as_str().expect("named tool"))
+            .collect::<Vec<_>>();
+        offered.sort_unstable();
+        let mut expected = allow;
+        expected.sort_unstable();
+        assert_eq!(offered, expected, "the scheduled request's exact tool list");
+    }
+    let (system, offered) = memory_text_and_offer_of(&captured);
+    assert!(
+        system.contains("general/planning — The operator plans the following week on Friday."),
+        "real index summary: {system}"
+    );
+    assert!(
+        !system.contains("Private entry detail beyond the summary."),
+        "entry bodies require a read: {system}"
+    );
+    println!(
+        "scheduled memory controls: populated summary present; body absent; exact tool list matches; memory_read offered={offered}"
+    );
+    (system, offered)
+}
+
+#[tokio::test]
+async fn memory_scheduled_file_only_receives_summaries_as_all_readable_memory() {
+    let (system, offered) = scheduled_memory_request(false).await;
+    assert!(!offered);
+    assert!(
+        !system.contains("memory_read"),
+        "no system message may direct an unavailable memory read: {system}"
+    );
+    assert!(
+        system.contains("the summaries are all of memory you can read"),
+        "summary-only guidance: {system}"
+    );
+}
+
+#[tokio::test]
+async fn memory_scheduled_with_read_tool_receives_entry_read_guidance() {
+    let (system, offered) = scheduled_memory_request(true).await;
+    assert!(offered);
+    assert!(
+        system.contains("read the entry with `memory_read`"),
+        "entry-read guidance: {system}"
+    );
 }
 
 /// The memory text names `memory_read` only in a session whose tools offer
@@ -8411,7 +8520,7 @@ async fn memory_guidance_names_the_read_tool_only_when_the_session_has_it() {
         (&["*"][..], &[][..], true),
     ] {
         let (state, session_id, captured) =
-            make_state_offering_memory_read(allow, deny, None).await;
+            make_state_offering_memory_read(allow, deny, None, None).await;
         let (tx, _rx) = mpsc::unbounded_channel();
         process_turn(
             &state,
@@ -8453,6 +8562,7 @@ async fn memory_guidance_follows_the_device_hosts_advertised_tools() {
         &["*"],
         &[],
         Some(serde_json::json!({ "device_id": "bench" })),
+        None,
     )
     .await;
     state.devices.lock().await.devices.insert(
@@ -8502,7 +8612,8 @@ async fn an_approval_gated_tool_is_offered_only_where_the_runtime_offers_it() {
     use crate::tool::memory::MEMORY_READ_TOOL;
     use crate::turn::dispatcher::turn_offers_tool;
 
-    let (state, _session_id, _captured) = make_state_offering_memory_read(&["*"], &[], None).await;
+    let (state, _session_id, _captured) =
+        make_state_offering_memory_read(&["*"], &[], None, None).await;
     let agent_config = swage_agent::AgentConfig::new("gateway");
     let mut gated = swage_config::ResolvedConfig::default();
     gated.tools.permissions.allow = vec!["*".into()];
