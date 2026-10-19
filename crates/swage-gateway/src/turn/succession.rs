@@ -765,7 +765,17 @@ async fn diagnose(
         synthesis_model,
         &synthesis,
     ));
-    let synthesis = synthesis?.content;
+    let synthesis = synthesis?;
+    if synthesis.finish_reason == swage_core::FinishReason::Length {
+        let reason = "the diagnosis synthesis reached its output limit";
+        diagnosis
+            .calls
+            .last_mut()
+            .expect("synthesis call was recorded")
+            .failure_reason = Some(reason.to_string());
+        return Err(SuccessionError::Diagnosis(reason.to_string()));
+    }
+    let synthesis = synthesis.content;
     if synthesis.trim().is_empty() {
         diagnosis
             .calls
@@ -1139,6 +1149,7 @@ mod tests {
         blank_reader: Option<usize>,
         failing_synthesis: bool,
         blank_synthesis: bool,
+        truncated_synthesis: bool,
     }
 
     #[async_trait::async_trait]
@@ -1174,7 +1185,11 @@ mod tests {
                 },
                 input_tokens: 11,
                 output_tokens: 7,
-                finish_reason: swage_core::FinishReason::Stop,
+                finish_reason: if self.truncated_synthesis && index == LOCATOR_COUNT {
+                    swage_core::FinishReason::Length
+                } else {
+                    swage_core::FinishReason::Stop
+                },
                 cost: Some(0.25),
             })
         }
@@ -1470,11 +1485,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_or_blank_synthesis_records_the_call_and_uses_threshold_succession() {
-        for blank in [false, true] {
+    async fn failed_blank_or_truncated_synthesis_records_the_call_and_uses_threshold_succession() {
+        for mode in ["failed", "blank", "truncated"] {
             let provider = RecordingProvider {
-                failing_synthesis: !blank,
-                blank_synthesis: blank,
+                failing_synthesis: mode == "failed",
+                blank_synthesis: mode == "blank",
+                truncated_synthesis: mode == "truncated",
                 ..Default::default()
             };
             let tokeniser = TiktokenTokeniser::new("claude-sonnet-4-20250514");
@@ -1531,6 +1547,18 @@ mod tests {
                 calls.last().unwrap().failure_reason.is_some(),
                 "synthesis failure recorded"
             );
+            assert!(records[0].diagnosis.as_ref().unwrap().synthesis.is_none());
+            if mode == "truncated" {
+                assert!(
+                    calls
+                        .last()
+                        .unwrap()
+                        .failure_reason
+                        .as_deref()
+                        .unwrap()
+                        .contains("output limit")
+                );
+            }
             assert_eq!(records[1].actual_strategy, THRESHOLD_STRATEGY);
         }
     }
