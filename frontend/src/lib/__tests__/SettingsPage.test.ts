@@ -30,6 +30,7 @@ vi.mock("../api/skills", () => ({
 }));
 
 vi.mock("../api/workflows", () => ({
+  checkSpeechModel: vi.fn(),
   createSchedule: vi.fn(),
   downloadRecoveryExport: vi.fn(),
   exportRecoveryBundle: vi.fn(),
@@ -149,7 +150,7 @@ function emptySettings(): SettingsResponse {
       message_ttl_secs: 86_400,
       expiry_interval_secs: 60,
     },
-    sessions: { archive_after_days: 7 },
+    sessions: { archive_after_days: 7, max_delegation_depth: 4 },
     memory: { curator_idle_minutes: 10 },
     attachments: { accepted_schemes: ["https", "data"] },
     voice: {},
@@ -874,6 +875,35 @@ describe("SettingsPage", () => {
     expect(document.body.textContent).not.toContain("Select a topic before scheduling work.");
   });
 
+  it.each(["0", "1.5", ""])("refuses invalid delegation depth %s without saving", async (value) => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", topicId: null },
+    });
+    await flushUi();
+    const depth = document.querySelector<HTMLInputElement>('input[aria-label="Maximum delegation depth"]')!;
+    depth.value = value;
+    depth.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    await flushUi();
+    expect(settingsApi.saveSettings).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Delegation depth must be a whole number of at least 1.");
+    expect(document.body.textContent).not.toContain("Saved automatically");
+  });
+
+  it("saves the delegation depth from the automation control", async () => {
+    component = mount(SettingsPage, { target: document.body, props: { tab: "automation", topicId: null } });
+    await flushUi();
+    const depth = document.querySelector<HTMLInputElement>('input[aria-label="Maximum delegation depth"]');
+    expect(depth, "Automation exposes the delegation limit").not.toBeNull();
+    expect(depth!.value).toBe("4");
+    depth!.value = "2";
+    depth!.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    const [payload] = vi.mocked(settingsApi.saveSettings).mock.calls[0];
+    expect(payload.sessions?.max_delegation_depth).toBe(2);
+  });
+
   it("autosaves edited image reference schemes from Automation", async () => {
     component = mount(SettingsPage, { target: document.body, props: { tab: "automation" } });
     await flushUi();
@@ -902,7 +932,7 @@ describe("SettingsPage", () => {
     await waitForSaveCall();
 
     const [payload] = vi.mocked(settingsApi.saveSettings).mock.calls[0];
-    expect(payload.sessions).toEqual({ archive_after_days: 14 });
+    expect(payload.sessions).toEqual({ archive_after_days: 14, max_delegation_depth: 4 });
   });
 
   it("explains the archive delay minimum before editing", async () => {
@@ -986,7 +1016,7 @@ describe("SettingsPage", () => {
 
     expect(settingsApi.saveSettings).toHaveBeenCalledTimes(1);
     expect(vi.mocked(settingsApi.saveSettings).mock.calls[0][0].sessions)
-      .toEqual({ archive_after_days: 14 });
+      .toEqual({ archive_after_days: 14, max_delegation_depth: 4 });
     expect(delay.closest(".field")?.querySelector('[role="alert"]')).toBeNull();
     expect(document.body.textContent).toContain("Archive delay saved as 14 days.");
 
@@ -1068,6 +1098,61 @@ describe("SettingsPage", () => {
 
     const [payload] = vi.mocked(settingsApi.saveSettings).mock.calls[0];
     expect(payload.voice).toEqual({ transcription_model: "whisper-1", speech_model: "tts-1" });
+  });
+
+  it("checks the saved speech model, shows upstream failure and allows a successful retry", async () => {
+    let finishSave: ((settings: SettingsResponse) => void) | undefined;
+    const initial = { ...emptySettings(), voice: { speech_model: "old-model" } };
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(initial);
+    vi.mocked(settingsApi.saveSettings).mockImplementationOnce(() => new Promise((resolve) => { finishSave = resolve; }));
+    vi.mocked(workflowApi.checkSpeechModel)
+      .mockRejectedValueOnce(new Error("upstream HTTP 404: speech model not found"))
+      .mockResolvedValueOnce();
+    component = mount(SettingsPage, { target: document.body, props: { tab: "voice", topicId: null } });
+    await flushUi();
+    const check = Array.from(document.querySelectorAll("button")).find((button) => button.textContent?.trim() === "Check speech model");
+    expect(check, "Voice settings must offer a speech check").toBeDefined();
+    const speechDraft = document.querySelector<HTMLInputElement>('input[aria-label="Speech model"]')!;
+    speechDraft.value = "bad-model";
+    speechDraft.dispatchEvent(new Event("input", { bubbles: true }));
+    // Leave a dirty draft so the pending autosave must yield to the check's save.
+    const saved = { ...initial, voice: { ...initial.voice, speech_model: "bad-model" } };
+    check!.click();
+    await flushUi();
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(workflowApi.checkSpeechModel).not.toHaveBeenCalled();
+    expect(settingsApi.saveSettings).toHaveBeenCalledTimes(1);
+    expect(check!.disabled).toBe(true);
+    expect(settingsApi.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ voice: saved.voice }));
+    finishSave!(saved);
+    await flushUi();
+    expect(workflowApi.checkSpeechModel).toHaveBeenCalledTimes(1);
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("HTTP 404: speech model not found");
+    expect(check!.disabled).toBe(false);
+    check!.click();
+    await flushUi();
+    expect(workflowApi.checkSpeechModel).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).toContain("Speech model bad-model is working.");
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    const speech = document.querySelector<HTMLInputElement>('input[aria-label="Speech model"]')!;
+    speech.value = "other-model";
+    speech.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
+    expect(document.body.textContent).not.toContain("bad-model is working");
+  });
+
+  it("does not check speech when saving the settings fails", async () => {
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue({ ...emptySettings(), voice: { speech_model: "tts-1" } });
+    vi.mocked(settingsApi.saveSettings).mockRejectedValueOnce(new Error("settings could not be saved"));
+    component = mount(SettingsPage, { target: document.body, props: { tab: "voice", topicId: null } });
+    await flushUi();
+    const check = Array.from(document.querySelectorAll("button")).find((button) => button.textContent?.trim() === "Check speech model");
+    expect(check, "Voice settings must offer a speech check").toBeDefined();
+    check!.click();
+    await flushUi();
+    expect(workflowApi.checkSpeechModel).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("settings could not be saved");
+    expect(check!.disabled).toBe(false);
   });
 
   it("creates a fresh schedule in the general scope when no topic is selected", async () => {

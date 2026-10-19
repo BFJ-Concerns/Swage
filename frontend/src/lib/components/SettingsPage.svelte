@@ -79,6 +79,13 @@
       ? "Archive delay must be at least 1 day."
       : null,
   );
+  const delegationDepthError = $derived(
+    settings && (nullableNumber(settings.sessions.max_delegation_depth) == null
+      || !Number.isInteger(settings.sessions.max_delegation_depth)
+      || settings.sessions.max_delegation_depth < 1)
+      ? "Delegation depth must be a whole number of at least 1."
+      : null,
+  );
   let status = $state("");
   let error = $state<string | null>(null);
   const HOT_AUTOSAVE_TABS: ReadonlySet<SettingsTabId> = new Set([
@@ -160,6 +167,10 @@
     status = "";
     if (archiveDelayError) {
       error = "Fix the archive delay in Automation before saving. It must be at least 1 day.";
+      return false;
+    }
+    if (delegationDepthError) {
+      error = delegationDepthError;
       return false;
     }
     const archiveDelayChanged = settings.sessions.archive_after_days !== lastSavedArchiveDelay;
@@ -305,7 +316,7 @@
   const shouldAutosaveSettings = $derived(HOT_AUTOSAVE_TABS.has(tab));
 
   $effect(() => {
-    if (!hasLoadedSettings || !shouldAutosaveSettings) return;
+    if (!hasLoadedSettings || !shouldAutosaveSettings || isPersisting) return;
     const fingerprint = settingsFingerprint();
     if (!fingerprint || fingerprint === lastPersistedSettingsFingerprint) return;
 
@@ -381,7 +392,7 @@
       <InformationalSettingsPanel {tab} />
     {:else if tab === "voice"}
       {#if settings}
-        <VoiceSettingsPanel bind:settings />
+        <VoiceSettingsPanel bind:settings onsave={() => persist()} saving={isPersisting} />
       {/if}
     {:else if tab === "recovery"}
       <RecoverySettingsPanel />

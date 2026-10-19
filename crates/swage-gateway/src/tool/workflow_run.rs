@@ -21,6 +21,12 @@ impl Tool for WorkflowRunTool {
     fn name(&self) -> &str {
         "workflow_run"
     }
+    fn display_hints(&self) -> swage_tool::tool::ToolDisplayHints {
+        swage_tool::tool::ToolDisplayHints {
+            summary_param: Some("name"),
+        }
+    }
+
     fn description(&self) -> &str {
         "Start either an available workflow by name or a newly authored workflow from JavaScript source. A request that an available workflow already serves — an unattended research sweep, say — is started here, by name, in the same turn it is asked for, rather than carried out conversationally first. Provide exactly one of name or source. Inline source inherits this session's dispatch bounds and cannot deliver outside the run; use wait=true only when this turn needs the final result. Before authoring source, activate the Workflow Authoring skill: it documents the whole script surface — agent, agentStart, wait, parallel, pipeline, workflow, gate, postEvent, awaitEvent, budget, the meta/defaults headers, and the determinism rules."
     }
@@ -142,6 +148,19 @@ impl Tool for WorkflowRunTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn declared_headline_renders_the_call_argument() {
+        let tool = WorkflowRunTool;
+        assert_eq!(
+            swage_tool::tool::display_summary(
+                &tool.display_hints(),
+                &json!({"name": "research-sweep", "args": {"query": "example"}})
+            )
+            .as_deref(),
+            Some("research-sweep")
+        );
+    }
+
     use std::sync::Arc;
 
     use super::*;

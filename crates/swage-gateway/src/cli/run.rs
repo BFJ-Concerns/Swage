@@ -157,9 +157,11 @@ async fn write_audio_output(
     }
 
     let capabilities = client.voice_capabilities().await?;
-    if !capabilities.synthesis {
+    if !capabilities.synthesis && !capabilities.synthesis_unverified {
         return Err(ClientError::GatewayNotRunning {
-            reason: "gateway runtime does not support voice synthesis".to_string(),
+            reason: capabilities
+                .unavailable_reason
+                .unwrap_or_else(|| "gateway runtime does not support voice synthesis".to_string()),
         });
     }
 

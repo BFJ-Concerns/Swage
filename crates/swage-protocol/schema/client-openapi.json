@@ -5699,10 +5699,17 @@
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
+          },
+          "max_delegation_depth": {
+            "description": "Maximum number of child levels in a delegation chain.",
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
           }
         },
         "required": [
-          "archive_after_days"
+          "archive_after_days",
+          "max_delegation_depth"
         ],
         "type": "object"
       },
@@ -6492,6 +6499,14 @@
           "description": {
             "type": "string"
           },
+          "effective_default_model": {
+            "default": null,
+            "description": "Default model selected by the topic's configuration cascade.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "format": "uuid",
             "type": "string"
@@ -6866,6 +6881,11 @@
             "type": "array"
           },
           "synthesis": {
+            "type": "boolean"
+          },
+          "synthesis_unverified": {
+            "default": false,
+            "description": "Whether the configured speech model's availability is still unverified.",
             "type": "boolean"
           },
           "transcription": {

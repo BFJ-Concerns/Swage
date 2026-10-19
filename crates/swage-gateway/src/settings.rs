@@ -280,7 +280,8 @@ pub async fn save_settings(
         .as_ref()
         .and_then(|providers| providers.entries.as_ref())
         .expect("settings save always writes provider entries");
-    let mut runtime_config = state.active_config();
+    let previous_config = state.active_config();
+    let mut runtime_config = previous_config.clone();
     runtime_config.providers.default = default_provider;
     runtime_config.providers.entries = saved_providers.clone();
     runtime_config.models.default = default_model;
@@ -327,8 +328,19 @@ pub async fn save_settings(
         &state.config_root,
         &state.browser_host,
     );
-    let voice_provider =
-        crate::startup::create_voice_provider(&runtime_config, &state.secret_manager).await;
+    // Keep observed speech failures until the voice configuration changes or a
+    // speech retry succeeds; an unrelated settings save is not a voice check.
+    let voice_provider = if runtime_config.voice == previous_config.voice
+        && runtime_config.providers == previous_config.providers
+        && runtime_config.models == previous_config.models
+        && requested_providers
+            .values()
+            .all(|provider| provider.api_key.as_deref().is_none_or(str::is_empty))
+    {
+        state.active_voice_provider()
+    } else {
+        crate::startup::create_voice_provider(&runtime_config, &state.secret_manager).await
+    };
     state.replace_runtime(runtime_config, provider, tool_dispatcher);
     state.replace_voice_provider(voice_provider);
     let response = load_settings(state).await?;
@@ -2010,6 +2022,119 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_speech_disables_capabilities_and_a_successful_retry_restores_them() {
+        use crate::voice::{SynthesiseSpeechRequest, synthesise_speech, voice_capabilities};
+        use axum::{Router, http::StatusCode, routing::post};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let _home = SwageHomeGuard::new();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counted = requests.clone();
+        let upstream = Router::new().route(
+            "/audio/speech",
+            post(move || {
+                let counted = counted.clone();
+                async move {
+                    if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                        (
+                            StatusCode::NOT_FOUND,
+                            r#"{"error":{"param":"model","code":"model_not_found","message":"speech model not found"}}"#,
+                        )
+                    } else {
+                        (StatusCode::OK, "RIFFAUDIO")
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let storage = Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::new(
+            storage.clone(),
+            storage,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let settings_request = |model: &str| {
+            let mut request =
+                voice_settings_request(Some(swage_protocol::client::settings::VoiceConfig {
+                    transcription_model: Some("whisper".into()),
+                    speech_model: Some(model.into()),
+                }));
+            request.providers.get_mut("local").unwrap().base_url = Some(base_url.clone());
+            request
+        };
+        save_settings(&state, settings_request("not-a-real-audio-model"))
+            .await
+            .unwrap();
+        let request = || SynthesiseSpeechRequest {
+            text: "Check speech.".into(),
+            voice: None,
+            format: None,
+        };
+        let error = synthesise_speech(&state, request()).await.unwrap_err();
+        assert!(error.to_string().contains("404"), "{error}");
+
+        let voice = voice_capabilities(&state).await;
+        assert!(
+            !voice.synthesis,
+            "a provider 404 must stop advertising synthesis"
+        );
+        assert!(
+            voice.transcription,
+            "speech failure must not disable transcription"
+        );
+        let reason = voice.unavailable_reason.unwrap();
+        assert!(
+            reason.contains("404") && reason.contains("not-a-real-audio-model"),
+            "{reason}"
+        );
+        assert!(!crate::capabilities::workflow_capabilities(&state).await.tts);
+
+        save_settings(&state, settings_request("not-a-real-audio-model"))
+            .await
+            .unwrap();
+        let saved_failure = voice_capabilities(&state).await;
+        assert!(
+            !saved_failure.synthesis,
+            "saving unchanged voice settings must retain the observed failure"
+        );
+        assert_eq!(saved_failure.unavailable_reason, Some(reason));
+
+        let recovered = synthesise_speech(&state, request()).await.unwrap();
+        assert_eq!(recovered.audio_bytes, b"RIFFAUDIO");
+        assert!(voice_capabilities(&state).await.synthesis);
+        assert_eq!(voice_capabilities(&state).await.unavailable_reason, None);
+        assert!(crate::capabilities::workflow_capabilities(&state).await.tts);
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        save_settings(&state, settings_request("not-a-real-audio-model"))
+            .await
+            .unwrap();
+        assert!(
+            voice_capabilities(&state).await.synthesis,
+            "saving unchanged voice settings must retain successful validation"
+        );
+        save_settings(&state, settings_request("replacement-speech-model"))
+            .await
+            .unwrap();
+        assert!(!voice_capabilities(&state).await.synthesis);
+        assert!(
+            voice_capabilities(&state)
+                .await
+                .unavailable_reason
+                .unwrap()
+                .contains("has not been checked")
+        );
+        server.abort();
+    }
+
     fn voice_settings_request(
         voice: Option<swage_protocol::client::settings::VoiceConfig>,
     ) -> SaveSettingsRequest {
@@ -2114,6 +2239,72 @@ mod tests {
         assert_eq!(state.active_config().memory.curator_idle_minutes, 45);
     }
 
+    #[tokio::test]
+    async fn delegation_depth_saves_hot_applies_reloads_and_refuses_zero() {
+        let home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::new(
+            storage.clone(),
+            storage,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        assert_eq!(
+            serde_json::to_value(state.active_config().sessions).unwrap()["max_delegation_depth"],
+            4,
+            "the gateway loads the depth default"
+        );
+        let mut request = voice_settings_request(None);
+        request.sessions = Some(
+            serde_json::from_value(
+                serde_json::json!({"archive_after_days": 7, "max_delegation_depth": 2}),
+            )
+            .unwrap(),
+        );
+        let response = save_settings(&state, request.clone()).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(response.sessions).unwrap()["max_delegation_depth"],
+            2
+        );
+        assert_eq!(
+            serde_json::to_value(state.active_config().sessions).unwrap()["max_delegation_depth"],
+            2,
+            "new chains read the saved depth without a restart"
+        );
+        let reloaded = swage_config::load_resolved_config_from(
+            home.path(),
+            &ScopeLocation::General,
+            "default",
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(reloaded.sessions).unwrap()["max_delegation_depth"],
+            2,
+            "the declared setting survives a file reload"
+        );
+        request.sessions = Some(
+            serde_json::from_value(
+                serde_json::json!({"archive_after_days": 7, "max_delegation_depth": 0}),
+            )
+            .unwrap(),
+        );
+        let result = save_settings(&state, request).await;
+        assert!(result.is_err(), "the settings API refuses a zero depth");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("sessions.max_delegation_depth")
+        );
+        assert_eq!(
+            serde_json::to_value(state.active_config().sessions).unwrap()["max_delegation_depth"],
+            2,
+            "a refused save leaves the active setting intact"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn save_settings_hot_applies_voice_model_routes() {
         let swage_home = SwageHomeGuard::new();
@@ -2155,8 +2346,15 @@ mod tests {
         .expect("voice routes should save and hot-apply");
         assert_eq!(response.voice.speech_model.as_deref(), Some("tts-1"));
         let configured = crate::voice::voice_capabilities(&state).await;
-        assert!(configured.transcription && configured.synthesis);
-        assert_eq!(configured.unavailable_reason, None);
+        assert!(configured.transcription);
+        assert!(!configured.synthesis);
+        assert!(
+            configured
+                .unavailable_reason
+                .as_deref()
+                .unwrap()
+                .contains("has not been checked")
+        );
         assert!(!state.restart_required());
 
         let reloaded = swage_config::load_resolved_config_from(
