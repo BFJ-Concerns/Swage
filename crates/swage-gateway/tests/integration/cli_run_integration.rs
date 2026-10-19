@@ -106,29 +106,27 @@ impl VoiceProvider for MockVoiceProvider {
 async fn start_test_server(
     provider: impl LlmProvider + 'static,
     voice_provider: Option<Arc<dyn VoiceProvider>>,
-) -> (SocketAddr, tempfile::TempDir) {
+) -> SocketAddr {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let root = tempfile::tempdir().unwrap();
-    let state = AppState::new_with_config_root(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
         swage_config::ResolvedConfig::default(),
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         None,
-        root.path().to_path_buf(),
     );
     if let Some(voice_provider) = voice_provider {
         state.replace_voice_provider(voice_provider);
     }
     let router: Router = build_router(state);
 
-    (start_live_server(router).await.0, root)
+    start_live_server(router).await.0
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn run_command_streams_response_from_argument_prompt() {
-    let (addr, _root) = start_test_server(
+    let addr = start_test_server(
         MockProvider::new(vec![
             StreamChunk::Delta {
                 content: "hello".into(),
@@ -159,7 +157,7 @@ async fn run_command_streams_response_from_argument_prompt() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn run_command_reads_prompt_from_stdin() {
-    let (addr, _root) = start_test_server(
+    let addr = start_test_server(
         MockProvider::new(vec![
             StreamChunk::Delta {
                 content: "stdin".into(),
@@ -198,7 +196,7 @@ async fn run_command_reads_prompt_from_stdin() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn run_command_supports_audio_input_and_output() {
-    let (addr, _root) = start_test_server(
+    let addr = start_test_server(
         MockProvider::new(vec![
             StreamChunk::Delta {
                 content: "spoken".into(),
@@ -263,7 +261,7 @@ fn run_command_returns_non_zero_when_gateway_is_unreachable() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn run_command_rejects_audio_input_when_voice_support_is_unavailable() {
-    let (addr, _root) = start_test_server(
+    let addr = start_test_server(
         MockProvider::new(vec![StreamChunk::Done {
             finish_reason: None,
         }]),
@@ -321,7 +319,7 @@ async fn run_audio_output_checks_fresh_speech_and_returns_provider_failures() {
             },
         ));
         assert!(!voice.capabilities().synthesis);
-        let (addr, _root) = start_test_server(
+        let addr = start_test_server(
             MockProvider::new(vec![
                 StreamChunk::Delta {
                     content: "hello".into(),
@@ -431,7 +429,7 @@ async fn run_audio_output_rechecks_unverified_speech_but_refuses_stored_failures
         let before = voice.capabilities();
         assert!(!before.synthesis);
         assert_eq!(before.synthesis_unverified, !failed);
-        let (addr, _root) = start_test_server(
+        let addr = start_test_server(
             MockProvider::new(vec![
                 StreamChunk::Delta {
                     content: "hello".into(),

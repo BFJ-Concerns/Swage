@@ -109,7 +109,7 @@ fn research_sweep_id(topic_id: Uuid) -> Uuid {
 
 fn workflow_test_state() -> (AppState, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -964,7 +964,7 @@ async fn resumed_pre_change_agent_call_replays_before_schema_validation() {
         outputs: std::sync::Mutex::new(std::collections::VecDeque::new()),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -1038,7 +1038,7 @@ async fn resumed_run_reapplies_its_persisted_dispatch_bound_after_a_grant_change
         ])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -1047,6 +1047,7 @@ async fn resumed_run_reapplies_its_persisted_dispatch_bound_after_a_grant_change
             Arc::new(NamedTool::new("shell")) as Arc<dyn crate::tool::Tool>
         ]),
         None,
+        swage_home.path().to_path_buf(),
     );
 
     let Json(resumed) = resume_run(State(state.clone()), Path(run.id))
@@ -1155,7 +1156,7 @@ async fn workflow_agent_call_records_requested_skills_in_its_child_report() {
 
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![
@@ -1169,6 +1170,7 @@ async fn workflow_agent_call_records_requested_skills_in_its_child_report() {
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
+        swage_home.path().to_path_buf(),
     );
     let request = |skills| AgentCallRequest {
         agent: Some("workflow-worker".into()),
@@ -1253,7 +1255,7 @@ async fn fresh_topic_workflow_call_grants_a_role_through_its_call_scoped_tools()
         ])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -1724,7 +1726,7 @@ async fn research_sweep_executes_its_gather_organise_and_synthesis_contract() {
         Arc::new(crate::tool::knowledge::KnowledgeCurateOrientationTool)
             as Arc<dyn crate::tool::Tool>,
     ]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -1893,13 +1895,14 @@ async fn workflow_journal_preserves_and_recomposes_call_scoped_context() {
         ])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
+        swage_home.path().to_path_buf(),
     );
     let (tx, rx) = mpsc::unbounded_channel();
     let task = tokio::spawn(run_host_commands(
@@ -2269,7 +2272,7 @@ impl WorkingBudgetScaffold {
             .await
             .expect("run");
         let pending_call_started = Arc::new(Notify::new());
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(PendingWorkingProvider {
@@ -3052,7 +3055,7 @@ async fn started_effect_entry() -> (AppState, Arc<SqliteStorage>, Uuid, Uuid) {
         })
         .await
         .expect("started entry");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -3332,7 +3335,7 @@ async fn cancelling_an_in_flight_effect_leaves_its_entry_started() {
 async fn completed_and_failed_journal_broadcasts_match_persisted_entries() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -3495,7 +3498,7 @@ async fn token_reservation_refuses_a_concurrent_call_at_admission() {
         })
         .await
         .expect("run");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::PendingProvider),
@@ -3657,7 +3660,7 @@ async fn a_continued_call_lands_on_the_same_worker_session_with_history() {
         ])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -3666,6 +3669,7 @@ async fn a_continued_call_lands_on_the_same_worker_session_with_history() {
             Arc::new(NamedTool::new("shell")) as Arc<dyn crate::tool::Tool>
         ]),
         None,
+        swage_home.path().to_path_buf(),
     );
     let (tx, rx) = mpsc::unbounded_channel();
     let task = tokio::spawn(run_host_commands(
@@ -4052,7 +4056,7 @@ async fn run_held_worker_run(
         outputs: std::sync::Mutex::new(std::collections::VecDeque::from(outputs)),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         match delay {
@@ -4067,6 +4071,7 @@ async fn run_held_worker_run(
             Arc::new(NamedTool::new("knowledge_search")) as Arc<dyn crate::tool::Tool>
         ]),
         None,
+        swage_home.path().to_path_buf(),
     );
     launch_existing_run(state.clone(), run.clone(), source.into(), None)
         .await
@@ -4237,7 +4242,7 @@ async fn a_held_worker_carries_its_first_turn_into_its_second_and_records_its_li
         .update_workflow_run_state(run.id, "interrupted", None, None, None)
         .await
         .expect("simulate process interruption");
-    let replay_state = AppState::new(
+    let replay_state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -4567,13 +4572,14 @@ async fn worker_staleness_uses_the_hot_applied_route_threshold() {
     let worker_dir = swage_home.path().join("general/agents/worker");
     std::fs::create_dir_all(&worker_dir).expect("create worker config directory");
     std::fs::write(worker_dir.join("config.toml"), "").expect("write worker config");
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
         held_worker_route_config(None),
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
+        swage_home.path().to_path_buf(),
     );
     let Json(started) = start_inline_run(
         State(state.clone()),
@@ -4704,7 +4710,7 @@ async fn a_bare_worker_completes_with_dispatch_bounded_tools_and_an_agentless_jo
         )])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -4713,6 +4719,7 @@ async fn a_bare_worker_completes_with_dispatch_bounded_tools_and_an_agentless_jo
             Arc::new(NamedTool::new("shell")) as Arc<dyn crate::tool::Tool>
         ]),
         None,
+        swage_home.path().to_path_buf(),
     );
     launch_existing_run(state.clone(), run.clone(), source.into(), None)
         .await
@@ -4805,7 +4812,7 @@ async fn identified_schema_exhaustion_returns_its_failure_envelope_and_replays_w
         ])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -4974,7 +4981,7 @@ async fn workflow_launched_by_a_placed_worker_keeps_its_exact_filesystem_authori
         .await
         .expect("placed session");
     let outputs = std::collections::VecDeque::from([scripted_text_output("work complete")]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(ScriptedRecordingProvider {
@@ -5101,7 +5108,7 @@ async fn workflow_launches_carry_task_bounds_and_fail_closed_when_the_task_disap
         },
         ..Default::default()
     };
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -5236,7 +5243,7 @@ async fn workflow_launches_preserve_call_scoped_tools_through_nested_runs() {
         },
         ..Default::default()
     };
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -5342,7 +5349,7 @@ async fn workflow_dispatch_re_resolves_and_applies_named_tasks() {
         },
         ..Default::default()
     };
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -5512,7 +5519,7 @@ async fn worktree_provisioning_journal_replays_lists_and_rejects_changed_argumen
         .await
         .expect("run");
     let make_state = || {
-        AppState::new(
+        AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(ScriptedRecordingProvider {
@@ -5746,7 +5753,7 @@ async fn workflow_read_only_attachment_placement_stays_read_only() {
         ],
         scripted_text_output("read succeeded and write was refused"),
     ]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(ScriptedRecordingProvider {
@@ -5836,7 +5843,7 @@ async fn live_workflow_workers_write_only_inside_their_own_worktrees() {
     let topic = storage.general_scope().await.unwrap();
     grant_workspace(storage.as_ref(), topic.id, &repo).await;
     let placement_tool = Arc::new(PlacementWriteTool::default());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(PlacementWritingProvider::default()),
@@ -6179,7 +6186,7 @@ async fn parallel_cwd_placement_replays_in_dispatch_order() {
         ])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -6278,7 +6285,7 @@ async fn timed_out_agent_call_is_cancelled_journalled_and_replayed_without_reinv
         outputs: std::sync::Mutex::new(std::collections::VecDeque::new()),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -6388,7 +6395,7 @@ async fn parent_cancellation_wins_over_a_configured_agent_call_timeout() {
         outputs: std::sync::Mutex::new(std::collections::VecDeque::new()),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -6567,7 +6574,7 @@ async fn parked_cancellation_losing_to_a_wake_keeps_the_resumed_runs_account() {
         .expect("run");
     let provider_started = Arc::new(Notify::new());
     let provider_release = Arc::new(Notify::new());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(ReleasableProvider {
@@ -6647,7 +6654,7 @@ async fn parked_cancellation_losing_after_return_withdraws_its_retention_claim()
     grant_workspace(storage.as_ref(), topic.id, &repo).await;
     let placement_tool = Arc::new(PlacementWriteTool::default());
     let worktree_root = fixture.path().join("worker-worktrees");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(PlacementWritingProvider::default()),
@@ -6784,7 +6791,7 @@ async fn stale_parked_cancellation_preserves_a_failed_winner_retention_claim() {
     let topic = storage.general_scope().await.expect("topic");
     grant_workspace(storage.as_ref(), topic.id, &repo).await;
     let worktree_root = fixture.path().join("worker-worktrees");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(PlacementWritingProvider::default()),
@@ -6915,7 +6922,7 @@ async fn a_continuation_token_the_run_does_not_own_is_refused() {
         })
         .await
         .expect("foreign session");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::PendingProvider),
@@ -7128,7 +7135,7 @@ async fn event_gate_fixture<P: swage_provider::LlmProvider + 'static>(
         })
         .await
         .expect("run");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         provider,
@@ -7204,7 +7211,7 @@ async fn configured_event_gate_fixture_with_models(
         })
         .await
         .expect("run");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         provider,
@@ -7443,7 +7450,7 @@ async fn a_hold_is_invisible_and_unanswerable_from_another_topic() {
     )
     .await
     .expect("a second topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -7521,7 +7528,7 @@ async fn a_hold_is_invisible_and_unanswerable_from_another_topic() {
 async fn a_held_run_parks_until_an_agent_answers_it_through_the_tool() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -7652,7 +7659,7 @@ async fn answering_either_concurrent_hold_advances_the_workflow() {
         };
         let second = &holds[1];
 
-        answer_run_hold(
+        Box::pin(answer_run_hold(
             &state,
             AnswerWorkflowRunHoldRequest {
                 hold_id: second.id,
@@ -7665,7 +7672,7 @@ async fn answering_either_concurrent_hold_advances_the_workflow() {
                 session_id: None,
                 turn_id: None,
             },
-        )
+        ))
         .await
         .expect("answer the later concurrent hold");
 
@@ -7754,7 +7761,7 @@ async fn answering_the_first_concurrent_hold_advances_the_workflow() {
             "the second hold is still open when the first decision is answered"
         );
 
-        answer_run_hold(
+        Box::pin(answer_run_hold(
             &state,
             AnswerWorkflowRunHoldRequest {
                 hold_id: first.id,
@@ -7767,7 +7774,7 @@ async fn answering_the_first_concurrent_hold_advances_the_workflow() {
                 session_id: None,
                 turn_id: None,
             },
-        )
+        ))
         .await
         .expect("answer the first concurrent hold");
 
@@ -7788,7 +7795,7 @@ async fn answering_the_first_concurrent_hold_advances_the_workflow() {
 async fn an_answer_outside_the_hold_s_set_is_refused_with_feedback_and_the_hold_keeps_waiting() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -7879,7 +7886,7 @@ async fn an_answer_outside_the_hold_s_set_is_refused_with_feedback_and_the_hold_
 async fn a_rejected_answer_cannot_be_recorded_after_the_hold_closes() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -7935,7 +7942,7 @@ async fn a_rejected_answer_cannot_be_recorded_after_the_hold_closes() {
         "the storage write must recheck the hold and run state"
     );
 
-    let error = answer_run_hold(
+    let error = Box::pin(answer_run_hold(
         &state,
         AnswerWorkflowRunHoldRequest {
             hold_id: hold.id,
@@ -7948,7 +7955,7 @@ async fn a_rejected_answer_cannot_be_recorded_after_the_hold_closes() {
             session_id: None,
             turn_id: None,
         },
-    )
+    ))
     .await
     .expect_err("a closed hold cannot record a rejected answer");
     assert_eq!(
@@ -7969,7 +7976,7 @@ async fn a_rejected_answer_cannot_be_recorded_after_the_hold_closes() {
 async fn run_detail_counts_what_is_still_waiting_what_was_decided_and_what_was_refused() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -8055,7 +8062,7 @@ async fn run_detail_counts_what_is_still_waiting_what_was_decided_and_what_was_r
 async fn a_hold_offering_fewer_than_two_verdicts_is_refused_at_raise() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -8119,7 +8126,7 @@ async fn a_hold_offering_fewer_than_two_verdicts_is_refused_at_raise() {
 async fn cancelling_a_run_waiting_on_a_hold_closes_the_unanswered_decision() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -8214,7 +8221,7 @@ async fn parked_on_a_hold(
 async fn an_answered_hold_reaches_its_script_after_a_crash_before_the_resume() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -8254,7 +8261,7 @@ async fn an_answered_hold_reaches_its_script_after_a_crash_before_the_resume() {
 async fn a_hold_recovered_behind_a_settled_sequential_hold_parks() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -8281,7 +8288,7 @@ async fn a_hold_recovered_behind_a_settled_sequential_hold_parks() {
     wait_for_run_state(&storage, started.id, "parked").await;
     wait_for_active_workflow_run_release(&state, started.id).await;
     let first_id = wait_for_open_hold(&storage, started.id).await;
-    answer_run_hold(
+    Box::pin(answer_run_hold(
         &state,
         AnswerWorkflowRunHoldRequest {
             hold_id: first_id,
@@ -8294,7 +8301,7 @@ async fn a_hold_recovered_behind_a_settled_sequential_hold_parks() {
             session_id: None,
             turn_id: None,
         },
-    )
+    ))
     .await
     .expect("answer the first hold");
     // The run resumes on the first verdict and parks on the second.
@@ -8329,7 +8336,7 @@ async fn a_hold_recovered_behind_a_settled_sequential_hold_parks() {
     .expect("a recovered sequential hold parks its run");
     wait_for_active_workflow_run_release(&state, started.id).await;
 
-    answer_run_hold(
+    Box::pin(answer_run_hold(
         &state,
         AnswerWorkflowRunHoldRequest {
             hold_id: second_id,
@@ -8342,7 +8349,7 @@ async fn a_hold_recovered_behind_a_settled_sequential_hold_parks() {
             session_id: None,
             turn_id: None,
         },
-    )
+    ))
     .await
     .expect("answer the second hold");
     let completed = wait_for_run_state(&storage, started.id, "completed").await;
@@ -8356,7 +8363,7 @@ async fn a_hold_recovered_behind_a_settled_sequential_hold_parks() {
 async fn an_answer_that_loses_to_a_cancellation_launches_no_engine() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -8370,7 +8377,7 @@ async fn an_answer_that_loses_to_a_cancellation_launches_no_engine() {
     let answering = tokio::spawn({
         let state = state.clone();
         async move {
-            answer_run_hold(
+            Box::pin(answer_run_hold(
                 &state,
                 AnswerWorkflowRunHoldRequest {
                     hold_id,
@@ -8383,7 +8390,7 @@ async fn an_answer_that_loses_to_a_cancellation_launches_no_engine() {
                     session_id: None,
                     turn_id: None,
                 },
-            )
+            ))
             .await
         }
     });
@@ -8451,7 +8458,7 @@ async fn an_answer_that_loses_to_a_cancellation_launches_no_engine() {
 async fn a_cancellation_that_loses_to_an_answer_leaves_the_resumed_run_alone() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -8521,7 +8528,7 @@ async fn a_cancellation_that_loses_to_an_answer_leaves_the_resumed_run_alone() {
 async fn a_failed_run_closes_a_decision_it_can_no_longer_receive() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -8581,7 +8588,7 @@ async fn a_failed_run_closes_a_decision_it_can_no_longer_receive() {
 async fn operator_event_wakes_awaiting_run_and_replay_returns_recorded_answer() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -8735,7 +8742,7 @@ async fn shipped_holds_acknowledge_only_the_answered_request_across_replay() {
         ] {
             let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
             let topic = storage.general_scope().await.expect("topic");
-            let make_state = || AppState::new(
+            let make_state = || AppState::for_test(
                 Arc::clone(&storage) as Arc<dyn Storage>, Arc::clone(&storage) as Arc<dyn TopicStore>,
                 Arc::new(crate::turn::tests::MockProvider::new(vec![])),
                 swage_config::ResolvedConfig::default(), crate::tool::ToolDispatcher::allow_all(vec![]), None,
@@ -8857,7 +8864,7 @@ async fn exact_event_acknowledgement_recovers_after_stamp_before_journal_settlem
 async fn sequential_same_kind_awaits_each_receive_one_queued_event() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -8943,7 +8950,7 @@ async fn sequential_same_kind_awaits_each_receive_one_queued_event() {
 async fn replay_recovers_event_claimed_before_await_journal_completion() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -9033,7 +9040,7 @@ async fn replay_recovers_event_claimed_before_await_journal_completion() {
 async fn script_event_operations_reject_invalid_kinds_without_journalling_them() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -10514,7 +10521,7 @@ async fn the_wake_pass_resumes_interrupted_and_due_parked_runs() {
         .set_workflow_run_parked(sleeping.id, chrono::Utc::now() + chrono::Duration::hours(1))
         .await
         .expect("park future");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::PendingProvider),
@@ -10707,7 +10714,7 @@ async fn startup_recovery_redrives_a_continuation_after_its_worker_turn_was_orph
         )])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         provider.clone(),
@@ -10851,7 +10858,7 @@ async fn token_reservation_settlement_releases_estimate_and_retains_actual_spend
         .await
         .expect("run");
     let pending_call_started = Arc::new(Notify::new());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(SettlementProvider {
@@ -11187,7 +11194,7 @@ async fn replayed_started_calls_hold_token_reservations_until_settlement() {
         .list_workflow_journal(run.id)
         .await
         .expect("journal");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::PendingProvider),
@@ -11328,7 +11335,7 @@ async fn replay_latches_wind_down_only_after_a_started_working_call_settles() {
         ])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -11521,7 +11528,7 @@ async fn assert_replayed_wind_down_transition(completed_transition: bool) {
         )])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -11751,7 +11758,7 @@ async fn replayed_started_closing_call_keeps_its_reserved_partition() {
         )])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -11896,7 +11903,7 @@ async fn resumed_run_excludes_journalled_refusal_from_agent_call_count() {
         .update_workflow_run_state(run.id, "interrupted", None, None, None)
         .await
         .expect("interrupt run");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![
@@ -11939,7 +11946,7 @@ async fn resumed_run_excludes_journalled_refusal_from_agent_call_count() {
 async fn inline_run_returns_detached_and_completes_from_recorded_args() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -12072,7 +12079,7 @@ async fn invalid_inline_agent_prompt_fails_after_journalling_valid_work() {
         )])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -12141,7 +12148,7 @@ async fn inline_run_without_reserve_keeps_hard_ceiling_behaviour() {
         )),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -12215,7 +12222,7 @@ async fn exhausted_schema_agent_call_completes_without_a_durable_handover() {
         )),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -12324,7 +12331,7 @@ async fn ordinary_failed_agent_call_keeps_interrupted_handover_event_accounting(
         ]])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -12596,7 +12603,7 @@ async fn caught_agent_failure_does_not_blame_the_call_for_a_later_script_error()
         ]])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -12701,7 +12708,7 @@ async fn failed_call_reconstruction_failure_still_leaves_a_handover() {
         .fail_workflow_journal_entry(mismatched.id, "AgentCallError: terminal failure")
         .await
         .expect("failed journal entry");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -12788,7 +12795,7 @@ async fn uncaught_recorded_agent_failure_replays_without_provider_work_and_keeps
         outputs: std::sync::Mutex::new(std::collections::VecDeque::new()),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -12848,7 +12855,7 @@ async fn a_handover_record_outside_the_contract_is_rejected_not_passed_through()
         )
         .await
         .expect("stored blob");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -12880,7 +12887,7 @@ async fn budget_snapshot_funds_the_following_closing_segment_from_the_reserve() 
         )),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -13071,7 +13078,7 @@ async fn terminal_budget_is_read_back_and_replayed_without_recomputation() {
         )),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -13205,7 +13212,7 @@ async fn terminal_budget_audit_failure_preserves_the_engine_outcome() {
         })
         .await
         .expect("install terminal audit failure trigger");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -13268,7 +13275,7 @@ async fn attempt_five_snapshot_enters_wind_down_through_the_consumer_expression(
         ])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -13347,7 +13354,7 @@ async fn snapshot_led_closing_calls_remain_bounded_by_the_closing_partition() {
         ])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -13421,7 +13428,7 @@ async fn failed_snapshot_led_closing_call_keeps_its_attributed_handover() {
         ])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -13497,7 +13504,7 @@ async fn saved_run_winds_down_into_reserve_and_replays_the_boundary() {
         )),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -13632,7 +13639,7 @@ async fn failed_refusal_transition_only_latches_wind_down_through_a_later_snapsh
         )),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -13726,7 +13733,7 @@ async fn failed_refusal_transition_completion_does_not_latch_on_replay() {
         )),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -13907,7 +13914,7 @@ async fn snapshot_transition_completion_retries_before_latching_on_resume() {
         ])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -14069,7 +14076,7 @@ async fn resume_substitutes_completed_delivery_without_posting_again() {
 
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -14119,7 +14126,7 @@ async fn resume_substitutes_completed_delivery_without_posting_again() {
 async fn saved_run_projects_script_version_and_parallel_failure_log() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -14182,7 +14189,7 @@ async fn composed_run_executes_the_child_and_journals_its_output() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
     let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -14297,7 +14304,7 @@ async fn fresh_author_errors_fail_before_agent_or_workflow_intents() {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let topic = storage.general_scope().await.expect("topic");
         let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -14364,7 +14371,7 @@ async fn unknown_agent_option_run_records_its_name_without_worker_dispatch() {
         )])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -14423,7 +14430,7 @@ async fn a_caught_missing_workflow_keeps_positional_replay_dense() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
     let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -14549,7 +14556,7 @@ async fn invalid_placed_agent_schema_fails_before_worktree_provisioning() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
     grant_workspace(storage.as_ref(), topic.id, &repo).await;
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -14618,7 +14625,7 @@ async fn a_child_run_cannot_compose_further() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
     let _skill_root = crate::skill::TestSkillRootGuard::empty(topic.id);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -14687,7 +14694,7 @@ async fn a_child_run_cannot_compose_further() {
 async fn timer_won_wait_is_journalled_and_replays_the_same_winner() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -14822,7 +14829,7 @@ async fn route_budgets_isolate_admission_and_journal_their_balances() {
         },
         ..Default::default()
     };
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -15178,7 +15185,7 @@ async fn resumed_route_keeps_its_recorded_closing_limit() {
         "resume restores the route's original closing boundary"
     );
     let config = route_test_config("alpha", "alpha-route");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -15392,7 +15399,7 @@ async fn replay_completes_a_started_route_wind_down_once() {
         .await
         .expect("replay journal");
     let accounting = terminal_budget_accounting_from_journal(&replay, &budget);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(FixedUsageProvider),
@@ -15536,7 +15543,7 @@ async fn resumed_unconfigured_route_spend_uses_the_fallback_ledger() {
         &replay, &budget,
     )));
     let config = route_test_config("unconfigured", "unconfigured-route");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -15731,7 +15738,7 @@ async fn recovery_does_not_readmit_a_started_route_call_after_later_spend() {
         ])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -15838,7 +15845,7 @@ async fn a_resumed_call_spends_the_route_that_serves_after_a_config_change() {
         .await
         .expect("replay journal");
     // The model has moved to another provider since the run was interrupted.
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(FixedUsageProvider),
@@ -15926,7 +15933,7 @@ async fn a_resumed_fallback_call_spends_the_route_that_served_it() {
         ])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -16015,7 +16022,7 @@ async fn a_configured_default_route_keeps_its_own_spend_across_replay() {
          whatever it is called"
     );
     assert_eq!(accounting.default.spent, 0);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -16097,7 +16104,7 @@ async fn an_unknown_model_fails_as_its_own_error_on_a_spent_fallback_ledger() {
         outputs: std::sync::Mutex::new(std::collections::VecDeque::new()),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -16243,7 +16250,7 @@ async fn a_working_route_call_settling_after_wind_down_keeps_the_closing_allowan
     let run_id = empty_journal_run(&storage, topic.id).await;
     let first_call_started = Arc::new(Notify::new());
     let release_first_call = Arc::new(Notify::new());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(HeldFirstCallProvider {
@@ -16404,7 +16411,7 @@ async fn fallback_test_state_with_tools(
         outputs: std::sync::Mutex::new(outputs.into()),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -17414,7 +17421,7 @@ async fn stored_worker_liveness(
 async fn failed_worker_persists_liveness_after_live_overlay_is_evicted() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(ScriptedRecordingProvider {
@@ -17795,7 +17802,7 @@ fn scripted_state(
         outputs: std::sync::Mutex::new(std::collections::VecDeque::from(outputs)),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(storage) as Arc<dyn Storage>,
         Arc::clone(storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -18350,7 +18357,7 @@ async fn worker_call_record_fixture(
         })
         .await
         .expect("run");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         provider as Arc<dyn swage_provider::LlmProvider>,
@@ -18897,7 +18904,7 @@ async fn unavailable_usage_closes_the_token_gate_and_marks_budget_readings_incom
         ])),
         requests: std::sync::Mutex::new(Vec::new()),
     });
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -19010,7 +19017,7 @@ async fn unavailable_usage_closes_only_its_configured_route() {
             ..Default::default()
         },
     );
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::clone(&provider) as Arc<dyn swage_provider::LlmProvider>,
@@ -19254,7 +19261,7 @@ async fn a_worker_cancelled_mid_round_reads_cut_short_not_failed() {
         .expect("run");
     let round_opened = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(GatedRoundProvider {
