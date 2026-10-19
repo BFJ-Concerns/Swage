@@ -6420,6 +6420,11 @@
           "synthesis": {
             "type": "boolean"
           },
+          "synthesis_unverified": {
+            "default": false,
+            "description": "Whether the configured speech model's availability is still unverified.",
+            "type": "boolean"
+          },
           "transcription": {
             "type": "boolean"
           },
