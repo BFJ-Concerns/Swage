@@ -115,24 +115,25 @@ pub fn load_resolved_config_from(
     )
 }
 
-/// Load the gateway's running configuration: the global layer and, where the
-/// gateway is started under a topic, that topic's layer — never an agent's,
-/// since agent layers belong to sessions and are overlaid per turn.
+/// Load the gateway's running configuration: the global layer alone. Topic
+/// and agent layers belong to sessions and are overlaid per turn, so nothing
+/// at startup selects a scope into the running configuration.
 ///
 /// Resolves the Swage root via `$SWAGE_HOME` / `~/.swage/`, then delegates
 /// to [`load_running_config_from`].
-pub fn load_running_config(scope: &ScopeLocation) -> Result<ResolvedConfig, ConfigError> {
+pub fn load_running_config() -> Result<ResolvedConfig, ConfigError> {
     let root = discovery::resolve_root().map_err(|p| ConfigError::new(vec![p]))?;
-    load_running_config_from(&root, scope)
+    load_running_config_from(&root)
 }
 
 /// Load the gateway's running configuration from an explicit root directory
 /// (see [`load_running_config`]).
-pub fn load_running_config_from(
-    root: &Path,
-    scope: &ScopeLocation,
-) -> Result<ResolvedConfig, ConfigError> {
-    resolve_layers(root, None, &configuration_hierarchy(root, scope, None))
+pub fn load_running_config_from(root: &Path) -> Result<ResolvedConfig, ConfigError> {
+    resolve_layers(
+        root,
+        None,
+        &configuration_hierarchy(root, &ScopeLocation::General, None),
+    )
 }
 
 /// Overlay a session's scope layers — its topic's `config.toml` and
@@ -677,7 +678,7 @@ api_key = "x"
             "[providers.entries.codex]\nprotocol = \"codex\"\n",
         )
         .unwrap();
-        let error = load_running_config_from(tmp.path(), &ScopeLocation::General)
+        let error = load_running_config_from(tmp.path())
             .expect_err("file loading still refuses the built-in Codex protocol");
         assert!(error.to_string().contains("temporarily disabled"));
         let session = overlay_scope_layers(running.clone(), tmp.path(), &scope, "bot")
@@ -742,7 +743,7 @@ api_key = "x"
             "default",
             None,
         );
-        let running = load_running_config_from(tmp.path(), &ScopeLocation::General).unwrap();
+        let running = load_running_config_from(tmp.path()).unwrap();
         let scope = ScopeLocation::topic("proj");
         let file_based = load_resolved_config_from(tmp.path(), &scope, "default").unwrap();
         assert_eq!(
@@ -771,7 +772,7 @@ api_key = "x"
     }
 
     #[test]
-    fn the_running_configuration_takes_no_agent_layer() {
+    fn the_running_configuration_is_the_global_layer_alone() {
         let tmp = TempDir::new().unwrap();
         build_fixture(
             tmp.path(),
@@ -782,14 +783,11 @@ api_key = "x"
             Some("[server]\nport = 9200\n"),
         );
 
-        let general =
-            load_running_config_from(tmp.path(), &ScopeLocation::General).expect("global layer");
-        assert_eq!(general.server.port, 9000);
-        let under_topic = load_running_config_from(tmp.path(), &ScopeLocation::topic("proj"))
-            .expect("global and topic layers");
+        let running = load_running_config_from(tmp.path()).expect("global layer");
+
         assert_eq!(
-            under_topic.server.port, 9100,
-            "a gateway started under a topic takes that topic's layer and never an agent's"
+            running.server.port, 9000,
+            "topic and agent layers belong to sessions and reach the running configuration only through a turn's overlay"
         );
     }
 }

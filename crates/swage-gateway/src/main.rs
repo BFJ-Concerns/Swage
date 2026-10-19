@@ -108,18 +108,14 @@ async fn main() {
     // --server-mode is set when we re-exec ourselves as a background daemon.
     // Skip all CLI dispatch and run the gateway directly.
     if cli.server_mode {
-        let (port, host, config) = match &cli.command {
+        let (port, host) = match &cli.command {
             Some(Command::Gateway(args)) => match &args.command {
-                GatewayCommand::Start(start_args) => (
-                    start_args.port,
-                    start_args.host.clone(),
-                    start_args.config.clone(),
-                ),
-                _ => (None, None, None),
+                GatewayCommand::Start(start_args) => (start_args.port, start_args.host.clone()),
+                _ => (None, None),
             },
-            _ => (None, None, None),
+            _ => (None, None),
         };
-        swage_gateway::startup::run_gateway(port, host, config).await;
+        swage_gateway::startup::run_gateway(port, host).await;
         return;
     }
 
@@ -244,8 +240,6 @@ mod tests {
             "8080",
             "--host",
             "0.0.0.0",
-            "--config",
-            "/tmp/swage.toml",
         ])
         .unwrap();
         assert!(cli.server_mode);
@@ -258,7 +252,6 @@ mod tests {
         };
         assert_eq!(args.port, Some(8080));
         assert_eq!(args.host.as_deref(), Some("0.0.0.0"));
-        assert_eq!(args.config.as_deref(), Some("/tmp/swage.toml"));
     }
 
     #[test]
