@@ -138,6 +138,34 @@ describe("WorkflowRunDetail", () => {
     );
   });
 
+  it("leads with worker metadata and expands a collapsed long briefing", async () => {
+    const prompt = "Read the recorded state carefully. ".repeat(100) + "Final instruction.";
+    await render(runWith({ ...baseCall, dispatch: { ...baseCall.dispatch!,
+      prompt, requested_model: "asked-model", requested_effort: "high",
+      placement: { path: "/workspace/worker", can_write: true },
+    } }));
+    const card = document.querySelector(".call")!;
+    const briefing = card.querySelector("details")!;
+    expect(briefing).not.toBeNull();
+    expect(briefing.open).toBe(false);
+    const summary = briefing.querySelector("summary")!;
+    expect(summary.textContent).toContain("Expand");
+    expect(summary.textContent!.length).toBeLessThan(220);
+    expect(summary.textContent).not.toContain("Final instruction.");
+    for (const text of ["Finished", "asked-model", "high", "test-model", "low", "/workspace/worker", "Provider rounds"]) {
+      const metadata = [...card.querySelectorAll("dt, dd")].find((node) => node.textContent?.includes(text));
+      expect(metadata, text).toBeDefined();
+      expect(metadata!.compareDocumentPosition(briefing) & Node.DOCUMENT_POSITION_FOLLOWING, text).not.toBe(0);
+    }
+    const roundLabel = [...card.querySelectorAll("dt")].find((node) => node.textContent === "Provider rounds")!;
+    expect(roundLabel.nextElementSibling?.textContent).toBe("1");
+    summary.click();
+    expect(briefing.open).toBe(true);
+    expect(briefing.querySelector(".prompt")?.textContent).toBe(prompt);
+    summary.click();
+    expect(briefing.open).toBe(false);
+  });
+
   it("shows what the worker was dispatched with and what it resolved", async () => {
     await render(runWith(baseCall));
 
