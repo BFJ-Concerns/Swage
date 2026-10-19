@@ -61,6 +61,16 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- New topic sessions select the topic’s configured default model, including API requests without a model; topic settings show the effective default and fresh composers preselect it.
+- A topic whose configuration cannot be read still appears in the topic list, and its composer offers no model, instead of the whole list failing and the web UI failing to load.
+- Topic settings distinguish loading from an empty workspace list and offer a retry after any topic-settings load failure.
+- Long topic names use a compact heading so workspace controls stay in view.
+- Tool results display readable output, including JSON embedded in quoted text, with raw envelopes behind a disclosure.
+- Tool-call headers show file-edit paths and workflow names, with readable object and array fallbacks.
+- Degradation-triggered succession carries established results, completed tool outcomes and current work alongside its diagnosis, including when the diagnosis is reused on later turns.
+- Runtime fallback compaction keeps tool calls with their results across summarisation and both truncation tiers, preventing orphaned results in later model requests.
+- Anthropic messages completions accept thinking blocks alongside text, so conversation summaries and degradation diagnosis calls can decode the proxy’s responses.
+
 - The published settings schemas require a delegation depth of at least one, matching settings validation.
 - Delegated sessions keep their chain depth and creation-time limit on later turns and named continuations; changed limits apply to fresh chains.
 - External agent messages refuse delegation beyond the sender’s chain limit before creating a child, and record the depth reason.
