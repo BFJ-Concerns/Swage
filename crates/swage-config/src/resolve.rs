@@ -126,8 +126,11 @@ pub fn load_resolved_config_from(
         .map(|(level, path)| (level.clone(), path.as_path()))
         .collect::<Vec<_>>();
 
-    match instructions::assemble_instructions(&level_refs) {
-        Ok(text) => resolved.instructions = text,
+    match instructions::assemble_instructions_with_sources(&level_refs) {
+        Ok((text, sources)) => {
+            resolved.instructions = text;
+            resolved.instruction_sources = sources;
+        }
         Err(problem) => return Err(ConfigError::new(vec![problem])),
     }
 
@@ -152,6 +155,7 @@ pub fn apply_overlay(base: ResolvedConfig, overlay: PartialConfig) -> ResolvedCo
     // instructions, the caller should set resolved.instructions directly.
     if resolved.instructions.is_empty() {
         resolved.instructions = base.instructions;
+        resolved.instruction_sources = base.instruction_sources;
     }
 
     resolved

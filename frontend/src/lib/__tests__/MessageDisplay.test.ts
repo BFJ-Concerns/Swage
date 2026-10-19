@@ -84,6 +84,7 @@ function makeConversationStore(
   const detail: ConversationDetail = {
     id: "conv-1",
     agent_id: "gateway",
+    agent_display_name: "Swage default",
     topic_id: "proj-1",
     created_at: "2026-03-20T10:00:00Z",
     last_activity: "2026-03-20T10:00:00Z",
@@ -574,6 +575,7 @@ describe("turns that ended without a reply, as loaded", () => {
     vi.spyOn(api, "createConversation").mockResolvedValue({
       id: "conv-live",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: "proj-1",
       created_at: "2026-03-20T10:00:00Z",
       last_activity: "2026-03-20T10:00:00Z",

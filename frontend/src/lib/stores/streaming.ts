@@ -48,6 +48,8 @@ export interface ProviderRetryState {
  * outside this projection so callers can select the state for the surface
  * they are rendering. */
 export interface ConversationStreamState {
+  /** Destination of the live reply; null denotes the root thread. */
+  readonly threadId: string | null;
   readonly isStreaming: boolean;
   readonly activeTurnGeneration: number;
   readonly streamedContent: string;
@@ -193,6 +195,7 @@ export function createStreamingStore(
 
   const streams = new Map<string | null, InternalStreamState>();
   const emptyStream: ConversationStreamState = {
+    threadId: null,
     isStreaming: false,
     activeTurnGeneration: 0,
     streamedContent: "",
@@ -204,6 +207,8 @@ export function createStreamingStore(
   };
 
   function createStreamState(): InternalStreamState {
+    const threadIdStore = writable<string | null>(null);
+    const threadIdState = fromStore(threadIdStore);
     const isStreamingStore = writable(false);
     const streamedContentStore = writable("");
     const turnErrorStore = writable<{ code: string; message: string } | null>(null);
@@ -227,7 +232,8 @@ export function createStreamingStore(
       providerRetryState: fromStore(providerRetryStore),
       pendingApprovalState: fromStore(pendingApprovalStore),
       activeTurnGeneration: 0,
-      threadId: null,
+      get threadId() { return threadIdState.current; },
+      set threadId(value: string | null) { threadIdStore.set(value); },
     };
   }
 
@@ -250,6 +256,7 @@ export function createStreamingStore(
   function streamView(stream: InternalStreamState | undefined): ConversationStreamState {
     if (!stream) return emptyStream;
     return {
+      get threadId() { return stream.threadId; },
       get isStreaming() { return stream.isStreamingState.current; },
       get activeTurnGeneration() { return stream.activeTurnGeneration; },
       get streamedContent() { return stream.streamedContentState.current; },
@@ -593,6 +600,7 @@ export function createStreamingStore(
           // starting, as far as this view is concerned — no client called
           // startTurn for it.
           options?.conversationStore?.clearQueuedMessages?.(event.session_id, event.queued_ids);
+          stream.threadId = event.thread_id;
           stream.streamedContentStore.set("");
           stream.turnErrorStore.set(null);
           stream.activeToolCallsStore.set([]);
@@ -748,6 +756,7 @@ export function withConversationAutoCreate(
     },
     streamFor(conversationId): ConversationStreamState {
       const stream = base.streamFor?.(conversationId) ?? {
+        threadId: null,
         isStreaming: base.isStreaming,
         activeTurnGeneration: base.activeTurnGeneration,
         streamedContent: base.streamedContent,

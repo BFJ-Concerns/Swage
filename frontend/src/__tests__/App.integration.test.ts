@@ -254,6 +254,7 @@ function makeSettings(
     },
     sessions: { archive_after_days: 7 },
     memory: { curator_idle_minutes: 10 },
+    attachments: { accepted_schemes: ["https", "data"] },
     voice: {},
     restart_required: false,
     can_restart: false,
@@ -453,6 +454,7 @@ describe("App", () => {
     const created: ConversationResponse = {
       id: "conv-general",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
     };
@@ -540,6 +542,7 @@ describe("App", () => {
     resolveCreation({
       id: "conv-late",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: topic.id,
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
@@ -731,6 +734,45 @@ describe("App", () => {
     );
   });
 
+  it.each([false, true])("keeps session agent names across topics and reload when definitions fail: %s", async (failDefinitions) => {
+    const firstTopic = makeTopic({ id: "first-topic", name: "First" });
+    const secondTopic = makeTopic({ id: "second-topic", name: "Second" });
+    vi.mocked(topicsApi.listTopics).mockResolvedValue([firstTopic, secondTopic]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValue([]);
+    vi.mocked(conversationsApi.getConversation).mockImplementation(async (id) =>
+      makeConversationDetail({
+        id,
+        topic_id: id === "first-session" ? firstTopic.id : secondTopic.id,
+        agent_id: "shared-reader",
+        agent_display_name: id === "first-session" ? "First reader" : "Second reader",
+      }),
+    );
+    let finishDefinitions!: () => void;
+    vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockImplementation(async (topicId) => {
+      if (topicId === firstTopic.id) return [makeAgentDefinition({ id: "shared-reader", display_name: "First reader" })];
+      await new Promise<void>((resolve) => { finishDefinitions = resolve; });
+      if (failDefinitions) throw new Error("second topic definitions unavailable");
+      return [makeAgentDefinition({ id: "shared-reader", display_name: "Second reader" })];
+    });
+    setPath("/conversations/first-session");
+    component = mount(App, { target: document.body });
+    const label = () => document.querySelector('[aria-label="Session agent"]')?.textContent;
+    await vi.waitFor(() => expect(label()).toBe("First reader"));
+    setPath("/conversations/second-session");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    await vi.waitFor(() => expect(finishDefinitions).toBeTypeOf("function"));
+    await vi.waitFor(() => expect(label()).toBe("Second reader"));
+    finishDefinitions();
+    await settleUi();
+    expect(label()).toBe("Second reader");
+
+    unmount(component);
+    component = undefined;
+    vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockResolvedValue([]);
+    component = mount(App, { target: document.body });
+    await vi.waitFor(() => expect(label()).toBe("Second reader"));
+  });
+
   it("keeps the gateway available when startup agent inventory loading fails", async () => {
     const defaultTopic = makeTopic();
     const linkedConversation = makeConversationSummary({ id: "conv-linked" });
@@ -811,6 +853,7 @@ describe("App", () => {
     const replacementConversation: ConversationResponse = {
       id: "replacement-id",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: "proj-default",
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
@@ -1172,6 +1215,7 @@ describe("App", () => {
     const created: ConversationResponse = {
       id: "conv-new",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: defaultTopic.id,
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
@@ -1227,6 +1271,7 @@ describe("App", () => {
     const createdFromChannel: ConversationResponse = {
       id: "conv-channel-new",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: defaultTopic.id,
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
@@ -1234,6 +1279,7 @@ describe("App", () => {
     const createdFromSidebar: ConversationResponse = {
       id: "conv-sidebar-new",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: defaultTopic.id,
       created_at: "2026-04-07T12:04:00Z",
       last_activity: "2026-04-07T12:04:00Z",
@@ -1317,6 +1363,7 @@ describe("App", () => {
     const created: ConversationResponse = {
       id: "conv-auto",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: defaultTopic.id,
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
@@ -1354,6 +1401,7 @@ describe("App", () => {
     const created: ConversationResponse = {
       id: "conv-agent",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: defaultTopic.id,
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",

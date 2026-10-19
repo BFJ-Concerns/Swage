@@ -169,6 +169,7 @@ pub enum ServerEvent {
     QueueDrained {
         session_id: Uuid,
         turn_id: Uuid,
+        thread_id: Uuid,
         queued_ids: Vec<Uuid>,
     },
     /// Context assembly completed for a turn.

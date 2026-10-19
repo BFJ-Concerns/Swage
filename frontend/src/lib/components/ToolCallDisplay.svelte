@@ -47,6 +47,15 @@
         ? JSON.stringify(toolCall.result, null, 2)
         : "",
   );
+  const resultLink = $derived.by(() => {
+    let result = toolCall.result;
+    if (typeof result === "string") {
+      try { result = JSON.parse(result); } catch { return null; }
+    }
+    if (!result || typeof result !== "object" || !("view_url" in result)) return null;
+    const path = result.view_url;
+    return typeof path === "string" && /^\/(?![\/\\])[^\u0000-\u0020\u007f\\]*$/u.test(path) ? path : null;
+  });
   const isLongResult = $derived(resultText.length >= 500);
 
   // Initialise expansion based on result length.
@@ -140,6 +149,7 @@
 
   <!-- ---- Result block: only shown once the call has completed ---- -->
   {#if toolCall.result !== null}
+    {#if resultLink}<a class="result-link" href={resultLink}>Open result</a>{/if}
     <div class="tool-result" class:collapsed={isLongResult && !isExpanded}>
       {#if isLongResult && !isExpanded}
         <!-- Collapsed view: preview of first ~3 lines. -->
