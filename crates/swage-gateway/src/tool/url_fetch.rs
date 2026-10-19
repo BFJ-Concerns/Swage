@@ -233,7 +233,7 @@ impl Tool for UrlFetchTool {
         };
 
         let retained = RetainedBody {
-            artifact_path: &raw_body_artifact_path.relative,
+            artifact_path: &raw_body_artifact_path.reported,
             media_type: &content_type,
             capture: capture_hint(ctx),
         };

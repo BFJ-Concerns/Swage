@@ -259,6 +259,14 @@ fn compose(
             source: block.source.clone(),
             token_count: tokeniser.count_messages(&block.messages),
             preview: safe_metadata_preview(&block.name, &block.source),
+            full_text: Some(
+                block
+                    .messages
+                    .iter()
+                    .map(ChatMessage::text_content)
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+            ),
             priority: block.priority,
             named_assembly: None,
         })
@@ -1757,5 +1765,34 @@ mod tests {
             resolve_js_assembly("../../outside", &[(HierarchyLevel::Global, &config)]).is_none()
         );
         assert!(resolve_js_assembly("/outside", &[(HierarchyLevel::Global, &config)]).is_none());
+    }
+    #[test]
+    fn inspector_records_the_text_a_named_assembly_actually_composed() {
+        let output = assemble_source(HISTORY_AND_PROMPTS_ONLY, &baseline_bearing_elements());
+        assert!(output.report.errors.is_empty());
+        let report = serde_json::to_value(&output.report).unwrap();
+        let prompts = report["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "prompts")
+            .unwrap();
+        assert_eq!(prompts["full_text"], "operator instructions");
+        let norms = report["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "working_norms")
+            .unwrap();
+        let restored_norms = output
+            .messages
+            .iter()
+            .find(|message| message.text_content().contains("## Working norms"))
+            .expect("restored working norms message");
+        assert_eq!(
+            norms["full_text"],
+            restored_norms.text_content(),
+            "the report must retain the complete restored working norms"
+        );
     }
 }

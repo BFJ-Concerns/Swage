@@ -2,7 +2,7 @@ use super::{
     AgentConfig, AppState, GatewayError, Path, PathBuf, TrustedWorkspacePolicy, Uuid,
     load_trusted_workspace_policy,
 };
-use swage_config::RESERVED_WORKFLOW_AGENT_ID;
+use swage_config::{HierarchyLevel, RESERVED_WORKFLOW_AGENT_ID};
 use swage_core::ScopeLocation;
 
 /// Host-only session metadata carrying every agent context whose effective
@@ -344,13 +344,18 @@ pub(crate) async fn build_agent_config_for_topic_workspace(
         &topic.location(),
         session_id,
     );
-    let agent_config = build_agent_config_with_workspace(
+    let mut agent_config = build_agent_config_with_workspace(
         agent_id,
         config,
         output_schema_override,
         &tool_root.path,
         allowed_paths,
     );
+    agent_config.tool_output_directory = Some(managed_scratch_workspace(
+        &state.config_root,
+        &topic.location(),
+        session_id,
+    ));
     (agent_config, tool_root)
 }
 
@@ -535,6 +540,10 @@ pub(crate) fn apply_agent_definition(
     definition: &swage_storage::NewAgentDefinition,
 ) -> swage_config::ResolvedConfig {
     if !definition.instructions.trim().is_empty() {
+        if !config.instructions.is_empty() && config.instruction_sources.is_empty() {
+            config.instruction_sources.push(HierarchyLevel::Global);
+        }
+        config.instruction_sources.push(HierarchyLevel::Agent);
         if config.instructions.is_empty() {
             config.instructions = definition.instructions.clone();
         } else {
@@ -597,6 +606,10 @@ pub(crate) fn apply_task_definition(
     definition: &swage_storage::TaskDefinition,
 ) -> Result<swage_config::ResolvedConfig, GatewayError> {
     if !definition.instructions.trim().is_empty() {
+        if !config.instructions.is_empty() && config.instruction_sources.is_empty() {
+            config.instruction_sources.push(HierarchyLevel::Global);
+        }
+        config.instruction_sources.push(HierarchyLevel::Agent);
         config.instructions = if config.instructions.is_empty() {
             definition.instructions.clone()
         } else {

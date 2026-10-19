@@ -154,12 +154,9 @@ impl TopicService {
             None => None,
         };
 
-        let tags = req.tags.map(|tags| {
-            tags.into_iter()
-                .map(|tag| tag.trim().to_lowercase())
-                .filter(|tag| !tag.is_empty())
-                .collect::<Vec<_>>()
-        });
+        // The one tag rule (`swage_core::tags`): trimmed, lower-cased, kept
+        // once — the same form the library saves and the catalogue filters by.
+        let tags = req.tags.map(swage_core::tags::canonical_tags);
         let topic = self
             .topic_store
             .update(id, req.name, req.description, new_slug, tags)

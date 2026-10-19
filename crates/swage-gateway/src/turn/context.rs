@@ -37,6 +37,7 @@ use swage_config::RESERVED_WORKFLOW_AGENT_ID;
 /// discard.
 pub(crate) fn build_assembly_elements(
     instructions: &str,
+    instruction_sources: &[HierarchyLevel],
     operator_guidance: Vec<PromptRule>,
     active_skills: Vec<ActiveSkill>,
     history: Vec<ChatMessage>,
@@ -48,25 +49,6 @@ pub(crate) fn build_assembly_elements(
     hierarchy: &[(HierarchyLevel, PathBuf)],
     requested_elements: Option<&[String]>,
 ) -> Vec<Box<dyn ContextElement>> {
-    // Construct a single PromptRule from the resolved instructions string.
-    // The config resolver has already merged hierarchy levels and assembled
-    // the text — we wrap it as a single Global-level rule so the PromptsElement
-    // produces the expected system message.
-    let mut rules = if instructions.is_empty() {
-        vec![]
-    } else {
-        vec![PromptRule {
-            priority: 0,
-            content: instructions.to_string(),
-            source_level: HierarchyLevel::Global,
-            file_path: PathBuf::from("resolved-instructions"),
-        }]
-    };
-    // Operator guidance extends the resolved baseline rather than replacing
-    // it: the rules arrive pre-ordered (global config root before trusted
-    // workspace roots) and append after the resolved instructions.
-    rules.extend(operator_guidance);
-
     let mut elements: Vec<Box<dyn ContextElement>> = vec![
         Box::new(OrientationElement::new(environment, available_skills)),
         Box::new(swage_context::current_time::CurrentTimeElement::new(
@@ -79,7 +61,11 @@ pub(crate) fn build_assembly_elements(
             model_id,
             working_norms_scaffold,
         )),
-        Box::new(PromptsElement::new(rules)),
+        Box::new(PromptsElement::from_resolved_instructions(
+            instructions,
+            instruction_sources,
+            operator_guidance,
+        )),
         Box::new(SkillsElement::new(active_skills)),
     ];
     let hierarchy_refs = hierarchy

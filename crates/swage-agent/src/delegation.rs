@@ -460,6 +460,10 @@ impl DelegationExecutor {
                 delegate_message_id: delegate_msg.id,
                 child_session_id: session.id,
                 child_thread_id: thread.id,
+                child_turn_id: turn_id,
+                status: None,
+                status_as_of: None,
+                error_message: None,
                 target_agent_id: delegate_msg.recipient_agent_id.clone(),
             });
         }
@@ -680,19 +684,27 @@ pub struct DetachedDelegation {
     pub child_thread_id: Uuid,
     /// The target agent running the detached work.
     pub target_agent_id: String,
+    pub child_turn_id: Uuid,
+    pub status: Option<String>,
+    pub status_as_of: Option<chrono::DateTime<chrono::Utc>>,
+    pub error_message: Option<String>,
 }
 
 impl DetachedDelegation {
     /// Tool output shown to the parent model immediately after detaching.
     pub fn tool_output(&self) -> serde_json::Value {
-        serde_json::json!({
-            "status": "detached",
-            "delegate_message_id": self.delegate_message_id,
-            "child_session_id": self.child_session_id,
-            "child_thread_id": self.child_thread_id,
-            "target_agent_id": self.target_agent_id,
-            "result_delivery": "The delegated work continues independently. Its durable result message will be stored with correlation_id equal to delegate_message_id when the child finishes.",
+        serde_json::to_value(swage_protocol::client::workflow::DelegationStartResult {
+            status: self.status.clone(),
+            status_as_of: self.status_as_of,
+            completion_mode: "detach".into(),
+            delegate_message_id: self.delegate_message_id,
+            child_session_id: self.child_session_id,
+            child_thread_id: self.child_thread_id,
+            child_turn_id: self.child_turn_id,
+            target_agent_id: self.target_agent_id.clone(),
+            error_message: self.error_message.clone(),
         })
+        .expect("delegation start result serialises")
     }
 }
 
