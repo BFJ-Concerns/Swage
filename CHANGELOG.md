@@ -6,6 +6,8 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Delegation chains stop at a configurable depth, including cycles (default: four child levels). Settings → Automation edits `sessions.max_delegation_depth`; a refused delegation records its depth reason and returns it to the delegating model.
+
 - `file_write` can append content without rewriting or replacing the existing file.
 - A module a scheduled run, a workflow run or a routed turn delivers to a surface records what delivered it and when, and the surface shows the attribution above the module.
 - Settings has a read-only Channels tab showing channel status, linked chats and unredeemed link codes verbatim with their expiry in local time.
@@ -58,6 +60,21 @@ All notable changes to Swage are documented in this file.
 - The terminal client (`swage chat`) and its `swage-tui` crate; the web UI and desktop shell are the conversation interfaces.
 
 ### Fixed
+
+- The published settings schemas require a delegation depth of at least one, matching settings validation.
+- Delegated sessions keep their chain depth and creation-time limit on later turns and named continuations; changed limits apply to fresh chains.
+- External agent messages refuse delegation beyond the sender’s chain limit before creating a child, and record the depth reason.
+- Automation reports invalid delegation depths without saving or replacing the entered value.
+- Externally started delegates honour their actual depth and the initiating agent's delegation limit.
+- Delegated children resolve default effort through their selected provider and retain that value for continuations.
+- A failed task-prompt selection audit insert allows the delegated child to run with the definition's default prompt.
+- Named child continuations retain their creation-time model, effort and prompt selection, even after forced pins change. Child selection records belong to actual child turns.
+
+- Memory page reads and notice links keep the latest selection when responses arrive out of order, including reads overtaken by a curator edit.
+- Successful memory curation keeps its reply and updated page when the following listing refresh fails; the refresh error names its scope.
+- A general memory page open in Settings updates when an instruction sent to a topic changes it.
+- Memory listings remain visible when another scope fails to load, with failures shown beside the affected scope.
+- Opening a memory page selects that page's scope for curator instructions, including pages opened from notices.
 
 - Topic tags, library tags and the library catalogue's tag filter follow one rule: tags are trimmed, lower-cased and kept once, so a tag saved in any spelling matches a filter in any other. Annotation tags keep their case.
 
