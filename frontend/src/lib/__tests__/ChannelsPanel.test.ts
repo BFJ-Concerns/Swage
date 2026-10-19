@@ -17,14 +17,17 @@ const link = {
   home_target: null, linked_at: "2030-07-09T10:00:00Z", updated_at: "2030-07-09T10:00:00Z",
 };
 
-function mockLists(codes: () => unknown = () => [{ link_code: code, expires_at: expiry }]) {
+function mockLists(
+  codes: () => unknown = () => [{ link_code: code, expires_at: expiry }],
+  links: () => unknown = () => [link],
+) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     switch (String(input)) {
       case "/api/channels": return Response.json({ channels: [{
         integration: "telegram", status: "connected", route_count: 1, delivery_count: 7,
         last_delivery_at: null,
       }] });
-      case "/api/onboarding/channels": return Response.json({ links: [link] });
+      case "/api/onboarding/channels": return Response.json({ links: links() });
       case "/api/onboarding/channels/link-codes": return Response.json(codes());
       default: throw new Error(`Unexpected request: ${String(input)}`);
     }
@@ -99,5 +102,28 @@ describe("Channels settings", () => {
     refresh();
     await vi.waitFor(() => expect(document.querySelector("code")?.textContent).toBe(code));
     expect(document.querySelector('[aria-label="Channel inventory"] [role="alert"]')).toBeNull();
+  });
+});
+
+
+describe("Channel linking controls", () => {
+  it("updates distinct colon-containing link tuples independently", async () => {
+    let links = [
+      { ...link, account: "a:b", conversation: "c", agent_id: "first-agent" },
+      { ...link, account: "a", conversation: "b:c", agent_id: "second-agent" },
+    ];
+    mockLists(() => [], () => links);
+    openChannels();
+    await vi.waitFor(() => expect(document.querySelectorAll('[aria-label="Channel links"] article')).toHaveLength(2));
+    links = [{ ...links[1], agent_id: "updated-second" }, { ...links[0], agent_id: "updated-first" }];
+    refresh();
+    await vi.waitFor(() => {
+      const rows = document.querySelectorAll('[aria-label="Channel links"] article');
+      expect(rows).toHaveLength(2);
+      expect(rows[0].textContent).toContain("updated-second");
+      expect(rows[1].textContent).toContain("updated-first");
+      expect(rows[0].textContent).not.toContain("updated-first");
+      expect(rows[1].textContent).not.toContain("updated-second");
+    });
   });
 });

@@ -52,7 +52,7 @@
     </section>
     <section aria-label="Channel links">
       <h2>Links</h2>
-      {#each links as link (`${link.integration}:${link.account}:${link.conversation}`)}
+      {#each links as link (JSON.stringify([link.integration, link.account, link.conversation]))}
         <article>
           <h3>{link.integration} · {link.conversation}</h3>
           <dl>
