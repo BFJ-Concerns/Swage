@@ -74,10 +74,16 @@ describe("WorkflowRunView", () => {
     account.cancellation = { source: "API request", requested_at: end };
     component = render({ ...run(account), created_at: start, completed_at: end,
       interruptions: [{ detected_at: start, run_state: "running" }] });
-    expect(document.querySelectorAll("time")).toHaveLength(4);
-    for (const time of document.querySelectorAll("time")) {
-      const stamp = time.getAttribute("datetime")!;
-      expect(time.title).toBe(stamp);
+    for (const [selector, stamp] of [
+      [".run header time:nth-of-type(1)", start],
+      [".run header time:nth-of-type(2)", end],
+      [".interruptions time", start],
+      [".ending time", end],
+    ]) {
+      const time = document.querySelector<HTMLTimeElement>(selector)!;
+      expect(time, selector).not.toBeNull();
+      expect(time.getAttribute("datetime"), selector).toBe(stamp);
+      expect(time.title, selector).toBe(stamp);
       expect(time.textContent).toBe(new Date(stamp).toLocaleString());
       expect(time.textContent).not.toBe(stamp);
     }

@@ -123,15 +123,18 @@ describe("WorkflowRunDetail", () => {
       liveness: { started_at: started, first_evidence_at: ended },
       provider_rounds: [{ ...baseCall.provider_rounds![0], started_at: started, completed_at: ended }],
     } as WorkflowAgentCallDetail));
-    for (const selector of [".liveness", ".rounds"]) {
-      const surface = document.querySelector(selector)!;
-      expect(surface.querySelectorAll("time")).toHaveLength(2);
-      for (const time of surface.querySelectorAll("time")) {
-        const stamp = time.getAttribute("datetime")!;
-        expect(time.title).toBe(stamp);
-        expect(time.textContent).toBe(new Date(stamp).toLocaleString());
-        expect(time.textContent).not.toBe(stamp);
-      }
+    for (const [selector, stamp] of [
+      [".liveness dd:nth-of-type(1) time", started],
+      [".liveness dd:nth-of-type(2) time", ended],
+      [".rounds tbody tr:first-child td:nth-child(3) time", started],
+      [".rounds tbody tr:first-child td:nth-child(4) time", ended],
+    ]) {
+      const time = document.querySelector<HTMLTimeElement>(selector)!;
+      expect(time, selector).not.toBeNull();
+      expect(time.getAttribute("datetime"), selector).toBe(stamp);
+      expect(time.title, selector).toBe(stamp);
+      expect(time.textContent).toBe(new Date(stamp).toLocaleString());
+      expect(time.textContent).not.toBe(stamp);
     }
     expect(document.querySelector(".rounds tbody")?.textContent).toContain(
       `${(1.5).toLocaleString(undefined, { maximumFractionDigits: 1 })} s`,
