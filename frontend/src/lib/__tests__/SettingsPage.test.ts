@@ -154,7 +154,7 @@ function emptySettings(): SettingsResponse {
       message_ttl_secs: 86_400,
       expiry_interval_secs: 60,
     },
-    sessions: { archive_after_days: 7 },
+    sessions: { archive_after_days: 7, max_delegation_depth: 4 },
     memory: { curator_idle_minutes: 10 },
     attachments: { accepted_schemes: ["https", "data"] },
     voice: {},
@@ -1151,6 +1151,35 @@ describe("SettingsPage", () => {
     expect(document.body.textContent).not.toContain("Select a topic before scheduling work.");
   });
 
+  it.each(["0", "1.5", ""])("refuses invalid delegation depth %s without saving", async (value) => {
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: { tab: "automation", topicId: null },
+    });
+    await flushUi();
+    const depth = document.querySelector<HTMLInputElement>('input[aria-label="Maximum delegation depth"]')!;
+    depth.value = value;
+    depth.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    await flushUi();
+    expect(settingsApi.saveSettings).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Delegation depth must be a whole number of at least 1.");
+    expect(document.body.textContent).not.toContain("Saved automatically");
+  });
+
+  it("saves the delegation depth from the automation control", async () => {
+    component = mount(SettingsPage, { target: document.body, props: { tab: "automation", topicId: null } });
+    await flushUi();
+    const depth = document.querySelector<HTMLInputElement>('input[aria-label="Maximum delegation depth"]');
+    expect(depth, "Automation exposes the delegation limit").not.toBeNull();
+    expect(depth!.value).toBe("4");
+    depth!.value = "2";
+    depth!.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    const [payload] = vi.mocked(settingsApi.saveSettings).mock.calls[0];
+    expect(payload.sessions?.max_delegation_depth).toBe(2);
+  });
+
   it("autosaves edited image reference schemes from Automation", async () => {
     component = mount(SettingsPage, { target: document.body, props: { tab: "automation" } });
     await flushUi();
@@ -1179,7 +1208,7 @@ describe("SettingsPage", () => {
     await waitForSaveCall();
 
     const [payload] = vi.mocked(settingsApi.saveSettings).mock.calls[0];
-    expect(payload.sessions).toEqual({ archive_after_days: 14 });
+    expect(payload.sessions).toEqual({ archive_after_days: 14, max_delegation_depth: 4 });
   });
 
   it("explains the archive delay minimum before editing", async () => {
@@ -1263,7 +1292,7 @@ describe("SettingsPage", () => {
 
     expect(settingsApi.saveSettings).toHaveBeenCalledTimes(1);
     expect(vi.mocked(settingsApi.saveSettings).mock.calls[0][0].sessions)
-      .toEqual({ archive_after_days: 14 });
+      .toEqual({ archive_after_days: 14, max_delegation_depth: 4 });
     expect(delay.closest(".field")?.querySelector('[role="alert"]')).toBeNull();
     expect(document.body.textContent).toContain("Archive delay saved as 14 days.");
 

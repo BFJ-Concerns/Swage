@@ -191,17 +191,12 @@ impl ConversationService {
         self
     }
 
-    async fn resolved_effort(
+    async fn resolved_config(
         &self,
         topic_id: Uuid,
         scope: &ScopeLocation,
         agent_id: &str,
-        selected_model_id: Option<&str>,
-        requested: Option<swage_protocol::client::settings::Effort>,
-    ) -> Result<Option<swage_protocol::client::settings::Effort>, GatewayError> {
-        if requested.is_some() {
-            return Ok(requested);
-        }
+    ) -> Result<Option<swage_config::ResolvedConfig>, GatewayError> {
         let Some((active_config, config_root)) = &self.config else {
             return Ok(None);
         };
@@ -226,10 +221,27 @@ impl ConversationService {
                 tracing::warn!(
                     agent_id,
                     %error,
-                    "failed to resolve the agent definition while selecting session effort; using file config alone"
+                    "failed to resolve the agent definition while selecting session defaults; using file config alone"
                 );
                 config
             }
+        };
+        Ok(Some(config))
+    }
+
+    async fn resolved_effort(
+        &self,
+        topic_id: Uuid,
+        scope: &ScopeLocation,
+        agent_id: &str,
+        selected_model_id: Option<&str>,
+        requested: Option<swage_protocol::client::settings::Effort>,
+    ) -> Result<Option<swage_protocol::client::settings::Effort>, GatewayError> {
+        if requested.is_some() {
+            return Ok(requested);
+        }
+        let Some(config) = self.resolved_config(topic_id, scope, agent_id).await? else {
+            return Ok(None);
         };
         let selected_model_id = selected_model_id.unwrap_or(&config.models.default);
         Ok(
@@ -557,6 +569,13 @@ impl ConversationService {
             .get(topic_id)
             .await?
             .ok_or(GatewayError::TopicNotFound { id: topic_id })?;
+        let selected_model_id = match normalise_selected_model_id(selected_model_id) {
+            Some(model) => Some(model),
+            None => self
+                .resolved_config(topic_id, &topic.location(), agent_id)
+                .await?
+                .and_then(|config| normalise_selected_model_id(Some(config.models.default))),
+        };
         let active_workspace_attachment_id = self.default_workspace_for_topic(topic_id).await?;
 
         let mut session = self
