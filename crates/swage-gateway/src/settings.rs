@@ -2039,7 +2039,10 @@ mod tests {
                 let counted = counted.clone();
                 async move {
                     if counted.fetch_add(1, Ordering::SeqCst) == 0 {
-                        (StatusCode::NOT_FOUND, "speech model not found")
+                        (
+                            StatusCode::NOT_FOUND,
+                            r#"{"error":{"param":"model","code":"model_not_found","message":"speech model not found"}}"#,
+                        )
                     } else {
                         (StatusCode::OK, "RIFFAUDIO")
                     }
