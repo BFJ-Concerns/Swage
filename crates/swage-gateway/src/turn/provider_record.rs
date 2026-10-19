@@ -78,10 +78,64 @@ pub(crate) async fn apply_provider_snapshot_event(
     let turn_id = match &event {
         AgentEvent::ProviderRequestPrepared { turn_id, .. }
         | AgentEvent::ProviderResponseCaptured { turn_id, .. }
-        | AgentEvent::ProviderReasoningCaptured { turn_id, .. } => *turn_id,
+        | AgentEvent::ProviderReasoningCaptured { turn_id, .. }
+        | AgentEvent::ProviderAttempt { turn_id, .. } => *turn_id,
         _ => return,
     };
     match event {
+        AgentEvent::ProviderAttempt { mut record, .. } => {
+            if let Some(request) = record.request.take() {
+                record.request = match redact_provider_visible_request(state, request).await {
+                    Ok(request) => Some(request),
+                    Err(_) => {
+                        append_provider_visible_capture_error(report_json, record.round);
+                        None
+                    }
+                };
+                let requests = provider_visible_array(report_json, "requests");
+                // Replace the provisional pre-stream snapshot with concrete
+                // attempts. Settlements update the same entry, preserving the
+                // order in which attempts ran, even if capture failed.
+                requests.retain(|entry| {
+                    entry["round"] != record.round || !entry["attempt_id"].is_null()
+                });
+                let value = serde_json::json!({
+                    "round": record.round,
+                    "attempt_id": record.id,
+                    "request": record.request,
+                });
+                if let Some(previous) = requests
+                    .iter_mut()
+                    .find(|entry| entry["attempt_id"] == record.id)
+                {
+                    *previous = value;
+                } else {
+                    requests.push(value);
+                }
+            }
+            if let Some(error) = &mut record.error {
+                match known_secret_values(state).await {
+                    Ok(secrets) => redact_text(error, &secrets),
+                    Err(_) => {
+                        *error =
+                            "Error detail omitted because secret redaction was unavailable".into();
+                    }
+                }
+            }
+            let value = serde_json::to_value(&record).expect("attempt serialises");
+            let attempts = report_json
+                .as_object_mut()
+                .expect("context report is an object")
+                .entry("provider_attempts")
+                .or_insert_with(|| serde_json::json!([]))
+                .as_array_mut()
+                .expect("provider attempts is an array");
+            if let Some(previous) = attempts.iter_mut().find(|a| a["id"] == record.id) {
+                *previous = value;
+            } else {
+                attempts.push(value);
+            }
+        }
         AgentEvent::ProviderRequestPrepared { round, request, .. } => {
             match redact_provider_visible_request(state, request).await {
                 Ok(request) => append_provider_visible_request(report_json, round, request),
@@ -132,15 +186,17 @@ async fn known_secret_values(state: &AppState) -> Result<Vec<String>, swage_core
         })
 }
 
+fn redact_text(text: &mut String, secret_values: &[String]) {
+    let mut redacted = mem::take(text);
+    for secret in secret_values {
+        redacted = redacted.replace(secret, "[REDACTED_SECRET]");
+    }
+    *text = redacted;
+}
+
 fn redact_secret_values(value: &mut serde_json::Value, secret_values: &[String]) {
     match value {
-        serde_json::Value::String(text) => {
-            let mut redacted = mem::take(text);
-            for secret in secret_values {
-                redacted = redacted.replace(secret, "[REDACTED_SECRET]");
-            }
-            *text = redacted;
-        }
+        serde_json::Value::String(text) => redact_text(text, secret_values),
         serde_json::Value::Array(values) => {
             for value in values {
                 redact_secret_values(value, secret_values);
@@ -324,4 +380,36 @@ pub(super) fn record_effective_model_snapshot(
         "provider_id": model.provider_id,
         "source": source,
     });
+}
+
+pub(crate) async fn redact_element_texts(
+    state: &AppState,
+    report: &mut swage_protocol::client::context::AssemblyReport,
+) {
+    fn visit(
+        elements: &mut [swage_protocol::client::context::ElementReport],
+        secrets: Option<&[String]>,
+    ) {
+        for element in elements {
+            if let Some(secrets) = secrets {
+                if let Some(text) = &mut element.full_text {
+                    redact_text(text, secrets);
+                }
+            } else {
+                element.full_text = None;
+            }
+            if let Some(nested) = &mut element.named_assembly {
+                visit(&mut nested.child_elements, secrets);
+            }
+        }
+    }
+    match known_secret_values(state).await {
+        Ok(secrets) => visit(&mut report.elements, Some(&secrets)),
+        Err(_) => {
+            visit(&mut report.elements, None);
+            report.warnings.push(
+                "Element text capture omitted because secret redaction was unavailable".into(),
+            );
+        }
+    }
 }

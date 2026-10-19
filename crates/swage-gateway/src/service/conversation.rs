@@ -313,6 +313,12 @@ impl ConversationService {
             id: session.id,
             topic_id: topic.client_topic_id(),
             agent_id: session.agent_id.clone(),
+            agent_display_name: crate::workflow::session_agent_display_name(
+                self.storage.as_ref(),
+                &session.agent_id,
+                session.topic_id,
+            )
+            .await?,
             selected_model_id: session.selected_model_id,
             created_at: session.created_at,
             last_activity: session.updated_at,
@@ -421,6 +427,12 @@ impl ConversationService {
             id: session.id,
             topic_id: topic.client_topic_id(),
             agent_id: session.agent_id.clone(),
+            agent_display_name: crate::workflow::session_agent_display_name(
+                self.storage.as_ref(),
+                &session.agent_id,
+                session.topic_id,
+            )
+            .await?,
             selected_model_id: session.selected_model_id,
             created_at: session.created_at,
             last_activity: session.updated_at,
@@ -579,6 +591,12 @@ impl ConversationService {
             id: session.id,
             topic_id: topic.client_topic_id(),
             agent_id: session.agent_id.clone(),
+            agent_display_name: crate::workflow::session_agent_display_name(
+                self.storage.as_ref(),
+                &session.agent_id,
+                session.topic_id,
+            )
+            .await?,
             selected_model_id: session.selected_model_id,
             created_at: session.created_at,
             last_activity: session.updated_at,

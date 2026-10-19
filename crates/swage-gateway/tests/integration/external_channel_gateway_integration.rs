@@ -149,6 +149,21 @@ async fn queued_channel_drain_carries_the_created_turn_id_into_the_delivery_reco
         .await
         .expect("look up channel session")
         .expect("drain creates the linked session");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if !storage
+                .list_delivery_records_by_session(session.id)
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the queued turn must finish and record its delivery");
     let turn = storage
         .list_by_session(session.id)
         .await

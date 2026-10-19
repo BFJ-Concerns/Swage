@@ -529,7 +529,8 @@ describe("queued input transport", () => {
     const { createConversationStore } = await import("../stores/conversations");
     const { createStreamingStore } = await import("../stores/streaming");
     vi.spyOn(api, "createConversation").mockResolvedValue({
-      id: "conv-1", agent_id: "gateway", topic_id: "topic-1",
+      id: "conv-1", agent_id: "gateway",
+      agent_display_name: "Swage default", topic_id: "topic-1",
       created_at: "2026-10-04T10:00:00Z", last_activity: "2026-10-04T10:00:00Z",
     });
     vi.spyOn(api, "listConversations").mockResolvedValue([]);
@@ -555,7 +556,7 @@ describe("queued input transport", () => {
     });
     expect(conversations.activeConversation?.messages.map((item) => item.content)).toEqual(["follow up"]);
     latestWs().simulateMessage({
-      type: "queue_drained", session_id: "conv-1", turn_id: "turn-1", queued_ids: ["queued-1"],
+      type: "queue_drained", thread_id: "thread-1", session_id: "conv-1", turn_id: "turn-1", queued_ids: ["queued-1"],
     });
     expect(conversations.activeConversation?.queued).toEqual([]);
     expect(streaming.isStreaming).toBe(true);

@@ -9,4 +9,8 @@ topic_id?: string | null,
 /**
  * The agent definition the session runs under.
  */
-agent_id: string, selected_model_id?: string | null, created_at: string, last_activity: string, };
+agent_id: string,
+/**
+ * The display name resolved in the session's topic scope.
+ */
+agent_display_name: string, selected_model_id?: string | null, created_at: string, last_activity: string, };

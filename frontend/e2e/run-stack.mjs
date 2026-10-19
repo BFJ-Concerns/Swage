@@ -88,7 +88,8 @@ start(process.execPath, [join(frontendDir, "e2e/mock-provider.mjs")], {
     SWAGE_E2E_PROVIDER_REQUESTS: join(invocationDir, "provider-requests.jsonl"),
   },
 });
-start(join(repoDir, "target/debug/swage"), [
+const targetDir = resolve(repoDir, process.env.CARGO_TARGET_DIR ?? "target");
+start(join(targetDir, "debug/swage"), [
   "--server-mode", "gateway", "start", "--host", "127.0.0.1", "--port", String(gatewayPort),
 ], {
   cwd: repoDir,

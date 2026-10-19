@@ -2,23 +2,13 @@ url: https://fixture.local/login
 title: Fixture Login
 snapshot: 1
 
-- heading "Sign in"
-- form
-  - LabelText
-    - StaticText "Username"
-    - textbox "Username" [invalid=false] ref=s1e1
-  - LabelText
-    - StaticText "Password"
-    - textbox "Password" [invalid=false] ref=s1e2
-  - link "Sign in" ref=s1e3
-- LabelText
-  - StaticText "Username"
-  - textbox "Username" [invalid=false] ref=s1e4
-- LabelText
-  - StaticText "Password"
-  - textbox "Password" [invalid=false] ref=s1e5
-- link "Sign in" ref=s1e6
-- StaticText "Username"
-- textbox "Username" [invalid=false] ref=s1e7
-- StaticText "Password"
-- textbox "Password" [invalid=false] ref=s1e8
+- RootWebArea "Fixture Login" ref=s1e1
+  - heading "Sign in"
+  - form
+    - LabelText
+      - StaticText "Username"
+      - textbox "Username" [invalid=false] ref=s1e2
+    - LabelText
+      - StaticText "Password"
+      - textbox "Password" [invalid=false] ref=s1e3
+    - link "Sign in" ref=s1e4

@@ -175,12 +175,13 @@ fn resolve_layers(
     // Instructions are text, not a configuration field: the partial never
     // carries them, so the base's are set aside before the conversion and
     // put back ahead of the layers' below.
-    let (base_instructions, mut config_chain) = match base {
+    let (base_instructions, base_sources, mut config_chain) = match base {
         Some(mut base) => (
             std::mem::take(&mut base.instructions),
+            std::mem::take(&mut base.instruction_sources),
             vec![PartialConfig::from(base)],
         ),
-        None => (String::new(), Vec::new()),
+        None => (String::new(), Vec::new(), Vec::new()),
     };
     for (_, directory) in layers {
         if let Some(partial) = try_load_file(&directory.join("config.toml"), &mut problems) {
@@ -215,13 +216,16 @@ fn resolve_layers(
         .iter()
         .map(|(level, path)| (level.clone(), path.as_path()))
         .collect::<Vec<_>>();
-    let layer_instructions = instructions::assemble_instructions(&level_refs)
-        .map_err(|problem| ConfigError::new(vec![problem]))?;
+    let (layer_instructions, layer_sources) =
+        instructions::assemble_instructions_with_sources(&level_refs)
+            .map_err(|problem| ConfigError::new(vec![problem]))?;
     resolved.instructions = [base_instructions, layer_instructions]
         .into_iter()
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n");
+    resolved.instruction_sources = base_sources;
+    resolved.instruction_sources.extend(layer_sources);
 
     Ok(resolved)
 }
@@ -244,6 +248,7 @@ pub fn apply_overlay(base: ResolvedConfig, overlay: PartialConfig) -> ResolvedCo
     // instructions, the caller should set resolved.instructions directly.
     if resolved.instructions.is_empty() {
         resolved.instructions = base.instructions;
+        resolved.instruction_sources = base.instruction_sources;
     }
 
     resolved
@@ -769,6 +774,51 @@ api_key = "x"
             session.communication.context_transfer.targets["worker"].mode, None,
             "the running configuration's conversion keeps the target's own fields only"
         );
+    }
+
+    #[test]
+    fn scope_overlays_preserve_attachment_policy_and_instruction_provenance() {
+        let tmp = TempDir::new().unwrap();
+        let scope = ScopeLocation::topic("proj");
+        let global_instructions = tmp.path().join("instructions");
+        let topic_dir = scope.data_dir(tmp.path());
+        let topic_instructions = topic_dir.join("instructions");
+        fs::create_dir_all(&global_instructions).unwrap();
+        fs::create_dir_all(&topic_instructions).unwrap();
+        fs::write(global_instructions.join("global.md"), "GLOBAL_RULES").unwrap();
+        fs::write(topic_instructions.join("topic.md"), "TOPIC_RULES").unwrap();
+        fs::write(
+            tmp.path().join("config.toml"),
+            "[attachments]\naccepted_schemes = ['http']\n",
+        )
+        .unwrap();
+        let running = load_running_config_from(tmp.path()).unwrap();
+        fs::write(
+            tmp.path().join("config.toml"),
+            "[attachments]\naccepted_schemes = ['file']\n",
+        )
+        .unwrap();
+
+        let first = overlay_scope_layers(running.clone(), tmp.path(), &scope, "bot").unwrap();
+        assert_eq!(first.attachments.accepted_schemes, ["http"]);
+        assert_eq!(
+            first.instruction_sources,
+            [HierarchyLevel::Global, HierarchyLevel::Topic]
+        );
+        assert!(first.instructions.starts_with(&running.instructions));
+        assert_eq!(first.instructions.matches("GLOBAL_RULES").count(), 1);
+        assert_eq!(first.instructions.matches("TOPIC_RULES").count(), 1);
+
+        fs::write(
+            topic_dir.join("config.toml"),
+            "[attachments]\naccepted_schemes = ['data']\n",
+        )
+        .unwrap();
+        fs::write(topic_instructions.join("topic.md"), "UPDATED_TOPIC_RULES").unwrap();
+        let next = overlay_scope_layers(running, tmp.path(), &scope, "bot").unwrap();
+        assert_eq!(next.attachments.accepted_schemes, ["data"]);
+        assert!(next.instructions.contains("UPDATED_TOPIC_RULES"));
+        assert_eq!(next.instruction_sources, first.instruction_sources);
     }
 
     #[test]

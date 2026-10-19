@@ -279,6 +279,9 @@
     // A URL that names a surface means the work surface: the pane opens the
     // surface once the session is in view.
     if (route.surfaceId) activeSurface = "surfaces";
+    else if (route.conversationId && activeSurface === "operator") {
+      activeSurface = "conversation";
+    }
     // A conversation the URL named is gone. Someone who was working in a
     // scope stays there with the composer ready, so the next message starts
     // afresh where they were; with no scope in view, the front door serves.

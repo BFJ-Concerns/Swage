@@ -6,7 +6,7 @@
 //! files are recognised from their leading bytes and never read in full.
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, Cursor, Read};
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -15,9 +15,7 @@ use swage_core::ToolError;
 use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
-use crate::tool::workspace::{
-    continuable_output_value, location_approval_error, read_text_sample, resolve_context_path,
-};
+use crate::tool::workspace::{location_approval_error, read_text_sample, resolve_context_path};
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -101,30 +99,58 @@ impl Tool for FileSearchTool {
                 .map_err(|_| location_approval_error(self.name(), ctx, ".", "read", true))?,
         };
 
-        // Collect matches by walking the tree synchronously.
-        let matches = search_tree(&resolved.path, &resolved.root, &pattern);
-
-        if matches.is_empty() {
+        let cap = self.max_output_bytes;
+        if cap == 0 {
+            return Err(ToolError::InvalidParameters {
+                name: self.name().into(),
+                message: "max_output_bytes must be positive".into(),
+            });
+        }
+        let search_pattern = pattern.clone();
+        let window = run_search(std::time::Duration::from_secs(30), move |control| {
+            let mut window = SearchWindow::new(offset_bytes, cap);
+            search_tree(
+                &resolved.path,
+                &resolved.root,
+                &search_pattern,
+                &mut window,
+                &control,
+            )?;
+            Ok(window)
+        })
+        .await
+        .map_err(|message| ToolError::ExecutionFailed {
+            name: self.name().into(),
+            message,
+        })?;
+        if window.matches == 0 {
             return Ok(json!({"output": format!("No matches found for pattern: {pattern}")}));
         }
-
-        let raw = matches.join("\n");
+        if !window.boundary || offset_bytes > window.total_bytes {
+            return Err(ToolError::InvalidParameters {
+                name: self.name().into(),
+                message: "offset_bytes must be a valid UTF-8 byte boundary within the result"
+                    .into(),
+            });
+        }
         let mut arguments = serde_json::Map::new();
         arguments.insert("pattern".to_string(), json!(pattern_arg));
         if params["path"].as_str().is_some() {
             arguments.insert("path".to_string(), json!(path_arg));
         }
-        continuable_output_value(
-            &raw,
-            self.max_output_bytes,
-            offset_bytes,
-            "file_search",
-            arguments,
-        )
-        .map_err(|message| ToolError::InvalidParameters {
-            name: self.name().to_owned(),
-            message,
-        })
+        let next = offset_bytes + window.output.len();
+        let mut result = json!({"output": window.output});
+        if offset_bytes > 0 || next < window.total_bytes {
+            result["offset_bytes"] = json!(offset_bytes);
+            result["total_bytes"] = json!(window.total_bytes);
+        }
+        if next < window.total_bytes {
+            arguments.insert("offset_bytes".into(), json!(next));
+            result["truncated"] = json!(true);
+            result["next_offset_bytes"] = json!(next);
+            result["follow_up"] = json!({"tool": "file_search", "arguments": arguments});
+        }
+        Ok(result)
     }
 }
 
@@ -150,76 +176,421 @@ fn optional_offset_bytes(params: &Value, tool_name: &str) -> Result<usize, ToolE
     }
 }
 
-/// Walk `root` recursively, returning "rel_path:line_num: line" for every
-/// line in every text file that contains `pattern` (case-insensitive).
-fn search_tree(root: &Path, workspace_root: &Path, pattern: &str) -> Vec<String> {
-    let mut results = Vec::new();
-    search_dir(root, workspace_root, pattern, &mut results);
-    results
+/// A bounded slice of the result stream, with counts independent of retention.
+#[cfg_attr(not(test), derive(Clone))]
+struct SearchWindow {
+    output: String,
+    total_bytes: usize,
+    matches: usize,
+    offset: usize,
+    limit: usize,
+    boundary: bool,
 }
 
-fn search_dir(dir: &Path, workspace_root: &Path, pattern: &str, results: &mut Vec<String>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
+// Count retained bytes copied by the scanner without changing release builds.
+#[cfg(test)]
+std::thread_local! {
+    static CLONED_OUTPUT_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
-    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
-    // Sort for deterministic output order.
-    paths.sort();
+#[cfg(test)]
+impl Clone for SearchWindow {
+    fn clone(&self) -> Self {
+        CLONED_OUTPUT_BYTES.with(|count| count.set(count.get() + self.output.len()));
+        Self {
+            output: self.output.clone(),
+            total_bytes: self.total_bytes,
+            matches: self.matches,
+            offset: self.offset,
+            limit: self.limit,
+            boundary: self.boundary,
+        }
+    }
+}
 
-    for path in paths {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+impl SearchWindow {
+    fn new(offset: usize, limit: usize) -> Self {
+        Self {
+            output: String::new(),
+            total_bytes: 0,
+            matches: 0,
+            offset,
+            limit,
+            boundary: offset == 0,
+        }
+    }
 
-        if path.is_dir() {
-            // Skip hidden directories and known build/vcs dirs.
-            if name.starts_with('.') || SKIP_DIRS.contains(&name) {
-                continue;
+    /// A line retains only its own slice; earlier results never need copying.
+    fn commit_line(&mut self, line: &Self) {
+        self.output.push_str(&line.output);
+        self.total_bytes = line.total_bytes;
+        self.boundary = line.boundary;
+        self.matches += 1;
+    }
+
+    fn push(&mut self, text: &str) {
+        if self.total_bytes >= self.offset.saturating_add(self.limit) {
+            if self.total_bytes == self.offset {
+                self.boundary = true;
             }
-            search_dir(&path, workspace_root, pattern, results);
-        } else if path.is_file() {
-            search_file(&path, workspace_root, pattern, results);
+            self.total_bytes += text.len();
+            return;
+        }
+        for ch in text.chars() {
+            if self.total_bytes == self.offset {
+                self.boundary = true;
+            }
+            let end = self.total_bytes + ch.len_utf8();
+            if self.total_bytes >= self.offset && end <= self.offset.saturating_add(self.limit) {
+                self.output.push(ch);
+            }
+            self.total_bytes = end;
+        }
+        if self.total_bytes == self.offset {
+            self.boundary = true;
         }
     }
 }
 
-fn search_file(path: &Path, workspace_root: &Path, pattern: &str, results: &mut Vec<String>) {
-    let Ok(file) = File::open(path) else {
-        return;
+#[derive(Clone)]
+struct SearchControl {
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    deadline: std::time::Instant,
+}
+
+impl SearchControl {
+    fn check(&self) -> Result<(), String> {
+        if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            Err("File search cancelled".into())
+        } else if std::time::Instant::now() >= self.deadline {
+            Err("File search deadline exceeded".into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+struct CancelSearch(SearchControl);
+impl Drop for CancelSearch {
+    fn drop(&mut self) {
+        self.0
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+async fn run_search<F>(timeout: std::time::Duration, operation: F) -> Result<SearchWindow, String>
+where
+    F: FnOnce(SearchControl) -> Result<SearchWindow, String> + Send + 'static,
+{
+    let control = SearchControl {
+        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        deadline: std::time::Instant::now() + timeout,
     };
+    let _cancel = CancelSearch(control.clone());
+    tokio::task::spawn_blocking(move || operation(control))
+        .await
+        .map_err(|error| error.to_string())?
+}
 
-    // Make the path relative to the workspace root for readable output.
-    let rel = path
-        .strip_prefix(workspace_root)
-        .unwrap_or(path)
-        .to_string_lossy();
+fn search_tree(
+    root: &Path,
+    workspace_root: &Path,
+    pattern: &str,
+    window: &mut SearchWindow,
+    control: &SearchControl,
+) -> Result<(), String> {
+    let mut visited = std::collections::HashSet::new();
+    search_dir(root, workspace_root, pattern, window, control, &mut visited)
+}
 
-    if let Some(matches) = search_text(file, &rel, pattern) {
-        results.extend(matches);
+fn search_dir(
+    dir: &Path,
+    workspace_root: &Path,
+    pattern: &str,
+    window: &mut SearchWindow,
+    control: &SearchControl,
+    visited: &mut std::collections::HashSet<PathBuf>,
+) -> Result<(), String> {
+    control.check()?;
+    let Ok(canonical) = dir.canonicalize() else {
+        return Ok(());
+    };
+    if !canonical.starts_with(workspace_root) || !visited.insert(canonical) {
+        return Ok(());
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        control.check()?;
+        if let Ok(entry) = entry {
+            paths.push(entry.path());
+        }
+    }
+    paths.sort();
+    for path in paths {
+        control.check()?;
+        let Ok(canonical) = path.canonicalize() else {
+            continue;
+        };
+        if !canonical.starts_with(workspace_root) {
+            continue;
+        }
+        let Ok(metadata) = canonical.metadata() else {
+            continue;
+        };
+        if metadata.is_dir() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !name.starts_with('.') && !SKIP_DIRS.contains(&name) {
+                search_dir(&path, workspace_root, pattern, window, control, visited)?;
+            }
+        } else if metadata.is_file() {
+            let Ok(file) = File::open(&canonical) else {
+                continue;
+            };
+            let rel = path
+                .strip_prefix(workspace_root)
+                .unwrap_or(&path)
+                .to_string_lossy();
+            search_into(file, &rel, pattern, window, control)?;
+        }
+    }
+    Ok(())
+}
+
+/// Streams UTF-8 and matching lines with bounded retention, committing a file's
+/// results only after all its bytes have proved readable as text.
+fn search_into(
+    mut source: impl Read,
+    rel: &str,
+    pattern: &str,
+    window: &mut SearchWindow,
+    control: &SearchControl,
+) -> Result<(), String> {
+    control.check()?;
+    let Some(sample) = read_text_sample(&mut source).ok().flatten() else {
+        return Ok(());
+    };
+    let mut source = Cursor::new(sample).chain(source);
+    let mut file_window = window.clone();
+    let mut line_window = SearchWindow::new(window.offset, window.limit);
+    let mut line_number = 1;
+    let mut line_started = false;
+    let mut matcher = LineMatcher::new(pattern);
+    let mut pending_cr = false;
+    let mut pending = Vec::with_capacity(8196);
+    let mut chunk = [0u8; 8192];
+    loop {
+        control.check()?;
+        let n = match source.read(&mut chunk) {
+            Ok(n) => n,
+            Err(_) => return Ok(()),
+        };
+        pending.extend_from_slice(&chunk[..n]);
+        let (valid, incomplete) = match std::str::from_utf8(&pending) {
+            Ok(text) => (text.len(), false),
+            Err(error) if error.error_len().is_none() && n != 0 => (error.valid_up_to(), true),
+            Err(_) => return Ok(()),
+        };
+        let text = std::str::from_utf8(&pending[..valid]).expect("validated prefix");
+        for ch in text.chars() {
+            if !line_started {
+                line_window.output.clear();
+                line_window.total_bytes = file_window.total_bytes;
+                line_window.boundary = file_window.boundary;
+                if file_window.matches > 0 {
+                    line_window.push("\n");
+                }
+                line_window.push(&format!("{rel}:{line_number}: "));
+                line_started = true;
+            }
+            if ch == '\n' {
+                if matcher.matched() {
+                    file_window.commit_line(&line_window);
+                }
+                line_number += 1;
+                line_started = false;
+                matcher.reset();
+                pending_cr = false;
+            } else {
+                if pending_cr {
+                    push_search_character('\r', &mut line_window, &mut matcher);
+                }
+                pending_cr = ch == '\r';
+                if !pending_cr {
+                    push_search_character(ch, &mut line_window, &mut matcher);
+                }
+            }
+        }
+        pending.drain(..valid);
+        if n == 0 {
+            if incomplete || !pending.is_empty() {
+                return Ok(());
+            }
+            break;
+        }
+    }
+    if pending_cr {
+        push_search_character('\r', &mut line_window, &mut matcher);
+    }
+    if line_started && matcher.matched() {
+        file_window.commit_line(&line_window);
+    }
+    *window = file_window;
+    Ok(())
+}
+
+fn push_search_character(ch: char, window: &mut SearchWindow, matcher: &mut LineMatcher) {
+    window.push(ch.encode_utf8(&mut [0; 4]));
+    matcher.push(ch);
+}
+
+#[derive(Clone)]
+struct MatchState {
+    position: usize,
+    matched: bool,
+}
+
+impl MatchState {
+    fn push(&mut self, ch: char, needle: &[char], prefix: &[usize]) {
+        if self.matched {
+            return;
+        }
+        while self.position > 0 && needle[self.position] != ch {
+            self.position = prefix[self.position - 1];
+        }
+        if needle[self.position] == ch {
+            self.position += 1;
+        }
+        if self.position == needle.len() {
+            self.matched = true;
+        }
     }
 }
 
-/// Returns "rel:line_num: line" for every line of `source` that contains
-/// `pattern`, or `None` when the source is not readable text.
-///
-/// The source is read line by line after its classification sample, so a
-/// binary file is skipped without being read further and a large text file is
-/// never held whole.
-fn search_text(mut source: impl Read, rel: &str, pattern: &str) -> Option<Vec<String>> {
-    // Skip binary files — they produce garbled output and are rarely useful.
-    let sample = read_text_sample(&mut source).ok().flatten()?;
+/// Matches the same lowercase stream as `str::to_lowercase`, without retaining
+/// a line. A sigma after a cased character needs lookahead through arbitrarily
+/// many case-ignorable characters: advance both possible match states until a
+/// cased character, a boundary or line end selects the correct one.
+struct LineMatcher {
+    needle: Vec<char>,
+    prefix: Vec<usize>,
+    current: MatchState,
+    final_sigma: Option<MatchState>,
+    preceding_cased: bool,
+}
 
-    let mut matches = Vec::new();
-    let lines = BufReader::new(Cursor::new(sample).chain(source)).lines();
-    for (line_num, line) in lines.enumerate() {
-        // A line that is not UTF-8 or cannot be read leaves the file unsearchable
-        // as text — skip it whole.
-        let line = line.ok()?;
-        if line.to_lowercase().contains(pattern) {
-            matches.push(format!("{}:{}: {}", rel, line_num + 1, line));
+impl LineMatcher {
+    fn new(pattern: &str) -> Self {
+        let needle: Vec<char> = pattern.chars().collect();
+        let mut prefix = vec![0; needle.len()];
+        for i in 1..needle.len() {
+            let mut j = prefix[i - 1];
+            while j > 0 && needle[i] != needle[j] {
+                j = prefix[j - 1];
+            }
+            if needle[i] == needle[j] {
+                j += 1;
+            }
+            prefix[i] = j;
+        }
+        Self {
+            current: MatchState {
+                position: 0,
+                matched: needle.is_empty(),
+            },
+            needle,
+            prefix,
+            final_sigma: None,
+            preceding_cased: false,
         }
     }
-    Some(matches)
+
+    fn reset(&mut self) {
+        self.current = MatchState {
+            position: 0,
+            matched: self.needle.is_empty(),
+        };
+        self.final_sigma = None;
+        self.preceding_cased = false;
+    }
+
+    fn matched(&self) -> bool {
+        self.final_sigma.as_ref().unwrap_or(&self.current).matched
+    }
+
+    fn push(&mut self, ch: char) {
+        if self.current.matched && self.final_sigma.as_ref().is_none_or(|state| state.matched) {
+            return;
+        }
+        let (ignorable, cased) = case_context(ch);
+        if !ignorable
+            && let Some(final_sigma) = self.final_sigma.take()
+            && !cased
+        {
+            self.current = final_sigma;
+        }
+        if ch == 'Σ' && self.preceding_cased {
+            let mut final_sigma = self.current.clone();
+            final_sigma.push('ς', &self.needle, &self.prefix);
+            self.current.push('σ', &self.needle, &self.prefix);
+            self.final_sigma = Some(final_sigma);
+        } else {
+            for lower in ch.to_lowercase() {
+                self.current.push(lower, &self.needle, &self.prefix);
+                if let Some(final_sigma) = &mut self.final_sigma {
+                    final_sigma.push(lower, &self.needle, &self.prefix);
+                }
+            }
+        }
+        if !ignorable {
+            self.preceding_cased = cased;
+        }
+    }
+}
+
+/// Classifies sigma context with the same Unicode version as pattern lowering.
+/// The stable char API does not expose Case_Ignorable. Two fixed-size lowercase
+/// probes distinguish a cased follower from an ignorable one: in `AΣx`, sigma
+/// is non-final only for a non-ignorable cased x; appending A also makes it
+/// non-final when x is ignorable. For a character that is both, ignorable takes precedence.
+fn case_context(ch: char) -> (bool, bool) {
+    if ch.is_ascii() {
+        return (
+            matches!(ch, '\'' | '.' | ':' | '^' | '`'),
+            ch.is_ascii_alphabetic(),
+        );
+    }
+    let mut probe = [0; 8];
+    probe[..3].copy_from_slice("AΣ".as_bytes());
+    let end = 3 + ch.encode_utf8(&mut probe[3..7]).len();
+    let has_cased_follower = |bytes: &[u8]| {
+        std::str::from_utf8(bytes)
+            .expect("UTF-8 case probe")
+            .to_lowercase()
+            .chars()
+            .nth(1)
+            == Some('σ')
+    };
+    if has_cased_follower(&probe[..end]) {
+        return (false, true);
+    }
+    probe[end] = b'A';
+    (has_cased_follower(&probe[..=end]), false)
+}
+
+#[cfg(test)]
+fn search_text(source: impl Read, rel: &str, pattern: &str) -> Option<Vec<String>> {
+    let mut window = SearchWindow::new(0, usize::MAX);
+    let control = SearchControl {
+        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+    };
+    search_into(source, rel, pattern, &mut window, &control).unwrap();
+    (window.matches > 0).then(|| window.output.lines().map(str::to_owned).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -481,6 +852,333 @@ mod tests {
                 ToolError::RequiresLocationApproval { ref access, .. } if access == "read"
             ),
             "got: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    fn control() -> SearchControl {
+        SearchControl {
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(2),
+        }
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn regression_search_confines_symlinks_and_stops_cycles() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("inside"), "needle").unwrap();
+        std::fs::write(outside.path().join("outside"), "needle").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("outside"),
+            dir.path().join("file-escape"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("cycle")).unwrap();
+        let mut ctx = swage_tool::context::MockToolContext::new("agent", "session");
+        ctx.working_directory = dir.path().into();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            FileSearchTool {
+                max_output_bytes: 1000,
+            }
+            .execute(json!({"pattern":"needle"}), &ctx),
+        )
+        .await;
+        assert!(result.is_ok(), "search did not stop at symlink cycle");
+        assert_eq!(result.unwrap().unwrap()["output"], "inside:1: needle");
+    }
+    #[test]
+    fn regression_search_large_file_after_window_fills() {
+        const LIMIT: usize = 100_000;
+        const LINES: usize = 2_000;
+        let first_line = "needle ".repeat(14_286);
+        let text = format!("{first_line}\n{}needle tail\n", "x\n".repeat(LINES));
+        let mut window = SearchWindow::new(0, LIMIT);
+        let control = SearchControl {
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(86_400),
+        };
+
+        CLONED_OUTPUT_BYTES.with(|count| count.set(0));
+        search_into(
+            text.as_bytes(),
+            "large.txt",
+            "needle",
+            &mut window,
+            &control,
+        )
+        .unwrap();
+        let copied_bytes = CLONED_OUTPUT_BYTES.with(|count| count.get());
+        // File-level provisional results may copy the window once. Starting
+        // each later line must not copy all the retained earlier results.
+        assert!(
+            copied_bytes <= LIMIT,
+            "retained output copied {copied_bytes} bytes for {LINES} lines after the window filled"
+        );
+        let expected = format!(
+            "large.txt:1: {first_line}\nlarge.txt:{}: needle tail",
+            LINES + 2
+        );
+        assert_eq!(window.output, expected[..LIMIT]);
+        assert_eq!(window.total_bytes, expected.len());
+        assert_eq!(window.matches, 2, "search must still find the tail match");
+    }
+
+    #[test]
+    fn regression_search_retains_window_counts_and_rejects_invalid_files() {
+        let text = "needle\n".repeat(10_000);
+        let mut window = SearchWindow::new(100, 37);
+        search_into(text.as_bytes(), "notes", "needle", &mut window, &control()).unwrap();
+        let expected = (1..=10_000)
+            .map(|n| format!("notes:{n}: needle"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(window.output, expected[100..137]);
+        assert_eq!(window.matches, 10_000);
+        assert_eq!(window.total_bytes, expected.len());
+        let mut invalid = text.into_bytes();
+        invalid.push(0xff);
+        search_into(
+            invalid.as_slice(),
+            "invalid",
+            "needle",
+            &mut window,
+            &control(),
+        )
+        .unwrap();
+        assert_eq!(
+            window.matches, 10_000,
+            "invalid file committed provisional matches"
+        );
+        struct SampleOnly {
+            consumed: usize,
+        }
+        impl Read for SampleOnly {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                assert!(
+                    self.consumed + buffer.len() <= 8192,
+                    "binary search read past its classification sample"
+                );
+                buffer.fill(0);
+                self.consumed += buffer.len();
+                Ok(buffer.len())
+            }
+        }
+        let mut binary = SearchWindow::new(0, 37);
+        search_into(
+            SampleOnly { consumed: 0 },
+            "binary",
+            "needle",
+            &mut binary,
+            &control(),
+        )
+        .unwrap();
+        assert_eq!(binary.matches, 0);
+    }
+    #[test]
+    fn regression_search_preserves_crlf_unicode_and_byte_offsets() {
+        let mut window = SearchWindow::new(0, 100);
+        search_into(
+            "CAFÉ needle\r\nother needle\n".as_bytes(),
+            "notes",
+            "café",
+            &mut window,
+            &control(),
+        )
+        .unwrap();
+        assert_eq!(window.output, "notes:1: CAFÉ needle");
+    }
+    #[tokio::test]
+    async fn regression_search_deadline_is_enforced() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes"), "needle").unwrap();
+        let path = dir.path().to_path_buf();
+        let result = run_search(std::time::Duration::ZERO, move |control| {
+            let mut window = SearchWindow::new(0, 100);
+            search_tree(&path, &path, "needle", &mut window, &control)?;
+            Ok(window)
+        })
+        .await;
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.contains("deadline")),
+            "deadline was not enforced"
+        );
+    }
+    #[tokio::test]
+    async fn regression_search_cancellation_reaches_worker() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        struct SlowText {
+            reads: usize,
+            started: Arc<AtomicBool>,
+        }
+        impl Read for SlowText {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.started.store(true, Ordering::Release);
+                if self.reads == 256 {
+                    return Ok(0);
+                }
+                self.reads += 1;
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                buffer.fill(b'a');
+                Ok(buffer.len())
+            }
+        }
+        let started = Arc::new(AtomicBool::new(false));
+        let reader = SlowText {
+            reads: 0,
+            started: started.clone(),
+        };
+        let (settled, result) = tokio::sync::oneshot::channel();
+        let execution = tokio::spawn(run_search(
+            std::time::Duration::from_secs(2),
+            move |control| {
+                let mut window = SearchWindow::new(0, 32);
+                let outcome = search_into(reader, "notes", "needle", &mut window, &control);
+                let _ = settled.send(outcome);
+                Ok(window)
+            },
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !started.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        execution.abort();
+        let _ = execution.await;
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), result).await;
+        assert!(
+            outcome.is_ok(),
+            "search worker continued after its caller was dropped"
+        );
+        assert!(
+            outcome
+                .unwrap()
+                .unwrap()
+                .is_err_and(|error| error.contains("cancelled")),
+            "worker did not observe cancellation"
+        );
+    }
+    #[tokio::test]
+    async fn regression_search_preserves_contextual_unicode_lowercase() {
+        let dir = tempfile::tempdir().unwrap();
+        let words = [
+            "ΟΣ",
+            "ΟΣΑ",
+            "Ο\u{301}Σ",
+            "ΟΣ\u{301}",
+            "ΟΣ\u{301}Α",
+            "Σ",
+            "AΣ'A",
+            "AΣ' ",
+            "ǅΣ",
+            "ªΣ",
+            "ΟΣ\u{345} ",
+            "ΟΣ\u{200d}Α",
+            "ΟΣ.Α",
+            "ΟΣ:Α",
+            "ΟΣ^Α",
+            "ΟΣ`Α",
+            "ΟΣ!Α",
+            "ΟΣΣ",
+            "ΟΣ\u{1ad0}Α",
+            "ΟΣ\u{a7ce}",
+        ];
+        let text = words
+            .map(|word| format!("padding padding padding padding {word}"))
+            .join("\n");
+        std::fs::write(dir.path().join("notes"), &text).unwrap();
+        let mut ctx = swage_tool::context::MockToolContext::new("agent", "session");
+        ctx.working_directory = dir.path().into();
+        for pattern in [
+            "ΟΣ",
+            "ΟΣΑ",
+            "Σ",
+            "Ο\u{301}Σ",
+            "AΣ'A",
+            "ΟΣ\u{345}",
+            "ΟΣ!Α",
+            "ΟΣΣ",
+            "ΟΣ\u{1ad0}Α",
+            "ΟΣ\u{a7ce}",
+        ] {
+            let lower = pattern.to_lowercase();
+            let expected = text
+                .lines()
+                .enumerate()
+                .filter(|(_, line)| line.to_lowercase().contains(&lower))
+                .map(|(i, line)| format!("notes:{}: {line}", i + 1))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !expected.is_empty(),
+                "case has no reference matches: {pattern}"
+            );
+            let result = FileSearchTool {
+                max_output_bytes: 10_000,
+            }
+            .execute(json!({"pattern":pattern}), &ctx)
+            .await
+            .unwrap();
+            assert_eq!(
+                result["output"], expected,
+                "whole-line lowercase changed for {pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn regression_search_context_spans_chunks_without_retaining_the_line() {
+        let prefix = "p".repeat(8189);
+        let marks = "\u{301}".repeat(12_000);
+        let text = format!("{prefix}ΟΣ{marks}!\n{prefix}ΟΣ{marks}A\n");
+        for pattern in ["ος", "οσ"] {
+            let expected = text
+                .lines()
+                .enumerate()
+                .filter(|(_, line)| line.to_lowercase().contains(pattern))
+                .map(|(i, line)| format!("notes:{}: {line}", i + 1))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut window = SearchWindow::new(0, 19);
+            search_into(text.as_bytes(), "notes", pattern, &mut window, &control()).unwrap();
+            assert_eq!(
+                window.matches, 1,
+                "context across chunks changed matches for {pattern}"
+            );
+            assert_eq!(window.total_bytes, expected.len());
+            assert_eq!(window.output, expected[..19]);
+        }
+    }
+
+    #[tokio::test]
+    async fn regression_existing_search_rejects_utf8_error_beyond_sample() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = b"needle\n".repeat(2000);
+        bytes.push(0xff);
+        std::fs::write(dir.path().join("notes"), bytes).unwrap();
+        let mut ctx = swage_tool::context::MockToolContext::new("agent", "session");
+        ctx.working_directory = dir.path().into();
+        let result = FileSearchTool {
+            max_output_bytes: 100,
+        }
+        .execute(json!({"pattern":"needle"}), &ctx)
+        .await
+        .unwrap();
+        assert!(
+            result["output"].as_str().unwrap().contains("No matches"),
+            "{result}"
         );
     }
 }

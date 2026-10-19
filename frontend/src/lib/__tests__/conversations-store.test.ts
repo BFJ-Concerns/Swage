@@ -6,6 +6,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+import { createStreamingStore } from "../stores/streaming";
 import { createConversationStore } from "../stores/conversations";
 import * as api from "../api/conversations";
 
@@ -44,6 +45,7 @@ function makeDetail(id: string) {
     id,
     topic_id: "default",
     agent_id: "gateway",
+    agent_display_name: "Swage default",
     created_at: "2026-01-01T00:00:00Z",
     last_activity: "2026-01-01T00:00:00Z",
     messages: [] as import("../types").MessageView[],
@@ -203,6 +205,7 @@ describe("createConversation", () => {
     const resp = {
       id: "new-conv",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: "default",
       created_at: "2026-01-05T00:00:00Z",
       last_activity: "2026-01-05T00:00:00Z",
@@ -220,6 +223,7 @@ describe("createConversation", () => {
     expect(store.conversations).toHaveLength(1);
     expect(store.conversations[0].id).toBe("new-conv");
     expect(store.activeConversation?.id).toBe("new-conv");
+    expect(store.activeConversation?.agent_display_name).toBe(resp.agent_display_name);
     expect(store.activeConversation?.messages).toEqual([]);
   });
 
@@ -233,6 +237,7 @@ describe("createConversation", () => {
     vi.mocked(api.createConversation).mockResolvedValueOnce({
       id: "new-conv",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: "default",
       created_at: "2026-01-05T00:00:00Z",
       last_activity: "2026-01-05T00:00:00Z",
@@ -248,6 +253,7 @@ describe("createConversation", () => {
     vi.mocked(api.createConversation).mockResolvedValueOnce({
       id: "new-conv",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: "default",
       created_at: "2026-01-05T00:00:00Z",
       last_activity: "2026-01-05T00:00:00Z",
@@ -456,6 +462,19 @@ describe("durable local updates", () => {
       messages: store.activeConversation!.messages.map(message => ({ client_id: message.client_id, timestamp: message.timestamp })),
       queued: store.activeConversation!.queued,
     }).toEqual({ messages: [{ client_id: "first-send", timestamp: "2026-01-01T00:00:01Z" }], queued: [queued] });
+  });
+
+  it("ignores a queued acknowledgement arriving after its drain, including after reopening the conversation", async () => {
+    const store = createConversationStore();
+    vi.mocked(api.getConversation).mockResolvedValue(makeDetail("conv-1"));
+    await store.selectConversation("conv-1");
+    const queued = { id: "late", origin: "user" as const, content: "already recorded", queued_at: "2026-01-01T00:02:00Z" };
+    store.clearQueuedMessages("conv-1", [queued.id]);
+    store.appendQueuedMessage(queued, "conv-1");
+    expect(store.activeConversation!.queued ?? []).toEqual([]);
+    await store.selectConversation("conv-1");
+    store.appendQueuedMessage(queued, "conv-1");
+    expect(store.activeConversation!.queued ?? []).toEqual([]);
   });
 
   it("shows a message the gateway holds for the next turn, once, until the queue drains", async () => {
@@ -694,6 +713,7 @@ describe("createConversation (topic-scoped)", () => {
     vi.mocked(api.createConversation).mockResolvedValueOnce({
       id: "new-conv",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: "proj-1",
       created_at: "2026-01-01T00:00:00Z",
       last_activity: "2026-01-01T00:00:00Z",
@@ -907,5 +927,30 @@ describe("threads and branches", () => {
     await store.abandonActiveBranch!();
 
     expect(api.abandonThread).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("queued thread replies", () => {
+  it("keeps queued branch replies out of Main and resets the destination for the following turn", async () => {
+    vi.mocked(api.getConversation).mockResolvedValue({ ...makeDetail("conv-queue"), root_thread_id: "main-thread" });
+    const conversations = createConversationStore();
+    await conversations.selectConversation("conv-queue");
+    const append = vi.spyOn(conversations, "appendAssistantMessage");
+    const stream = createStreamingStore({ conversationStore: conversations });
+
+    stream.handleServerEvent({ type: "queue_drained", session_id: "conv-queue", turn_id: "branch-turn", thread_id: "branch-thread", queued_ids: [] });
+    stream.handleServerEvent({ type: "token", content: "branch reply" });
+    stream.handleServerEvent({ type: "turn_complete", turn_id: "branch-turn" });
+
+    expect(conversations.activeConversation?.messages).toEqual([]);
+    expect(append).toHaveBeenLastCalledWith(expect.objectContaining({ content: "branch reply", thread_id: "branch-thread" }), "conv-queue");
+
+    stream.handleServerEvent({ type: "queue_drained", session_id: "conv-queue", turn_id: "main-turn", thread_id: "main-thread", queued_ids: [] });
+    stream.handleServerEvent({ type: "token", content: "main reply" });
+    stream.handleServerEvent({ type: "turn_complete", turn_id: "main-turn" });
+
+    expect(append).toHaveBeenLastCalledWith(expect.objectContaining({ content: "main reply", thread_id: "main-thread" }), "conv-queue");
+    expect(conversations.activeConversation?.messages.map(message => message.content)).toEqual(["main reply"]);
   });
 });

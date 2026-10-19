@@ -1,0 +1,14 @@
+url: https://fixture.local/article
+title: Heron
+snapshot: 1
+
+- RootWebArea "Heron"
+  - navigation "Contents"
+    - link "Habitat" ref=s1e1
+    - link "References" ref=s1e2
+  - main
+    - paragraph
+      - StaticText "Herons are long-legged, long-necked freshwater and coastal birds in the family Ardeidae."
+    ... (1 nodes elided - full snapshot saved)
+    - link "More about herons" ref=s1e3
+  ... (1 nodes elided - full snapshot saved)

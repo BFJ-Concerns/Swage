@@ -375,3 +375,77 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod run_page_tests {
+    use super::*;
+    use crate::{state::AppState, tool_executor::GatewayToolContext};
+    use std::sync::Arc;
+    use swage_storage::{SessionStore, SqliteStorage, Storage, TopicStore, WorkflowStore};
+    use swage_tool::context::MockToolContext;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn inline_run_result_and_detail_keep_the_view_address_name_origin_and_wake() {
+        let root = tempfile::tempdir().expect("test root");
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let topic = storage.general_scope().await.expect("topic");
+        let session = storage
+            .create_session(swage_storage::fixtures::new_session(topic.id))
+            .await
+            .expect("session");
+        let config = swage_config::ResolvedConfig::default();
+        let state = AppState::new_with_config_root(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            root.path().to_path_buf(),
+        );
+        let base = MockToolContext::new("current-agent", session.id.to_string());
+        let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
+        let context =
+            GatewayToolContext::new(&base, ws_tx, Arc::clone(&storage) as Arc<dyn Storage>)
+                .with_app_state(Some(state.clone()));
+        let result = WorkflowRunTool.execute(json!({"source": r#"export const meta = { name: "three-whys" }; await wait({timerMs: 600000}); return 1;"#}), &context).await.expect("launch");
+        let id: Uuid = serde_json::from_value(result["id"].clone()).expect("id");
+        // Wait for the host's durable timer parking, rather than putting a
+        // wake time in the fixture that the projection merely echoes.
+        let parked = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let record = storage
+                    .get_workflow_run(id)
+                    .await
+                    .expect("read")
+                    .expect("run");
+                if record.state == "parked" {
+                    break record;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("parked");
+        let detail =
+            crate::workflow::get_run(axum::extract::State(state.clone()), crate::error::Path(id))
+                .await
+                .expect("detail")
+                .0;
+        let wire = serde_json::to_value(&detail).expect("wire");
+        crate::workflow::cancel_run(axum::extract::State(state), crate::error::Path(id))
+            .await
+            .expect("cancel");
+        assert_eq!(result["view_url"], format!("/workflow-runs/{id}"));
+        assert_eq!(wire["run"]["script_name"], "three-whys");
+        assert_eq!(
+            wire["run"]["dispatching_session_id"],
+            session.id.to_string()
+        );
+        assert_eq!(
+            wire["run"]["wake_at"],
+            serde_json::to_value(parked.wake_at).expect("wake")
+        );
+        assert!(!wire["run"]["wake_at"].is_null());
+    }
+}

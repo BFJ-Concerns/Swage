@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { SETTINGS_LABELS } from "../../settings-labels";
   import type { ProviderProtocol } from "../../types";
 
   export type ProviderKind = "OpenAi" | "OpenAiResponses" | "Anthropic" | "Google" | "OpenRouter" | "OpenAiCompatible" | "Codex";
@@ -73,7 +74,7 @@
             <input id="compatible-name" type="text" class="text search" bind:value={compatibleDraft.name} placeholder="My OpenAI proxy" autocomplete="off" />
           </div>
           <div class="compatible-field">
-            <label class="key" for="compatible-base-url">Base URL</label>
+            <label class="key" for="compatible-base-url">{SETTINGS_LABELS["providers.*.base_url"]}</label>
             <input id="compatible-base-url" type="text" class="text" value={compatibleDraft.baseUrl} oninput={(event) => { if (compatibleDraft) compatibleDraft.baseUrl = event.currentTarget.value; baseUrlError = null; }} placeholder="https://api.example.com/v1" autocomplete="off" aria-describedby="compatible-base-url-help compatible-base-url-error" />
             <small id="compatible-base-url-help" class="field-help">Override the provider's canonical endpoint.</small>
             <p id="compatible-base-url-error" class="field-error" role="alert">{baseUrlError ?? ""}</p>

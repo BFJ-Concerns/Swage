@@ -359,7 +359,7 @@ async fn write_full_snapshot(
     file.flush()
         .await
         .map_err(|error| artifact_error("snapshot", error))?;
-    Ok(Some(path.relative))
+    Ok(Some(path.reported))
 }
 
 async fn write_screenshot(
@@ -385,7 +385,7 @@ async fn write_screenshot(
         .await
         .map_err(|error| artifact_error("screenshot", error))?;
     let _ = audit;
-    Ok(Some(path.relative))
+    Ok(Some(path.reported))
 }
 
 async fn write_audit_event(

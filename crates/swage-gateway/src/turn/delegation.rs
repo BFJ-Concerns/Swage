@@ -307,6 +307,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         );
         let elements = build_assembly_elements(
             &self.config.instructions,
+            &self.config.instruction_sources,
             operator_guidance,
             active_skills,
             delegated_history,
@@ -330,6 +331,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             &session_variables,
         );
         let mut assembly_report = output.report;
+        super::redact_element_texts(&self.state, &mut assembly_report).await;
         assembly_report.effective_tool_permissions = Some(self.effective_tool_permissions.clone());
         let report = serde_json::to_value(&assembly_report).unwrap_or_else(|error| {
             tracing::warn!(%error, "failed to serialise delegated assembly report");
@@ -461,7 +463,8 @@ impl DelegationSnapshotRecorder for GatewayDelegationSnapshotRecorder {
         let turn_id = match &event {
             AgentEvent::ProviderRequestPrepared { turn_id, .. }
             | AgentEvent::ProviderResponseCaptured { turn_id, .. }
-            | AgentEvent::ProviderReasoningCaptured { turn_id, .. } => *turn_id,
+            | AgentEvent::ProviderReasoningCaptured { turn_id, .. }
+            | AgentEvent::ProviderAttempt { turn_id, .. } => *turn_id,
             _ => return Ok(()),
         };
         let Some(snapshot) = self.state.storage.get_snapshot(turn_id).await? else {
@@ -1061,7 +1064,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                     }
                 });
 
-                let detached = started_rx.await.map_err(|_| {
+                let mut detached = started_rx.await.map_err(|_| {
                     AgentError::InvalidConfig(
                         "detached delegation stopped before child turn startup".to_string(),
                     )
@@ -1079,6 +1082,24 @@ impl DelegationHandler for GatewayDelegationHandler {
                 {
                     tracing::warn!(%error, child = name, "could not record the named child");
                 }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                #[cfg(test)]
+                crate::workflow::workflow_pause_test_hook::pause(
+                    "detached-snapshot-pending",
+                    sender_session_id,
+                )
+                .await;
+                let (observed, status_as_of) = self
+                    .state
+                    .storage
+                    .get_turn_observation(detached.child_turn_id)
+                    .await?
+                    .ok_or_else(|| {
+                        AgentError::InvalidConfig("delegated child turn disappeared".into())
+                    })?;
+                detached.status = Some(observed.state.to_string());
+                detached.error_message = observed.failure_message;
+                detached.status_as_of = Some(status_as_of);
                 Ok(DelegationOutcome::Detached(detached))
             }
         }

@@ -14,7 +14,7 @@ use swage_core::{
 };
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
 use swage_protocol::client::turn::MessageAttachment;
-use swage_protocol::client::workflow::{WorkflowAgentCallResolution, WorkflowProviderRoundOutcome};
+use swage_protocol::client::workflow::{WorkflowAttemptResolution, WorkflowProviderRoundOutcome};
 use swage_storage::model::{
     AppendMessage, ApprovalKind, ApprovalState, InboundAudit, NewAgentMessage, NewApprovalRequest,
     NewTurn, ToolCallRecord, TurnState,
@@ -224,81 +224,8 @@ pub(super) async fn process_turn_with_composition_and_focus(
     // and replace the cached write bit before assembly or sandbox creation.
     reauthorise_worker_placement_for_turn(state, &mut session).await?;
 
-    // Overlay the session's topic and agent layers on the running
-    // configuration. A present but invalid scope file fails the turn before
-    // any user message is written.
-    let config = load_session_config(state, &scope, &session.agent_id)?;
-
-    // A durable agent definition, when one exists for this agent, gives the
-    // session its character on top of the resolved file config: instructions
-    // append, the model preference fills an unselected default, and the
-    // permission overlay narrows grants. Resolution failure falls open to
-    // the file config — a broken definition must not brick the session.
-    let config = match crate::service::resolve_effective_agent_definition(
-        state.storage.as_ref(),
-        &session.agent_id,
-        topic_id,
-    )
-    .await
-    {
-        Ok(Some(definition)) => apply_agent_definition(config, &definition.definition),
-        Ok(None) => config,
-        Err(error) => {
-            tracing::warn!(
-                agent_id = %session.agent_id,
-                %error,
-                "failed to resolve the agent definition; using file config alone"
-            );
-            config
-        }
-    };
-
-    // A worker session carries the full lineage of dispatching contexts in
-    // session metadata: the worker's grants are the intersection of its own
-    // and every inherited bound, re-resolved on every turn so nested dispatch
-    // cannot expand authority and suspension cannot freeze it.
-    // Unlike the definition overlay above, resolution failure here fails the
-    // turn: falling open would run the worker wider than its dispatcher.
-    let bound_agent_ids = dispatch_bound_agent_ids(session.metadata.as_ref())?;
-    let config = apply_dispatch_bounds(
-        state,
-        &scope,
-        topic_id,
-        config,
-        &bound_agent_ids,
-        &format!("worker session {session_id}"),
-    )
-    .await?;
-    let bound_task_definition_ids = dispatch_bound_task_definition_ids(session.metadata.as_ref())?;
-    let config = apply_dispatch_task_bounds(
-        state,
-        config,
-        &bound_task_definition_ids,
-        &format!("worker session {session_id}"),
-    )
-    .await?;
-    let config = apply_workflow_call_tools(config, session.metadata.as_ref())?;
-
-    // Task names ride child-session metadata, while the definition is
-    // resolved afresh for every execution. Missing or unreadable tasks fail
-    // closed: silently running a different contract would be false success.
-    let task_definition_id = session
-        .metadata
-        .as_ref()
-        .and_then(|m| m.get("task_definition"))
-        .and_then(serde_json::Value::as_str);
-    let (config, task_defines_output_retries) = match task_definition_id {
-        Some(task_id) => {
-            let definition =
-                crate::service::resolve_task_definition(state.storage.as_ref(), task_id).await?;
-            let defines_output_retries = definition.output_max_retries.is_some();
-            (
-                apply_task_definition(config, &definition)?,
-                defines_output_retries,
-            )
-        }
-        None => (config, false),
-    };
+    let (config, task_defines_output_retries) =
+        resolve_turn_admission_config(state, &scope, &session).await?;
 
     let (config, effective_model_source, selected_model_id) = resolve_turn_model_and_attachments(
         state,
@@ -307,7 +234,8 @@ pub(super) async fn process_turn_with_composition_and_focus(
         session.selected_model_id.as_deref(),
         session_id,
         &attachments,
-    )?;
+    )
+    .await?;
 
     // Skill discovery, topic memory loading, and assembly search paths all use
     // the root retained when this application state was constructed.
@@ -346,7 +274,12 @@ pub(super) async fn process_turn_with_composition_and_focus(
         }
     };
 
-    if task_definition_id.is_some()
+    if session
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("task_definition"))
+        .and_then(serde_json::Value::as_str)
+        .is_some()
         && let Err(error) = crate::experimentation::select_session_variant(
             state,
             &config.experimentation,
@@ -571,6 +504,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
 
     let elements = build_assembly_elements(
         &config.instructions,
+        &config.instruction_sources,
         operator_guidance,
         active_skills,
         history_messages,
@@ -622,6 +556,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
     )
     .await;
     let (assembled_messages, mut assembly_report) = (output.messages, output.report);
+    redact_element_texts(state, &mut assembly_report).await;
     assembly_report.tool_scope = Some(serde_json::json!({
         "effective_root": tool_root.path,
     }));
@@ -669,6 +604,8 @@ pub(super) async fn process_turn_with_composition_and_focus(
         &tool_root.path,
         allowed_paths,
     );
+    let output_directory = managed_scratch_workspace(&state.config_root, &scope, session.id);
+    agent_config.tool_output_directory = Some(output_directory);
     if !task_defines_output_retries && let Some(max_retries) = max_output_retries_override {
         agent_config.max_output_retries = max_retries;
     }
@@ -919,3 +856,166 @@ pub(crate) mod tests;
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod output_scratch_regressions {
+    use super::*;
+    use swage_core::StreamChunk;
+    use swage_storage::{SessionStore, TopicStore, WorkspaceAttachmentStore};
+
+    #[tokio::test]
+    async fn regression_delegated_disabled_sandbox_turn_retains_shell_artifact() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let storage = Arc::new(tests::MockStorage::new());
+        let (state, session_id) = tests::make_state_with_storage_and_root(
+            vec![],
+            storage.clone(),
+            Some(root.path().into()),
+        )
+        .await;
+        let topic = storage.general_scope().await.unwrap();
+        let attachment = storage
+            .create_workspace_attachment(swage_storage::NewWorkspaceAttachment {
+                topic_id: topic.id,
+                label: "workspace".into(),
+                path: workspace.path().to_str().unwrap().into(),
+                permissions: vec!["read".into()],
+                is_trusted: true,
+            })
+            .await
+            .unwrap();
+        let mut config = swage_config::ResolvedConfig::default();
+        config.sandbox.enabled = false;
+        let (agent_config, tool_root) = build_agent_config_for_topic_workspace(
+            &state,
+            "gateway".into(),
+            &config,
+            None,
+            &topic,
+            session_id,
+            Some(attachment.id),
+        )
+        .await;
+        assert_eq!(tool_root.source, ToolRootSource::AttachedWorkspace);
+        let build = build_gateway_dispatcher_for_unattended_execution(
+            &state,
+            GatewayDispatcherRequest {
+                config: &config,
+                agent_config: &agent_config,
+                session_metadata: None,
+                topic_id: Some(topic.id),
+                active_workspace_attachment_id: Some(attachment.id),
+                ws_tx: mpsc::unbounded_channel().0,
+                session_id: Some(session_id),
+                turn_id: Some(Uuid::new_v4()),
+            },
+            "delegated turn",
+        )
+        .await
+        .unwrap();
+        assert!(build.sandbox_guard.is_none());
+        let output = agent_config.tool_output_directory.unwrap();
+        let mut base = swage_tool::context::MockToolContext::new("gateway", session_id.to_string());
+        base.working_directory = agent_config.working_directory;
+        let mut ctx = swage_tool::context::serialise_tool_context(&base);
+        ctx.tool_output_directory = Some(swage_tool::context::ToolOutputLocation {
+            directory: output.clone(),
+        });
+        let result = crate::tool::shell::ShellTool {
+            timeout: std::time::Duration::from_secs(5),
+            max_output_bytes: 4,
+        }
+        .execute(
+            serde_json::json!({"command": "printf 'delegated artifact'"}),
+            &ctx,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "delegated turn without a sandbox must retain shell output (output directory exists: {}): {result:?}",
+            output.is_dir()
+        );
+        let result = result.unwrap();
+        let path = Path::new(result["stdout_artifact_path"].as_str().unwrap());
+        assert!(path.starts_with(output));
+        assert_eq!(std::fs::read(path).unwrap(), b"delegated artifact");
+        assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn regression_disabled_sandbox_turn_can_write_artifacts_with_attached_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let storage = Arc::new(tests::MockStorage::new());
+        let (state, session_id) = tests::make_state_with_storage_and_root(
+            vec![
+                StreamChunk::Delta {
+                    content: "done".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            storage.clone(),
+            Some(root.path().into()),
+        )
+        .await;
+        {
+            let mut config = state.runtime_config.write().unwrap();
+            config.sandbox.enabled = false;
+            config.sandbox.allow_degraded_execution = true;
+        }
+        let topic = storage.general_scope().await.unwrap();
+        let attachment = storage
+            .create_workspace_attachment(swage_storage::NewWorkspaceAttachment {
+                topic_id: topic.id,
+                label: "workspace".into(),
+                path: workspace.path().to_str().unwrap().into(),
+                permissions: vec!["read".into()],
+                is_trusted: true,
+            })
+            .await
+            .unwrap();
+        storage
+            .set_session_active_workspace(session_id, Some(attachment.id))
+            .await
+            .unwrap();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "hello",
+            mpsc::unbounded_channel().0,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .unwrap();
+        let output = managed_scratch_workspace(root.path(), &topic.location(), session_id);
+        let mut base = swage_tool::context::MockToolContext::new("gateway", session_id.to_string());
+        base.working_directory = workspace.path().into();
+        let mut ctx = swage_tool::context::serialise_tool_context(&base);
+        ctx.tool_output_directory = Some(swage_tool::context::ToolOutputLocation {
+            directory: output.clone(),
+        });
+        let result = crate::tool::shell::ShellTool {
+            timeout: std::time::Duration::from_secs(5),
+            max_output_bytes: 4,
+        }
+        .execute(
+            serde_json::json!({"command": "printf 'artifact text'"}),
+            &ctx,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "disabled sandbox turn must permit output artefacts: {result:?}"
+        );
+        let result = result.unwrap();
+        let path = std::path::Path::new(result["stdout_artifact_path"].as_str().unwrap());
+        assert!(path.starts_with(output));
+        assert_eq!(std::fs::read(path).unwrap(), b"artifact text");
+        assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 0);
+    }
+}

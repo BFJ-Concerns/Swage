@@ -122,6 +122,7 @@
         <li class="entry">
           <div class="entry-text">
             <strong class="entry-name">{entry.name}</strong>
+            <time datetime={entry.updated_at}>Saved {entry.updated_at}</time>
             <span class="entry-description">{entry.description}</span>
             {#if entry.tags.length > 0}
               <span class="entry-tags">

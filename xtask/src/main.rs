@@ -169,6 +169,8 @@ struct InstallOptions {
     prefix: PathBuf,
     skip_frontend: bool,
     lan_mode: bool,
+    host: String,
+    port: u16,
 }
 
 impl InstallOptions {
@@ -177,6 +179,8 @@ impl InstallOptions {
             prefix: home_dir()?.join(".local/bin"),
             skip_frontend: false,
             lan_mode: false,
+            host: "0.0.0.0".into(),
+            port: 3000,
         };
 
         while let Some(arg) = args.next() {
@@ -187,9 +191,13 @@ impl InstallOptions {
                 }
                 "--skip-frontend" => options.skip_frontend = true,
                 "--lan" => options.lan_mode = true,
+                "--host" => options.host = args.next().ok_or("missing value after --host")?,
+                "--port" => {
+                    options.port = args.next().ok_or("missing value after --port")?.parse()?
+                }
                 "-h" | "--help" => {
                     println!(
-                        "Usage: cargo run -p xtask -- install [--prefix DIR] [--skip-frontend] [--lan]"
+                        "Usage: cargo run -p xtask -- install [--prefix DIR] [--skip-frontend] [--lan] [--host HOST] [--port PORT]"
                     );
                     std::process::exit(0);
                 }
@@ -781,11 +789,9 @@ fn release(options: &ReleaseOptions) -> Result<()> {
             ],
         ),
     )?;
-    ensure_file(
-        "target/release/swage",
-        "release binary was not produced: target/release/swage",
-    )?;
-    println!("==> Built target/release/{BINARY_NAME}");
+    let binary = release_binary_path(&cargo_target_directory()?);
+    ensure_file(&binary, "release binary was not produced")?;
+    println!("==> Built {}", binary.display());
     Ok(())
 }
 
@@ -819,25 +825,26 @@ fn install(options: &InstallOptions) -> Result<()> {
 
     fs::create_dir_all(&options.prefix)?;
     let installed_binary = options.prefix.join(BINARY_NAME);
-    publish_binary_atomically(Path::new("target/release/swage"), &installed_binary)?;
+    publish_binary_atomically(
+        &release_binary_path(&cargo_target_directory()?),
+        &installed_binary,
+    )?;
     println!("==> Installed swage to {}", installed_binary.display());
 
     if options.lan_mode {
-        run_command("Configuring gateway to bind 0.0.0.0:3000 by default", {
-            let mut command = Command::new(&installed_binary);
-            command
-                .arg("gateway")
-                .arg("install")
-                .arg("--host")
-                .arg("0.0.0.0")
-                .arg("--port")
-                .arg("3000");
-            command
-        })?;
+        run_command(
+            "Saving gateway binding defaults",
+            lan_configuration_command(&installed_binary, options),
+        )?;
     }
 
     hot_swap_gateway_if_running(&installed_binary)?;
-    print_install_next_steps(&options.prefix, options.lan_mode);
+    print_install_next_steps(
+        &options.prefix,
+        options.lan_mode,
+        &options.host,
+        options.port,
+    );
     Ok(())
 }
 
@@ -867,6 +874,23 @@ fn temporary_install_path(installed_binary: &Path) -> Result<PathBuf> {
             )
         })?;
     Ok(installed_binary.with_file_name(format!(".{file_name}.installing.{}", std::process::id())))
+}
+
+fn release_binary_path(target_directory: &Path) -> PathBuf {
+    target_directory.join("release").join(BINARY_NAME)
+}
+
+fn lan_configuration_command(binary: &Path, options: &InstallOptions) -> Command {
+    let mut command = Command::new(binary);
+    command.args([
+        "gateway",
+        "set-defaults",
+        "--host",
+        &options.host,
+        "--port",
+        &options.port.to_string(),
+    ]);
+    command
 }
 
 fn hot_swap_gateway_if_running(installed_binary: &Path) -> Result<()> {
@@ -1326,7 +1350,7 @@ fn print_dev_urls(options: &DevOptions) {
     println!();
 }
 
-fn print_install_next_steps(prefix: &Path, lan_mode: bool) {
+fn print_install_next_steps(prefix: &Path, lan_mode: bool, host: &str, port: u16) {
     println!();
     println!("Next steps:");
     if path_contains(prefix) {
@@ -1346,10 +1370,15 @@ fn print_install_next_steps(prefix: &Path, lan_mode: bool) {
 
     if lan_mode {
         println!("  2. Open the UI:");
-        println!("     Local: http://127.0.0.1:3000");
         println!(
-            "     LAN:   http://{}:3000",
-            lan_ip().unwrap_or_else(|| "<this-machine-ip>".to_string())
+            "     LAN:   http://{}:{port}",
+            if host == "0.0.0.0" {
+                lan_ip().unwrap_or_else(|| "<this-machine-ip>".to_string())
+            } else if host.contains(':') {
+                format!("[{host}]")
+            } else {
+                host.to_owned()
+            }
         );
         println!();
         println!("LAN exposure warning:");
@@ -1417,12 +1446,14 @@ fn option_value(arg: &str) -> &str {
 
 fn print_help() {
     println!(
-        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check (workspace and frontend type check only)\n  check-gate (full static rung)\n  check-design-tokens\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan]"
+        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check (workspace and frontend type check only)\n  check-gate (full static rung)\n  check-design-tokens\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan] [--host HOST] [--port PORT]"
     );
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{InstallOptions, lan_configuration_command, release_binary_path};
+    use std::path::Path;
     use std::path::PathBuf;
 
     use super::{
@@ -1479,6 +1510,41 @@ mod tests {
                 .parse()
                 .unwrap_or_else(|_| panic!("cannot parse documented gate count {other:?}")),
         }
+    }
+
+    #[test]
+    fn lan_install_saves_the_requested_binding_with_a_valid_command() {
+        let parsed = InstallOptions::parse(
+            ["--lan", "--host", "192.0.2.10", "--port", "4321"]
+                .into_iter()
+                .map(str::to_owned),
+        );
+        assert!(parsed.is_ok(), "caller-supplied binding was refused");
+        let options = parsed.unwrap();
+        let command = lan_configuration_command(Path::new("/isolated/swage"), &options);
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "gateway",
+                "set-defaults",
+                "--host",
+                "192.0.2.10",
+                "--port",
+                "4321"
+            ]
+        );
+    }
+
+    #[test]
+    fn release_artifact_uses_the_resolved_target_directory() {
+        assert_eq!(
+            release_binary_path(Path::new("/custom/cargo-output")),
+            PathBuf::from("/custom/cargo-output/release/swage")
+        );
     }
 
     #[test]

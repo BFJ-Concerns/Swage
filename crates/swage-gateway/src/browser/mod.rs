@@ -671,7 +671,13 @@ impl BrowserState {
             Ok(process) => process,
             Err(sandboxed_error) => {
                 warn!(error = %sandboxed_error, "sandboxed Chromium launch failed; retrying with --no-sandbox");
-                spawn_browser(config, true).await?
+                spawn_browser(config, true).await.map_err(|error| match error {
+                    ToolError::ExecutionFailed { name, message } => ToolError::ExecutionFailed {
+                        name,
+                        message: format!("{message}; retry after the previous browser exits, or restart the gateway"),
+                    },
+                    error => error,
+                })?
             }
         });
         Ok(())
@@ -1233,6 +1239,34 @@ fn browser_error(
 #[cfg(test)]
 mod tests {
     use super::chromium_command;
+
+    #[tokio::test]
+    async fn failed_browser_launch_explains_recovery() {
+        let root = tempfile::tempdir().expect("temporary browser root");
+        let config = super::BrowserConfig {
+            binary_path: Some(root.path().join("missing-chromium").display().to_string()),
+            profile_root: root.path().join("profiles"),
+            page_idle: std::time::Duration::from_secs(30),
+            process_idle: std::time::Duration::from_secs(30),
+            max_snapshot_bytes: 40_000,
+            screenshots: swage_config::BrowserScreenshotPolicy::Off,
+            allow_hosts: vec!["fixture.invalid".into()],
+        };
+        let host = super::BrowserHost::new(config);
+        let error = host
+            .navigate("launch-test", "http://fixture.invalid/")
+            .await
+            .expect_err("missing binary cannot launch");
+        let message = error.to_string();
+        assert!(
+            message.contains("failed to start Chromium"),
+            "unexpected failure: {message}"
+        );
+        assert!(
+            message.contains("retry after the previous browser exits, or restart the gateway"),
+            "launch failure has no recovery advice: {message}"
+        );
+    }
 
     #[test]
     fn chromium_launch_does_not_depend_on_a_desktop_keyring() {

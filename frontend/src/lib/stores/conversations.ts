@@ -109,6 +109,8 @@ function sortByRecency(list: ConversationSummary[]): ConversationSummary[] {
 }
 
 export function createConversationStore(): ConversationStore {
+  const drainedQueueIds = new Map<string, Set<string>>();
+
   // Back the custom API with real Svelte stores so async updates re-render
   // mounted components instead of leaving them stuck on initial state.
   const conversationsStore = writable<ConversationSummary[]>([]);
@@ -313,6 +315,7 @@ export function createConversationStore(): ConversationStore {
         id: resp.id,
         topic_id: resp.topic_id ?? undefined,
         agent_id: resp.agent_id,
+        agent_display_name: resp.agent_display_name,
         selected_model_id: resp.selected_model_id ?? null,
         created_at: resp.created_at,
         last_activity: resp.last_activity,
@@ -404,6 +407,7 @@ export function createConversationStore(): ConversationStore {
     },
 
     appendQueuedMessage(queued, conversationId) {
+      if (drainedQueueIds.get(conversationId)?.has(queued.id)) return;
       const activeConversation = get(activeConversationStore);
       if (activeConversation?.id !== conversationId) return;
       const held = activeConversation.queued ?? [];
@@ -422,6 +426,9 @@ export function createConversationStore(): ConversationStore {
     },
 
     clearQueuedMessages(conversationId, queuedIds) {
+      const seen = drainedQueueIds.get(conversationId) ?? new Set<string>();
+      for (const id of queuedIds) seen.add(id);
+      drainedQueueIds.set(conversationId, seen);
       const activeConversation = get(activeConversationStore);
       if (activeConversation?.id !== conversationId) return;
       const drained = new Set(queuedIds);

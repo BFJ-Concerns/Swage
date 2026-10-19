@@ -27,10 +27,20 @@ fn typescript_bindings_are_regenerated() {
 
     // Exporting the top-level types pulls in every dependency they
     // reference, so the full surface lands in one pass.
+    client::workflow::WorkflowRunEndingNotice::export_all(&cfg).expect("export ending notice");
+    client::workflow::AnswerWorkflowRunHoldResponse::export_all(&cfg)
+        .expect("export hold answer response");
+    client::workflow::WorkflowWorkerActivity::export_all(&cfg).expect("export worker activity");
+    client::workflow::WorkflowRunStatusRequest::export_all(&cfg).expect("export status request");
+    client::workflow::DelegationStartResult::export_all(&cfg)
+        .expect("export delegation start result");
+    client::workflow::WorkflowRunStartResult::export_all(&cfg).expect("export run start result");
     client::channel::CreateChannelLinkCodeRequest::export_all(&cfg)
         .expect("export channel link code request");
     client::channel::ChannelLinkCodeResponse::export_all(&cfg)
         .expect("export channel link code response");
+    client::channel::ChannelLinkListResponse::export_all(&cfg).expect("export channel links");
+    client::channel::ChannelLinkCodeListResponse::export_all(&cfg).expect("export channel codes");
     client::error::ApiErrorBody::export_all(&cfg).expect("export api error body");
     client::websocket::ClientEvent::export_all(&cfg).expect("export client events");
     client::websocket::ServerEvent::export_all(&cfg).expect("export server events");
@@ -43,6 +53,7 @@ fn typescript_bindings_are_regenerated() {
         .expect("export memory instruction request");
     client::memory::MemoryInstructionResponse::export_all(&cfg)
         .expect("export memory instruction response");
+    client::surface::RenameSurfaceRequest::export_all(&cfg).expect("export surface rename");
     client::surface::CreateSurfaceRequest::export_all(&cfg).expect("export create surface");
     client::surface::WriteSurfaceModuleResponse::export_all(&cfg)
         .expect("export write surface module response");

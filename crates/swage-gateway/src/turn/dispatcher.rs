@@ -202,6 +202,13 @@ pub(crate) fn build_sandbox_config(
         }
     }
 
+    if let Some(directory) = &agent_config.tool_output_directory {
+        let directory = sandbox_path(directory);
+        builder = builder
+            .read_write_mount(&directory)
+            .landlock_write_path(&directory)
+            .tool_output_location(swage_tool::context::ToolOutputLocation { directory });
+    }
     builder.build()
 }
 
@@ -232,6 +239,17 @@ pub(super) async fn build_turn_sandbox(
     agent_config: &AgentConfig,
     workspace_policy: Option<&TrustedWorkspacePolicy>,
 ) -> Result<TurnSandboxBuild, swage_core::SandboxError> {
+    if let Some(directory) = &agent_config.tool_output_directory {
+        tokio::fs::create_dir_all(directory)
+            .await
+            .map_err(|error| swage_core::SandboxError::SpawnFailed {
+                message: format!(
+                    "failed to create tool output directory {}: {error}",
+                    directory.display()
+                ),
+            })?;
+    }
+
     // An install that declares its boundary (a container image, for one)
     // runs every turn inside it: no per-turn sandbox is built, the host
     // sandbox settings are not consulted, and the turn's record names the

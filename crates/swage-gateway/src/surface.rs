@@ -25,10 +25,10 @@ use swage_core::{GatewayError, StorageError};
 use swage_protocol::client::surface::{
     CreateSurfaceAnnotationRequest, CreateSurfaceRequest, DeleteSurfaceAnnotationResponse,
     DeleteSurfaceModuleResponse, LibraryEntryModuleView, LibraryEntryResponse, LibraryEntrySummary,
-    LibraryListResponse, MoveSurfaceModuleRequest, SaveSurfaceToLibraryRequest,
-    SurfaceAnnotationView, SurfaceListResponse, SurfaceModuleView, SurfaceResponse, SurfaceSummary,
-    TopicDefaultSurfaceRequest, UpdateSurfaceAnnotationRequest, WriteSurfaceModuleRequest,
-    WriteSurfaceModuleResponse,
+    LibraryListResponse, ModuleDelivery, MoveSurfaceModuleRequest, RenameSurfaceRequest,
+    SaveSurfaceToLibraryRequest, SurfaceAnnotationView, SurfaceListResponse, SurfaceModuleView,
+    SurfaceResponse, SurfaceSummary, TopicDefaultSurfaceRequest, UpdateSurfaceAnnotationRequest,
+    WriteSurfaceModuleRequest, WriteSurfaceModuleResponse,
 };
 use swage_protocol::client::websocket::ServerEvent;
 use swage_storage::{
@@ -288,12 +288,10 @@ pub async fn save_surface_to_library(
     library_entry_response(state, entry.id).await
 }
 
+/// Tags in the one canonical form every tag path shares
+/// (`swage_core::tags`): saved tags and the catalogue's filter meet in it.
 fn normalised_tags(tags: &[String]) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    tags.iter()
-        .map(|tag| tag.trim().to_lowercase())
-        .filter(|tag| !tag.is_empty() && seen.insert(tag.clone()))
-        .collect()
+    swage_core::tags::canonical_tags(tags)
 }
 
 /// The library's catalogue: names, descriptions and tags, never module
@@ -516,6 +514,112 @@ async fn module_on_surface(
         })
 }
 
+/// Rename a session's surface and record the title it replaces.
+pub async fn rename_surface(
+    state: &AppState,
+    id: Uuid,
+    request: RenameSurfaceRequest,
+    author: &str,
+) -> Result<SurfaceResponse, GatewayError> {
+    let surface = surface_or_invalid(state, id).await?;
+    let title = request.title.trim();
+    if title.is_empty() {
+        return Err(GatewayError::ValidationError(
+            "a surface needs a non-empty title".into(),
+        ));
+    }
+    state
+        .storage
+        .rename_surface(
+            id,
+            title,
+            NewAuditEvent {
+                id: Uuid::new_v4().to_string(),
+                session_id: Some(surface.session_id),
+                entity_kind: "surface".into(),
+                entity_id: id.to_string(),
+                event_kind: "surface_renamed".into(),
+                summary: format!("surface renamed: {title}"),
+                metadata: json!({"title": title, "author": author}),
+            },
+        )
+        .await?
+        .ok_or_else(|| {
+            GatewayError::ValidationError("the surface disappeared during rename".into())
+        })?;
+    let _ = state.broadcast.send(ServerEvent::SurfaceUpdated {
+        surface_id: id,
+        module_id: None,
+    });
+    surface_response(state, id).await
+}
+
+/// Resolve a note without removing it from the surface's record.
+pub async fn resolve_surface_annotation(
+    state: &AppState,
+    surface_id: Uuid,
+    annotation_id: Uuid,
+    author: &str,
+) -> Result<SurfaceAnnotationView, GatewayError> {
+    let surface = surface_or_invalid(state, surface_id).await?;
+    let prior = state
+        .storage
+        .get_surface_annotation(annotation_id)
+        .await?
+        .filter(|note| note.surface_id == surface_id)
+        .ok_or_else(|| GatewayError::ValidationError("no such note on this surface".into()))?;
+    module_on_surface(state, &surface, prior.module_id).await?;
+    if state
+        .storage
+        .resolve_surface_annotation(annotation_id, NewAuditEvent {
+            id: Uuid::new_v4().to_string(),
+            session_id: Some(surface.session_id),
+            entity_kind: "surface".into(),
+            entity_id: surface_id.to_string(),
+            event_kind: "surface_annotation_resolved".into(),
+            summary: format!("note resolved on {}", surface.title),
+            metadata: json!({"annotation_id": annotation_id, "module_id": prior.module_id, "author": author}),
+        })
+        .await?
+    {
+        let current = state
+            .storage
+            .get_surface_annotation(annotation_id)
+            .await?
+            .ok_or_else(|| {
+                GatewayError::ValidationError("the note disappeared during resolution".into())
+            })?;
+        let _ = state.broadcast.send(ServerEvent::SurfaceUpdated {
+            surface_id,
+            module_id: Some(prior.module_id),
+        });
+        return Ok(annotation_view(current));
+    }
+    if prior.resolved_at.is_none() {
+        return Err(GatewayError::ValidationError(
+            "the note changed during resolution; read it again".into(),
+        ));
+    }
+    Ok(annotation_view(prior))
+}
+
+pub async fn rename_surface_handler(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<RenameSurfaceRequest>,
+) -> Result<Json<SurfaceResponse>, ApiError> {
+    Ok(Json(rename_surface(&state, id, request, "user").await?))
+}
+
+pub async fn resolve_surface_annotation_handler(
+    State(state): State<AppState>,
+    Path((surface_id, annotation_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<SurfaceAnnotationView>, ApiError> {
+    Ok(Json(
+        resolve_surface_annotation(&state, surface_id, annotation_id, "user").await?,
+    ))
+}
+
 /// Write a module: append a new instance, or replace an existing one's source
 /// against the revision the writer read. A replace whose revision has moved
 /// on lands nothing and answers with the module as it now stands — the
@@ -526,6 +630,7 @@ pub async fn write_surface_module(
     surface_id: Uuid,
     request: WriteSurfaceModuleRequest,
     author: &str,
+    delivery: Option<ModuleDelivery>,
 ) -> Result<WriteSurfaceModuleResponse, GatewayError> {
     let surface = surface_or_invalid(state, surface_id).await?;
 
@@ -541,7 +646,12 @@ pub async fn write_surface_module(
             })?;
             let outcome = state
                 .storage
-                .replace_surface_module_source(existing.id, expected_revision, &request.source)
+                .replace_surface_module_source(
+                    existing.id,
+                    expected_revision,
+                    &request.source,
+                    delivery,
+                )
                 .await?
                 .ok_or_else(|| {
                     GatewayError::ValidationError(format!(
@@ -570,7 +680,7 @@ pub async fn write_surface_module(
             }
             let created = state
                 .storage
-                .append_surface_module(surface.id, kind, &request.source)
+                .append_surface_module(surface.id, kind, &request.source, delivery)
                 .await?;
             (created, None)
         }
@@ -595,6 +705,7 @@ pub async fn write_surface_module(
                 "module_id": module.id,
                 "kind": module.kind,
                 "author": author,
+                "delivery": module.delivery,
                 "prior_source": prior_source,
                 "new_source": request.source,
             }),
@@ -1002,6 +1113,7 @@ pub async fn surface_response(
     // Each note travels with the module it hangs on, so the reader finds it
     // where the location is rather than having to match ids by hand.
     Ok(SurfaceResponse {
+        shape_only: surface.shape_only,
         id: surface.id,
         session_id: surface.session_id,
         title: surface.title,
@@ -1036,12 +1148,14 @@ fn module_view(
         source: module.source,
         revision: module.revision,
         updated_at: module.updated_at,
+        delivery: module.delivery,
         annotations,
     }
 }
 
 fn annotation_view(annotation: SurfaceAnnotation) -> SurfaceAnnotationView {
     SurfaceAnnotationView {
+        resolved_at: annotation.resolved_at,
         id: annotation.id,
         module_id: annotation.module_id,
         body: annotation.body,
@@ -1099,7 +1213,7 @@ pub async fn write_surface_module_handler(
     Json(request): Json<WriteSurfaceModuleRequest>,
 ) -> Result<Json<WriteSurfaceModuleResponse>, ApiError> {
     Ok(Json(
-        write_surface_module(&state, surface_id, request, "user").await?,
+        write_surface_module(&state, surface_id, request, "user", None).await?,
     ))
 }
 
@@ -1270,6 +1384,7 @@ mod tests {
                     expected_revision: None,
                 },
                 "user",
+                None,
             )
             .await
             .unwrap(),
@@ -1295,11 +1410,188 @@ mod tests {
                     expected_revision: None,
                 },
                 "user",
+                None,
             )
             .await
             .unwrap(),
         );
         (state, storage, surface.id, module.id, other_module.id)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_rename_audit_leaves_the_title_unchanged() {
+        let (state, storage, surface_id, _, _) = seeded().await;
+        let prior = storage.get_page(surface_id).await.unwrap().unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER reject_rename_audit BEFORE INSERT ON audit_events
+             WHEN NEW.event_kind = 'surface_renamed'
+             BEGIN SELECT RAISE(ABORT, 'injected rename audit failure'); END;",
+                )
+            })
+            .await
+            .unwrap();
+        let mut updates = state.broadcast.subscribe();
+        rename_surface(
+            &state,
+            surface_id,
+            RenameSurfaceRequest {
+                title: "New title".into(),
+            },
+            "user",
+        )
+        .await
+        .expect_err("the audit insert must fail");
+        let unchanged = storage.get_page(surface_id).await.unwrap().unwrap();
+        assert_eq!(
+            unchanged.title, "Planning",
+            "a failed audit must roll back the title"
+        );
+        assert_eq!(unchanged.updated_at, prior.updated_at);
+        assert!(
+            updates.try_recv().is_err(),
+            "a failed change emits no update"
+        );
+        assert!(
+            storage
+                .list_audit_events()
+                .await
+                .unwrap()
+                .iter()
+                .all(|event| event.event_kind != "surface_renamed")
+        );
+
+        storage
+            .with_conn(|conn| conn.execute_batch("DROP TRIGGER reject_rename_audit"))
+            .await
+            .unwrap();
+        let renamed = rename_surface(
+            &state,
+            surface_id,
+            RenameSurfaceRequest {
+                title: "New title".into(),
+            },
+            "user",
+        )
+        .await
+        .unwrap();
+        assert_eq!(renamed.title, "New title");
+        let events = storage.list_audit_events().await.unwrap();
+        let events: Vec<_> = events
+            .iter()
+            .filter(|event| event.event_kind == "surface_renamed")
+            .collect();
+        assert_eq!(
+            events.len(),
+            1,
+            "one successful rename leaves exactly one audit"
+        );
+        assert_eq!(events[0].entity_id, surface_id.to_string());
+        assert_eq!(events[0].metadata["prior_title"], "Planning");
+        assert_eq!(events[0].metadata["title"], "New title");
+        assert_eq!(events[0].metadata["author"], "user");
+        assert!(
+            matches!(updates.try_recv().unwrap(), ServerEvent::SurfaceUpdated { surface_id: id, module_id: None } if id == surface_id)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_resolution_audit_leaves_the_note_open() {
+        let (state, storage, surface_id, module_id, _) = seeded().await;
+        let note =
+            create_surface_annotation(&state, surface_id, annotation(module_id, "Do this"), "user")
+                .await
+                .unwrap();
+        let prior = storage
+            .get_surface_annotation(note.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let surface = storage.get_page(surface_id).await.unwrap().unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER reject_resolution_audit BEFORE INSERT ON audit_events
+             WHEN NEW.event_kind = 'surface_annotation_resolved'
+             BEGIN SELECT RAISE(ABORT, 'injected resolution audit failure'); END;",
+                )
+            })
+            .await
+            .unwrap();
+        let mut updates = state.broadcast.subscribe();
+        resolve_surface_annotation(&state, surface_id, note.id, "agent")
+            .await
+            .expect_err("the audit insert must fail");
+        let unchanged = storage
+            .get_surface_annotation(note.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            unchanged.resolved_at.is_none(),
+            "a failed audit must leave the note unresolved"
+        );
+        assert_eq!(unchanged.updated_at, prior.updated_at);
+        assert_eq!(
+            storage
+                .get_page(surface_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .updated_at,
+            surface.updated_at
+        );
+        assert!(
+            updates.try_recv().is_err(),
+            "a failed change emits no update"
+        );
+        assert!(
+            storage
+                .list_audit_events()
+                .await
+                .unwrap()
+                .iter()
+                .all(|event| event.event_kind != "surface_annotation_resolved")
+        );
+
+        storage
+            .with_conn(|conn| conn.execute_batch("DROP TRIGGER reject_resolution_audit"))
+            .await
+            .unwrap();
+        let resolved = resolve_surface_annotation(&state, surface_id, note.id, "agent")
+            .await
+            .unwrap();
+        assert!(resolved.resolved_at.is_some());
+        resolve_surface_annotation(&state, surface_id, note.id, "user")
+            .await
+            .unwrap();
+        let events = storage.list_audit_events().await.unwrap();
+        let events: Vec<_> = events
+            .iter()
+            .filter(|event| event.event_kind == "surface_annotation_resolved")
+            .collect();
+        assert_eq!(
+            events.len(),
+            1,
+            "one successful resolution leaves exactly one audit, including after retry"
+        );
+        assert_eq!(events[0].entity_id, surface_id.to_string());
+        assert_eq!(events[0].metadata["annotation_id"], note.id.to_string());
+        assert_eq!(events[0].metadata["module_id"], module_id.to_string());
+        assert_eq!(events[0].metadata["body"], "Do this");
+        assert_eq!(events[0].metadata["author"], "agent");
+        assert_eq!(
+            events[0].metadata["resolved_at"],
+            json!(resolved.resolved_at)
+        );
+        assert!(
+            matches!(updates.try_recv().unwrap(), ServerEvent::SurfaceUpdated { surface_id: id, module_id: Some(mid) } if id == surface_id && mid == module_id)
+        );
+        assert!(
+            updates.try_recv().is_err(),
+            "a resolution retry emits no duplicate update"
+        );
     }
 
     /// The module a write landed; an append never comes back stale.
@@ -1340,6 +1632,7 @@ mod tests {
             surface_id,
             replace(module_id, 0, "# Agent's"),
             "gateway",
+            None,
         )
         .await
         .unwrap();
@@ -1356,6 +1649,7 @@ mod tests {
             surface_id,
             replace(module_id, 0, "# Person's"),
             "user",
+            None,
         )
         .await
         .unwrap();
@@ -1389,6 +1683,7 @@ mod tests {
             surface_id,
             replace(module_id, current.revision, "# Person's, knowingly"),
             "user",
+            None,
         )
         .await
         .unwrap();
@@ -1411,6 +1706,7 @@ mod tests {
                 expected_revision: None,
             },
             "gateway",
+            None,
         )
         .await
         .unwrap_err();
@@ -1494,6 +1790,7 @@ mod tests {
                     expected_revision: None,
                 },
                 "user",
+                None,
             )
             .await
             .unwrap();

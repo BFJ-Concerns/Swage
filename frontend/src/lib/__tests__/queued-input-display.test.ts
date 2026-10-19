@@ -8,7 +8,7 @@ import * as api from "../api/conversations";
 import { makeConversationDetail } from "./fixtures/conversations";
 import type { MessageView } from "../protocol/MessageView";
 
-vi.mock("../api/conversations", () => ({ getConversation: vi.fn(), listBranches: vi.fn() }));
+vi.mock("../api/conversations", () => ({ getConversation: vi.fn(), listBranches: vi.fn(), getThread: vi.fn() }));
 
 let component: ReturnType<typeof mount> | undefined;
 afterEach(() => {
@@ -19,7 +19,7 @@ afterEach(() => {
 });
 
 async function openConversation() {
-  vi.mocked(api.getConversation).mockResolvedValue(makeConversationDetail());
+  vi.mocked(api.getConversation).mockResolvedValue(makeConversationDetail({ root_thread_id: "root-1" }));
   vi.mocked(api.listBranches).mockResolvedValue([]);
   const conversation = createConversationStore();
   await conversation.selectConversation("conv-1");
@@ -31,6 +31,31 @@ async function openConversation() {
 }
 
 describe("queued input display", () => {
+  it.each([false, true])("shows a queued branch stream only on its destination while switching views (tokens: %s)", async (tokens) => {
+    const { conversation, streaming } = await openConversation();
+    vi.mocked(api.getThread).mockResolvedValue({ id: "branch-1", session_id: "conv-1", agent_id: "gateway", state: "idle", messages: [] });
+    flushSync(() => streaming.handleServerEvent({ type: "queue_drained", thread_id: "branch-1", session_id: "conv-1", turn_id: "branch-turn", queued_ids: [] }));
+    if (!tokens) expect(document.querySelector(".message.streaming"), "Main must not show the branch's generating bubble").toBeNull();
+    flushSync(() => streaming.handleServerEvent({ type: "token", content: "branch reply" }, "conv-1"));
+    expect(document.body.textContent, "Main must not show branch tokens").not.toContain("branch reply");
+    await conversation.selectThread!("branch-1");
+    flushSync();
+    expect(document.querySelector(".message.streaming")).not.toBeNull();
+    expect(document.body.textContent).toContain("branch reply");
+    await conversation.selectThread!(null);
+    flushSync();
+    expect(document.querySelector(".message.streaming")).toBeNull();
+    expect(document.body.textContent).not.toContain("branch reply");
+    flushSync(() => streaming.handleServerEvent({ type: "turn_complete", turn_id: "branch-turn" }, "conv-1"));
+    flushSync(() => streaming.handleServerEvent({ type: "queue_drained", thread_id: "root-1", session_id: "conv-1", turn_id: "main-turn", queued_ids: [] }));
+    expect(document.querySelector(".message.streaming")).not.toBeNull();
+    flushSync(() => streaming.handleServerEvent({ type: "token", content: "main reply" }, "conv-1"));
+    expect(document.body.textContent).toContain("main reply");
+    await conversation.selectThread!("branch-1");
+    flushSync();
+    expect(document.body.textContent).not.toContain("main reply");
+  });
+
   it("appends three drained rows with a shared timestamp and follows the reply without remounting", async () => {
     const { streaming } = await openConversation();
     const contents = ["first input", "second input", "third input"];
@@ -41,7 +66,7 @@ describe("queued input display", () => {
     }));
     expect(() => flushSync(() => {
       for (const message of rows) streaming.handleServerEvent({ type: "message_appended", session_id: "conv-1", message });
-      streaming.handleServerEvent({ type: "queue_drained", session_id: "conv-1", turn_id: "drained-turn", queued_ids: [] });
+      streaming.handleServerEvent({ type: "queue_drained", thread_id: "root-1", session_id: "conv-1", turn_id: "drained-turn", queued_ids: [] });
       streaming.handleServerEvent({ type: "token", content: "shared reply" }, "conv-1");
     })).not.toThrow();
     expect(Array.from(document.querySelectorAll('[aria-label="Your message"]')).map((row) => row.querySelector(".message-content")?.textContent?.trim())).toEqual(contents);

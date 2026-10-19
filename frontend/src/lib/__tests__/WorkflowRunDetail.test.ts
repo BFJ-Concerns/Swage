@@ -85,11 +85,13 @@ const baseCall: WorkflowAgentCallDetail = {
     grants: ["file_read"],
     attempts: [
       {
+        cause: { cause: "first" },
+        opened_at: "2026-09-02T10:00:00Z",
         model: "test-model",
         effort: "low",
         session_id: null,
         thread_id: null,
-        turn_id: null,
+        turn_id: "turn-1",
       },
     ],
   },
@@ -218,6 +220,69 @@ describe("WorkflowRunDetail", () => {
     expect(termination).not.toContain("Failed");
   });
 
+  it("names an opened attempt no turn has resolved as such, never as defaults", async () => {
+    const first = baseCall.dispatch!.attempts[0];
+    await render(
+      runWith({
+        ...baseCall,
+        termination: { termination: "outstanding" },
+        dispatch: {
+          ...baseCall.dispatch!,
+          attempts: [{ ...first, model: null, effort: null, turn_id: null }],
+        },
+      } as unknown as WorkflowAgentCallDetail),
+    );
+    const call = document.querySelector(".call")!.textContent!;
+    expect(call).toContain("opened, not yet resolved by a turn");
+    expect(call).not.toContain("default model");
+  });
+
+  it("words a redispatch after an interruption apart from a fallback", async () => {
+    const first = baseCall.dispatch!.attempts[0];
+    await render(
+      runWith({
+        ...baseCall,
+        dispatch: {
+          ...baseCall.dispatch!,
+          attempts: [
+            first,
+            { ...first, cause: { cause: "after_interruption" }, model: "test-model" },
+          ],
+        },
+      } as unknown as WorkflowAgentCallDetail),
+    );
+    let attempts = document.querySelector(".attempts")!.textContent!;
+    expect(attempts).toContain("attempt 2 — dispatched again after a gateway interruption");
+    expect(attempts).toContain("attempt 1's outcome is unknown");
+    expect(attempts).toContain("may have been applied twice");
+    expect(attempts).not.toContain("fallback");
+
+    unmount(component!);
+    component = undefined;
+    document.body.replaceChildren();
+    await render(
+      runWith({
+        ...baseCall,
+        dispatch: {
+          ...baseCall.dispatch!,
+          attempts: [
+            first,
+            {
+              ...first,
+              cause: { cause: "provider_fallback", primary_failure: "unknown model pinned" },
+              model: "fallback",
+            },
+          ],
+        },
+      } as unknown as WorkflowAgentCallDetail),
+    );
+    attempts = document.querySelector(".attempts")!.textContent!;
+    expect(attempts).toContain("dispatched to the declared fallback because the primary failed (unknown model pinned)");
+    expect(attempts).not.toContain("served");
+    expect(attempts).not.toContain("interrupt");
+    expect(document.querySelector(".call")!.textContent).toContain("fallback, low");
+  });
+
   it("tells an outstanding provider round from a settled one", async () => {
     await render(
       runWith({
@@ -283,18 +348,22 @@ describe("WorkflowRunDetail", () => {
           ...baseCall.dispatch!,
           attempts: [
             {
+              cause: { cause: "first" },
+              opened_at: "2026-09-02T10:00:00Z",
               model: "interrupted-model",
               effort: "low",
               session_id: null,
               thread_id: null,
-              turn_id: null,
+              turn_id: "turn-1",
             },
             {
+              cause: { cause: "after_interruption" },
+              opened_at: "2026-09-02T10:00:03Z",
               model: "test-model",
               effort: "low",
               session_id: null,
               thread_id: null,
-              turn_id: null,
+              turn_id: "turn-2",
             },
           ],
         },
@@ -339,5 +408,33 @@ describe("WorkflowRunDetail", () => {
     expect(document.querySelector(".call")!.textContent).toContain(
       "test-model",
     );
+  });
+});
+
+describe("complete worker detail", () => {
+  it("shows every attempt's options and session, liveness and null-grant meaning", async () => {
+    await render(runWith({ ...baseCall, session_id: "worker-session", liveness: { started_at: "2026-09-02T11:00:00Z", first_evidence_at: "2026-09-02T11:00:04Z" }, dispatch: { ...baseCall.dispatch!, grants: null, placement: { path: "/Worktree/ExactCase", can_write: false }, attempts: [
+      { cause: { cause: "first" }, opened_at: "2026-09-02T10:00:00Z", model: "earlier-model", effort: "high", session_id: "earlier-session", turn_id: "earlier-turn" },
+      { cause: { cause: "after_interruption" }, opened_at: "2026-09-02T10:01:00Z", model: "later-model", effort: "low", session_id: "later-session", turn_id: "later-turn" },
+    ] } }));
+    const attempts = document.querySelectorAll(".attempts li");
+    expect(attempts[0].textContent).toContain("earlier-model, high");
+    expect(attempts[1].textContent).toContain("later-model, low");
+    expect(attempts[0].querySelector("a")?.getAttribute("href")).toBe("/conversations/earlier-session");
+    expect(attempts[1].querySelector("a")?.getAttribute("href")).toBe("/conversations/later-session");
+    expect(document.querySelector(".liveness")?.textContent).toContain("2026-09-02T11:00:00Z");
+    expect(document.querySelector(".liveness")?.textContent).toContain("2026-09-02T11:00:04Z");
+    expect(document.body.textContent).toContain("narrowed nothing");
+    expect(document.body.textContent).toContain("/Worktree/ExactCase");
+    expect(document.querySelector('a[href="/conversations/worker-session"]')).not.toBeNull();
+  });
+
+  it("reads an outstanding journal worker through its terminal account", async () => {
+    const detail = runWith({ ...baseCall, termination: { termination: "outstanding" } });
+    detail.run.state = "completed";
+    detail.run.terminal_account = { ending: { ending: "returned" }, settled_at: "2026-09-02T10:05:00Z", workers: { done: [], failed: [], unsettled: [], cut_short: [{ journal_entry_id: "entry-1", seq: 0, redispatched_after_interruption: false, termination: { termination: "cut_short", cause: "run_returned", detail: "The script returned" } }] } };
+    await render(detail);
+    expect(document.querySelector(".termination")?.textContent).toBe("Cut short");
+    expect(document.body.textContent).not.toContain("Still working");
   });
 });
