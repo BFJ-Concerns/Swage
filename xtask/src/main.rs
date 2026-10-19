@@ -1589,12 +1589,11 @@ mod tests {
             ("gateway.example", "http://gateway.example:4321"),
         ] {
             let output = next_steps(host, 4321);
-            assert!(
-                output
-                    .lines()
-                    .any(|line| line.trim() == format!("LAN:   {expected}")),
-                "{output}"
-            );
+            let urls: Vec<_> = output
+                .split_whitespace()
+                .filter(|word| word.contains("://"))
+                .collect();
+            assert_eq!(urls, [expected], "{output}");
         }
     }
 
