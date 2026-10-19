@@ -409,7 +409,7 @@
               </div>
             </article>
           {:else}
-            {#if worktopicsLoaded}
+            {#if worktopicsLoaded && !isLoading}
               <p class="shell-empty">No workspace folders are attached to this topic.</p>
             {/if}
           {/each}
