@@ -7408,7 +7408,7 @@ pub(crate) async fn answer_run_hold(
         // Relaunching is a claim on the run's state, so a cancellation that
         // got there first simply refuses this resume: the verdict stands on
         // the record and nothing runs.
-        resume_owed_workflow_runs(state).await;
+        Box::pin(resume_owed_workflow_runs(state)).await;
     }
     let answered = state
         .storage
