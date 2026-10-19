@@ -1184,7 +1184,8 @@ async fn run_body(
     let (session_id, agent_id, input) = match &schedule.session_policy {
         SessionPolicy::Fresh { topic_id, agent_id } => {
             let service =
-                ConversationService::new(state.storage.clone(), state.topic_store.clone());
+                ConversationService::new(state.storage.clone(), state.topic_store.clone())
+                    .with_config(state.active_config(), state.config_root.clone());
             let conversation = service
                 .create_session_in_topic_for_agent(
                     topic_id.expect("stored fresh policy has a scope id"),

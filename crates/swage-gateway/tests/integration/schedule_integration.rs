@@ -970,6 +970,68 @@ async fn tick_continues_after_a_due_schedule_run_fails() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
+async fn fresh_policy_selects_the_topics_default_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = test_state(
+        &dir.path().join("fresh-model.db"),
+        MockProvider::new(vec![MockProvider::text_round("outcome")]),
+    );
+    state.config_root = dir.path().to_path_buf();
+    let topic = state
+        .topic_store
+        .create(swage_storage::NewTopic {
+            name: "Scheduled model".into(),
+            slug: "scheduled-model".into(),
+        })
+        .await
+        .unwrap();
+    let topic_dir = topic.location().data_dir(dir.path());
+    std::fs::create_dir_all(&topic_dir).unwrap();
+    std::fs::write(
+        topic_dir.join("config.toml"),
+        r#"[providers]
+default = "mock"
+[providers.entries.mock]
+protocol = "openai"
+base_url = "http://127.0.0.1:9/v1"
+[models]
+default = "schedule-mock"
+[models.entries.schedule-mock]
+provider_id = "mock"
+model_id = "schedule-mock"
+"#,
+    )
+    .unwrap();
+    let created = schedule::create_schedule(
+        &state,
+        create_request(
+            "Check the queue.",
+            ScheduleSpec::Interval {
+                every: "every 1 hours".into(),
+            },
+            SessionPolicy::Fresh {
+                topic_id: Some(topic.id),
+                agent_id: "gateway".into(),
+            },
+        ),
+        ScheduleCreator::User,
+    )
+    .await
+    .unwrap();
+    let run = schedule::trigger_schedule(&state, created.id)
+        .await
+        .unwrap()
+        .run;
+    let session = state
+        .storage
+        .get_session(run.session_id.expect("fresh run records its session"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.selected_model_id.as_deref(), Some("schedule-mock"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn fresh_policy_creates_a_session_per_run_and_seeds_previous_outcome() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(

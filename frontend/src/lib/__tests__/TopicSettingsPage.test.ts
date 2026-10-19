@@ -77,6 +77,78 @@ describe("TopicSettingsPage", () => {
     vi.clearAllMocks();
   });
 
+  it("waits for the workspace load before showing an empty list", async () => {
+    let finish!: (value: Awaited<ReturnType<typeof topicsApi.listTopicWorkspaces>>) => void;
+    vi.mocked(topicsApi.listTopicWorkspaces).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "workspaces" } });
+    await flushUi();
+    expect(document.body.textContent).toContain("Loading topic settings");
+    expect(document.body.textContent).not.toContain("No workspace folders");
+    finish([]);
+    await flushUi();
+    expect(document.body.textContent).toContain("No workspace folders");
+  });
+
+  it("retries a failed load and shows the current working folder", async () => {
+    vi.mocked(topicsApi.listTopicWorkspaces).mockRejectedValueOnce(new Error("Workspace load failed"));
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "workspaces" } });
+    await flushUi();
+    expect(document.body.textContent).toContain("Workspace load failed");
+    const retry = Array.from(document.querySelectorAll("button")).find((button) => button.textContent === "Retry");
+    expect(retry).toBeDefined();
+    let finish!: (value: Awaited<ReturnType<typeof topicsApi.listTopicWorkspaces>>) => void;
+    vi.mocked(topicsApi.listTopicWorkspaces).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    retry!.click();
+    await flushUi();
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(document.body.textContent).toContain("Loading topic settings");
+    finish([{
+      id: "workspace-1", topic_id: topic.id, label: "Moved source", path: "/work/moved",
+      canonical_path: "/work/moved", is_missing: false, permissions: ["read"], is_trusted: true,
+      is_default: true, created_at: "2026-05-26T10:00:00Z",
+    }]);
+    await flushUi();
+    const row = document.querySelector(".record-row");
+    expect(row?.textContent).toContain("/work/moved");
+    expect(row?.textContent).toContain("working folder");
+    expect(row?.textContent).toContain("trusted · read");
+    expect(document.body.textContent).not.toContain("/work/source");
+    expect(topicsApi.listTopicSessions).toHaveBeenCalledTimes(2);
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("retries a failed refresh after a successful load", async () => {
+    vi.mocked(topicsApi.detachTopicWorkspace).mockResolvedValue();
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "workspaces" } });
+    await flushUi();
+    expect(document.body.textContent).toContain("/work/source");
+    vi.mocked(topicsApi.listTopicWorkspaces).mockRejectedValueOnce(new Error("Refresh failed"));
+    Array.from(document.querySelectorAll("button")).find(button => button.textContent?.trim() === "Detach")!.click();
+    await flushUi();
+    expect(topicsApi.listTopicWorkspaces).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).toContain("Refresh failed");
+    const retry = Array.from(document.querySelectorAll("button")).find(button => button.textContent?.trim() === "Retry");
+    expect(retry, "failed refresh offers Retry").toBeDefined();
+    vi.mocked(topicsApi.listTopicWorkspaces).mockResolvedValueOnce([]);
+    retry!.click();
+    await flushUi();
+    expect(topicsApi.listTopicWorkspaces).toHaveBeenCalledTimes(3);
+    expect(topicsApi.listTopicSessions).toHaveBeenCalledTimes(3);
+    expect(document.body.textContent).toContain("No workspace folders");
+    expect(document.body.textContent).not.toContain("/work/source");
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("shows the topic's effective default model in its overview", async () => {
+    component = mount(TopicSettingsPage, { target: document.body, props: {
+      topic: { ...topic, effective_default_model: "local:topic-model" }, tab: "overview",
+    } });
+    await flushUi();
+    const rows = Array.from(document.querySelectorAll(".shell-row"));
+    const model = rows.find((row) => row.querySelector(".shell-label")?.textContent === "Default model");
+    expect(model?.querySelector(".shell-value")?.textContent).toBe("local:topic-model");
+  });
+
   it("loads topic-scoped data for the overview", async () => {
     component = mount(TopicSettingsPage, {
       target: document.body,
