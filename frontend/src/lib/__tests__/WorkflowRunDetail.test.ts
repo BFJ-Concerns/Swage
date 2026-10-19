@@ -160,6 +160,10 @@ describe("WorkflowRunDetail", () => {
       expect(metadata, text).toBeDefined();
       expect(metadata!.compareDocumentPosition(briefing) & Node.DOCUMENT_POSITION_FOLLOWING, text).not.toBe(0);
     }
+    for (const history of [card.querySelector(".attempts"), [...card.querySelectorAll("dt")].find((node) => node.textContent === "Granted")]) {
+      expect(history).toBeTruthy();
+      expect(briefing.compareDocumentPosition(history!) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    }
     const roundLabel = [...card.querySelectorAll("dt")].find((node) => node.textContent === "Provider rounds")!;
     expect(roundLabel.nextElementSibling?.textContent).toBe("1");
     summary.click();

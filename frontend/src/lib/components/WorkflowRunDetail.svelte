@@ -177,6 +177,26 @@
               </dd>
               <dt>Ran with</dt>
               <dd>{call.dispatch.attempts.length ? resolvedLabel(call.dispatch.attempts[call.dispatch.attempts.length - 1]) : "not yet resolved"}</dd>
+              {#if call.dispatch.placement}
+                <dt>Placed at</dt>
+                <dd>
+                  {#if placementInAccount(call.dispatch.placement.path)}
+                    Shown in the terminal account
+                  {:else}
+                    {call.dispatch.placement.path}
+                  {/if}
+                  ({call.dispatch.placement.can_write ? "writable" : "read-only"})
+                </dd>
+              {/if}
+            </dl>
+            <details class="briefing">
+              <summary>
+                Briefing <span class="preview">{briefingPreview(call.dispatch.prompt)}</span>
+                <span class="expand">Expand</span><span class="collapse">Collapse</span>
+              </summary>
+              <p class="prompt">{call.dispatch.prompt}</p>
+            </details>
+            <dl>
               {#if call.dispatch.attempts.length > 0}
                 <dt>Attempts</dt>
                 <dd class="attempts">
@@ -192,17 +212,6 @@
                   </ol>
                 </dd>
               {/if}
-              {#if call.dispatch.placement}
-                <dt>Placed at</dt>
-                <dd>
-                  {#if placementInAccount(call.dispatch.placement.path)}
-                    Shown in the terminal account
-                  {:else}
-                    {call.dispatch.placement.path}
-                  {/if}
-                  ({call.dispatch.placement.can_write ? "writable" : "read-only"})
-                </dd>
-              {/if}
               <dt>Granted</dt>
               <dd>
                 {call.dispatch.grants == null
@@ -210,13 +219,6 @@
                   : call.dispatch.grants.join(", ") || "no tools"}
               </dd>
             </dl>
-            <details class="briefing">
-              <summary>
-                Briefing <span class="preview">{briefingPreview(call.dispatch.prompt)}</span>
-                <span class="expand">Expand</span><span class="collapse">Collapse</span>
-              </summary>
-              <p class="prompt">{call.dispatch.prompt}</p>
-            </details>
           {:else}
             <p class="status">
               No dispatch record — this call was journalled before the record
