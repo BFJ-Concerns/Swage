@@ -7299,6 +7299,11 @@
         "synthesis": {
           "type": "boolean"
         },
+        "synthesis_unverified": {
+          "description": "Whether the configured speech model's availability is still unverified.",
+          "type": "boolean",
+          "default": false
+        },
         "transcription": {
           "type": "boolean"
         },
