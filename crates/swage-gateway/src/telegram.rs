@@ -1186,8 +1186,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let database = root.path().join("codes.db");
         let (state, storage) = file_state(&database, MockProvider::new(vec![]), client.clone());
-        let issued = chrono::Utc::now();
+        let before = chrono::Utc::now();
         let code = issue_link_code(&state).await;
+        let after = chrono::Utc::now();
         drop(state);
         drop(storage);
         let (rebuilt, storage) = file_state(&database, MockProvider::new(vec![]), client.clone());
@@ -1202,8 +1203,9 @@ mod tests {
         );
         assert_eq!(visible[0].link_code, code);
         assert!(
-            (visible[0].expires_at - issued).num_seconds() >= 86399,
-            "a link code must last 24 hours"
+            visible[0].expires_at >= before + chrono::Duration::hours(24)
+                && visible[0].expires_at <= after + chrono::Duration::hours(24),
+            "expiry must be between issuance bounds plus 24 hours"
         );
         assert_eq!(
             crate::onboarding::list_channel_link_codes(&rebuilt)
