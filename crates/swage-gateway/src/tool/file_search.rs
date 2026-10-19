@@ -61,7 +61,7 @@ impl Tool for FileSearchTool {
             "properties": {
                 "justification": {
                     "type": "string",
-                    "description": "Why this file is needed when it lies outside the session's granted locations, in one or two sentences. Read by whoever answers for the request — the person, or the judge when nobody is watching; omitted, the request is weighed without a reason."
+                    "description": "Why this file is needed when it lies outside the session's granted locations, in one or two sentences. Read by the judge that answers for the request, and by the person when one is watching and the judge is not sure; omitted, the request is weighed without a reason."
                 },
                 "pattern": {
                     "type": "string",

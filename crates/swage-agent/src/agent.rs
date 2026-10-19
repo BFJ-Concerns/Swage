@@ -909,8 +909,9 @@ pub struct Agent {
     /// When set, the agent can pause tool execution and wait for human review.
     pub(crate) approval_registrar: Option<ApprovalChannelRegistrar>,
 
-    /// Who answers for a request beyond the session's grants when no person
-    /// is watching (crate::judge). Without one, an unattended turn's
+    /// Who answers for a request beyond the session's grants (crate::judge):
+    /// alone when no person is watching, and first when one is, the person
+    /// taking the cases it is not sure of. Without one, an unattended turn's
     /// out-of-grant request fails closed.
     pub(crate) request_judge: Option<crate::judge::SharedRequestJudge>,
 

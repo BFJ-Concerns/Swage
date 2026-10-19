@@ -35,7 +35,7 @@ impl Tool for FileReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read the contents of a file in the workspace, optionally from a byte offset. A path outside the session's granted locations is put to the person, or, when nobody is watching, to the judge: give your reason in justification so it can be answered."
+        "Read the contents of a file in the workspace, optionally from a byte offset. A path outside the session's granted locations is answered for by the judge, and by the person when one is watching and the judge is not sure: give your reason in justification so whoever answers can weigh it."
     }
 
     fn parameters(&self) -> Value {
@@ -53,7 +53,7 @@ impl Tool for FileReadTool {
                 },
                 "justification": {
                     "type": "string",
-                    "description": "Why this file is needed when it lies outside the session's granted locations, in one or two sentences. Read by whoever answers for the request — the person, or the judge when nobody is watching; omitted, the request is weighed without a reason."
+                    "description": "Why this file is needed when it lies outside the session's granted locations, in one or two sentences. Read by the judge that answers for the request, and by the person when one is watching and the judge is not sure; omitted, the request is weighed without a reason."
                 }
             },
             "required": ["path"]

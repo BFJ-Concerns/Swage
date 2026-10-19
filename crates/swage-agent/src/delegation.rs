@@ -116,8 +116,9 @@ pub struct DelegationExecutor {
     pub hook_registry: Option<Arc<HookRegistry>>,
     pub leak_detector: Option<Arc<LeakDetector>>,
     pub approval_registrar: Option<ApprovalChannelRegistrar>,
-    /// Who answers for a child's request beyond its grants when no person is
-    /// watching; a child without one fails such requests closed.
+    /// Who answers for a child's request beyond its grants — alone when no
+    /// person is watching, first when one is; a child without one fails such
+    /// requests closed in an unattended turn.
     pub request_judge: Option<crate::judge::SharedRequestJudge>,
     pub delegation_handler: Option<Arc<dyn DelegationHandler>>,
     pub router: Arc<MessageRouter>,

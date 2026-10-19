@@ -559,8 +559,8 @@ settings_section! {
 
 settings_section! {
     /// The judging model: who answers for a request a session's grants do
-    /// not cover when no person is watching (an unattended turn reaching a
-    /// location outside its granted locations).
+    /// not cover — alone in an unattended turn, and first in an attended one,
+    /// where the person takes the cases it is not sure of.
     section "judge" as JudgeConfig / PartialJudgeConfig {
         /// The model catalogue key, or an alias, of the model that judges
         /// such requests. Empty means no judge, and an unattended request

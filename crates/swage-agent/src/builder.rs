@@ -78,8 +78,9 @@ impl AgentBuilder {
         self
     }
 
-    /// Who answers for a request beyond the session's grants when no person
-    /// is watching (crate::judge). Without one, such a request in an
+    /// Who answers for a request beyond the session's grants (crate::judge):
+    /// alone when no person is watching, and first when one is, the person
+    /// taking the cases it is not sure of. Without one, such a request in an
     /// unattended turn fails closed.
     pub fn request_judge(mut self, judge: crate::judge::SharedRequestJudge) -> Self {
         self.request_judge = Some(judge);

@@ -2080,7 +2080,7 @@
       },
       "JudgeConfig": {
         "additionalProperties": false,
-        "description": "The judging model: who answers for a request a session's grants do\nnot cover when no person is watching (an unattended turn reaching a\nlocation outside its granted locations).",
+        "description": "The judging model: who answers for a request a session's grants do\nnot cover — alone in an unattended turn, and first in an attended one,\nwhere the person takes the cases it is not sure of.",
         "properties": {
           "model": {
             "description": "The model catalogue key, or an alias, of the model that judges\nsuch requests. Empty means no judge, and an unattended request\nbeyond the session's grants then fails closed.",

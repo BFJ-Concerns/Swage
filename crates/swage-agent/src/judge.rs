@@ -88,9 +88,11 @@ pub struct JudgeRequest {
     pub arguments: Value,
     /// The agent's stated reason for the request, when it gave one.
     pub justification: Option<String>,
-    /// The task the turn was given — the person's or the automation's own
-    /// words, as the turn's record holds them — the one thing the judge
-    /// reads that the agent did not write; `None` when the record has none.
+    /// The task the turn was given — a person's, a schedule's or a
+    /// delegating agent's own words, as the turn's record holds them — the
+    /// one thing the judge reads that this agent did not write, which is why
+    /// it says what the request is for and never that it is permitted;
+    /// `None` when the record has none.
     pub task: Option<String>,
     pub reach: RequestedReach,
 }
