@@ -171,6 +171,7 @@ impl EgressPolicy for SessionEgressPolicy {
                     "justification": serde_json::Value::Null,
                     "task": task,
                     "verdict": judgement.verdict.as_str(),
+                    "confident": judgement.confident,
                     "reason": judgement.reason,
                     "judge": judgement.judge,
                 }),
@@ -425,6 +426,7 @@ mod tests {
         assert_eq!(judged.len(), 1, "{judged:?}");
         assert_eq!(judged[0].metadata["reach"]["kind"], "network_host");
         assert_eq!(judged[0].metadata["verdict"], "allowed");
+        assert_eq!(judged[0].metadata["confident"], true);
     }
 
     #[tokio::test(flavor = "multi_thread")]
