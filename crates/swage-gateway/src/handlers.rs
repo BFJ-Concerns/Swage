@@ -704,6 +704,15 @@ pub async fn create_channel_link_code(
     ))
 }
 
+/// `GET /api/onboarding/channels/link-codes` — read valid unredeemed codes.
+pub async fn list_channel_link_codes(
+    State(state): State<AppState>,
+) -> Result<Json<channel_wire::ChannelLinkCodeListResponse>, ApiError> {
+    Ok(Json(
+        crate::onboarding::list_channel_link_codes(&state).await?,
+    ))
+}
+
 /// `POST /api/onboarding/devices/pairing-codes` — issue a one-time device pairing code.
 pub async fn create_device_pairing_code(
     State(state): State<AppState>,
@@ -1393,14 +1402,30 @@ pub async fn submit_turn(
     .await
     .map_err(ApiError::from)?;
 
+    let topic = state
+        .topic_store
+        .get(session.topic_id)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| {
+            ApiError::from(GatewayError::TopicNotFound {
+                id: session.topic_id,
+            })
+        })?;
+    let (config, _) =
+        crate::turn::resolve_turn_admission_config(&state, &topic.location(), &session)
+            .await
+            .map_err(ApiError::from)?;
+
     crate::turn::resolve_turn_model_and_attachments(
         &state,
-        state.active_config(),
+        config,
         req.model.as_deref(),
         session.selected_model_id.as_deref(),
         session.id,
         &req.attachments,
     )
+    .await
     .map_err(ApiError::from)?;
     // A message that arrives while a turn is running is held for the next
     // turn, never refused. The persisted check comes first: REST
@@ -2191,6 +2216,61 @@ mod tests {
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn channel_link_code_list_uses_declared_response_and_preserves_array_body() {
+        let root = tempfile::tempdir().unwrap();
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::open(&root.path().join("codes.db")).unwrap());
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            Arc::new(MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let helper_response: channel_wire::ChannelLinkCodeListResponse =
+            crate::onboarding::list_channel_link_codes(&state)
+                .await
+                .unwrap();
+        assert!(helper_response.0.is_empty());
+        let response: Json<channel_wire::ChannelLinkCodeListResponse> =
+            list_channel_link_codes(State(state.clone())).await.unwrap();
+        assert_eq!(
+            body_json(response.into_response()).await,
+            serde_json::json!([])
+        );
+
+        let issued = crate::onboarding::create_channel_link_code(
+            &state,
+            channel_wire::CreateChannelLinkCodeRequest {
+                integration: swage_protocol::client::delivery::ExternalChannelIntegration::Telegram,
+                topic_id: None,
+                agent_id: None,
+                home_target: None,
+            },
+        )
+        .await
+        .unwrap();
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/onboarding/channels/link-codes")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(response).await,
+            serde_json::json!([{
+                "link_code": issued.link_code,
+                "expires_at": issued.expires_at,
+            }]),
+        );
     }
 
     #[test]
@@ -3999,6 +4079,162 @@ mod tests {
         })
         .await
         .expect("selected-provider turn completes");
+    }
+
+    #[tokio::test]
+    async fn image_scheme_rest_preflight_uses_topic_and_agent_policy() {
+        use swage_storage::store::{SessionStore, TopicStore};
+
+        for agent_override in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let topic_dir = root.path().join("topics/images");
+            std::fs::create_dir_all(&topic_dir).unwrap();
+            std::fs::write(
+                topic_dir.join("config.toml"),
+                "[attachments]\naccepted_schemes = ['http']\n",
+            )
+            .unwrap();
+            if agent_override {
+                let agent_dir = topic_dir.join("agents/gateway");
+                std::fs::create_dir_all(&agent_dir).unwrap();
+                std::fs::write(
+                    agent_dir.join("config.toml"),
+                    "[attachments]\naccepted_schemes = ['ftp']\n",
+                )
+                .unwrap();
+            }
+            let storage = Arc::new(MockStorage::new());
+            let topic = storage
+                .create(swage_storage::model::NewTopic {
+                    name: "Images".into(),
+                    slug: "images".into(),
+                })
+                .await
+                .unwrap();
+            let session = storage
+                .create_session(swage_storage::NewSession {
+                    agent_id: "gateway".into(),
+                    ..swage_storage::fixtures::new_session(topic.id)
+                })
+                .await
+                .unwrap();
+            swage_storage::ThreadStore::create(
+                storage.as_ref(),
+                swage_storage::model::NewThread {
+                    session_id: session.id,
+                    agent_id: session.agent_id.clone(),
+                },
+            )
+            .await
+            .unwrap();
+            let (provider, requests) = CapturingMultiRoundProvider::new(vec![vec![
+                swage_core::StreamChunk::Delta {
+                    content: "seen".into(),
+                },
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ]]);
+            let mut state = AppState::new(
+                storage.clone() as Arc<dyn Storage>,
+                storage.clone() as Arc<dyn TopicStore>,
+                Arc::new(provider),
+                swage_config::ResolvedConfig::default(),
+                crate::tool::ToolDispatcher::allow_all(vec![]),
+                None,
+            );
+            state.config_root = root.path().to_owned();
+            let router = build_router(state);
+            let url = if agent_override {
+                "ftp://example.test/a.png"
+            } else {
+                "http://example.test/a.png"
+            };
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/turns")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(
+                            serde_json::json!({
+                                "conversation_id": session.id,
+                                "message": "look",
+                                "attachments": [{"kind": "image_url", "url": url}]
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = body_json(response).await;
+            assert_eq!(
+                status,
+                StatusCode::ACCEPTED,
+                "scoped policy must admit {url}: {body}"
+            );
+            let turn_id = body["turn_id"].as_str().unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let response = router
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .uri(format!("/api/turns/{turn_id}"))
+                                .body(axum::body::Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    let turn = body_json(response).await;
+                    assert_ne!(
+                        turn["state"], "failed",
+                        "scoped execution must agree: {turn}"
+                    );
+                    if turn["state"] == "completed" {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("scoped turn completes");
+            assert!(
+                requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|request| request.messages.iter().any(|message| message
+                        .content()
+                        .contains(&swage_core::ContentPart::ImageUrl { url: url.into() }))),
+                "the provider receives the admitted reference intact"
+            );
+
+            // The install default allows HTTPS, but this scope does not.
+            let refused = router.oneshot(
+                Request::builder().method("POST").uri("/api/turns")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::json!({
+                        "conversation_id": session.id,
+                        "message": "look again",
+                        "attachments": [{"kind": "image_url", "url": "https://example.test/a.png"}]
+                    }).to_string())).unwrap()
+            ).await.unwrap();
+            assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let body = body_json(refused).await;
+            assert!(
+                body["message"].as_str().unwrap().contains("https"),
+                "{body}"
+            );
+            assert_eq!(
+                requests.lock().unwrap().len(),
+                1,
+                "the refused send never calls the provider"
+            );
+        }
     }
 
     #[tokio::test]

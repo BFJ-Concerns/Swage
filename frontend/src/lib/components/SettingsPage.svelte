@@ -14,6 +14,7 @@
   import ScheduleAutomationPanel from "./ScheduleAutomationPanel.svelte";
   import AutomationSettingsPanel from "./settings/AutomationSettingsPanel.svelte";
   import AgentDefinitionsPanel from "./AgentDefinitionsPanel.svelte";
+  import ChannelsPanel from "./ChannelsPanel.svelte";
   import CommandsPanel from "./CommandsPanel.svelte";
   import DisplayPreferencesSettingsPanel from "./settings/DisplayPreferencesSettingsPanel.svelte";
   import GenerationSettingsPanel from "./settings/GenerationSettingsPanel.svelte";
@@ -155,6 +156,7 @@
       communication: settings.communication,
       sessions: settings.sessions,
       memory: settings.memory,
+      attachments: settings.attachments,
       voice: settings.voice,
     });
   }
@@ -305,7 +307,6 @@
   ]);
   const NON_FUNCTIONAL_TABS: ReadonlySet<SettingsTabId> = new Set([
     "plugins",
-    "channels",
     "devices",
     "account",
   ]);
@@ -382,11 +383,7 @@
       -->
       <InformationalSettingsPanel {tab} />
     {:else if tab === "channels"}
-      <!--
-        The operator overview lists channels read-only; there is no channel
-        management API for this page to edit yet.
-      -->
-      <InformationalSettingsPanel {tab} />
+      <ChannelsPanel />
     {:else if tab === "devices"}
       <!--
         Devices register and pair through the API; this page has no view of them

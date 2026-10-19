@@ -232,6 +232,7 @@ pub struct AnswerWorkflowRunHoldResponse {
     /// Whether answering made a parked run due again. False when the run was
     /// still holding its engine and will take the answer directly.
     pub wake_provisioned: bool,
+    pub run_state: WorkflowRunState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -267,6 +268,9 @@ pub enum WorkflowRunState {
 #[serde(tag = "classification", rename_all = "snake_case")]
 #[ts(optional_fields = nullable)]
 pub enum WorkflowRunHandover {
+    AuthorError {
+        failure: String,
+    },
     /// An attributed agent-call failure stopped the run.
     Interrupted {
         failure: String,
@@ -346,6 +350,8 @@ pub enum WorkflowRunEnding {
     Returned,
     /// The script threw, or the engine failed the run.
     Threw { error: String },
+    /// Invalid workflow input refused before its worker spawned.
+    AuthorError { error: String },
     /// An operator or a parent run cancelled it.
     Cancelled,
     /// The working token allowance ran out and the run ended under
@@ -372,6 +378,11 @@ pub struct WorkflowWorkerAccount {
     pub worktree: Option<WorkflowWorktreeCompletion>,
     /// Absent for a worker that settled on its own account.
     pub termination: Option<WorkflowWorkerTermination>,
+    /// Whether any attempt of this worker followed a gateway interruption:
+    /// the interrupted attempt's outcome is unknown and the tool calls it
+    /// issued may have been applied, so this worker's effects may have been
+    /// repeated.
+    pub redispatched_after_interruption: bool,
 }
 
 /// Every worker the run dispatched, sorted by how it stood when the run
@@ -417,15 +428,21 @@ pub struct WorkflowPartialResults {
 pub struct WorkflowRunTerminalAccount {
     pub ending: WorkflowRunEnding,
     pub workers: WorkflowWorkerPartition,
-    /// Present exactly when the run ended without its script returning.
+    /// Present when a run ended without returning and has completed worker output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partial_results: Option<WorkflowPartialResults>,
     pub settled_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation: Option<WorkflowRunCancellation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct WorkflowRun {
+    /// The conversation whose turn launched this run, when there is one.
+    pub dispatching_session_id: Option<Uuid>,
+    /// The next timer wake recorded for a parked run.
+    pub wake_at: Option<DateTime<Utc>>,
     pub id: Uuid,
     pub topic_id: Uuid,
     pub script_id: Option<Uuid>,
@@ -448,9 +465,35 @@ pub struct WorkflowRun {
     /// The run's terminal account: how it ended and where its workers stood.
     /// Absent only while the run is still going.
     pub terminal_account: Option<WorkflowRunTerminalAccount>,
+    /// Every gateway interruption the run lived through, oldest first: a
+    /// boot that found the run running (so it was marked interrupted and
+    /// relaunched by replay) or parked (its wait outlived the gateway).
+    pub interruptions: Vec<WorkflowRunInterruption>,
     pub error_message: Option<String>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// A gateway interruption a run lived through, recorded by the boot that
+/// found the run with no gateway alive to serve it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct WorkflowRunInterruption {
+    /// When the boot recorded it; the gateway's death itself left no stamp.
+    pub detected_at: DateTime<Utc>,
+    /// How the run stood when the gateway stopped.
+    pub run_state: WorkflowInterruptedRunState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowInterruptedRunState {
+    /// The run was executing: its workers in flight lost their process, and
+    /// replay re-dispatches the calls that had not settled.
+    Running,
+    /// The run was parked on a durable wait: nothing of it was executing,
+    /// and the waker relaunches it when its wake is due.
+    Parked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
@@ -654,11 +697,13 @@ pub struct WorkflowAgentCallDispatch {
     /// The call-scoped tool grants after intersection with the dispatching
     /// context's own authority. `None` means the call narrowed nothing.
     pub grants: Option<Vec<String>>,
-    /// Every attempt the call ran, oldest first, each stamped once its turn
-    /// resolved the options it actually ran with. A call interrupted and
-    /// re-dispatched by replay has more than one, and each names its own
-    /// turn — so the record keeps the interrupted attempt rather than only
-    /// the one that settled. Empty until the first turn resolves.
+    /// Every attempt the call was dispatched for, oldest first: opened by
+    /// the run with its cause before the turn starts, and resolved by the
+    /// turn with the options it actually ran with. A call interrupted and
+    /// re-dispatched by replay, or served by its declared fallback, has more
+    /// than one, each naming its own turn — so the record keeps the attempt
+    /// that was cut off beside the one that followed. An attempt with no
+    /// turn was opened and never resolved.
     pub attempts: Vec<WorkflowAgentCallResolution>,
 }
 
@@ -670,10 +715,44 @@ pub struct WorkflowWorkerPlacementRecord {
     pub can_write: bool,
 }
 
-/// The options a dispatched worker's turn resolved for itself.
+/// Why an attempt of an agent call was dispatched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(tag = "cause", rename_all = "snake_case")]
+#[ts(optional_fields = nullable)]
+pub enum WorkflowAttemptCause {
+    /// The call's first dispatch.
+    First,
+    /// Replay re-dispatched the call after a gateway death cut the attempt
+    /// before it off: that attempt's outcome is unknown, and the tool calls
+    /// it issued may have been applied.
+    AfterInterruption,
+    /// The model the call named refused before any output, and the call's
+    /// declared fallback served it instead; no interruption occurred.
+    ProviderFallback { primary_failure: String },
+}
+
+/// One attempt of a dispatched call: why it was dispatched, when it was
+/// opened, and the options its turn resolved for itself. Opened by the run
+/// before the turn starts and resolved by the turn before any provider work,
+/// so an attempt the gateway dies between the two writes of stays in the
+/// record with its cause and no resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct WorkflowAgentCallResolution {
+    pub cause: WorkflowAttemptCause,
+    pub opened_at: DateTime<Utc>,
+    pub model: Option<String>,
+    pub effort: Option<Effort>,
+    pub session_id: Option<Uuid>,
+    pub thread_id: Option<Uuid>,
+    pub turn_id: Option<Uuid>,
+}
+
+/// What a turn resolved for the attempt it runs: written over the open
+/// attempt's record, beside the cause and opening time the run wrote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct WorkflowAttemptResolution {
     pub model: Option<String>,
     pub effort: Option<Effort>,
     pub session_id: Option<Uuid>,
@@ -707,6 +786,19 @@ pub struct WorkflowAgentCallDetail {
     /// as a call that made no provider request. The run detail always
     /// carries them.
     pub provider_rounds: Option<Vec<WorkflowProviderRound>>,
+}
+
+/// One worker's activity in an open-run overview.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct WorkflowWorkerActivity {
+    pub id: Uuid,
+    #[ts(type = "number")]
+    pub seq: u64,
+    pub label: Option<String>,
+    pub status: WorkflowJournalEntryStatus,
+    pub agent_definition_id: Option<String>,
+    pub liveness: Option<WorkflowWorkerLiveness>,
 }
 
 /// Earliest liveness evidence for one workflow worker.
@@ -955,4 +1047,68 @@ mod journal_result_tests {
             serde_json::json!({"kind": "timer", "fired": true})
         );
     }
+}
+
+/// A run's observed state when its start request returns.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct WorkflowRunStartResult {
+    /// Gateway-relative address, resolved against the origin the reader uses.
+    pub view_url: String,
+    #[serde(flatten)]
+    pub run: WorkflowRun,
+    pub status_as_of: DateTime<Utc>,
+    pub workers_dispatched: Option<u32>,
+}
+
+/// The recorded request which cancelled a run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct WorkflowRunCancellation {
+    pub source: String,
+    pub session_id: Option<Uuid>,
+    pub actor: Option<String>,
+    pub requested_at: DateTime<Utc>,
+}
+
+/// An ended run awaiting acknowledgement by a lead or schedule gate.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct WorkflowRunEndingNotice {
+    pub run_id: Uuid,
+    pub script_name: Option<String>,
+    pub state: String,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[ts(optional_fields = nullable)]
+pub struct WorkflowRunStatusRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 100))]
+    pub acknowledge_run_ids: Option<Vec<Uuid>>,
+}
+
+impl WorkflowRunStatusRequest {
+    pub fn json_schema() -> Value {
+        serde_json::to_value(schemars::schema_for!(Self)).expect("status request schema serialises")
+    }
+}
+
+/// A delegated child's state observed when its start request returns.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct DelegationStartResult {
+    pub status: Option<String>,
+    pub status_as_of: Option<DateTime<Utc>>,
+    pub completion_mode: String,
+    pub delegate_message_id: Uuid,
+    pub child_session_id: Uuid,
+    pub child_thread_id: Uuid,
+    pub child_turn_id: Uuid,
+    pub target_agent_id: String,
+    pub error_message: Option<String>,
 }
