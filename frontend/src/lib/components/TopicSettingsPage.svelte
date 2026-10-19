@@ -149,6 +149,7 @@
   async function loadTopicSettings(): Promise<void> {
     if (!topic) return;
     isLoading = true;
+    error = null;
     try {
       const [workspaceList, sessionList] = await Promise.all([
         listTopicWorkspaces(topic.id),
@@ -294,7 +295,10 @@
     </div>
 
     {#if error}
-      <div class="notice error" role="alert">{error}</div>
+      <div class="notice error" role="alert">
+        {error}
+        <button type="button" disabled={isLoading} onclick={() => void loadTopicSettings()}>Retry</button>
+      </div>
     {:else if isLoading}
       <div class="notice">Loading topic settings…</div>
     {/if}
@@ -306,6 +310,10 @@
           <div class="shell-row">
             <span class="shell-label">Slug</span>
             <span class="shell-value">{topic.slug}</span>
+          </div>
+          <div class="shell-row">
+            <span class="shell-label">Default model</span>
+            <span class="shell-value">{topic.effective_default_model ?? "No model configured"}</span>
           </div>
           <div class="shell-row">
             <span class="shell-label">Workspaces</span>
@@ -401,7 +409,9 @@
               </div>
             </article>
           {:else}
-            <p class="shell-empty">No workspace folders are attached to this topic.</p>
+            {#if worktopicsLoaded}
+              <p class="shell-empty">No workspace folders are attached to this topic.</p>
+            {/if}
           {/each}
         </div>
       </section>
@@ -413,6 +423,8 @@
           {#each defaultSurfaces as entry (entry.id)}
             <article class="record-row">
               <strong>{entry.name}</strong>
+              <time datetime={entry.updated_at}>Saved {entry.updated_at}</time>
+              <span>From {entry.origin_topic_deleted ? "a deleted topic" : entry.origin_topic_id ? (entry.origin_topic_id === topic.id ? topic.name : entry.origin_topic_id) : "General"}</span>
               <span>{entry.description}</span>
               <button type="button" disabled={isMutating} onclick={() => void withdrawDefault(entry.id)}>Withdraw</button>
             </article>
@@ -427,6 +439,8 @@
           {#each library.filter((entry) => !defaultSurfaces.some((d) => d.id === entry.id)) as entry (entry.id)}
             <article class="record-row">
               <strong>{entry.name}</strong>
+              <time datetime={entry.updated_at}>Saved {entry.updated_at}</time>
+              <span>From {entry.origin_topic_deleted ? "a deleted topic" : entry.origin_topic_id ? (entry.origin_topic_id === topic.id ? topic.name : entry.origin_topic_id) : "General"}</span>
               <span>{entry.description}</span>
               <span>{entry.tags.join(", ")}</span>
               <button type="button" disabled={isMutating} onclick={() => void designateDefault(entry.id)}>Make default</button>
@@ -502,12 +516,22 @@
     color: var(--ink-soft);
   }
 
+  .head > div {
+    min-width: 0;
+  }
+
   .title {
     margin: 4px 0 6px;
     font-family: var(--font-display);
     font-weight: 400;
-    font-size: clamp(42px, 8vw, 76px);
-    line-height: 0.9;
+    font-size: 28px;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
     letter-spacing: 0.02em;
     text-transform: uppercase;
   }

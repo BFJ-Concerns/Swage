@@ -118,3 +118,11 @@ export async function deleteSurfaceAnnotation(
 ): Promise<void> {
   await generated.deleteSurfaceAnnotation(annotationId);
 }
+
+export async function renameSurface(surfaceId: string, title: string): Promise<SurfaceResponse> {
+  return generated.renameSurface(surfaceId, { title });
+}
+
+export async function resolveSurfaceAnnotation(surfaceId: string, annotationId: string): Promise<SurfaceAnnotationView> {
+  return generated.resolveSurfaceAnnotation(surfaceId, annotationId);
+}

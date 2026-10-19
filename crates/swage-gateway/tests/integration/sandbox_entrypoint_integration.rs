@@ -496,3 +496,70 @@ fn bubblewrap_disabled_reports_each_named_fallback() {
         );
     }
 }
+
+#[tokio::test]
+async fn regression_read_only_workspace_shell_returns_output_and_readable_runtime_artifact() {
+    use swage_tool::context::ToolOutputLocation;
+    let mut env_guard = ProcessEnvGuard::new();
+    let workspace = tempfile::tempdir().unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("reference"), "keep").unwrap();
+    let config = SandboxConfig::builder()
+        .working_directory(workspace.path())
+        .read_only_mount(workspace.path())
+        .landlock_read_path(workspace.path())
+        .read_write_mount(runtime.path())
+        .landlock_write_path(runtime.path())
+        .tool_output_location(ToolOutputLocation {
+            directory: runtime.path().into(),
+        })
+        .build()
+        .unwrap();
+    env_guard.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    let mut sandbox = BubblewrapSandbox::new(config, test_llm_handler());
+    sandbox.spawn_agent().await.unwrap();
+    let result = sandbox
+        .execute_tool("shell", json!({"command":"ls -la; seq 1 30000"}))
+        .await;
+    let read = match &result {
+        Ok(result) if result.error.is_none() => Some(
+            sandbox
+                .execute_tool(
+                    "file_read",
+                    result.output["stdout_follow_up"]["arguments"].clone(),
+                )
+                .await,
+        ),
+        _ => None,
+    };
+    sandbox.shutdown().await.unwrap();
+    let result = result.unwrap();
+    assert!(
+        result.error.is_none(),
+        "read-only workspace lost shell output: {result:?}"
+    );
+    assert_eq!(result.output["exit_code"], 0);
+    let artifact = std::path::Path::new(result.output["stdout_artifact_path"].as_str().unwrap());
+    assert!(artifact.starts_with(runtime.path()), "{result:?}");
+    assert!(
+        std::fs::read_to_string(artifact)
+            .unwrap()
+            .ends_with("30000\n")
+    );
+    let read = read.unwrap().unwrap();
+    assert!(
+        read.error.is_none(),
+        "runtime artefact was not readable: {read:?}"
+    );
+    assert!(
+        read.output["output"]
+            .as_str()
+            .unwrap()
+            .contains("reference")
+    );
+    let entries: Vec<_> = std::fs::read_dir(workspace.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(entries, vec![std::ffi::OsString::from("reference")]);
+}

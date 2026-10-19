@@ -483,6 +483,10 @@ settings_section! {
         /// visibility only — nothing is cancelled and nothing queued is blocked.
         #[ts(type = "number")]
         archive_after_days: u64 = 7,
+        /// Maximum number of child levels in a delegation chain.
+        #[ts(type = "number")]
+        #[schemars(range(min = 1))]
+        max_delegation_depth: u64 = 4,
     }
     problems(section) {
         let mut problems = Vec::new();
@@ -494,6 +498,41 @@ settings_section! {
                     section.archive_after_days
                 ),
             });
+        }
+        if section.max_delegation_depth == 0 {
+            problems.push(SettingsProblem {
+                field: "max_delegation_depth",
+                message: "sessions.max_delegation_depth must be at least 1".into(),
+            });
+        }
+        problems
+    }
+}
+
+settings_section! {
+    /// Admission policy for image references submitted with a turn.
+    section "attachments" as AttachmentsConfig / PartialAttachmentsConfig {
+        /// URI schemes accepted before checking the selected provider's capabilities.
+        accepted_schemes: Vec<String> = vec!["https".into(), "data".into()],
+    }
+    problems(section) {
+        let mut problems = Vec::new();
+        if section.accepted_schemes.is_empty() {
+            problems.push(SettingsProblem {
+                field: "accepted_schemes",
+                message: "at least one image reference scheme is required".into(),
+            });
+        }
+        for scheme in &section.accepted_schemes {
+            let mut bytes = scheme.bytes();
+            if !bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
+                || !bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+            {
+                problems.push(SettingsProblem {
+                    field: "accepted_schemes",
+                    message: format!("invalid URI scheme `{scheme}`: use a letter followed by letters, digits, +, - or . (without a colon)"),
+                });
+            }
         }
         problems
     }
@@ -560,6 +599,7 @@ pub struct SettingsResponse {
     pub communication: CommunicationConfig,
     pub sessions: SessionsConfig,
     pub memory: MemoryConfig,
+    pub attachments: AttachmentsConfig,
     pub voice: VoiceConfig,
     pub restart_required: bool,
     pub can_restart: bool,
@@ -607,6 +647,9 @@ pub struct SaveSettingsRequest {
     pub memory: Option<MemoryConfig>,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
+    pub attachments: Option<AttachmentsConfig>,
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
     pub voice: Option<VoiceConfig>,
 }
 
@@ -633,6 +676,63 @@ pub struct RestartStatusResponse {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn delegation_depth_schema_requires_at_least_one() {
+        let schema = serde_json::to_value(schemars::schema_for!(super::SessionsConfig)).unwrap();
+        assert_eq!(
+            schema["properties"]["max_delegation_depth"]["minimum"].as_f64(),
+            Some(1.0),
+            "published delegation depth minimum matches settings validation"
+        );
+    }
+
+    #[test]
+    fn delegation_depth_declaration_defaults_overlays_and_validates() {
+        use crate::client::settings_section::SettingsSection;
+        let defaults = super::SessionsConfig::default();
+        assert_eq!(
+            serde_json::to_value(defaults).unwrap()["max_delegation_depth"],
+            4,
+            "four child levels are allowed by default"
+        );
+        let base: super::PartialSessionsConfig =
+            serde_json::from_value(serde_json::json!({"max_delegation_depth": 2})).unwrap();
+        let overlay: super::PartialSessionsConfig =
+            serde_json::from_value(serde_json::json!({"archive_after_days": 12})).unwrap();
+        let resolved = base.overlay(overlay).resolve();
+        assert_eq!(
+            serde_json::to_value(&resolved).unwrap()["max_delegation_depth"],
+            2
+        );
+        assert_eq!(resolved.archive_after_days, 12);
+        let round_trip = super::PartialSessionsConfig::from(resolved.clone()).resolve();
+        assert_eq!(round_trip, resolved);
+        assert!(resolved.problems().is_empty());
+        let invalid: super::SessionsConfig = serde_json::from_value(
+            serde_json::json!({"archive_after_days": 7, "max_delegation_depth": 0}),
+        )
+        .unwrap();
+        assert!(
+            invalid
+                .problems()
+                .iter()
+                .any(|problem| problem.field == "max_delegation_depth"),
+            "the declaration refuses an unbounded zero limit"
+        );
+        assert!(
+            serde_json::from_value::<super::PartialSessionsConfig>(
+                serde_json::json!({"max_delegation_depth": "two"})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<super::PartialSessionsConfig>(
+                serde_json::json!({"delegation_depth": 2})
+            )
+            .is_err()
+        );
+    }
+
     use super::*;
 
     #[test]

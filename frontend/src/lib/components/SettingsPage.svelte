@@ -14,6 +14,7 @@
   import ScheduleAutomationPanel from "./ScheduleAutomationPanel.svelte";
   import AutomationSettingsPanel from "./settings/AutomationSettingsPanel.svelte";
   import AgentDefinitionsPanel from "./AgentDefinitionsPanel.svelte";
+  import ChannelsPanel from "./ChannelsPanel.svelte";
   import CommandsPanel from "./CommandsPanel.svelte";
   import DisplayPreferencesSettingsPanel from "./settings/DisplayPreferencesSettingsPanel.svelte";
   import GenerationSettingsPanel from "./settings/GenerationSettingsPanel.svelte";
@@ -76,6 +77,13 @@
   const archiveDelayError = $derived(
     settings && (nullableNumber(settings.sessions.archive_after_days) == null || settings.sessions.archive_after_days < 1)
       ? "Archive delay must be at least 1 day."
+      : null,
+  );
+  const delegationDepthError = $derived(
+    settings && (nullableNumber(settings.sessions.max_delegation_depth) == null
+      || !Number.isInteger(settings.sessions.max_delegation_depth)
+      || settings.sessions.max_delegation_depth < 1)
+      ? "Delegation depth must be a whole number of at least 1."
       : null,
   );
   let status = $state("");
@@ -148,6 +156,7 @@
       communication: settings.communication,
       sessions: settings.sessions,
       memory: settings.memory,
+      attachments: settings.attachments,
       voice: settings.voice,
     });
   }
@@ -158,6 +167,10 @@
     status = "";
     if (archiveDelayError) {
       error = "Fix the archive delay in Automation before saving. It must be at least 1 day.";
+      return false;
+    }
+    if (delegationDepthError) {
+      error = delegationDepthError;
       return false;
     }
     const archiveDelayChanged = settings.sessions.archive_after_days !== lastSavedArchiveDelay;
@@ -294,7 +307,6 @@
   ]);
   const NON_FUNCTIONAL_TABS: ReadonlySet<SettingsTabId> = new Set([
     "plugins",
-    "channels",
     "devices",
     "account",
   ]);
@@ -304,7 +316,7 @@
   const shouldAutosaveSettings = $derived(HOT_AUTOSAVE_TABS.has(tab));
 
   $effect(() => {
-    if (!hasLoadedSettings || !shouldAutosaveSettings) return;
+    if (!hasLoadedSettings || !shouldAutosaveSettings || isPersisting) return;
     const fingerprint = settingsFingerprint();
     if (!fingerprint || fingerprint === lastPersistedSettingsFingerprint) return;
 
@@ -371,11 +383,7 @@
       -->
       <InformationalSettingsPanel {tab} />
     {:else if tab === "channels"}
-      <!--
-        The operator overview lists channels read-only; there is no channel
-        management API for this page to edit yet.
-      -->
-      <InformationalSettingsPanel {tab} />
+      <ChannelsPanel />
     {:else if tab === "devices"}
       <!--
         Devices register and pair through the API; this page has no view of them
@@ -384,7 +392,7 @@
       <InformationalSettingsPanel {tab} />
     {:else if tab === "voice"}
       {#if settings}
-        <VoiceSettingsPanel bind:settings />
+        <VoiceSettingsPanel bind:settings onsave={() => persist()} saving={isPersisting} />
       {/if}
     {:else if tab === "recovery"}
       <RecoverySettingsPanel />

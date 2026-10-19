@@ -2,7 +2,7 @@ use crate::error::{ConfigProblem, ConfigProblemKind};
 use crate::merge::PartialConfig;
 use crate::model::ResolvedConfig;
 use std::path::Path;
-use swage_protocol::client::settings::{MemoryConfig, SessionsConfig};
+use swage_protocol::client::settings::{AttachmentsConfig, MemoryConfig, SessionsConfig};
 use swage_protocol::client::settings_section::{
     SettingsProblem, SettingsSection, SettingsSectionSchema,
 };
@@ -51,6 +51,7 @@ where
 const DECLARED_SECTIONS: &[&dyn DeclaredSection] = &[
     &Declared::<SessionsConfig>(std::marker::PhantomData),
     &Declared::<MemoryConfig>(std::marker::PhantomData),
+    &Declared::<AttachmentsConfig>(std::marker::PhantomData),
 ];
 
 fn declared_section(name: &str) -> Option<&'static dyn DeclaredSection> {
@@ -2284,6 +2285,33 @@ allowed_fields = ["user"]
     }
 
     #[test]
+    fn delegation_depth_file_validation_uses_the_declaration() {
+        let valid = validate_toml_string(
+            "[sessions]\nmax_delegation_depth = 2\n",
+            &path("config.toml"),
+        );
+        assert!(
+            valid.is_empty(),
+            "the declared depth is a recognised setting: {valid:?}"
+        );
+        let invalid = validate_toml_string(
+            "[sessions]\nmax_delegation_depth = 0\n",
+            &path("config.toml"),
+        );
+        assert!(
+            invalid
+                .iter()
+                .any(|problem| matches!(&problem.kind, ConfigProblemKind::SemanticError { .. })),
+            "zero is refused by the declaration: {invalid:?}"
+        );
+        let wrong_kind = validate_toml_string(
+            "[sessions]\nmax_delegation_depth = 'two'\n",
+            &path("config.toml"),
+        );
+        assert_eq!(wrong_kind.len(), 1);
+    }
+
+    #[test]
     fn sessions_section_validates_and_rejects_a_zero_delay() {
         let problems = validate_toml_string(
             "[sessions]\narchive_after_days = 14\n",
@@ -2562,5 +2590,41 @@ message_ttl_secs = 86400
             }),
             "{problems:?}"
         );
+    }
+    #[test]
+    fn image_scheme_settings_refuse_bad_shapes_and_scheme_forms() {
+        for body in [
+            "[attachments]\naccepted_schemes = ['https', 'data']",
+            "[attachments]\naccepted_schemes = ['HTTP', 'custom+v1.test-2']",
+        ] {
+            assert!(
+                validate_toml_string(body, &path("config.toml")).is_empty(),
+                "{body}"
+            );
+        }
+        for body in [
+            "[attachments]\naccepted_schemes = []",
+            "[attachments]\naccepted_schemes = ['https:']",
+            "[attachments]\naccepted_schemes = ['1http']",
+            "[attachments]\naccepted_schemes = ['']",
+            "[attachments]\naccepted_schemes = ['file/path']",
+            "[attachments]\naccepted_schemes = [' http']",
+            "[attachments]\naccepted_schemes = [42]",
+            "[attachments]\naccepted_schemes = 'https'",
+            "[attachments]\nunknown = ['https']",
+        ] {
+            let problems = validate_toml_string(body, &path("config.toml"));
+            assert!(
+                !problems.is_empty(),
+                "invalid scheme settings accepted: {body}"
+            );
+            assert!(
+                problems.iter().all(|p| p
+                    .field_path
+                    .as_deref()
+                    .is_some_and(|field| field.starts_with("attachments"))),
+                "{problems:?}"
+            );
+        }
     }
 }
