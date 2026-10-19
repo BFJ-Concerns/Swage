@@ -312,6 +312,33 @@ describe("ambient channel control path", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it.each(["navigation", "unmount"])("run view cancels an armed refresh on %s", async (leaving) => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => runResponse("run-polled"));
+    try {
+      await startRunView();
+      // Re-enter under fake time; leave before the first refresh fires.
+      window.history.pushState({}, "", "/workflow-runs/run-armed");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+      fetch.mockClear();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS - 1);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      if (leaving === "navigation") {
+        window.history.pushState({}, "", "/");
+        window.dispatchEvent(new PopStateEvent("popstate"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(document.querySelector(".workflow-run")).toBeNull();
+      } else {
+        await unmount(component!);
+        component = undefined;
+      }
+      const requests = fetch.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS * 3);
+      expect(fetch).toHaveBeenCalledTimes(requests);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("run view drops an old route's pending read and clears its timer", async () => {
     let release!: (response: Response) => void;
     const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => runResponse("run-polled"));

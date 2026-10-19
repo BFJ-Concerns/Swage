@@ -334,20 +334,47 @@ describe("run page completeness", () => {
   });
 
   it.each(["timer", "hold", "event"])("names a parked %s wait read-only", (kind) => {
-    const parked = detail({ ...run(null), state: "parked", wake_at: kind === "timer" ? "2026-09-03T10:00:00Z" : null });
-    if (kind === "hold") parked.holds = [{ id: "decision", run_id: "run-1", seq: 0, content: "Ship the findings?", verdicts: ["approve", "postpone"], state: "open", raised_at: "2026-09-02T10:00:00Z", rejections: [] }];
-    if (kind === "event") parked.journal = [{ id: "wait", kind: "await_event", status: "started", request: { kinds: ["review.finished"] } } as unknown as WorkflowRunDetailResponse["journal"][number]];
+    const started = "2026-09-02T10:00:00.393288230Z";
+    // workflow.rs parks event waits and holds at now + 36,500 days.
+    const sentinel = "2126-08-09T10:00:00.393288230Z";
+    const wake = kind === "timer" ? "2026-09-03T10:00:00.393288230Z" : sentinel;
+    const parked = detail({ ...run(null), state: "parked", wake_at: wake });
+    parked.journal = [{
+      id: "wait", seq: 0n, kind: kind === "event" ? "await_event" : kind === "hold" ? "hold" : "timer",
+      status: "started", started_at: started,
+      request: kind === "timer" ? { ms: 86400000 } : kind === "event"
+        ? { action: "await", kinds: ["review.finished"] }
+        : { action: "raise", content: "Ship the findings?", verdicts: ["approve", "postpone"] },
+    }];
+    if (kind === "hold") parked.holds = [{ id: "decision", run_id: "run-1", seq: 1, content: "Ship the findings?", verdicts: ["approve", "postpone"], state: "open", raised_at: started, rejections: [] }];
     page = mount(WorkflowRunView, { target: document.body, props: { detail: parked, loadState: "loaded", errorMessage: "" } });
     const awaited = document.querySelector(".awaited")!;
     expect(awaited).not.toBeNull();
-    if (kind === "timer") expect(awaited.textContent).toContain(new Date("2026-09-03T10:00:00Z").toLocaleString());
+    if (kind === "timer") {
+      expect(awaited.textContent).toContain("Timer wakes at");
+      expect(awaited.querySelector("time")?.textContent).toBe(new Date(wake).toLocaleString());
+      expect(awaited.querySelector("time")?.title).toBe(wake);
+    } else {
+      expect(awaited.textContent).not.toContain("Timer wakes at");
+      expect(awaited.querySelector("time")).toBeNull();
+      expect(awaited.textContent).not.toContain(sentinel);
+    }
     if (kind === "hold") {
+      expect(awaited.textContent).toContain("Decision hold");
       expect(awaited.textContent).toContain("Ship the findings?");
       expect(awaited.textContent).toContain("approve, postpone");
       expect(awaited.textContent).toContain("An agent answers");
     }
-    if (kind === "event") expect(awaited.textContent).toContain("review.finished");
+    if (kind === "event") expect(awaited.textContent).toContain("Awaiting review.finished");
     expect(awaited.querySelector("button, input, select")).toBeNull();
+  });
+
+  it("keeps all thrown error lines under a neutral disclosure", () => {
+    const error = "Input rejected\nThe source is missing\nTry a different source";
+    page = render(run(emptyAccount({ ending: "threw", error })));
+    const disclosure = document.querySelector(".ending details")!;
+    expect(disclosure.querySelector("summary")?.textContent).toBe("Error details");
+    expect(disclosure.querySelector("pre")?.textContent).toBe(error);
   });
 
   it("shows recorded and failed sources from the returned result independently of workers", () => {

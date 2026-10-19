@@ -161,7 +161,7 @@
           <p>Cancelled by {account.cancellation.source} at {@render recordedTime(account.cancellation.requested_at)}{account.cancellation.actor ? ` (${account.cancellation.actor})` : ""}{account.cancellation.session_id ? ` in session ${account.cancellation.session_id}` : ""}</p>
         {/if}
         {#if account.ending.ending === "threw" && account.ending.error.includes("\n")}
-          <details><summary>Engine details</summary><pre>{account.ending.error}</pre></details>
+          <details><summary>Error details</summary><pre>{account.ending.error}</pre></details>
         {/if}
         {#if redispatchedAny}
           <p class="detail disclosure">
@@ -232,10 +232,10 @@
       {#if run.state === "parked"}
         <section class="awaited" aria-label="Awaited work">
           <h3>Waiting for</h3>
-          {#if run.wake_at}<p>Timer wakes at {@render recordedTime(run.wake_at)}</p>{/if}
+          {#if run.wake_at && waits.some((entry) => entry.kind === "timer")}<p>Timer wakes at {@render recordedTime(run.wake_at)}</p>{/if}
           {#each detail?.holds ?? [] as hold (hold.id)}
             {#if hold.state === "open"}
-              <p>{hold.content}</p>
+              <p>Decision hold: {hold.content}</p>
               <p>Permitted verdicts: {hold.verdicts.join(", ")}</p>
               <p>An agent answers this decision through its granted tool.</p>
             {/if}
