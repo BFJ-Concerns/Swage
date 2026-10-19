@@ -176,15 +176,27 @@ mod tests {
     // manipulate XDG_RUNTIME_DIR during parallel test execution.
     use crate::test_helpers::ENV_LOCK;
 
-    /// Run `f` with `XDG_RUNTIME_DIR` pointing at a temporary directory,
-    /// cleaning up the variable afterwards regardless of panics.
+    /// Run `f` with no explicit data root and a temporary runtime directory,
+    /// restoring the caller's environment afterwards regardless of panics.
     fn with_temp_xdg<F: FnOnce(&TempDir)>(f: F) {
         let _guard = ENV_LOCK.lock().unwrap();
         let dir = TempDir::new().unwrap();
-        // SAFETY: single-threaded within the lock; no concurrent env reads.
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", dir.path()) };
+        let original_home = std::env::var_os("SWAGE_HOME");
+        let original_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        // SAFETY: all environment mutation in this crate is serialised by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("SWAGE_HOME");
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+        }
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&dir)));
-        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+        match original_home {
+            Some(value) => unsafe { std::env::set_var("SWAGE_HOME", value) },
+            None => unsafe { std::env::remove_var("SWAGE_HOME") },
+        }
+        match original_runtime {
+            Some(value) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", value) },
+            None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
+        }
         if let Err(e) = result {
             std::panic::resume_unwind(e);
         }
