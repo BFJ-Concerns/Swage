@@ -675,6 +675,13 @@
               "null"
             ]
           },
+          "calls": {
+            "description": "Every model call this succession pass made, in order: readers,\nsynthesis, then summary. A reused diagnosis adds no reader or\nsynthesis calls. Ordinary succession records its summary here too.",
+            "items": {
+              "$ref": "#/components/schemas/SuccessionCall"
+            },
+            "type": "array"
+          },
           "diagnosis": {
             "anyOf": [
               {
@@ -684,7 +691,7 @@
                 "type": "null"
               }
             ],
-            "description": "How a successor built for a stalled session got its summary: the\nwalls it answers and the model calls that diagnosed them."
+            "description": "The walls a successor built for a stalled session answers and the\ndiagnosis it carries."
           },
           "element": {
             "type": "string"
@@ -746,7 +753,8 @@
           "actual_strategy",
           "messages_removed",
           "tokens_before",
-          "tokens_after"
+          "tokens_after",
+          "calls"
         ],
         "type": "object"
       },
@@ -1731,66 +1739,9 @@
           }
         ]
       },
-      "DiagnosisCall": {
-        "description": "One model call a diagnosis made.",
-        "properties": {
-          "cost": {
-            "format": "double",
-            "type": [
-              "number",
-              "null"
-            ]
-          },
-          "failure_reason": {
-            "description": "Why the call failed, when it did.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "input_tokens": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "model": {
-            "description": "The provider-facing model id the call was sent to.",
-            "type": "string"
-          },
-          "output_tokens": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "report": {
-            "description": "What a reader reported. A synthesis's output is the record's\n`synthesis`.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "stage": {
-            "$ref": "#/components/schemas/DiagnosisStage"
-          }
-        },
-        "required": [
-          "stage",
-          "model",
-          "input_tokens",
-          "output_tokens"
-        ],
-        "type": "object"
-      },
       "DiagnosisRecord": {
         "description": "The diagnosis behind a degradation-triggered successor, recorded so the\nassembly report alone reconstructs the pass.",
         "properties": {
-          "calls": {
-            "description": "The model calls this turn made for the diagnosis, readers first and\nthe synthesis last; empty when an earlier turn's diagnosis was reused.",
-            "items": {
-              "$ref": "#/components/schemas/DiagnosisCall"
-            },
-            "type": "array"
-          },
           "reused_from_turn": {
             "description": "The turn whose recorded diagnosis this successor carries again,\nwhen the walls had not changed since.",
             "format": "uuid",
@@ -1820,25 +1771,9 @@
         },
         "required": [
           "signal",
-          "walls",
-          "calls"
+          "walls"
         ],
         "type": "object"
-      },
-      "DiagnosisStage": {
-        "description": "Which part of a diagnosis a model call was.",
-        "oneOf": [
-          {
-            "const": "reader",
-            "description": "A blind reader locating where one slice of the history went wrong.",
-            "type": "string"
-          },
-          {
-            "const": "synthesis",
-            "description": "The synthesis naming the problems from the readers' reports.",
-            "type": "string"
-          }
-        ]
       },
       "DiscoveredModel": {
         "properties": {
@@ -6064,6 +5999,76 @@
           "status"
         ],
         "type": "object"
+      },
+      "SuccessionCall": {
+        "description": "One model call a succession pass made.",
+        "properties": {
+          "cost": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "failure_reason": {
+            "description": "Why the call failed, when it did.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "input_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "model": {
+            "description": "The provider-facing model id the call was sent to.",
+            "type": "string"
+          },
+          "output_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "report": {
+            "description": "What a reader reported. A synthesis's output is in\n`CompactionRecord.diagnosis.synthesis`; summaries are carried in the\nsuccessor's conversation context.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stage": {
+            "$ref": "#/components/schemas/SuccessionStage"
+          }
+        },
+        "required": [
+          "stage",
+          "model",
+          "input_tokens",
+          "output_tokens"
+        ],
+        "type": "object"
+      },
+      "SuccessionStage": {
+        "description": "Which part of succession a model call was.",
+        "oneOf": [
+          {
+            "const": "reader",
+            "description": "A blind reader locating where one slice of the history went wrong.",
+            "type": "string"
+          },
+          {
+            "const": "synthesis",
+            "description": "The synthesis naming the problems from the readers' reports.",
+            "type": "string"
+          },
+          {
+            "const": "summary",
+            "description": "The summary of established conversation state.",
+            "type": "string"
+          }
+        ]
       },
       "SurfaceAnnotationView": {
         "description": "A note left on one of a surface's modules. `body` and `tags` are the author's\nown words: other parties' work product, to be read as data.",

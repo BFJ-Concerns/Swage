@@ -926,10 +926,10 @@ async fn seed_diagnosed_report(
         budget: None,
         failure_reason: None,
         focus: None,
+        calls: Vec::new(),
         diagnosis: Some(DiagnosisRecord {
             signal: "The `file_read` tool failed three times.".to_string(),
             walls,
-            calls: Vec::new(),
             synthesis: Some(PRIOR_DIAGNOSIS.to_string()),
             reused_from_turn: None,
         }),
@@ -1020,7 +1020,10 @@ async fn a_turn_whose_walls_are_unchanged_carries_the_previous_diagnosis_again()
     let diagnosis = &records[0]["diagnosis"];
     assert_eq!(diagnosis["reused_from_turn"], diagnosed.to_string());
     assert_eq!(diagnosis["synthesis"], PRIOR_DIAGNOSIS);
-    assert_eq!(diagnosis["calls"], serde_json::json!([]));
+    let calls = records[0]["calls"].as_array().expect("succession calls");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["stage"], "summary");
+    assert!(diagnosis.get("calls").is_none());
     assert_eq!(diagnosis["walls"], serde_json::json!(walls));
     let text = streamed_text(&provider);
     assert!(text.contains(PRIOR_DIAGNOSIS), "the successor: {text}");
@@ -1090,7 +1093,7 @@ async fn a_turn_whose_walls_changed_is_diagnosed_afresh_on_the_configured_models
     now.push(format!("tool_call:{}", again[0]));
     now.sort();
     assert_eq!(diagnosis["walls"], serde_json::json!(now));
-    let calls: Vec<(&str, &str)> = diagnosis["calls"]
+    let calls: Vec<(&str, &str)> = records[0]["calls"]
         .as_array()
         .expect("the diagnosis calls")
         .iter()
@@ -1108,6 +1111,7 @@ async fn a_turn_whose_walls_changed_is_diagnosed_afresh_on_the_configured_models
             ("reader", "vendor/cheap-reader-1"),
             ("reader", "vendor/cheap-reader-1"),
             ("synthesis", "mock-summarising-capturing"),
+            ("summary", "mock-summarising-capturing"),
         ],
         "the readers go to the configured alias's model, the synthesis to the session's"
     );
@@ -1419,7 +1423,9 @@ async fn a_diagnosis_that_cannot_be_written_is_recorded_and_the_turn_goes_on() {
     assert_eq!(records[0]["messages_removed"], 0);
     let diagnosis = &records[0]["diagnosis"];
     assert_eq!(diagnosis["synthesis"], serde_json::Value::Null);
-    let calls = diagnosis["calls"].as_array().expect("the diagnosis calls");
+    let calls = records[0]["calls"]
+        .as_array()
+        .expect("the succession calls");
     assert_eq!(calls.len(), 3, "every reader that was sent: {calls:?}");
     assert!(
         calls

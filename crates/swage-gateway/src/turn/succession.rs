@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use swage_core::{CompletionRequest, Role};
 use swage_protocol::client::context::{
-    CompactionRecord, DiagnosisCall, DiagnosisRecord, DiagnosisStage,
+    CompactionRecord, DiagnosisRecord, SuccessionCall, SuccessionStage,
 };
 use swage_protocol::client::workflow::WorkflowProviderRoundOutcome;
 use swage_storage::{
@@ -126,7 +126,8 @@ pub(super) async fn succeed_over_threshold(
     if let Some(degradation) = &site.degradation
         && let Some(history) = history_of(&elements)
     {
-        let (outcome, diagnosis) = succeed_on_degradation(&site, degradation, &history).await;
+        let (outcome, diagnosis, mut calls) =
+            succeed_on_degradation(&site, degradation, &history).await;
         let carried = carried_context(&elements, &output, site.variables);
         // A diagnosis explains the walls; the ordinary summary preserves what
         // the conversation established, including results unrelated to them.
@@ -138,6 +139,7 @@ pub(super) async fn succeed_over_threshold(
                 &history[..successor.record.messages_removed],
                 site.focus,
                 site.provider,
+                &mut calls,
             )
             .await
             {
@@ -165,6 +167,7 @@ pub(super) async fn succeed_over_threshold(
         };
         match outcome {
             Ok(mut succession) => {
+                succession.record.calls = calls;
                 succession.record.diagnosis = Some(diagnosis);
                 return reassemble(
                     elements,
@@ -182,6 +185,7 @@ pub(super) async fn succeed_over_threshold(
                     DEGRADATION_STRATEGY,
                     &error,
                 );
+                record.calls = calls;
                 record.diagnosis = Some(diagnosis);
                 output.report.compaction_applied.push(record);
             }
@@ -221,29 +225,28 @@ pub(super) async fn succeed_over_threshold(
         focus: site.focus,
         retain_at_most,
     };
-    match succession::succeed(request, site.provider, site.tokeniser).await {
-        Ok(succession) => reassemble(
-            elements,
-            succession,
-            &assemble,
-            output.report.compaction_applied,
-        ),
+    let mut calls = Vec::new();
+    match succession::succeed(request, site.provider, site.tokeniser, &mut calls).await {
+        Ok(mut succession) => {
+            succession.record.calls = calls;
+            reassemble(
+                elements,
+                succession,
+                &assemble,
+                output.report.compaction_applied,
+            )
+        }
         Err(error) => {
-            tracing::warn!(
-                %error,
-                "succession did not run; the agent runtime compacts this turn instead"
+            tracing::warn!(%error, "succession did not run; the agent runtime compacts this turn instead");
+            let mut record = succession::failure_record(
+                &history,
+                site.tokeniser,
+                site.focus,
+                THRESHOLD_STRATEGY,
+                &error,
             );
-            let mut output = output;
-            output
-                .report
-                .compaction_applied
-                .push(succession::failure_record(
-                    &history,
-                    site.tokeniser,
-                    site.focus,
-                    THRESHOLD_STRATEGY,
-                    &error,
-                ));
+            record.calls = calls;
+            output.report.compaction_applied.push(record);
             output
         }
     }
@@ -630,7 +633,7 @@ Write as notes to the assistant, in plain prose without headings.";
 /// synthesis names the problems. The coordinator combines this diagnosis
 /// with the ordinary conversation summary before reassembly; only the newest
 /// message is kept verbatim. The diagnosis record comes back whether or not
-/// a successor did, with every diagnosis call made.
+/// a successor did; its calls are returned separately for the compaction record.
 async fn succeed_on_degradation(
     site: &SuccessionSite<'_>,
     degradation: &Degradation,
@@ -638,11 +641,11 @@ async fn succeed_on_degradation(
 ) -> (
     Result<succession::Succession, SuccessionError>,
     DiagnosisRecord,
+    Vec<SuccessionCall>,
 ) {
     let mut diagnosis = DiagnosisRecord {
         signal: degradation.signal.describe(),
         walls: degradation.walls.clone(),
-        calls: Vec::new(),
         synthesis: None,
         reused_from_turn: None,
     };
@@ -663,7 +666,7 @@ async fn succeed_on_degradation(
             Ok(succession) => {
                 diagnosis.synthesis = Some(previous.synthesis.clone());
                 diagnosis.reused_from_turn = Some(previous.written_in);
-                return (Ok(succession), diagnosis);
+                return (Ok(succession), diagnosis, Vec::new());
             }
             Err(error) => tracing::warn!(
                 %error,
@@ -671,8 +674,9 @@ async fn succeed_on_degradation(
             ),
         }
     }
-    let outcome = diagnose(site, degradation, history, &mut diagnosis).await;
-    (outcome, diagnosis)
+    let mut calls = Vec::new();
+    let outcome = diagnose(site, degradation, history, &mut diagnosis, &mut calls).await;
+    (outcome, diagnosis, calls)
 }
 
 /// A fresh diagnosis of `history`, each model call appended to `diagnosis`.
@@ -681,6 +685,7 @@ async fn diagnose(
     degradation: &Degradation,
     history: &[ChatMessage],
     diagnosis: &mut DiagnosisRecord,
+    calls: &mut Vec<SuccessionCall>,
 ) -> Result<succession::Succession, SuccessionError> {
     let models = site
         .diagnosis_models
@@ -708,7 +713,12 @@ async fn diagnose(
     let mut reports = Vec::new();
     let mut failed_reader = false;
     for finding in findings {
-        let mut call = diagnosis_call(site, DiagnosisStage::Reader, reader_model, &finding);
+        let mut call = succession::recorded_call(
+            site.provider,
+            SuccessionStage::Reader,
+            reader_model,
+            &finding,
+        );
         match finding {
             Ok(response) if !response.content.trim().is_empty() => {
                 call.report = Some(response.content.clone());
@@ -723,7 +733,7 @@ async fn diagnose(
                 failed_reader = true;
             }
         }
-        diagnosis.calls.push(call);
+        calls.push(call);
     }
     if failed_reader {
         return Err(SuccessionError::Diagnosis(
@@ -759,17 +769,16 @@ async fn diagnose(
             synthesis_model,
         ))
         .await;
-    diagnosis.calls.push(diagnosis_call(
-        site,
-        DiagnosisStage::Synthesis,
+    calls.push(succession::recorded_call(
+        site.provider,
+        SuccessionStage::Synthesis,
         synthesis_model,
         &synthesis,
     ));
     let synthesis = synthesis?;
     if synthesis.finish_reason == swage_core::FinishReason::Length {
         let reason = "the diagnosis synthesis reached its output limit";
-        diagnosis
-            .calls
+        calls
             .last_mut()
             .expect("synthesis call was recorded")
             .failure_reason = Some(reason.to_string());
@@ -777,8 +786,7 @@ async fn diagnose(
     }
     let synthesis = synthesis.content;
     if synthesis.trim().is_empty() {
-        diagnosis
-            .calls
+        calls
             .last_mut()
             .expect("synthesis call was recorded")
             .failure_reason = Some(SuccessionError::EmptySummary.to_string());
@@ -825,37 +833,6 @@ fn reader_slices(
         start = end;
     }
     Ok(slices)
-}
-
-/// The record of one diagnosis call: where it went, what it cost, and why
-/// it failed if it did. A reader's report is filled in by the caller.
-fn diagnosis_call(
-    site: &SuccessionSite<'_>,
-    stage: DiagnosisStage,
-    model: Option<&str>,
-    outcome: &Result<swage_core::CompletionResponse, swage_core::ProviderError>,
-) -> DiagnosisCall {
-    let model = model.unwrap_or(site.provider.model_id()).to_string();
-    match outcome {
-        Ok(response) => DiagnosisCall {
-            stage,
-            model,
-            input_tokens: response.input_tokens,
-            output_tokens: response.output_tokens,
-            cost: response.cost,
-            report: None,
-            failure_reason: None,
-        },
-        Err(error) => DiagnosisCall {
-            stage,
-            model,
-            input_tokens: 0,
-            output_tokens: 0,
-            cost: None,
-            report: None,
-            failure_reason: Some(error.to_string()),
-        },
-    }
 }
 
 fn diagnosis_request(
@@ -1150,6 +1127,7 @@ mod tests {
         failing_synthesis: bool,
         blank_synthesis: bool,
         truncated_synthesis: bool,
+        summary_mode: Option<&'static str>,
     }
 
     #[async_trait::async_trait]
@@ -1162,13 +1140,17 @@ mod tests {
             &self,
             request: CompletionRequest,
         ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            let is_summary = request.messages[0]
+                .text_content()
+                .starts_with("You write the hand-over notes");
             let index = {
                 let mut requests = self.requests.lock().expect("requests");
                 let index = requests.len();
                 requests.push(request);
                 index
             };
-            if self.failing_reader == Some(index)
+            if (is_summary && self.summary_mode == Some("failed"))
+                || self.failing_reader == Some(index)
                 || (self.failing_synthesis && index == LOCATOR_COUNT)
             {
                 return Err(swage_core::ProviderError::StreamError(
@@ -1176,16 +1158,21 @@ mod tests {
                 ));
             }
             Ok(swage_core::CompletionResponse {
-                content: if self.blank_reader == Some(index)
+                content: if (is_summary && self.summary_mode == Some("blank"))
+                    || self.blank_reader == Some(index)
                     || (self.blank_synthesis && index == LOCATOR_COUNT)
                 {
                     "  ".to_string()
+                } else if self.truncated_synthesis && index == LOCATOR_COUNT {
+                    "TRUNCATED_DIAGNOSIS: the missing file was ca".to_string()
                 } else {
                     "The read of notes/missing.md kept failing.".to_string()
                 },
                 input_tokens: 11,
                 output_tokens: 7,
-                finish_reason: if self.truncated_synthesis && index == LOCATOR_COUNT {
+                finish_reason: if (self.truncated_synthesis && index == LOCATOR_COUNT)
+                    || (is_summary && self.summary_mode == Some("truncated"))
+                {
                     swage_core::FinishReason::Length
                 } else {
                     swage_core::FinishReason::Stop
@@ -1257,7 +1244,8 @@ mod tests {
             previous: None,
         };
 
-        let (outcome, diagnosis) = succeed_on_degradation(&site, &degradation, &history).await;
+        let (outcome, diagnosis, calls) =
+            succeed_on_degradation(&site, &degradation, &history).await;
         let succession = outcome.expect("the diagnosis runs");
 
         let requests = provider.requests.lock().expect("requests");
@@ -1322,7 +1310,7 @@ mod tests {
             "each stage goes to its configured model"
         );
         let reply = "The read of notes/missing.md kept failing.";
-        let call = |stage, model: &str, report: Option<&str>| DiagnosisCall {
+        let call = |stage, model: &str, report: Option<&str>| SuccessionCall {
             stage,
             model: model.to_string(),
             input_tokens: 11,
@@ -1331,14 +1319,14 @@ mod tests {
             report: report.map(str::to_owned),
             failure_reason: None,
         };
-        let reader = call(DiagnosisStage::Reader, "reader-model", Some(reply));
+        let reader = call(SuccessionStage::Reader, "reader-model", Some(reply));
         assert_eq!(
-            diagnosis.calls,
+            calls,
             [
                 reader.clone(),
                 reader.clone(),
                 reader,
-                call(DiagnosisStage::Synthesis, "synthesis-model", None),
+                call(SuccessionStage::Synthesis, "synthesis-model", None),
             ],
             "every call is recorded with its model, usage and report"
         );
@@ -1379,14 +1367,15 @@ mod tests {
                 walls: vec!["tool_call:a".into()],
                 previous: None,
             };
-            let (result, diagnosis) = succeed_on_degradation(&site, &degradation, &history).await;
+            let (result, _diagnosis, calls) =
+                succeed_on_degradation(&site, &degradation, &history).await;
             assert!(
                 result.is_err(),
                 "an incomplete read cannot replace all older history"
             );
-            assert_eq!(diagnosis.calls.len(), 3);
+            assert_eq!(calls.len(), 3);
             assert!(
-                diagnosis.calls[1].failure_reason.is_some(),
+                calls[1].failure_reason.is_some(),
                 "the missing reader is recorded"
             );
             assert_eq!(
@@ -1429,6 +1418,7 @@ mod tests {
                 failure_reason: None,
                 focus: None,
                 diagnosis: None,
+                calls: Vec::new(),
             });
             AssemblyOutput::new_unchecked(
                 elements
@@ -1473,11 +1463,8 @@ mod tests {
         assert_eq!(records[0].messages_removed, 1);
         assert_eq!(records[1].requested_strategy, DEGRADATION_STRATEGY);
         assert_eq!(records[1].actual_strategy, "none");
-        assert!(
-            records[1].diagnosis.as_ref().unwrap().calls[1]
-                .failure_reason
-                .is_some()
-        );
+        assert_eq!(records[1].calls.len(), LOCATOR_COUNT);
+        assert!(records[1].calls[1].failure_reason.is_some());
         assert_eq!(records[2].requested_strategy, THRESHOLD_STRATEGY);
         assert_eq!(records[2].actual_strategy, THRESHOLD_STRATEGY);
         assert_eq!(records[3].requested_strategy, "scripted");
@@ -1540,15 +1527,22 @@ mod tests {
             );
             assert_eq!(records[0].requested_strategy, DEGRADATION_STRATEGY);
             assert_eq!(records[0].actual_strategy, "none");
-            let calls = &records[0].diagnosis.as_ref().expect("diagnosis").calls;
+            let calls = &records[0].calls;
             assert_eq!(calls.len(), LOCATOR_COUNT + 1);
-            assert_eq!(calls.last().unwrap().stage, DiagnosisStage::Synthesis);
+            assert_eq!(calls.last().unwrap().stage, SuccessionStage::Synthesis);
             assert!(
                 calls.last().unwrap().failure_reason.is_some(),
                 "synthesis failure recorded"
             );
             assert!(records[0].diagnosis.as_ref().unwrap().synthesis.is_none());
             if mode == "truncated" {
+                assert!(
+                    result
+                        .messages
+                        .iter()
+                        .all(|message| !message.text_content().contains("TRUNCATED_DIAGNOSIS")),
+                    "the successor must not carry the cut-off synthesis"
+                );
                 assert!(
                     calls
                         .last()
@@ -1561,6 +1555,138 @@ mod tests {
             }
             assert_eq!(records[1].actual_strategy, THRESHOLD_STRATEGY);
         }
+    }
+
+    async fn assert_summary_calls_are_recorded(degradation: bool) {
+        for mode in ["complete", "failed", "blank", "truncated"] {
+            let provider = RecordingProvider {
+                summary_mode: Some(mode),
+                ..Default::default()
+            };
+            let tokeniser = TiktokenTokeniser::new("claude-sonnet-4-20250514");
+            let variables = BTreeMap::new();
+            // A failed degradation summary must stand alone, without a
+            // threshold fallback adding a second summary completion.
+            let threshold = CompactionThreshold::MessageCount(if degradation { 100 } else { 3 });
+            let history: Vec<_> = (0..8)
+                .map(|index| ChatMessage::new(Role::User, format!("message {index}")))
+                .collect();
+            let elements: Vec<Box<dyn ContextElement>> =
+                vec![Box::new(HistoryElement::new(history))];
+            let assemble = |elements: &[Box<dyn ContextElement>]| {
+                AssemblyOutput::new_unchecked(
+                    elements
+                        .iter()
+                        .flat_map(|element| element.content())
+                        .collect(),
+                    swage_context::report::AssemblyReport::default(),
+                )
+            };
+            let output = assemble(&elements);
+            let result = succeed_over_threshold(
+                SuccessionSite {
+                    provider: &provider,
+                    threshold: &threshold,
+                    model: None,
+                    focus: None,
+                    variables: &variables,
+                    tokeniser: &tokeniser,
+                    degradation: degradation.then(|| Degradation {
+                        signal: WallSignal::RepeatedFailures {
+                            failed_calls: 5,
+                            failed_turns: 0,
+                        },
+                        walls: vec!["tool_call:a".into()],
+                        previous: None,
+                    }),
+                    diagnosis_models: Ok(DiagnosisModels::default()),
+                },
+                elements,
+                output,
+                assemble,
+            )
+            .await;
+            let records = &result.report.compaction_applied;
+            assert_eq!(records.len(), 1, "{mode}");
+            let record = &records[0];
+            let expected_stages = if degradation {
+                vec![
+                    SuccessionStage::Reader,
+                    SuccessionStage::Reader,
+                    SuccessionStage::Reader,
+                    SuccessionStage::Synthesis,
+                    SuccessionStage::Summary,
+                ]
+            } else {
+                vec![SuccessionStage::Summary]
+            };
+            assert_eq!(
+                record
+                    .calls
+                    .iter()
+                    .map(|call| call.stage)
+                    .collect::<Vec<_>>(),
+                expected_stages,
+                "{mode}"
+            );
+            assert_eq!(
+                record.calls.len(),
+                provider.requests.lock().unwrap().len(),
+                "one record per actual completion"
+            );
+            assert_eq!(record.diagnosis.is_some(), degradation);
+            let serialised = serde_json::to_value(record).unwrap();
+            if degradation {
+                assert!(
+                    serialised["diagnosis"].get("calls").is_none(),
+                    "calls have one home"
+                );
+            }
+            let summary = record.calls.last().unwrap();
+            assert_eq!(summary.model, "recording");
+            assert_eq!(summary.input_tokens, if mode == "failed" { 0 } else { 11 });
+            assert_eq!(summary.output_tokens, if mode == "failed" { 0 } else { 7 });
+            assert_eq!(
+                summary.cost,
+                if mode == "failed" { None } else { Some(0.25) }
+            );
+            let expected_failure = match mode {
+                "failed" => Some("diagnosis provider unavailable"),
+                "blank" => Some("empty summary"),
+                "truncated" => Some("output limit"),
+                _ => None,
+            };
+            match expected_failure {
+                Some(reason) => assert!(
+                    summary
+                        .failure_reason
+                        .as_deref()
+                        .is_some_and(|failure| failure.contains(reason)),
+                    "{mode}: {summary:?}"
+                ),
+                None => assert!(summary.failure_reason.is_none(), "{summary:?}"),
+            }
+            // Recording truncation does not change the established policy
+            // of accepting non-empty summaries.
+            assert_eq!(
+                record.actual_strategy,
+                if matches!(mode, "failed" | "blank") {
+                    "none"
+                } else {
+                    THRESHOLD_STRATEGY
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_succession_records_every_summary_completion() {
+        assert_summary_calls_are_recorded(false).await;
+    }
+
+    #[tokio::test]
+    async fn degradation_succession_records_every_summary_completion() {
+        assert_summary_calls_are_recorded(true).await;
     }
 
     #[test]
