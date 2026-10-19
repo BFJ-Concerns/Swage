@@ -38,7 +38,6 @@ impl GatewayService {
     ) -> Result<(), ClientError> {
         if args.port.is_some()
             || args.host.is_some()
-            || args.config.is_some()
             || args.foreground
             || args.log_file.is_some()
             || args.force
@@ -204,7 +203,6 @@ mod tests {
             force: false,
             port: Some(4000),
             host: None,
-            config: None,
             foreground: false,
             log_file: None,
         };
