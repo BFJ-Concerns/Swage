@@ -177,6 +177,16 @@ impl TurnStore for SqliteStorage {
     }
 
     async fn get_turn(&self, id: Uuid) -> Result<Option<Turn>, StorageError> {
+        Ok(self
+            .get_turn_observation(id)
+            .await?
+            .map(|(record, _)| record))
+    }
+
+    async fn get_turn_observation(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<(Turn, chrono::DateTime<chrono::Utc>)>, StorageError> {
         self.with_conn(|conn| {
             conn.query_row(
                 "SELECT id, thread_id, agent_id, user_input, inbound_audit, assistant_response,
@@ -186,7 +196,7 @@ impl TurnStore for SqliteStorage {
                         isolation_kind, isolation_detail, failure_message
                  FROM turns WHERE id = ?1",
                 params![id.to_string()],
-                row_to_turn,
+                |row| Ok((row_to_turn(row)?, chrono::Utc::now())),
             )
             .optional()
         })

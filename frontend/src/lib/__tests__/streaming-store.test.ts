@@ -153,7 +153,7 @@ describe("reconnect reconciliation", () => {
     // Force the refresh to remain pending while a newer turn becomes live:
     // a message sent meanwhile was queued, and the gateway started the next
     // turn on it when the old one ended.
-    store.handleServerEvent({ type: "queue_drained", session_id: "conv-1", turn_id: "newer-turn", queued_ids: [] });
+    store.handleServerEvent({ type: "queue_drained", thread_id: "main-thread", session_id: "conv-1", turn_id: "newer-turn", queued_ids: [] });
     store.handleServerEvent({ type: "token", content: "new live content" });
 
     store.reconcileAfterReconnect(recoveredTurnGeneration);
@@ -229,7 +229,7 @@ describe("startTurn", () => {
     // The old turn ends and the queue runs: the view sees a turn start.
     store.handleServerEvent({ type: "turn_complete", turn_id: "t-1" });
     expect(store.isStreaming).toBe(false);
-    store.handleServerEvent({ type: "queue_drained", session_id: "conv-9", turn_id: "t-2", queued_ids: ["q-1"] });
+    store.handleServerEvent({ type: "queue_drained", thread_id: "main-thread", session_id: "conv-9", turn_id: "t-2", queued_ids: ["q-1"] });
     expect(conv.clearQueuedMessages).toHaveBeenCalledWith("conv-9", ["q-1"]);
     expect(store.isStreaming).toBe(true);
     expect(store.streamedContent).toBe("");

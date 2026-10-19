@@ -372,6 +372,7 @@ impl LlmProvider for CircuitBreakerProvider {
                                 | StreamChunk::ProviderResponseWitness(_)
                                 | StreamChunk::ProviderRetryStarted { .. }
                                 | StreamChunk::ProviderRetrySettled { .. }
+                                | StreamChunk::ProviderAttempt(_)
                                 | StreamChunk::ToolUse { .. } => {}
                             }
                         }

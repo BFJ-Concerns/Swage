@@ -3,7 +3,7 @@
 use std::any::Any;
 use std::path::{Path, PathBuf};
 
-pub use swage_protocol::device::{SerializableToolContext, UserInfo};
+pub use swage_protocol::device::{SerializableToolContext, ToolOutputLocation, UserInfo};
 
 /// Context passed to every tool execution.
 ///
@@ -20,6 +20,10 @@ pub trait ToolContext: Send + Sync {
     // allocating on every call, but this is fine because &UserInfo is a reference
     // into the concrete type's storage.
     fn user_info(&self) -> Option<&UserInfo>;
+
+    fn tool_output_directory(&self) -> Option<&Path> {
+        None
+    }
 
     /// The LLM's call_id for the current tool invocation.
     ///
@@ -52,6 +56,9 @@ pub fn context_within_workspaces(ctx: &dyn ToolContext, workspace_roots: &[PathB
         .collect::<Vec<_>>();
 
     path_within_any_workspace(ctx.working_directory(), &canonical_roots)
+        && ctx
+            .tool_output_directory()
+            .is_none_or(|directory| path_within_any_workspace(directory, &canonical_roots))
         && ctx
             .allowed_paths()
             .iter()
@@ -101,6 +108,11 @@ pub fn serialise_tool_context(ctx: &dyn ToolContext) -> SerializableToolContext 
         session_id: ctx.session_id().to_owned(),
         working_directory: ctx.working_directory().to_owned(),
         allowed_paths: ctx.allowed_paths().to_owned(),
+        tool_output_directory: ctx
+            .tool_output_directory()
+            .map(|directory| ToolOutputLocation {
+                directory: directory.to_path_buf(),
+            }),
         user_info: ctx.user_info().cloned(),
         call_id: ctx.call_id().map(ToOwned::to_owned),
         turn_id: ctx.turn_id(),
@@ -126,6 +138,12 @@ impl ToolContext for SerializableToolContext {
 
     fn allowed_paths(&self) -> &[PathBuf] {
         &self.allowed_paths
+    }
+
+    fn tool_output_directory(&self) -> Option<&Path> {
+        self.tool_output_directory
+            .as_ref()
+            .map(|location| location.directory.as_path())
     }
 
     fn user_info(&self) -> Option<&UserInfo> {
@@ -301,5 +319,28 @@ mod tests {
     fn mock_without_user_info_returns_none() {
         let ctx = MockToolContext::new("agent-z", "sess-0");
         assert!(ctx.user_info().is_none());
+    }
+}
+
+#[cfg(test)]
+mod output_location_tests {
+    use super::*;
+    #[test]
+    fn runtime_output_obeys_device_workspace_roots() {
+        let root = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let mut base = MockToolContext::new("agent", "session");
+        base.working_directory = root.clone();
+        let mut ctx = serialise_tool_context(&base);
+        ctx.tool_output_directory = Some(ToolOutputLocation {
+            directory: root.parent().unwrap().to_path_buf(),
+        });
+        assert!(
+            !context_within_workspaces(&ctx, std::slice::from_ref(&root)),
+            "runtime output widened the paired device's authority"
+        );
+        ctx.tool_output_directory = Some(ToolOutputLocation {
+            directory: root.clone(),
+        });
+        assert!(context_within_workspaces(&ctx, &[root]));
     }
 }

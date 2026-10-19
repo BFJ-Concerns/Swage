@@ -1156,6 +1156,7 @@ mod tests {
             "id": id,
             "topic_id": topic_id,
             "agent_id": "gateway",
+            "agent_display_name": "Swage default",
             "created_at": "2025-01-01T00:00:00Z",
             "last_activity": "2025-01-01T01:00:00Z",
         });
@@ -1224,6 +1225,7 @@ mod tests {
             "id": id,
             "topic_id": Uuid::new_v4(),
             "agent_id": "gateway",
+            "agent_display_name": "Swage default",
             "created_at": "2025-01-01T00:00:00Z",
             "last_activity": "2025-01-01T01:00:00Z",
             "root_thread_id": root_thread_id,

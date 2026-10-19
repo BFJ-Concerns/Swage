@@ -15,6 +15,7 @@ import type { ConversationStore } from "../stores/conversations";
 import { createStreamingStore, type StreamingStore } from "../stores/streaming";
 import type { ConversationBranch } from "../types";
 import { makeConversationDetail, makeConversationSummary } from "./fixtures/conversations";
+import { makeAgentDefinition } from "./fixtures/agent-definitions";
 
 type MountedComponent = ReturnType<typeof mount>;
 
@@ -292,5 +293,51 @@ describe("ConversationChannel session previews", () => {
     const summary = makeConversationSummary({ id: store.activeConversation!.id, message_preview: source });
     component = mountChannel({ ...store, conversations: [summary] });
     expect(document.querySelector('select[aria-label="Active conversation"] option')?.textContent).toBe(expected);
+  });
+});
+
+
+describe("ConversationChannel session agent identity", () => {
+  let component: MountedComponent | undefined;
+
+  afterEach(() => {
+    if (component) unmount(component);
+    component = undefined;
+    document.body.replaceChildren();
+  });
+
+  it.each([
+    ["fixture-reader", "Fixture reader"],
+    ["same-id", "Second topic reader"],
+    ["unlisted-definition", "Unavailable agent"],
+    ["platform-worker", "Workflow worker"],
+  ])("shows the loaded session identity for %s instead of the creation default", (agentId, expected) => {
+    const store = makeConversationStore([], null);
+    component = mount(ConversationChannel, {
+      target: document.body,
+      props: {
+        conversationStore: {
+          ...store,
+          activeConversation: makeConversationDetail({ agent_id: agentId, agent_display_name: expected }),
+        },
+        connectionStore: makeConnectionStore(),
+        streamingStore: createStreamingStore(),
+        onRetry: () => {},
+        selectedAgentId: "",
+        agentDefinitions: [
+          makeAgentDefinition("gateway", "built_in", { display_name: "Swage default", is_builtin: true }),
+          makeAgentDefinition("fixture-reader", "global", { display_name: "Fixture reader" }),
+          makeAgentDefinition("same-id", "topic", { display_name: "First topic reader" }),
+        ],
+      },
+    });
+    flushSync();
+
+    const indicator = document.querySelector<HTMLElement>('.session-bar [aria-label="Session agent"], .session-bar select[aria-label="Agent"]');
+    expect(indicator).not.toBeNull();
+    const displayed = indicator instanceof HTMLSelectElement
+      ? indicator.selectedOptions[0]?.textContent
+      : indicator?.textContent;
+    expect(displayed).toBe(expected);
   });
 });

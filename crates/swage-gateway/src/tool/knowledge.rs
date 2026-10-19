@@ -474,7 +474,7 @@ struct RetainedFetch {
 /// Read the body a url_fetch retained, through the stored call the
 /// reference names: the call must be a url_fetch in this conversation, its
 /// result must name the retained file, and the file is read only inside the
-/// working directory it was written under.
+/// current workspace or managed tool-output directory.
 async fn retained_fetch(
     ctx: &dyn ToolContext,
     reference: &str,
@@ -524,17 +524,17 @@ async fn retained_fetch(
         .ok_or_else(|| failed(RECORD_TOOL, "the referenced fetch recorded no URL"))?
         .to_owned();
     let path = validate_path(ctx.working_directory(), relative)
+        .or_else(|workspace_error| {
+            ctx.tool_output_directory()
+                .ok_or(workspace_error)
+                .and_then(|directory| validate_path(directory, relative))
+        })
         .map_err(|error| failed(RECORD_TOOL, error))?;
-    // The path is relative to the working directory the fetch ran under —
-    // the same directory for a session unless its workspace changed since —
-    // and its turn and call ids make a same-named file elsewhere impossible
-    // in practice; a body not found here was fetched under another
-    // directory and is fetched again, never guessed at.
     let bytes = tokio::fs::read(&path).await.map_err(|error| {
         failed(
             RECORD_TOOL,
             format!(
-                "the fetch's retained body is not under this session's current working directory \
+                "the fetch's retained body is not available in this session's workspace or output storage \
                  ({error}); if the workspace changed since the fetch, fetch the page again"
             ),
         )
@@ -1115,7 +1115,7 @@ mod tests {
     /// and text the platform derived from them; what the model types in is
     /// searchable at most, and a quote lands only in platform-derived text.
     #[tokio::test(flavor = "multi_thread")]
-    async fn record_from_a_fetch_captures_the_retained_bytes_and_derives_the_citable_text() {
+    async fn regression_record_fetch_from_managed_output_with_attached_workspace() {
         use swage_storage::model::{NewThread, NewToolCall, NewTurn, TurnState};
         use swage_storage::{ThreadStore, ToolCallStore, TurnStore};
 
@@ -1152,14 +1152,30 @@ mod tests {
             .await
             .unwrap();
 
-        // The fetch the platform ran: its retained body on disk under the
-        // working directory, its stored call naming the file and the URL.
+        let output = tempfile::tempdir().unwrap();
+        let mut fetch_base =
+            swage_tool::context::MockToolContext::new("gateway", session.id.to_string());
+        fetch_base.working_directory = workspace.path().into();
+        fetch_base.turn_id = Some(fetch_turn.id);
+        fetch_base.call_id = Some("fetch-1".into());
+        let mut fetch_ctx = swage_tool::context::serialise_tool_context(&fetch_base);
+        fetch_ctx.tool_output_directory = Some(swage_tool::context::ToolOutputLocation {
+            directory: output.path().into(),
+        });
         let html =
             b"<html><body><h1>Borrowing</h1><p>The borrow checker was rewritten.</p></body></html>";
-        let relative = format!(".swage/tool-output/{}/fetch-1/raw-body.html", fetch_turn.id);
-        let absolute = workspace.path().join(&relative);
-        std::fs::create_dir_all(absolute.parent().unwrap()).unwrap();
-        std::fs::write(&absolute, html).unwrap();
+        let artifact =
+            crate::tool::workspace::tool_output_artifact_path(&fetch_ctx, "raw-body.html");
+        let mut writer =
+            crate::tool::workspace::create_tool_output_artifact(&fetch_ctx, &artifact.absolute)
+                .await
+                .unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut writer, html)
+            .await
+            .unwrap();
+        tokio::io::AsyncWriteExt::flush(&mut writer).await.unwrap();
+        drop(writer);
+        let relative = artifact.reported;
         storage
             .create_tool_call(NewToolCall {
                 execution: None,
@@ -1205,6 +1221,8 @@ mod tests {
         let mut base = swage_tool::context::MockToolContext::new("gateway", session.id.to_string());
         base.turn_id = Some(current_turn.id);
         base.working_directory = workspace.path().to_path_buf();
+        let mut base = swage_tool::context::serialise_tool_context(&base);
+        base.tool_output_directory = fetch_ctx.tool_output_directory;
         let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
         let ctx = GatewayToolContext::new(
             &base,
@@ -1227,7 +1245,9 @@ mod tests {
         let captured = tool
             .execute(json!({"fetch_call": reference}), &ctx)
             .await
-            .expect("a fetch-bound capture");
+            .expect(
+                "a retained fetch in managed output must be capturable with an attached workspace",
+            );
         assert_eq!(captured["recorded"], true);
         assert_eq!(captured["searchable"], true);
         assert_eq!(captured["citable"], true);
@@ -1273,6 +1293,37 @@ mod tests {
         );
         assert!(!extraction.extracted_text.contains("<p>"));
         assert!(extraction.is_citable());
+
+        // General read approvals do not grant access to capture sources.
+        let mut approved_base = base.clone();
+        approved_base.tool_output_directory = None;
+        approved_base.allowed_paths.push(output.path().into());
+        let approved_ctx = GatewayToolContext::new(
+            &approved_base,
+            mpsc::unbounded_channel().0,
+            Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
+        )
+        .with_app_state(Some(state.clone()));
+        let refused = tool
+            .execute(json!({"fetch_call": reference}), &approved_ctx)
+            .await;
+        assert!(
+            refused.is_err(),
+            "general approved paths must not widen capture access: {refused:?}"
+        );
+
+        #[cfg(unix)]
+        {
+            let outside = root.path().join("outside.html");
+            std::fs::write(&outside, html).unwrap();
+            std::fs::remove_file(&artifact.absolute).unwrap();
+            std::os::unix::fs::symlink(&outside, &artifact.absolute).unwrap();
+            let refused = tool.execute(json!({"fetch_call": reference}), &ctx).await;
+            assert!(
+                refused.is_err(),
+                "a retained-body symlink must not escape capture roots: {refused:?}"
+            );
+        }
 
         // What the model types in is searchable at most: recorded as its
         // own words, and a quote cannot land in it.

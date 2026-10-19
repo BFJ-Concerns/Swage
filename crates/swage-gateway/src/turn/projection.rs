@@ -240,83 +240,45 @@ pub(super) async fn project_agent_events(
                 )
                 .await;
             }
-            AgentEvent::ProviderReasoningCaptured {
-                turn_id: snapshot_turn_id,
-                round,
-                content,
-                details,
-            } => {
-                apply_provider_snapshot_event(
-                    state,
-                    report_json,
-                    AgentEvent::ProviderReasoningCaptured {
-                        turn_id: snapshot_turn_id,
-                        round,
-                        content,
-                        details,
-                    },
-                    ProviderSnapshotCapturePath::Ordinary,
-                )
-                .await;
-                if let Err(e) = state
-                    .storage
-                    .store_snapshot(snapshot_turn_id, &report_json.to_string())
-                    .await
-                {
-                    // Reconstructive record (record_durability.rs).
-                    tracing::warn!(
-                        error = %e,
-                        "failed to persist provider reasoning context snapshot"
-                    );
-                    if let Err(audit_error) = record_durability::record_reconstruction_gap(
-                        state.storage.as_ref(),
-                        Some(session_id),
-                        snapshot_turn_id,
-                        "provider_reasoning_snapshot",
-                        &e,
-                    )
-                    .await
-                    {
-                        record_integrity_lost.get_or_insert(format!(
-                            "provider reasoning snapshot lost and the loss could not be recorded: {audit_error}"
-                        ));
+            event @ (AgentEvent::ProviderReasoningCaptured { .. }
+            | AgentEvent::ProviderResponseCaptured { .. }
+            | AgentEvent::ProviderAttempt { .. }) => {
+                let (snapshot_turn_id, record_kind) = match &event {
+                    AgentEvent::ProviderReasoningCaptured { turn_id, .. } => {
+                        (*turn_id, "provider_reasoning_snapshot")
                     }
-                }
-            }
-            AgentEvent::ProviderResponseCaptured {
-                turn_id: snapshot_turn_id,
-                round,
-                witness,
-            } => {
+                    AgentEvent::ProviderResponseCaptured { turn_id, .. } => {
+                        (*turn_id, "provider_response_witness")
+                    }
+                    AgentEvent::ProviderAttempt { turn_id, .. } => {
+                        (*turn_id, "provider_attempt_snapshot")
+                    }
+                    _ => unreachable!(),
+                };
                 apply_provider_snapshot_event(
                     state,
                     report_json,
-                    AgentEvent::ProviderResponseCaptured {
-                        turn_id: snapshot_turn_id,
-                        round,
-                        witness,
-                    },
+                    event,
                     ProviderSnapshotCapturePath::Ordinary,
                 )
                 .await;
-                if let Err(e) = state
+                if let Err(error) = state
                     .storage
                     .store_snapshot(snapshot_turn_id, &report_json.to_string())
                     .await
                 {
-                    // Reconstructive record (record_durability.rs).
-                    tracing::warn!(error = %e, "failed to persist provider response witness");
+                    tracing::warn!(%error, "failed to persist provider context snapshot");
                     if let Err(audit_error) = record_durability::record_reconstruction_gap(
                         state.storage.as_ref(),
                         Some(session_id),
                         snapshot_turn_id,
-                        "provider_response_witness",
-                        &e,
+                        record_kind,
+                        &error,
                     )
                     .await
                     {
                         record_integrity_lost.get_or_insert(format!(
-                            "provider response witness lost and the loss could not be recorded: {audit_error}"
+                            "provider snapshot lost and the loss could not be recorded: {audit_error}"
                         ));
                     }
                 }

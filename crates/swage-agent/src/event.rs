@@ -47,6 +47,12 @@ pub enum AgentEvent {
         success: bool,
     },
 
+    /// The recorded state of an actual provider stream attempt.
+    ProviderAttempt {
+        turn_id: Uuid,
+        record: swage_protocol::client::context::ProviderAttemptRecord,
+    },
+
     /// A provider-visible request body has been prepared for a model call.
     ///
     /// This is diagnostic data for context snapshots. It is emitted before the

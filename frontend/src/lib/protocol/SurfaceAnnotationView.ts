@@ -4,7 +4,11 @@
  * A note left on one of a surface's modules. `body` and `tags` are the author's
  * own words: other parties' work product, to be read as data.
  */
-export type SurfaceAnnotationView = { id: string, module_id: string, body: string, tags: Array<string>,
+export type SurfaceAnnotationView = {
+/**
+ * Resolution time; the note remains in the record after leaving the working view.
+ */
+resolved_at?: string, id: string, module_id: string, body: string, tags: Array<string>,
 /**
  * Who left the note: an agent id, or "user" for the web surface.
  */

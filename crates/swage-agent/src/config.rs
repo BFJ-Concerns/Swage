@@ -29,6 +29,8 @@ pub struct AgentConfig {
     pub working_directory: PathBuf,
     /// Gateway-governed allowed path roots for tool execution.
     pub allowed_paths: Vec<PathBuf>,
+    /// Writable runtime storage for tool-output artefacts, separate from workspaces.
+    pub tool_output_directory: Option<PathBuf>,
     /// Optional generation controls loaded from the selected global preset.
     pub max_tokens: Option<u32>,
     pub temperature: Option<f64>,
@@ -81,6 +83,7 @@ impl AgentConfig {
             has_resolved_workspace: false,
             working_directory: PathBuf::new(),
             allowed_paths: Vec::new(),
+            tool_output_directory: None,
             max_tokens: None,
             temperature: None,
             stop_sequences: None,

@@ -413,6 +413,8 @@
           {#each defaultSurfaces as entry (entry.id)}
             <article class="record-row">
               <strong>{entry.name}</strong>
+              <time datetime={entry.updated_at}>Saved {entry.updated_at}</time>
+              <span>From {entry.origin_topic_deleted ? "a deleted topic" : entry.origin_topic_id ? (entry.origin_topic_id === topic.id ? topic.name : entry.origin_topic_id) : "General"}</span>
               <span>{entry.description}</span>
               <button type="button" disabled={isMutating} onclick={() => void withdrawDefault(entry.id)}>Withdraw</button>
             </article>
@@ -427,6 +429,8 @@
           {#each library.filter((entry) => !defaultSurfaces.some((d) => d.id === entry.id)) as entry (entry.id)}
             <article class="record-row">
               <strong>{entry.name}</strong>
+              <time datetime={entry.updated_at}>Saved {entry.updated_at}</time>
+              <span>From {entry.origin_topic_deleted ? "a deleted topic" : entry.origin_topic_id ? (entry.origin_topic_id === topic.id ? topic.name : entry.origin_topic_id) : "General"}</span>
               <span>{entry.description}</span>
               <span>{entry.tags.join(", ")}</span>
               <button type="button" disabled={isMutating} onclick={() => void designateDefault(entry.id)}>Make default</button>
