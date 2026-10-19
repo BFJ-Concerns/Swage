@@ -335,6 +335,64 @@ ALTER TABLE turns ADD COLUMN delegated_output_tokens INTEGER;
 /// NULL and renderers use their generic fallback.
 const ADD_TOOL_CALL_DISPLAY_SUMMARY: &str = "
 ALTER TABLE tool_calls ADD COLUMN display_summary TEXT;
+
+    CREATE TRIGGER IF NOT EXISTS trg_tool_calls_settled_audit
+    AFTER UPDATE OF status ON tool_calls
+    WHEN NEW.status IS NOT NULL AND (OLD.status IS NULL OR OLD.status <> NEW.status)
+    BEGIN
+        INSERT INTO audit_events (
+            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
+        ) VALUES (
+            lower(hex(randomblob(16))),
+            (SELECT threads.session_id FROM turns
+                JOIN threads ON threads.id = turns.thread_id
+                WHERE turns.id = NEW.turn_id),
+            'tool_call',
+            NEW.id,
+            'tool_call',
+            'tool ' || NEW.tool || ' ' || NEW.status,
+            json_object(
+                'tool', NEW.tool,
+                'status', NEW.status,
+                'turn_id', NEW.turn_id,
+                'call_id', NEW.call_id,
+                'agent_id', NEW.agent_id,
+                'duration_ms', NEW.duration_ms,
+                'parent_call_id', COALESCE(NEW.parent_call_id, ''),
+                'display_summary', COALESCE(NEW.display_summary, '')
+            ),
+            strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        );
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_tool_calls_inserted_settled_audit
+    AFTER INSERT ON tool_calls
+    WHEN NEW.status IS NOT NULL
+    BEGIN
+        INSERT INTO audit_events (
+            id, session_id, entity_kind, entity_id, event_kind, summary, metadata_json, created_at
+        ) VALUES (
+            lower(hex(randomblob(16))),
+            (SELECT threads.session_id FROM turns
+                JOIN threads ON threads.id = turns.thread_id
+                WHERE turns.id = NEW.turn_id),
+            'tool_call',
+            NEW.id,
+            'tool_call',
+            'tool ' || NEW.tool || ' ' || NEW.status,
+            json_object(
+                'tool', NEW.tool,
+                'status', NEW.status,
+                'turn_id', NEW.turn_id,
+                'call_id', NEW.call_id,
+                'agent_id', NEW.agent_id,
+                'duration_ms', NEW.duration_ms,
+                'parent_call_id', COALESCE(NEW.parent_call_id, ''),
+                'display_summary', COALESCE(NEW.display_summary, '')
+            ),
+            strftime('%Y-%m-%dT%H:%M:%fZ','now')
+        );
+    END;
 ";
 
 const CREATE_SESSION_VARIABLES: &str = "

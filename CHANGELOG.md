@@ -44,6 +44,7 @@ All notable changes to Swage are documented in this file.
 - CI runs the full verification gate (`just verify`) on GitHub Actions hosted runners and names any test that passed only on retry.
 - The operator history names each changed configuration field with its prior and new value — nested settings by their path, such as Context › Assembly — and keeps the whole prior and new objects collapsed one click away, so variant selections and assembly decisions sit close below.
 - Per-turn sandboxing is on by default, so bubblewrap is a required install prerequisite; a topic opts out with `[sandbox] enabled = false`, and its local gateway turns then record a degraded execution boundary unless the install declares its own boundary.
+- In attended sessions, `shell`, `file_edit`, `file_write`, `python_execute`, `browser_click`, `browser_type`, `browser_select` and `browser_scroll` ask for approval before each call by default; a `require_approval` list in configuration replaces that default. Unattended sessions still run on their grants alone.
 - In attended sessions, `shell`, `file_edit`, `file_write` and `python_execute` ask for approval before each call by default; a `require_approval` list in configuration replaces that default. Unattended sessions still run on their grants alone.
 - The built-in Codex app server (`protocol = "codex"`) is temporarily disabled: configuration naming it does not load, and Settings does not offer it as a provider kind, until Swage can ask the operator to approve the commands and file changes it makes. Codex models stay reachable through any OpenAI-protocol provider.
 - Unused keys in `[tools.search]` are refused at configuration load.
@@ -216,7 +217,6 @@ All notable changes to Swage are documented in this file.
 - Native file tools refuse to write into a workspace attached without permission to change files.
 - Experimentation variants serve a whole conversation; configuration changes apply when a new session first draws.
 
-- Answering a native file-tool approval with Allow runs the pending operation, including paths relative to a sibling folder; timed-out calls report an expired result.
 - Tool output written into an attached workspace no longer appears as untracked files in that workspace’s Git repository.
 - Session previews in conversation, topic and operator lists show the latest user or assistant message; tool and system messages do not replace the preview.
 - A turn interrupted mid-tool resumes without repeating tools that had already completed: each tool call is recorded as soon as the model selects it and settled when it finishes, a call cut off by a restart is settled as interrupted and one stopped with its turn is settled as cancelled, and the resumed conversation replays those calls with their results.
