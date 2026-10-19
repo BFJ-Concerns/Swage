@@ -344,3 +344,97 @@ impl Drop for ProcessEnvGuard {
         }
     }
 }
+
+/// Ask the real workflow tools to discover and run a topic-saved workflow.
+pub fn workflow_discovery_rounds() -> Vec<Vec<StreamChunk>> {
+    vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "list-workflows".into(),
+                name: "workflow_list".into(),
+                arguments: serde_json::json!({}),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(swage_core::FinishReason::ToolUse),
+            },
+        ],
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "run-workflow".into(),
+                name: "workflow_run".into(),
+                arguments: serde_json::json!({"name": "fleet-hold", "wait": true}),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(swage_core::FinishReason::ToolUse),
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "Workflow checked".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(swage_core::FinishReason::Stop),
+            },
+        ],
+    ]
+}
+
+/// Read tool results produced by the gateway, never a scripted model's answer.
+pub async fn assert_workflow_discovery(storage: &dyn swage_storage::Storage, turn_id: uuid::Uuid) {
+    let calls = storage
+        .list_tool_calls_by_turn(turn_id)
+        .await
+        .expect("tool calls");
+    let listing = calls
+        .iter()
+        .find(|call| call.tool == "workflow_list")
+        .expect("workflow_list was called");
+    assert_eq!(
+        listing.status.as_deref(),
+        Some("success"),
+        "workflow_list failed: {:?}",
+        listing.result
+    );
+    let result: Value = serde_json::from_str(listing.result.as_deref().expect("listing result"))
+        .expect("listing JSON");
+    let workflows = result["workflows"].as_array().expect("workflow catalogue");
+    for name in ["fleet-hold", "research-sweep"] {
+        assert!(
+            workflows.iter().any(|workflow| workflow["name"] == name),
+            "missing {name}: {result}"
+        );
+    }
+    let started = calls
+        .iter()
+        .find(|call| call.tool == "workflow_run")
+        .expect("workflow_run was called");
+    assert_eq!(
+        started.status.as_deref(),
+        Some("success"),
+        "workflow_run failed: {:?}",
+        started.result
+    );
+    let result: Value =
+        serde_json::from_str(started.result.as_deref().expect("run result")).expect("run JSON");
+    let run_id = result["id"]
+        .as_str()
+        .expect("run id")
+        .parse()
+        .expect("run UUID");
+    let run = storage
+        .get_workflow_run(run_id)
+        .await
+        .expect("run lookup")
+        .expect("persisted workflow run");
+    assert_eq!(run.state, "completed");
+    let turn = storage
+        .get_turn(turn_id)
+        .await
+        .expect("turn lookup")
+        .expect("persisted turn");
+    let thread = swage_storage::ThreadStore::get(storage, turn.thread_id)
+        .await
+        .expect("thread lookup")
+        .expect("persisted thread");
+    assert_eq!(run.dispatching_session_id, Some(thread.session_id));
+}
