@@ -331,6 +331,28 @@ describe("TopicSettingsPage", () => {
     expect(topicsApi.detachTopicWorkspace).not.toHaveBeenCalled();
   });
 
+  it("retries only a failed surface-library load from the shared alert", async () => {
+    const entry = {
+      id: "entry-retry", name: "Recovered plan", description: "Planning notes",
+      tags: [], origin_topic_deleted: false, updated_at: "2026-10-19T10:00:00Z",
+    };
+    vi.mocked(surfacesApi.listLibrary).mockRejectedValueOnce(new Error("Library unavailable"))
+      .mockResolvedValueOnce({ entries: [entry] });
+    vi.mocked(surfacesApi.listTopicDefaultSurfaces).mockResolvedValue({ entries: [] });
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "surfaces" } });
+    await flushUi();
+    expect(topicsApi.listTopicWorkspaces).toHaveBeenCalledOnce();
+    expect(surfacesApi.listLibrary).toHaveBeenCalledOnce();
+    expect(document.querySelectorAll('[role="alert"]')).toHaveLength(1);
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("Library unavailable");
+    Array.from(document.querySelectorAll("button")).find((button) => button.textContent === "Retry")!.click();
+    await flushUi();
+    expect(surfacesApi.listLibrary).toHaveBeenCalledTimes(2);
+    expect(document.querySelector('[aria-label="Surface library"] .record-row')?.textContent).toContain(entry.name);
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(topicsApi.listTopicWorkspaces).toHaveBeenCalledOnce();
+  });
+
   it("designates a library surface as a topic default and saves the topic's tags", async () => {
     const standup = {
       id: "entry-1",

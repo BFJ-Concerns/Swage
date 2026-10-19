@@ -68,6 +68,9 @@
   let tagsDraft = $state("");
   let tagsNotice = $state<string | null>(null);
   let surfacesLoaded = $state(false);
+  let isLoadingSurfaces = $state(false);
+  let surfaceError = $state<string | null>(null);
+  const displayedError = $derived(error ?? surfaceError);
   // The description as edited here; saved explicitly.
   let aboutDraft = $state("");
   let aboutNotice = $state<string | null>(null);
@@ -90,6 +93,8 @@
 
   async function loadSurfaceSettings(): Promise<void> {
     if (!topic) return;
+    isLoadingSurfaces = true;
+    surfaceError = null;
     try {
       const [catalogue, defaults] = await Promise.all([
         listLibrary(),
@@ -99,9 +104,10 @@
       defaultSurfaces = defaults.entries;
       tagsDraft = (topic.tags ?? []).join(", ");
       surfacesLoaded = true;
-      error = null;
     } catch (err) {
-      error = err instanceof Error ? err.message : "Failed to load the surface library.";
+      surfaceError = err instanceof Error ? err.message : "Failed to load the surface library.";
+    } finally {
+      isLoadingSurfaces = false;
     }
   }
 
@@ -294,10 +300,10 @@
       {/if}
     </div>
 
-    {#if error}
+    {#if displayedError}
       <div class="notice error" role="alert">
-        {error}
-        <button type="button" disabled={isLoading} onclick={() => void loadTopicSettings()}>Retry</button>
+        {displayedError}
+        <button type="button" disabled={isLoading || isLoadingSurfaces} onclick={() => void (error ? loadTopicSettings() : loadSurfaceSettings())}>Retry</button>
       </div>
     {:else if isLoading}
       <div class="notice">Loading topic settings…</div>
