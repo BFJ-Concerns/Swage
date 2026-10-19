@@ -689,4 +689,33 @@ mod tests {
             DEFAULT_JUDGE_INSTRUCTION
         );
     }
+
+    /// The task the judge reads is the turn record's input, which a person,
+    /// a schedule's brief or a delegating agent may have written. Every
+    /// served instruction says so, says the task shows what a request is for
+    /// and never by itself that it is permitted, and never calls the task
+    /// the operator's — the wording under which a delegated task stood as a
+    /// person's authorisation.
+    #[test]
+    fn every_instruction_names_the_tasks_possible_authors_and_never_calls_it_the_operators() {
+        let variants = std::iter::once(DEFAULT_JUDGE_INSTRUCTION_VARIANT)
+            .chain(REGISTERED_JUDGE_INSTRUCTION_VARIANTS.iter().copied());
+        for variant in variants {
+            let instruction = judge_instruction(variant);
+            for author in ["a person", "a schedule's brief", "another agent"] {
+                assert!(
+                    instruction.contains(author),
+                    "{variant}: the task's possible author {author:?} is not named"
+                );
+            }
+            assert!(
+                instruction.contains("by itself"),
+                "{variant}: the task must tell what the request is for, never by itself that it is permitted"
+            );
+            assert!(
+                !instruction.to_lowercase().contains("operator"),
+                "{variant}: the task is called the operator's"
+            );
+        }
+    }
 }
