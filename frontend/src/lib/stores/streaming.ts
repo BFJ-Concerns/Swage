@@ -53,7 +53,7 @@ export interface ConversationStreamState {
   readonly isStreaming: boolean;
   readonly activeTurnGeneration: number;
   readonly streamedContent: string;
-  readonly turnError: { code: string; message: string } | null;
+  readonly turnError: { code: string; message: string; selectedModelId?: string } | null;
   readonly turnStartedAt: string | null;
   readonly activeToolCalls: ToolCallView[];
   readonly providerRetry: ProviderRetryState | null;
@@ -67,7 +67,7 @@ export interface StreamingStore {
   /** Monotonic local identity for the current streamed projection. */
   readonly activeTurnGeneration: number;
   readonly streamedContent: string;
-  readonly turnError: { code: string; message: string } | null;
+  readonly turnError: { code: string; message: string; selectedModelId?: string } | null;
   readonly turnStartedAt: string | null;
   // Live tool calls for the current turn. Populated as tool_start/tool_end
   // events arrive. Cleared when the turn completes normally. Preserved (for
@@ -174,14 +174,14 @@ export function createStreamingStore(
   interface InternalStreamState {
     isStreamingStore: Writable<boolean>;
     streamedContentStore: Writable<string>;
-    turnErrorStore: Writable<{ code: string; message: string } | null>;
+    turnErrorStore: Writable<{ code: string; message: string; selectedModelId?: string } | null>;
     turnStartedAtStore: Writable<string | null>;
     activeToolCallsStore: Writable<ToolCallView[]>;
     providerRetryStore: Writable<ProviderRetryState | null>;
     pendingApprovalStore: Writable<PendingApproval | null>;
     isStreamingState: { current: boolean };
     streamedContentState: { current: string };
-    turnErrorState: { current: { code: string; message: string } | null };
+    turnErrorState: { current: { code: string; message: string; selectedModelId?: string } | null };
     turnStartedAtState: { current: string | null };
     activeToolCallsState: { current: ToolCallView[] };
     providerRetryState: { current: ProviderRetryState | null };
@@ -189,6 +189,8 @@ export function createStreamingStore(
     activeTurnGeneration: number;
     /** The thread the running turn was sent on; null is the root thread. */
     threadId: string | null;
+    selectedModelId: string | null;
+    queuedModelSelections: Map<string, { queuedId: string | null; modelId: string | null }>;
   }
 
   const streams = new Map<string | null, InternalStreamState>();
@@ -209,7 +211,7 @@ export function createStreamingStore(
     const threadIdState = fromStore(threadIdStore);
     const isStreamingStore = writable(false);
     const streamedContentStore = writable("");
-    const turnErrorStore = writable<{ code: string; message: string } | null>(null);
+    const turnErrorStore = writable<{ code: string; message: string; selectedModelId?: string } | null>(null);
     const turnStartedAtStore = writable<string | null>(null);
     const activeToolCallsStore = writable<ToolCallView[]>([]);
     const providerRetryStore = writable<ProviderRetryState | null>(null);
@@ -229,6 +231,8 @@ export function createStreamingStore(
       activeToolCallsState: fromStore(activeToolCallsStore),
       providerRetryState: fromStore(providerRetryStore),
       pendingApprovalState: fromStore(pendingApprovalStore),
+      selectedModelId: null,
+      queuedModelSelections: new Map(),
       activeTurnGeneration: 0,
       get threadId() { return threadIdState.current; },
       set threadId(value: string | null) { threadIdStore.set(value); },
@@ -267,6 +271,7 @@ export function createStreamingStore(
   }
 
   function setStreamActive(conversationId: string | null, stream: InternalStreamState, active: boolean): void {
+    if (!active) stream.selectedModelId = null;
     stream.isStreamingStore.set(active);
     if (conversationId) options?.connectionStore?.setStreamActive?.(conversationId, active);
   }
@@ -330,7 +335,7 @@ export function createStreamingStore(
       return streamView(currentStreamState()).streamedContent;
     },
 
-    get turnError(): { code: string; message: string } | null {
+    get turnError(): { code: string; message: string; selectedModelId?: string } | null {
       return streamView(currentStreamState()).turnError;
     },
 
@@ -456,7 +461,7 @@ export function createStreamingStore(
             ownerId, stream, refused ? "refused" : "failed", undefined,
             refused ? get(stream.activeToolCallsStore) : undefined,
           );
-          stream.turnErrorStore.set({ code: event.code, message: event.message });
+          stream.turnErrorStore.set({ code: event.code, message: event.message, ...(stream.selectedModelId ? { selectedModelId: stream.selectedModelId } : {}) });
           setStreamActive(ownerId, stream, false);
           stream.turnStartedAtStore.set(null);
           // Refused turns own their calls in history; other errors retain
@@ -589,6 +594,10 @@ export function createStreamingStore(
         case "message_queued":
           // The message found a turn running and waits for the next one; the
           // gateway holds it, every open view shows it as queued.
+          if (event.queued.client_id) {
+            const selection = stream.queuedModelSelections.get(event.queued.client_id);
+            if (selection) selection.queuedId = event.queued.id;
+          }
           options?.conversationStore?.appendQueuedMessage?.(event.queued, event.session_id);
           break;
 
@@ -597,6 +606,13 @@ export function createStreamingStore(
           // its own) and a new turn is running on them: this is that turn
           // starting, as far as this view is concerned — no client called
           // startTurn for it.
+          stream.selectedModelId = null;
+          for (const [clientId, selection] of stream.queuedModelSelections) {
+            if (selection.queuedId && event.queued_ids.includes(selection.queuedId)) {
+              stream.selectedModelId = selection.modelId;
+              stream.queuedModelSelections.delete(clientId);
+            }
+          }
           options?.conversationStore?.clearQueuedMessages?.(event.session_id, event.queued_ids);
           stream.threadId = event.thread_id;
           stream.streamedContentStore.set("");
@@ -673,10 +689,12 @@ export function createStreamingStore(
         // the message list are left as they are.
         const threadId = options?.conversationStore?.activeThreadId ?? null;
         if (conversationId) {
+          stream.queuedModelSelections.set(clientId, { queuedId: null, modelId: selectedModelId ?? null });
           options?.connectionStore?.sendMessage(conversationId, content, selectedModelId, undefined, threadId, clientId);
         }
         return;
       }
+      stream.selectedModelId = selectedModelId ?? null;
       // Clear state from any previous turn.
       stream.streamedContentStore.set("");
       stream.turnErrorStore.set(null);
@@ -766,7 +784,7 @@ export function withConversationAutoCreate(
     get streamedContent(): string {
       return base.streamedContent;
     },
-    get turnError(): { code: string; message: string } | null {
+    get turnError(): { code: string; message: string; selectedModelId?: string } | null {
       return base.turnError;
     },
     get turnStartedAt(): string | null {

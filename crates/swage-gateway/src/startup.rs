@@ -1047,6 +1047,7 @@ fn same_connection(
 ) -> bool {
     let resolved =
         |endpoint: &swage_config::ProviderEndpointConfig| swage_config::ProviderEndpointConfig {
+            display_name: None,
             base_url: Some(provider_base_url(endpoint).to_owned()),
             ..endpoint.clone()
         };
@@ -1751,6 +1752,7 @@ mod tests {
                     (
                         "primary".to_string(),
                         ProviderEndpointConfig {
+                            display_name: None,
                             worker_staleness_threshold_ms: None,
                             protocol: Protocol::OpenAi,
                             api_key_secret_ref: None,
@@ -1763,6 +1765,7 @@ mod tests {
                     (
                         "secondary".to_string(),
                         ProviderEndpointConfig {
+                            display_name: None,
                             worker_staleness_threshold_ms: None,
                             protocol: Protocol::OpenAi,
                             api_key_secret_ref: None,
@@ -1833,6 +1836,7 @@ mod tests {
                 entries: [(
                     "codex".to_string(),
                     ProviderEndpointConfig {
+                        display_name: None,
                         worker_staleness_threshold_ms: None,
                         protocol: Protocol::Codex,
                         api_key_secret_ref: None,
@@ -1941,6 +1945,7 @@ mod tests {
         let events = MessageRecorder::default();
         let captured = Arc::clone(&events.0);
         let provider = ProviderEndpointConfig {
+            display_name: None,
             worker_staleness_threshold_ms: None,
             protocol: Protocol::OpenAi,
             api_key_secret_ref: None,
@@ -2012,6 +2017,7 @@ mod tests {
                     (
                         "openai".to_string(),
                         ProviderEndpointConfig {
+                            display_name: None,
                             worker_staleness_threshold_ms: None,
                             protocol: Protocol::OpenAi,
                             api_key_secret_ref: None,
@@ -2024,6 +2030,7 @@ mod tests {
                     (
                         "anthropic".to_string(),
                         ProviderEndpointConfig {
+                            display_name: None,
                             worker_staleness_threshold_ms: None,
                             protocol: Protocol::Anthropic,
                             api_key_secret_ref: None,
@@ -2068,6 +2075,7 @@ mod tests {
 
     fn endpoint(protocol: Protocol, base_url: String) -> ProviderEndpointConfig {
         ProviderEndpointConfig {
+            display_name: None,
             worker_staleness_threshold_ms: None,
             protocol,
             api_key_secret_ref: None,
@@ -2266,6 +2274,7 @@ mod tests {
     #[test]
     fn a_scoped_credential_override_does_not_reuse_the_runtime_provider() {
         let endpoint_with = |secret: Option<&str>, env: Option<&str>| ProviderEndpointConfig {
+            display_name: None,
             api_key_secret_ref: secret.map(str::to_owned),
             api_key_env: env.map(str::to_owned),
             ..endpoint(Protocol::OpenAi, "https://proxy.example/v1".to_owned())
@@ -2577,6 +2586,7 @@ mod tests {
             .expect("secret should be created");
 
         let provider = swage_config::ProviderEndpointConfig {
+            display_name: None,
             worker_staleness_threshold_ms: None,
             protocol: swage_config::Protocol::Anthropic,
             api_key_secret_ref: Some(secret.reference),
