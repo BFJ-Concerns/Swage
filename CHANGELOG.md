@@ -6,7 +6,8 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
-- Attended requests outside granted locations consult the judge before asking for approval; location-reaching tools accept a justification.
+- A sandboxed `git commit` under an operator who signs with SSH is signed on the host with the operator's key, the key never entering the sandbox; each signing is recorded, another key is refused, and a host that cannot sign fails the commit with the cause.
+- Sandboxed git commands use an HTTPS credential helper over private IPC, resolving host-scoped credentials through the governed secret store while forge token files remain hidden.
 
 - Settings has a Memory tab listing every memory page, general and per topic, to read; a chat box there changes memory by instructing the curator, showing its reply and each page it changed. The curator's notice links open the page they name.
 - Settings edits the web search provider and applies saved changes to new turns.
@@ -21,6 +22,8 @@ All notable changes to Swage are documented in this file.
 - Surfaces belong to the session that created them and stay with its record. A surface can be saved to a shared library with a name, a description of what it does and when to use it, and tags; any session in any topic or the general scope can add a library entry as a surface of its own, receiving the saved content only within the entry's origin topic and the bare shape elsewhere. A topic can designate library entries as defaults that open in each of its new sessions, and carries tags that narrow the catalogue for its sessions. Agents browse the catalogue (descriptions and tags, never content) and add entries through the new `surface_library` tool, and save surfaces through `surface_write`.
 
 ### Changed
+
+- Python execution uses the calling turn’s sandbox policy and recording proxy; nested tool calls honour that turn’s tool permissions.
 
 - Swage is licensed under the GNU Affero General Public License, version 3 or any later version (`AGPL-3.0-or-later`), with the full text in `LICENSE` and the licence recorded in every crate and npm package manifest. Pull requests are welcome, contributed under the same licence.
 - A continuation schedule firing during a running turn queues its brief for the next turn, and channel messages for a busy session wait in the same durable queue. The web UI shows queued inputs once, labels them queued, and displays recorded inputs and the drained reply live.
@@ -44,6 +47,18 @@ All notable changes to Swage are documented in this file.
 - The terminal client (`swage chat`) and its `swage-tui` crate; the web UI and desktop shell are the conversation interfaces.
 
 ### Fixed
+
+- Unsandboxed Python workers use the calling turn’s recording proxy for HTTP requests.
+
+- Python calls inside a declared execution boundary no longer require bubblewrap unless Python sandboxing is explicitly required.
+
+- Turns with both sandbox settings disabled can run without `HOME`, including when Python is disabled.
+
+- Sandboxed Python workers can use runtime libraries beneath masked directories or `/tmp`, with the runtime mounted read-only.
+
+- Sandboxed HTTPS git commands can resolve credentials restricted to a repository path.
+
+- Sandboxed agents and Python workers can launch executables stored under `/tmp` while keeping other host temporary files private.
 
 - Session previews in the recent list, sidebar, conversation selector, delete controls and Operator deck show plain text without Markdown formatting or link destinations. Operator session summaries are limited to three lines.
 - The workflow-authoring skill states event-kind names as the gateway accepts them: segments are joined by `.`, `:` or `/` only, with `_` and `-` allowed inside a segment but never separating one.

@@ -33,6 +33,18 @@
     "effective_agent_definition_list": {
       "$ref": "#/$defs/EffectiveAgentDefinitionListResponse"
     },
+    "git_credential_request": {
+      "$ref": "#/$defs/GitCredentialRequest"
+    },
+    "git_credential_response": {
+      "$ref": "#/$defs/GitCredentialResponse"
+    },
+    "git_sign_request": {
+      "$ref": "#/$defs/GitSignRequest"
+    },
+    "git_sign_response": {
+      "$ref": "#/$defs/GitSignResponse"
+    },
     "knowledge_mirror": {
       "$ref": "#/$defs/KnowledgeMirrorRegenerateResponse"
     },
@@ -44,9 +56,17 @@
     },
     "presence": {
       "$ref": "#/$defs/PresenceSnapshotResponse"
+    },
+    "sandbox": {
+      "$ref": "#/$defs/SandboxPolicy"
     }
   },
   "required": [
+    "sandbox",
+    "git_credential_request",
+    "git_credential_response",
+    "git_sign_request",
+    "git_sign_response",
     "presence",
     "approvals",
     "approval_decision",
@@ -778,6 +798,25 @@
         "registered_at"
       ]
     },
+    "Duration": {
+      "type": "object",
+      "properties": {
+        "nanos": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "secs",
+        "nanos"
+      ]
+    },
     "EffectiveAgentDefinitionListResponse": {
       "type": "object",
       "properties": {
@@ -940,6 +979,90 @@
           ]
         }
       ]
+    },
+    "GitCredentialRequest": {
+      "description": "One HTTPS git credential lookup on the turn's private IPC socket.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "protocol",
+        "host"
+      ]
+    },
+    "GitCredentialResponse": {
+      "description": "An absent credential makes git continue without this helper's answer.",
+      "type": "object",
+      "properties": {
+        "password": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "GitSignRequest": {
+      "description": "One request to sign a git payload on the host, from the sandboxed git's\nsigning program over the turn's private IPC socket: the SSH signing\nnamespace git names (`git`), the public key git was configured with, and\nthe payload, base64-encoded.",
+      "type": "object",
+      "properties": {
+        "namespace": {
+          "type": "string"
+        },
+        "payload": {
+          "type": "string"
+        },
+        "public_key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "namespace",
+        "public_key",
+        "payload"
+      ]
+    },
+    "GitSignResponse": {
+      "description": "The SSH signature (`ssh-keygen -Y sign`'s armoured output) for the\npayload, or the refusal that explains why the host did not sign.",
+      "type": "object",
+      "properties": {
+        "refusal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "signature": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     },
     "KnowledgeMirrorRegenerateResponse": {
       "description": "Result of regenerating a topic's knowledge-base browse mirror — a\ndisposable markdown projection of the database-authoritative store.",
@@ -1230,6 +1353,66 @@
         "gateway",
         "clients",
         "devices"
+      ]
+    },
+    "SandboxPolicy": {
+      "description": "Per-turn sandbox policy and timeouts.\n\nSerialised to the sandboxed child, which applies the write set and the\nbroad read through Landlock; the host applies the same policy through\nbubblewrap's mounts, where the masks and the read-only paths are enforced.",
+      "type": "object",
+      "properties": {
+        "environment": {
+          "description": "Host-selected environment inherited by sandboxed commands.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "llm_request_timeout": {
+          "description": "Per-LLM-request IPC timeout.",
+          "$ref": "#/$defs/Duration"
+        },
+        "masked_paths": {
+          "description": "Private paths hidden from the sandbox altogether. A directory reads as\nempty; a file reads as empty. Enforced by the mount layer, so the\nfallback backend cannot honour them.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "read_only_paths": {
+          "description": "Paths kept read-only even where a write path above them would allow\nwriting: a read-only attachment inside a writable tree, say.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "shutdown_grace_period": {
+          "description": "Time to wait for graceful shutdown before SIGKILL.",
+          "$ref": "#/$defs/Duration"
+        },
+        "tool_call_timeout": {
+          "description": "Per-tool-call IPC timeout.",
+          "$ref": "#/$defs/Duration"
+        },
+        "working_directory": {
+          "description": "The directory the agent's commands run in. Writable only when it is\nalso in `write_paths`.",
+          "type": "string"
+        },
+        "write_paths": {
+          "description": "Paths the sandboxed process may write. Everything else it can see is\nread-only.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "working_directory",
+        "write_paths",
+        "read_only_paths",
+        "masked_paths",
+        "environment",
+        "shutdown_grace_period",
+        "tool_call_timeout",
+        "llm_request_timeout"
       ]
     },
     "Schedule": {

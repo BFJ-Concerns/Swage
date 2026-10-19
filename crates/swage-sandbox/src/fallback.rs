@@ -12,6 +12,7 @@ use swage_core::SandboxError;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::CREDENTIAL_ENV_VARS;
 use crate::config::SandboxConfig;
 use crate::egress::{EgressProxy, EgressSetup};
 use crate::ipc::in_flight::InFlightToolCall;
@@ -22,20 +23,6 @@ use crate::process::{ChildProcessManager, cleanup_failed_startup_process};
 use crate::resolve_agent_binary;
 use crate::sandbox::{Sandbox, ToolCallResult};
 use crate::socket::SocketManager;
-
-// ---------------------------------------------------------------------------
-// Credential isolation
-// ---------------------------------------------------------------------------
-
-/// API key env var names to strip from the child process environment.
-///
-/// The sandboxed agent must never hold provider credentials. All LLM
-/// completions are proxied through the host process via IPC — the agent sends
-/// an `LlmRequest`, the host dispatches it to the provider, and the response
-/// comes back as `LlmResponse`. Stripping these vars is a defence-in-depth
-/// measure: even if the isolation layer is bypassed, the agent cannot call
-/// providers directly without keys.
-const CREDENTIAL_ENV_VARS: &[&str] = &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"];
 
 // ---------------------------------------------------------------------------
 // FallbackSandbox
@@ -146,6 +133,8 @@ impl Sandbox for FallbackSandbox {
         if let Some(proxy) = &egress_proxy {
             cmd.env(crate::egress::EGRESS_SOCKET_ENV, proxy.socket_path());
         }
+
+        cmd.envs(&self.config.environment);
 
         // Strip provider API keys — the agent gets completions via IPC proxy,
         // never directly from providers.

@@ -1,5 +1,7 @@
 //! Hosting and operator control-plane contract.
 
+pub mod sandbox;
+
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -363,6 +365,11 @@ pub struct KnowledgeMirrorRegenerateResponse {
 #[derive(JsonSchema)]
 #[allow(dead_code)]
 pub struct HostingSurface {
+    pub sandbox: sandbox::SandboxPolicy,
+    pub git_credential_request: GitCredentialRequest,
+    pub git_credential_response: GitCredentialResponse,
+    pub git_sign_request: GitSignRequest,
+    pub git_sign_response: GitSignResponse,
     presence: PresenceSnapshotResponse,
     approvals: ApprovalListResponse,
     approval_decision: ApprovalDecisionRequest,
@@ -377,4 +384,43 @@ pub struct HostingSurface {
     agent_definition_mutation: AgentDefinitionMutationResponse,
     devices: device::DeviceListResponse,
     knowledge_mirror: KnowledgeMirrorRegenerateResponse,
+}
+
+/// One HTTPS git credential lookup on the turn's private IPC socket.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct GitCredentialRequest {
+    pub protocol: String,
+    pub host: String,
+    pub path: Option<String>,
+    pub username: Option<String>,
+}
+
+/// An absent credential makes git continue without this helper's answer.
+#[derive(Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct GitCredentialResponse {
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+/// One request to sign a git payload on the host, from the sandboxed git's
+/// signing program over the turn's private IPC socket: the SSH signing
+/// namespace git names (`git`), the public key git was configured with, and
+/// the payload, base64-encoded.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct GitSignRequest {
+    pub namespace: String,
+    pub public_key: String,
+    pub payload: String,
+}
+
+/// The SSH signature (`ssh-keygen -Y sign`'s armoured output) for the
+/// payload, or the refusal that explains why the host did not sign.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
+pub struct GitSignResponse {
+    pub signature: Option<String>,
+    pub refusal: Option<String>,
 }

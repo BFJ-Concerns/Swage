@@ -387,6 +387,29 @@ environment variable is not stripped by this mechanism. LLM completions are
 proxied back through the host via IPC, so the child does not need provider
 credentials for completion requests.
 
+### Git on the host's behalf
+
+A sandboxed command's git runs with no inherited configuration and reaches
+the host for two things through the turn's private sockets. HTTPS
+credentials come from the gateway's governed secrets through a `swage` git
+credential helper, so no token file enters the sandbox. Commit signing
+runs on the host: when the operator signs commits with SSH (`gpg.format
+ssh` and a `user.signingkey`), the sandboxed git is configured to sign with
+the `swage` binary as its signing program and with the operator's public
+key as a literal, so nothing under `~/.ssh` is read inside; the program
+forwards each payload to the gateway, which signs with the operator's key
+— the private file beside the public one, or the operator's agent — and
+records every signing in the audit trail with the key named and the turn
+attributed, under its fingerprint. The configuration is read as the
+turn's workspace sees it, conditional includes and all. A key the operator
+has not configured is refused, and a host that cannot sign — a key with no
+readable public half, a key named by a key command, a signing that waits
+on a hardware token or a passphrase — fails the commit with the cause
+rather than leaving it unsigned. An operator who signs with OpenPGP gets
+the same: sandboxed git is given a signing program that refuses, so a
+commit that signs fails with that cause until the format is carried; the
+gateway log says why at the turn's start.
+
 ### Landlock
 
 The inner layer applies Landlock — a kernel-enforced, per-path filesystem

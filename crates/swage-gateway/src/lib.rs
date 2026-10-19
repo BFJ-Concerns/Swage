@@ -399,3 +399,6 @@ pub(crate) mod test_support {
         }
     }
 }
+
+pub mod git_credential;
+pub mod git_signer;
