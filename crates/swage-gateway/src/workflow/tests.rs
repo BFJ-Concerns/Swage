@@ -10682,9 +10682,13 @@ async fn startup_recovery_redrives_a_continuation_after_its_worker_turn_was_orph
     .await;
 
     assert_eq!(
-        crate::shutdown::recover_orphaned_turns(storage.as_ref(), storage.as_ref())
-            .await
-            .expect("recover turns"),
+        crate::shutdown::recover_orphaned_turns(
+            storage.as_ref(),
+            storage.as_ref(),
+            &swage_agent::MessageRouter::new(storage.clone(), None)
+        )
+        .await
+        .expect("recover turns"),
         1
     );
     assert_eq!(
@@ -10831,9 +10835,13 @@ async fn startup_recovery_keeps_turn_non_terminal_when_worker_thread_release_fai
         .await
         .expect("install thread release failure trigger");
 
-    let error = crate::shutdown::recover_orphaned_turns(storage.as_ref(), storage.as_ref())
-        .await
-        .expect_err("thread release failure aborts recovery");
+    let error = crate::shutdown::recover_orphaned_turns(
+        storage.as_ref(),
+        storage.as_ref(),
+        &swage_agent::MessageRouter::new(storage.clone(), None),
+    )
+    .await
+    .expect_err("thread release failure aborts recovery");
     assert!(
         error
             .to_string()

@@ -505,7 +505,13 @@ async fn an_interrupted_turn_keeps_its_tool_calls_after_restart() {
         }
     }
 
-    recover_orphaned_turns(&*storage, &*storage).await.unwrap();
+    recover_orphaned_turns(
+        &*storage,
+        &*storage,
+        &swage_agent::MessageRouter::new(storage.clone(), None),
+    )
+    .await
+    .unwrap();
 
     let (_, body) = http(&router, "GET", &format!("/api/conversations/{conv_id}")).await;
     let messages = body["messages"].as_array().unwrap();
@@ -715,7 +721,13 @@ async fn startup_recovery_marks_orphaned_turns() {
         .unwrap();
 
     // Run recovery.
-    let count = recover_orphaned_turns(&*storage, &*storage).await.unwrap();
+    let count = recover_orphaned_turns(
+        &*storage,
+        &*storage,
+        &swage_agent::MessageRouter::new(storage.clone(), None),
+    )
+    .await
+    .unwrap();
     assert_eq!(count, 1, "only 1 orphaned turn should be recovered");
 
     // Verify the orphaned turn is now Interrupted.
@@ -727,7 +739,13 @@ async fn startup_recovery_marks_orphaned_turns() {
     assert_eq!(turn.state, TurnState::Completed);
 
     // Recovery is idempotent — running again should find nothing.
-    let count = recover_orphaned_turns(&*storage, &*storage).await.unwrap();
+    let count = recover_orphaned_turns(
+        &*storage,
+        &*storage,
+        &swage_agent::MessageRouter::new(storage.clone(), None),
+    )
+    .await
+    .unwrap();
     assert_eq!(count, 0, "no orphans should remain");
 }
 
@@ -1117,5 +1135,182 @@ async fn tool_execution_round_trip_with_persistence() {
     assert!(
         tool_calls.is_empty() || tool_calls.iter().all(|tc| tc.get("call_id").is_some()),
         "tool_calls entries must have call_id"
+    );
+}
+
+/// The real startup recovers a delegating parent before serving, and its
+/// startup queue drain carries the reconstructed Result into the parent thread.
+#[tokio::test(flavor = "multi_thread")]
+async fn gateway_boot_recovers_delegation_before_accepting_work() {
+    use swage_core::MessageKind;
+    use swage_storage::{
+        AgentMessageStore, MessageStore, NewAgentMessage, SessionStore, TopicStore,
+    };
+
+    let root = crate::support::scratch_tempdir();
+    let runtime = crate::support::scratch_tempdir();
+    let storage = Arc::new(SqliteStorage::open(&root.path().join("swage.db")).unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .unwrap();
+    let parent_thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "gateway".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let parent = storage
+        .create_turn(NewTurn {
+            thread_id: parent_thread.id,
+            agent_id: "gateway".into(),
+            state: TurnState::Delegating,
+            user_input: Some("survey".into()),
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+    let child_session = storage
+        .create_session(swage_storage::model::NewSession {
+            agent_id: "worker".into(),
+            ..swage_storage::fixtures::new_session(topic.id)
+        })
+        .await
+        .unwrap();
+    let child_thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: child_session.id,
+            agent_id: "worker".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let delegate = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "gateway".into(),
+            recipient_agent_id: "worker".into(),
+            kind: MessageKind::Delegate,
+            correlation_id: None,
+            payload: json!({"task": "survey", "_thread_id": child_thread.id}),
+        })
+        .await
+        .unwrap();
+    let child = storage
+        .create_turn(NewTurn {
+            thread_id: child_thread.id,
+            agent_id: "worker".into(),
+            state: TurnState::Completed,
+            user_input: Some("survey".into()),
+            parent_turn_id: Some(parent.id),
+        })
+        .await
+        .unwrap();
+    storage
+        .update_response(child.id, "The completed survey.")
+        .await
+        .unwrap();
+
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = reservation.local_addr().unwrap();
+    drop(reservation);
+    let log_path = root.path().join("gateway.log");
+    let log = std::fs::File::create(&log_path).unwrap();
+    let mut gateway = tokio::process::Command::new(env!("CARGO_BIN_EXE_swage"))
+        .env("SWAGE_HOME", root.path())
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .args([
+            "gateway",
+            "start",
+            "--foreground",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &addr.port().to_string(),
+        ])
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let ready = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Ok(response) = client.get(format!("http://{addr}/api/health")).send().await
+                && response.status().is_success()
+            {
+                break;
+            }
+            if let Some(status) = gateway.try_wait().unwrap() {
+                panic!(
+                    "gateway exited with {status}: {}",
+                    std::fs::read_to_string(&log_path).unwrap()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    assert!(
+        ready.is_ok(),
+        "gateway did not become ready: {}",
+        std::fs::read_to_string(&log_path).unwrap()
+    );
+    // Recovery is awaited before the health endpoint can answer.
+    assert_eq!(
+        storage.get_turn(parent.id).await.unwrap().unwrap().state,
+        TurnState::Interrupted
+    );
+    let results = storage.list_by_correlation(delegate.id).await.unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].payload["response"], "The completed survey.");
+    assert_eq!(
+        results[0].payload["parent_thread_id"],
+        parent_thread.id.to_string()
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let messages = storage
+                .list_messages_by_thread(parent_thread.id)
+                .await
+                .unwrap();
+            if messages
+                .iter()
+                .any(|message| message.content.contains("The completed survey."))
+            {
+                assert!(
+                    messages
+                        .iter()
+                        .any(|message| message.content.contains("The gateway restarted while"))
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("startup drain must resume the parent with its child's result");
+    client
+        .post(format!("http://{addr}/api/shutdown"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let status = tokio::time::timeout(Duration::from_secs(15), gateway.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        status.success(),
+        "gateway failed to stop: {}",
+        std::fs::read_to_string(&log_path).unwrap()
     );
 }

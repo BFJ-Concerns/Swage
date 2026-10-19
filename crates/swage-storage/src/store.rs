@@ -316,6 +316,14 @@ pub trait TurnQueueStore: Send + Sync {
         &self,
         input: NewQueuedTurnInput,
     ) -> Result<QueuedTurnInput, StorageError>;
+    /// Atomically interrupt a delegating parent and enqueue its continuation,
+    /// transferring only its named presented inbox rows back to pending and
+    /// claiming them for the queued input. A failed claim changes nothing.
+    async fn enqueue_delegation_continuation(
+        &self,
+        parent_turn_id: Uuid,
+        input: NewQueuedTurnInput,
+    ) -> Result<QueuedTurnInput, StorageError>;
     /// Everything queued for a session, in arrival order.
     async fn list_queued_turn_inputs(
         &self,
@@ -594,11 +602,28 @@ pub trait TurnStore: Send + Sync {
 
     /// List all turns for a thread ordered by created_at ascending.
     async fn list_turns_by_thread(&self, thread_id: Uuid) -> Result<Vec<Turn>, StorageError>;
+    /// The turns a delegating turn started — its children by
+    /// `parent_turn_id` — in creation order.
+    async fn list_child_turns(&self, parent_turn_id: Uuid) -> Result<Vec<Turn>, StorageError>;
     /// Update a turn's state.
     ///
-    /// State is consumer-driven — the storage layer records whatever state is
-    /// provided. No state-machine enforcement is applied here.
+    /// A Delegating turn can only leave its wait through atomic result
+    /// settlement or a terminal state. Other non-terminal transitions are
+    /// refused, so a later tool's approval cannot consume an unsettled wait.
     async fn update_turn_state(&self, id: Uuid, state: TurnState) -> Result<(), StorageError>;
+    /// Record a delegating turn's tool result and return it to Processing in
+    /// one transaction. The caller must supply the call that owns the wait.
+    /// Only the result fields of the named, unsettled call
+    /// are changed. A missing call, a call owned by another turn, or a turn
+    /// no longer Delegating fails without changing either record.
+    ///
+    /// Stores that cannot provide this atomic hand-over reject it rather
+    /// than exposing a restart window between the result and the state.
+    async fn settle_delegation_result(&self, _call: ToolCallRecord) -> Result<(), StorageError> {
+        Err(StorageError::QueryFailed(
+            "atomic delegation settlement is not supported by this store".into(),
+        ))
+    }
     /// Force a turn to `Failed`, overriding the first-terminal-wins guard.
     ///
     /// The one sanctioned terminal-to-terminal transition: the record
@@ -1054,6 +1079,27 @@ pub trait AgentMessageStore: Send + Sync {
         payload: serde_json::Value,
     ) -> Result<(), StorageError>;
 
+    /// Reissue a pending message with a new payload, dated now: a message
+    /// written before a restart and readdressed by its recovery is as new
+    /// as the restart, so the startup expiry of stale messages does not
+    /// take it before the drain delivers it.
+    async fn reissue_agent_message(
+        &self,
+        id: Uuid,
+        payload: serde_json::Value,
+    ) -> Result<(), StorageError>;
+
+    /// The delegate message that started a turn on the child thread
+    /// `thread_id`: the newest delegate annotated with that thread and
+    /// created no later than `started_by` — a named child's thread is
+    /// reused across delegations, each starting its own turn after its own
+    /// delegate — or none when no delegate names it.
+    async fn find_delegate_for_thread(
+        &self,
+        thread_id: Uuid,
+        started_by: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<AgentMessage>, StorageError>;
+
     /// List all messages sharing a correlation ID, ordered by creation time.
     ///
     /// Used to trace delegation chains (Delegate → Result/Cancel).
@@ -1166,6 +1212,18 @@ pub trait ChannelQueueStore: Send + Sync {
         reason: &str,
     ) -> Result<u64, StorageError>;
 
+    /// Every inbox row a turn presented — the channel messages it drained
+    /// as its inputs — in arrival order; empty for a turn no channel started.
+    async fn list_channel_messages_by_turn(
+        &self,
+        turn_id: Uuid,
+    ) -> Result<Vec<ChannelInboundMessage>, StorageError>;
+
+    /// Return the presented rows of turns a restart cut off to the inbox,
+    /// so they are drained again. A turn cut off while delegating is left
+    /// out: recovery resumes it with its rows on the continuation
+    /// (`list_channel_messages_by_turn`), so its reply still reaches the
+    /// chat, and a second presentation would run its input twice.
     async fn requeue_presented_for_inflight_turns(&self) -> Result<u64, StorageError>;
 }
 
@@ -2047,6 +2105,13 @@ mod tests {
             unimplemented!()
         }
 
+        async fn list_channel_messages_by_turn(
+            &self,
+            _: Uuid,
+        ) -> Result<Vec<ChannelInboundMessage>, StorageError> {
+            unimplemented!()
+        }
+
         async fn requeue_presented_for_inflight_turns(&self) -> Result<u64, StorageError> {
             unimplemented!()
         }
@@ -2139,6 +2204,13 @@ mod tests {
         }
         async fn enqueue_turn_input(
             &self,
+            _: NewQueuedTurnInput,
+        ) -> Result<QueuedTurnInput, StorageError> {
+            unimplemented!()
+        }
+        async fn enqueue_delegation_continuation(
+            &self,
+            _: Uuid,
             _: NewQueuedTurnInput,
         ) -> Result<QueuedTurnInput, StorageError> {
             unimplemented!()
@@ -2709,6 +2781,9 @@ mod tests {
         async fn list_turns_by_thread(&self, _thread_id: Uuid) -> Result<Vec<Turn>, StorageError> {
             unimplemented!()
         }
+        async fn list_child_turns(&self, _: Uuid) -> Result<Vec<Turn>, StorageError> {
+            unimplemented!()
+        }
         async fn update_turn_state(&self, _: Uuid, _: TurnState) -> Result<(), StorageError> {
             unimplemented!()
         }
@@ -3016,6 +3091,13 @@ mod tests {
 
     #[async_trait]
     impl AgentMessageStore for StubStorage {
+        async fn find_delegate_for_thread(
+            &self,
+            _: Uuid,
+            _: chrono::DateTime<chrono::Utc>,
+        ) -> Result<Option<AgentMessage>, StorageError> {
+            unimplemented!()
+        }
         async fn create_agent_message(
             &self,
             _: NewAgentMessage,
@@ -3037,6 +3119,13 @@ mod tests {
             unimplemented!()
         }
         async fn update_agent_message_payload(
+            &self,
+            _: Uuid,
+            _: serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+        async fn reissue_agent_message(
             &self,
             _: Uuid,
             _: serde_json::Value,

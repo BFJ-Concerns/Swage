@@ -1314,6 +1314,12 @@ pub struct Turn {
     /// The explanation the person was shown when the turn ended without a
     /// reply; `None` for a turn that never failed with one.
     pub failure_message: Option<String>,
+    /// How the turn was started, as the queue drain that created it
+    /// recorded: whether a person attends it and where its reply is
+    /// delivered. `None` for a turn created outside the queue — an
+    /// automation's placeholder, an API call's, a delegation child's —
+    /// which runs unattended and delivers to no channel of its own.
+    pub attribution: Option<TurnAttribution>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
@@ -2159,6 +2165,18 @@ pub struct NewDeliveryRecord {
 pub struct NewThread {
     pub session_id: Uuid,
     pub agent_id: String,
+}
+
+/// What the queue drain recorded about the inputs a turn was started
+/// from, kept on the turn so a resumption after a restart runs as the
+/// original did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnAttribution {
+    /// A batch is attended if any of its inputs was attended at its source.
+    pub attended: bool,
+    /// The channel destinations the turn's reply is delivered to, as the
+    /// inputs named them; empty for a turn that delivers to none.
+    pub delivery_targets: Vec<serde_json::Value>,
 }
 
 /// Input for creating a new turn within a thread.
@@ -3327,6 +3345,7 @@ mod tests {
             delegated_output_tokens: None,
             execution_isolation: None,
             failure_message: None,
+            attribution: None,
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
@@ -3384,6 +3403,7 @@ mod tests {
             delegated_output_tokens: None,
             execution_isolation: None,
             failure_message: None,
+            attribution: None,
         };
         assert_eq!(turn_with_cost.cost_microcents, Some(42));
 
@@ -3415,6 +3435,7 @@ mod tests {
             delegated_output_tokens: None,
             execution_isolation: None,
             failure_message: None,
+            attribution: None,
         };
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
         assert!(
@@ -3449,6 +3470,7 @@ mod tests {
             delegated_output_tokens: None,
             execution_isolation: None,
             failure_message: None,
+            attribution: None,
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
@@ -3481,6 +3503,7 @@ mod tests {
             delegated_output_tokens: None,
             execution_isolation: None,
             failure_message: None,
+            attribution: None,
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
