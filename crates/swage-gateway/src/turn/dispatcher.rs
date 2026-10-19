@@ -586,7 +586,7 @@ pub(crate) async fn record_degraded_execution(
     Ok(())
 }
 
-/// Whether the model will be offered `tool_name` on this turn, read before
+/// The tools the model will be offered on this turn, by name, read before
 /// the turn's dispatcher exists — context is assembled first, and text in it
 /// that names a tool must not name one the model cannot call. The gates are
 /// the ones the turn applies: the tool registered for the agent
@@ -599,8 +599,8 @@ pub(crate) async fn record_degraded_execution(
 /// and withheld by the Codex runtime (`codex::dynamic_tools`), so under the
 /// Codex protocol only an outright `Allowed` answer offers it. Where the
 /// dispatcher already exists and the agent runtime will run it, ask it
-/// (`ToolDispatcher::offers`) instead.
-pub(crate) async fn turn_offers_tool(
+/// (`ToolDispatcher::offered_tools`) instead.
+pub(crate) async fn turn_offered_tools(
     state: &AppState,
     config: &swage_config::ResolvedConfig,
     agent_config: &AgentConfig,
@@ -608,18 +608,13 @@ pub(crate) async fn turn_offers_tool(
     topic_id: Option<Uuid>,
     session_id: Option<Uuid>,
     session_approval_grants: &std::collections::HashSet<crate::state::ApprovalGrantKey>,
-    tool_name: &str,
-) -> bool {
+) -> std::collections::BTreeSet<String> {
     use swage_tool::permission::{PermissionCheckResult, check_permission};
 
-    let Some(tool) = state
+    let registry = state
         .active_tool_dispatcher()
         .registry()
-        .for_agent(&agent_config.agent_id)
-        .get(tool_name)
-    else {
-        return false;
-    };
+        .for_agent(&agent_config.agent_id);
     let permissions = build_permission_config(
         config,
         &state.config,
@@ -627,19 +622,24 @@ pub(crate) async fn turn_offers_tool(
         session_id,
         session_approval_grants,
     );
-    let permitted = match check_permission(&permissions, tool_name) {
-        Ok(PermissionCheckResult::Allowed) => true,
-        Ok(PermissionCheckResult::RequiresApproval { .. }) => {
-            config.default_provider_protocol() != swage_config::Protocol::Codex
-        }
-        Err(_) => false,
-    };
-    if !permitted {
-        return false;
-    }
+    let approval_offers = config.default_provider_protocol() != swage_config::Protocol::Codex;
     let device = crate::device::resolve_device(state, session_metadata).await;
-    build_gateway_advertisement_filter(device.as_ref(), agent_config)
-        .is_none_or(|filter| filter(tool.as_ref()))
+    let filter = build_gateway_advertisement_filter(device.as_ref(), agent_config);
+    registry
+        .list()
+        .into_iter()
+        .filter(|name| match check_permission(&permissions, name) {
+            Ok(PermissionCheckResult::Allowed) => true,
+            Ok(PermissionCheckResult::RequiresApproval { .. }) => approval_offers,
+            Err(_) => false,
+        })
+        .filter(|name| {
+            registry
+                .get(name)
+                .is_some_and(|tool| filter.as_ref().is_none_or(|filter| filter(tool.as_ref())))
+        })
+        .map(str::to_string)
+        .collect()
 }
 
 pub(crate) async fn build_gateway_dispatcher_for_unattended_execution(

@@ -2370,6 +2370,30 @@ mod tests {
         );
     }
 
+    /// Every tool the orientation's preferences name is a tool of this
+    /// gateway — registered by the built-in dispatcher, or a built-in name a
+    /// host registers when its runtime is present — so a renamed tool fails
+    /// here rather than silently losing its sentence.
+    #[tokio::test]
+    async fn orientation_preferences_name_only_the_gateways_tools() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let dispatcher = build_tool_dispatcher(
+            &swage_config::ResolvedConfig::default(),
+            storage as Arc<dyn swage_storage::store::Storage>,
+            std::path::Path::new(".swage"),
+            &std::sync::OnceLock::new(),
+        );
+        let registry = dispatcher.registry();
+
+        for tool in swage_context::orientation::tools_named_in_preferences() {
+            assert!(
+                registry.get(tool).is_some() || registry.is_protected(tool),
+                "the orientation names `{tool}`, which is no tool of this gateway",
+            );
+        }
+    }
+
     #[tokio::test]
     async fn build_tool_dispatcher_registers_workflow_list_tool() {
         let storage =

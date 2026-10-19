@@ -211,8 +211,9 @@ struct GatewayDelegatedContextAssembler {
     context_event_tx: mpsc::UnboundedSender<crate::websocket::ServerEvent>,
     effective_tool_permissions: serde_json::Value,
     composition: DispatchContextComposition,
-    /// How far the child reaches into memory, read from its own dispatcher.
-    memory_reach: swage_context::memory::MemoryReach,
+    /// The tools the child's own dispatcher offers it, by name: the standing
+    /// text follows them.
+    offered_tools: std::collections::BTreeSet<String>,
 }
 
 pub(crate) fn delegated_context_assembler(
@@ -224,7 +225,7 @@ pub(crate) fn delegated_context_assembler(
     context_event_tx: mpsc::UnboundedSender<crate::websocket::ServerEvent>,
     effective_tool_permissions: serde_json::Value,
     composition: DispatchContextComposition,
-    memory_reach: swage_context::memory::MemoryReach,
+    offered_tools: std::collections::BTreeSet<String>,
 ) -> Arc<dyn DelegationContextAssembler> {
     let swage_root = resolve_swage_root(&state).to_path_buf();
     Arc::new(GatewayDelegatedContextAssembler {
@@ -237,7 +238,7 @@ pub(crate) fn delegated_context_assembler(
         context_event_tx,
         effective_tool_permissions,
         composition,
-        memory_reach,
+        offered_tools,
     })
 }
 
@@ -277,7 +278,10 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         let memory_index = Some(
             crate::memory::load_memory_index(&self.swage_root, &self.topic.location())
                 .await
-                .into_element(self.memory_reach),
+                .into_element(swage_context::memory::MemoryReach::with_read_tool(
+                    self.offered_tools
+                        .contains(crate::tool::memory::MEMORY_READ_TOOL),
+                )),
         );
         let mut session_variables: std::collections::BTreeMap<String, String> = self
             .state
@@ -319,6 +323,7 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             memory_index,
             environment,
             available_skills,
+            self.offered_tools.clone(),
             self.config.default_model_id(),
             context_choices.working_norms_scaffold,
             &hierarchy,
@@ -878,9 +883,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 silent_ws_tx,
                 effective_tool_permissions_record(&effective_target_resolved),
                 composition.clone(),
-                swage_context::memory::MemoryReach::with_read_tool(
-                    target_dispatcher.offers(crate::tool::memory::MEMORY_READ_TOOL),
-                ),
+                target_dispatcher.offered_tools(),
             ),
             snapshot_recorder: Some(delegation_snapshot_recorder_for_state(self.state.clone())),
         };

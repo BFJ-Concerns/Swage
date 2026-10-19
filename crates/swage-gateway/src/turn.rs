@@ -488,7 +488,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
     );
 
     // The agent's configuration is settled before context is assembled: the
-    // standing memory text asks which tools this turn will offer.
+    // standing text (orientation, memory) asks which tools this turn will offer.
     let session_approval_grants = state
         .session_approval_grants
         .lock()
@@ -514,22 +514,23 @@ pub(super) async fn process_turn_with_composition_and_focus(
         agent_config.max_output_retries = max_retries;
     }
     agent_config.approval_prompts_enabled = attendance == TurnAttendance::Attended;
+    let offered_tools = dispatcher::turn_offered_tools(
+        state,
+        &config,
+        &agent_config,
+        session.metadata.as_ref(),
+        Some(topic_id),
+        Some(session_id),
+        &session_approval_grants,
+    )
+    .await;
     let memory_index = if session_carries_memory(&session) {
         Some(
             crate::memory::load_memory_index(swage_root, &scope)
                 .await
-                .into_element(
-                    memory_reach(
-                        state,
-                        &config,
-                        &agent_config,
-                        session.metadata.as_ref(),
-                        Some(topic_id),
-                        Some(session_id),
-                        &session_approval_grants,
-                    )
-                    .await,
-                ),
+                .into_element(swage_context::memory::MemoryReach::with_read_tool(
+                    offered_tools.contains(crate::tool::memory::MEMORY_READ_TOOL),
+                )),
         )
     } else {
         None
@@ -550,6 +551,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
         memory_index,
         environment,
         available_skills,
+        offered_tools,
         config.default_model_id(),
         context_choices.working_norms_scaffold,
         &hierarchy,

@@ -8396,7 +8396,7 @@ fn memory_text_and_offer_of(
     let offered = request
         .tool_definitions
         .iter()
-        .any(|definition| definition["name"] == "memory_read");
+        .any(|definition| definition["name"] == crate::tool::memory::MEMORY_READ_TOOL);
     let memory = request
         .messages
         .iter()
@@ -8610,7 +8610,7 @@ async fn memory_guidance_follows_the_device_hosts_advertised_tools() {
 #[tokio::test]
 async fn an_approval_gated_tool_is_offered_only_where_the_runtime_offers_it() {
     use crate::tool::memory::MEMORY_READ_TOOL;
-    use crate::turn::dispatcher::turn_offers_tool;
+    use crate::turn::dispatcher::turn_offered_tools;
 
     let (state, _session_id, _captured) =
         make_state_offering_memory_read(&["*"], &[], None, None).await;
@@ -8623,34 +8623,18 @@ async fn an_approval_gated_tool_is_offered_only_where_the_runtime_offers_it() {
         )];
     let no_grants = std::collections::HashSet::new();
     assert!(
-        turn_offers_tool(
-            &state,
-            &gated,
-            &agent_config,
-            None,
-            None,
-            None,
-            &no_grants,
-            MEMORY_READ_TOOL
-        )
-        .await,
+        turn_offered_tools(&state, &gated, &agent_config, None, None, None, &no_grants,)
+            .await
+            .contains(MEMORY_READ_TOOL),
         "the agent runtime offers a gated tool and pauses for the approval"
     );
 
     let mut codex = codex_turn_config();
     codex.tools.permissions = gated.tools.permissions.clone();
     assert!(
-        !turn_offers_tool(
-            &state,
-            &codex,
-            &agent_config,
-            None,
-            None,
-            None,
-            &no_grants,
-            MEMORY_READ_TOOL
-        )
-        .await,
+        !turn_offered_tools(&state, &codex, &agent_config, None, None, None, &no_grants,)
+            .await
+            .contains(MEMORY_READ_TOOL),
         "the Codex runtime withholds a gated tool"
     );
 
@@ -8663,7 +8647,7 @@ async fn an_approval_gated_tool_is_offered_only_where_the_runtime_offers_it() {
         access: None,
     }]);
     assert!(
-        turn_offers_tool(
+        turn_offered_tools(
             &state,
             &codex,
             &agent_config,
@@ -8671,9 +8655,9 @@ async fn an_approval_gated_tool_is_offered_only_where_the_runtime_offers_it() {
             None,
             Some(session_id),
             &granted,
-            MEMORY_READ_TOOL
         )
-        .await,
+        .await
+        .contains(MEMORY_READ_TOOL),
         "a session's grant lifts the gate and the Codex runtime offers the tool"
     );
 }
@@ -16500,9 +16484,13 @@ async fn placed_worker_orientation_keeps_its_working_directory() {
         worker_placement_path(session.metadata.as_ref()),
     );
     let environment = build_session_environment(&topic, &tool_root, &session);
-    let text = swage_context::orientation::OrientationElement::new(environment, vec![]).content()
-        [0]
-    .text_content();
+    let text = swage_context::orientation::OrientationElement::new(
+        environment,
+        vec![],
+        std::collections::BTreeSet::new(),
+    )
+    .content()[0]
+        .text_content();
     assert!(text.contains(&format!("Working directory: {}", placed.display())));
     assert!(!text.contains("No workspace is attached"));
     assert_eq!(tool_root.source, ToolRootSource::WorkerPlacement);
@@ -16735,6 +16723,7 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
         )),
         test_environment(),
         vec![],
+        std::collections::BTreeSet::new(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
@@ -16772,6 +16761,7 @@ fn elements_built_without_memory_omit_the_memory_element() {
         None,
         test_environment(),
         vec![],
+        std::collections::BTreeSet::new(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
@@ -16831,6 +16821,7 @@ async fn named_assembly_composes_the_memory_element_like_any_other() {
         Some(memory),
         test_environment(),
         vec![],
+        std::collections::BTreeSet::new(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
@@ -16966,9 +16957,7 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
             assembly: Some("briefing".into()),
             skills: None,
         },
-        swage_context::memory::MemoryReach::with_read_tool(
-            session_value_dispatcher.offers(crate::tool::memory::MEMORY_READ_TOOL),
-        ),
+        session_value_dispatcher.offered_tools(),
     );
 
     let output = assembler
@@ -17051,6 +17040,7 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
         )),
         test_environment(),
         vec![],
+        std::collections::BTreeSet::new(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
@@ -17354,6 +17344,7 @@ fn instruction_provenance_counts_configured_files_at_their_own_levels() {
             None,
             test_environment(),
             vec![],
+            std::collections::BTreeSet::new(),
             "gpt-test-model",
             swage_context::working_norms::WorkingNormsScaffold::Native,
             &[],
@@ -17406,6 +17397,7 @@ fn assembly_elements_layer_operator_guidance_after_instructions() {
         None,
         test_environment(),
         vec![],
+        std::collections::BTreeSet::new(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],

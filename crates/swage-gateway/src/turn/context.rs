@@ -17,8 +17,10 @@ use swage_config::RESERVED_WORKFLOW_AGENT_ID;
 /// Build the context assembly elements for a turn.
 ///
 /// Constructs typed elements from the resolved turn inputs:
-/// - `OrientationElement` — baseline identity, place, and capability; always
-///   produces content, so an empty configuration still orients the session
+/// - `OrientationElement` — baseline identity, place, and capability, its tool
+///   preferences following `offered_tools`, the tools the turn offers the
+///   model; always produces content, so an empty configuration still orients
+///   the session
 /// - `PromptsElement` — from the merged instruction string, followed by the
 ///   operator-guidance rules (the standard agent-guidance files, resolved by
 ///   `operator_guidance_rules` from the config root and trusted workspaces)
@@ -43,13 +45,18 @@ pub(crate) fn build_assembly_elements(
     memory: Option<MemoryIndexElement>,
     environment: SessionEnvironment,
     available_skills: Vec<AvailableSkill>,
+    offered_tools: std::collections::BTreeSet<String>,
     model_id: &str,
     working_norms_scaffold: WorkingNormsScaffold,
     hierarchy: &[(HierarchyLevel, PathBuf)],
     requested_elements: Option<&[String]>,
 ) -> Vec<Box<dyn ContextElement>> {
     let mut elements: Vec<Box<dyn ContextElement>> = vec![
-        Box::new(OrientationElement::new(environment, available_skills)),
+        Box::new(OrientationElement::new(
+            environment,
+            available_skills,
+            offered_tools,
+        )),
         // Models arrive over the proxy bare: the norms their own harness
         // would have supplied come from the assembly, keyed by the coming
         // turn's model family.
@@ -115,34 +122,6 @@ pub(crate) fn session_carries_memory(session: &swage_storage::Session) -> bool {
     !matches!(
         session.origin,
         swage_storage::SessionOrigin::WorkflowWorker { .. }
-    )
-}
-
-/// How far this turn's session reaches into memory: the standing memory text
-/// names `memory_read` only when the model can call it, so the answer is
-/// whether the turn will offer that tool (`turn_offers_tool`), never a list
-/// kept beside it.
-pub(crate) async fn memory_reach(
-    state: &crate::state::AppState,
-    config: &swage_config::ResolvedConfig,
-    agent_config: &swage_agent::AgentConfig,
-    session_metadata: Option<&serde_json::Value>,
-    topic_id: Option<Uuid>,
-    session_id: Option<Uuid>,
-    session_approval_grants: &std::collections::HashSet<crate::state::ApprovalGrantKey>,
-) -> swage_context::memory::MemoryReach {
-    swage_context::memory::MemoryReach::with_read_tool(
-        super::dispatcher::turn_offers_tool(
-            state,
-            config,
-            agent_config,
-            session_metadata,
-            topic_id,
-            session_id,
-            session_approval_grants,
-            crate::tool::memory::MEMORY_READ_TOOL,
-        )
-        .await,
     )
 }
 

@@ -199,13 +199,18 @@ impl ToolDispatcher {
         self
     }
 
-    /// Whether `tool_name` is among the tools this dispatcher offers the model:
-    /// registered, permitted (an approval requirement keeps a granted tool
-    /// offered), and admitted by the advertisement filter. The same answer
-    /// `tool_definitions` gives for each tool, for a caller that composes text
-    /// around one tool and must not name a tool the model cannot call.
-    pub fn offers(&self, tool_name: &str) -> bool {
-        self.offered_tool(tool_name).is_some()
+    /// The tools this dispatcher offers the model, by name: registered,
+    /// permitted (an approval requirement keeps a granted tool offered), and
+    /// admitted by the advertisement filter — the names `tool_definitions`
+    /// advertises, for a caller that composes text around tools and must not
+    /// name one the model cannot call.
+    pub fn offered_tools(&self) -> std::collections::BTreeSet<String> {
+        self.registry
+            .list()
+            .into_iter()
+            .filter(|name| self.offered_tool(name).is_some())
+            .map(str::to_string)
+            .collect()
     }
 
     fn offered_tool(&self, tool_name: &str) -> Option<Arc<dyn crate::tool::Tool>> {
