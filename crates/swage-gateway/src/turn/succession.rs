@@ -679,7 +679,8 @@ async fn succeed_on_degradation(
     (outcome, diagnosis, calls)
 }
 
-/// A fresh diagnosis of `history`, each model call appended to `diagnosis`.
+/// A fresh diagnosis of `history`, with each model call appended to `calls`
+/// for the compaction record.
 async fn diagnose(
     site: &SuccessionSite<'_>,
     degradation: &Degradation,
