@@ -94,30 +94,44 @@ pub(crate) fn anthropic_effort_capability() -> EffortCapability {
     }
 }
 
-/// The Messages API's largest `max_tokens` for the models Anthropic documents
-/// (platform.claude.com/docs/en/about-claude/models/overview, read
-/// 2026-10-19): 128K on the 5 generation, on Opus 4.6 onward and on Sonnet
-/// 4.6; 64K on Opus 4.5 and Haiku 4.5. Matched by family prefix, so a dated
-/// snapshot id resolves as its family does. `None` for a model the adapter
-/// cannot vouch for — the catalogue's declaration governs there.
+/// The Messages API's largest `max_tokens` for the model ids and aliases
+/// Anthropic documents at platform.claude.com/docs/en/models/overview and its
+/// linked model pages (read 2026-10-19): 128K on the listed 5-generation ids,
+/// Opus 4.6–4.8 and Sonnet 4.6; 64K on Opus 4.5 and Haiku 4.5. An id matches
+/// exactly or with a dated snapshot suffix (`-` and eight ASCII digits).
+/// `None` for a model the adapter cannot vouch for — the catalogue's
+/// declaration governs there.
 pub(crate) fn anthropic_output_limit(model: &str) -> Option<u32> {
     const DOCUMENTED: &[(&str, u32)] = &[
+        ("claude-fable-5-1", 128_000),
         ("claude-fable-5", 128_000),
+        ("claude-mythos-5-1", 128_000),
         ("claude-mythos-5", 128_000),
+        ("claude-opus-5-5", 128_000),
         ("claude-opus-5", 128_000),
+        ("claude-sonnet-5-5", 128_000),
         ("claude-sonnet-5", 128_000),
-        ("claude-haiku-5", 128_000),
+        ("claude-haiku-5-5", 128_000),
         ("claude-opus-4-8", 128_000),
         ("claude-opus-4-7", 128_000),
         ("claude-opus-4-6", 128_000),
         ("claude-sonnet-4-6", 128_000),
         ("claude-opus-4-5", 64_000),
+        ("claude-opus-4-5@20251101", 64_000),
         ("claude-haiku-4-5", 64_000),
+        ("claude-haiku-4-5@20251001", 64_000),
     ];
     let model = model.trim().to_ascii_lowercase();
     DOCUMENTED
         .iter()
-        .find(|(family, _)| model.starts_with(family))
+        .find(|(id, _)| {
+            model.strip_prefix(id).is_some_and(|suffix| {
+                suffix.is_empty()
+                    || suffix.strip_prefix('-').is_some_and(|date| {
+                        date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+            })
+        })
         .map(|(_, limit)| *limit)
 }
 
@@ -1955,26 +1969,64 @@ mod tests {
         assert!(provider.effort_capability("some-other-model").is_none());
     }
 
-    /// The declaration is bound to the documented limits: each family the
-    /// docs list resolves, a dated snapshot as its family, and a model the
-    /// docs do not list is left to the catalogue.
+    /// Documented ids and their dated snapshots resolve to their published
+    /// limits; longer versions and arbitrary suffixes stay undeclared.
     #[test]
     fn output_limit_is_declared_for_documented_models_only() {
-        let provider = AnthropicProvider::new("key", "claude-opus-5-5");
         for (model, limit) in [
             ("claude-fable-5-1", 128_000),
+            ("claude-fable-5", 128_000),
+            ("claude-mythos-5-1", 128_000),
+            ("claude-mythos-5", 128_000),
             ("claude-opus-5-5", 128_000),
+            ("claude-opus-5", 128_000),
+            ("claude-sonnet-5-5", 128_000),
             ("claude-sonnet-5", 128_000),
             ("claude-haiku-5-5", 128_000),
+            ("claude-opus-4-8", 128_000),
+            ("claude-opus-4-7", 128_000),
             ("claude-opus-4-6", 128_000),
             ("claude-sonnet-4-6", 128_000),
-            (" Claude-Opus-4-5-20251101 ", 64_000),
+            ("claude-opus-4-5", 64_000),
+            ("claude-opus-4-5@20251101", 64_000),
             ("claude-haiku-4-5", 64_000),
+            ("claude-haiku-4-5@20251001", 64_000),
         ] {
-            assert_eq!(provider.output_limit(model), Some(limit), "{model}");
+            for id in [
+                model.to_owned(),
+                format!("{model}-20261019"),
+                format!(" \t{} \n", model.to_ascii_uppercase()),
+            ] {
+                assert_eq!(anthropic_output_limit(&id), Some(limit), "{id:?}");
+            }
         }
-        for model in ["claude-3-5-sonnet-20241022", "some-other-model", ""] {
-            assert_eq!(provider.output_limit(model), None, "{model}");
+        for model in ["claude-opus-4-5-20251101", "claude-haiku-4-5-20251001"] {
+            assert_eq!(anthropic_output_limit(model), Some(64_000), "{model}");
+        }
+        for model in [
+            "claude-opus-50",
+            "claude-sonnet-5-undocumented",
+            "claude-opus-4-60",
+            "claude-opus-4-5@20251102",
+            "claude-haiku-4-5@20251002",
+            "claude-haiku-5",
+            "claude-opus-5-5-1",
+            "claude-fable-5-2",
+            "claude-mythos-5-2",
+            "claude-sonnet-5-6",
+            "claude-haiku-5-6",
+            "claude-opus-5-",
+            "claude-opus-5-2026101",
+            "claude-opus-5-202610190",
+            "claude-opus-5-2026101x",
+            "claude-opus-5-２０２６１０１９",
+            "claude-opus-5-20261019-extra",
+            "claude-opus-5-5-20261019-20261019",
+            "claude-3-5-sonnet-20241022",
+            "some-other-model",
+            "",
+        ] {
+            assert_eq!(anthropic_output_limit(model), None, "{model}");
         }
     }
 
