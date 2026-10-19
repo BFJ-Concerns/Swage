@@ -8318,6 +8318,164 @@ pub(crate) async fn make_state_with_capturing_tools(
     (state, session_id, captured)
 }
 
+/// A state whose registry offers `memory_read`, under an agent allow and deny
+/// list of the test's choosing and a session carrying the given metadata, with
+/// the provider's one request captured.
+async fn make_state_offering_memory_read(
+    allow: &[&str],
+    deny: &[&str],
+    session_metadata: Option<serde_json::Value>,
+) -> (
+    AppState,
+    Uuid,
+    Arc<std::sync::Mutex<Option<CompletionRequest>>>,
+) {
+    let storage = Arc::new(MockStorage::new());
+    let topic = storage.general_scope().await.expect("create default topic");
+    let session = storage
+        .create_session(NewSession {
+            metadata: session_metadata,
+            ..new_session(topic.id)
+        })
+        .await
+        .expect("create session");
+    let session_id = session.id;
+    ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id,
+            agent_id: "gateway".to_string(),
+        },
+    )
+    .await
+    .expect("create default thread");
+
+    let (provider, captured) = CapturingProvider::new(vec![
+        StreamChunk::Delta {
+            content: "noted".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]);
+    let mut config = swage_config::ResolvedConfig::default();
+    config.tools.permissions.allow = allow.iter().map(|tool| tool.to_string()).collect();
+    config.tools.permissions.deny = deny.iter().map(|tool| tool.to_string()).collect();
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        config,
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(crate::tool::memory::MemoryReadTool) as Arc<dyn crate::tool::Tool>
+        ]),
+        None,
+    );
+    (state, session_id, captured)
+}
+
+/// The memory text of the one request a turn makes, read from the captured
+/// provider request.
+fn memory_text_of(captured: &Arc<std::sync::Mutex<Option<CompletionRequest>>>) -> String {
+    captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the provider saw one request")
+        .messages
+        .iter()
+        .find(|message| {
+            message.role() == Role::System && message.text_content().contains("## Memory index")
+        })
+        .expect("the memory element is in the system messages")
+        .text_content()
+}
+
+/// The memory text names `memory_read` only in a session whose tools offer
+/// it: a file-only agent is told the index is all it can read, while a
+/// session with the tool is told to read an entry by its reference.
+#[tokio::test]
+async fn memory_guidance_names_the_read_tool_only_when_the_session_has_it() {
+    for (allow, deny, offered) in [
+        (&["file_read"][..], &[][..], false),
+        (&["*"][..], &["memory_read"][..], false),
+        (&["*"][..], &[][..], true),
+    ] {
+        let (state, session_id, captured) =
+            make_state_offering_memory_read(allow, deny, None).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "Hello".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete");
+
+        let memory = memory_text_of(&captured);
+        assert_eq!(
+            memory.contains("`memory_read`"),
+            offered,
+            "allow {allow:?} deny {deny:?}: {memory}"
+        );
+        if !offered {
+            assert!(
+                memory.contains("the summaries are all of memory you can read"),
+                "a session without the tool is told what it can read: {memory}"
+            );
+        }
+    }
+}
+
+/// A session hosted on a remote device is offered only the tools the device
+/// advertises, so a granted `memory_read` the device does not carry is
+/// withheld from the text as the dispatcher withholds it from the model.
+#[tokio::test]
+async fn memory_guidance_follows_the_device_hosts_advertised_tools() {
+    let (state, session_id, captured) = make_state_offering_memory_read(
+        &["*"],
+        &[],
+        Some(serde_json::json!({ "device_id": "bench" })),
+    )
+    .await;
+    state.devices.lock().await.devices.insert(
+        "bench".into(),
+        crate::device::RegisteredDevice {
+            device_id: "bench".into(),
+            label: None,
+            kind: crate::device::DeviceKind::AttachedDevice,
+            shared_token_secret_ref: Some("secret://bench".into()),
+            workspace_root: std::path::PathBuf::from("/"),
+            workspace_roots: vec![std::path::PathBuf::from("/")],
+            capabilities: vec!["shell".into(), "file_read".into()],
+            registered_at: chrono::Utc::now(),
+        },
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Hello".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("turn should complete");
+
+    let memory = memory_text_of(&captured);
+    assert!(
+        !memory.contains("`memory_read`"),
+        "a tool the device does not advertise is not named: {memory}"
+    );
+    assert!(memory.contains("the summaries are all of memory you can read"));
+}
+
 pub(crate) async fn make_state_with_approval_gated_echo(
     rounds: Vec<Vec<StreamChunk>>,
 ) -> (AppState, Uuid) {
@@ -16368,7 +16526,11 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
         vec![],
         vec![],
         history,
-        Some(MemoryIndexElement::new(None, Vec::new())),
+        Some(MemoryIndexElement::new(
+            None,
+            Vec::new(),
+            swage_context::memory::MemoryReach::EntriesByReference,
+        )),
         test_environment(),
         vec![],
         "claude-test-model",
@@ -16453,7 +16615,11 @@ fn a_workflow_worker_session_does_not_carry_memory_but_every_other_does() {
 
 #[tokio::test]
 async fn named_assembly_composes_the_memory_element_like_any_other() {
-    let memory = MemoryIndexElement::new(Some("Important topic context".to_string()), Vec::new());
+    let memory = MemoryIndexElement::new(
+        Some("Important topic context".to_string()),
+        Vec::new(),
+        swage_context::memory::MemoryReach::EntriesByReference,
+    );
     let elements = build_assembly_elements(
         "Be helpful.",
         &[],
@@ -16598,6 +16764,9 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
             assembly: Some("briefing".into()),
             skills: None,
         },
+        swage_context::memory::MemoryReach::with_read_tool(
+            session_value_dispatcher.offers(crate::tool::memory::MEMORY_READ_TOOL),
+        ),
     );
 
     let output = assembler
@@ -16676,6 +16845,7 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
         Some(MemoryIndexElement::new(
             Some("Important topic context".to_string()),
             Vec::new(),
+            swage_context::memory::MemoryReach::EntriesByReference,
         )),
         test_environment(),
         vec![],

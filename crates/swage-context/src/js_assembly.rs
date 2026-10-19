@@ -1716,6 +1716,7 @@ mod tests {
         elements.push(Box::new(crate::memory::MemoryIndexElement::new(
             Some("remembered material".into()),
             Vec::new(),
+            crate::memory::MemoryReach::EntriesByReference,
         )));
         let output = assemble_source(HISTORY_AND_PROMPTS_ONLY, &elements);
 

@@ -211,6 +211,8 @@ struct GatewayDelegatedContextAssembler {
     context_event_tx: mpsc::UnboundedSender<crate::websocket::ServerEvent>,
     effective_tool_permissions: serde_json::Value,
     composition: DispatchContextComposition,
+    /// How far the child reaches into memory, read from its own dispatcher.
+    memory_reach: swage_context::memory::MemoryReach,
 }
 
 pub(crate) fn delegated_context_assembler(
@@ -222,6 +224,7 @@ pub(crate) fn delegated_context_assembler(
     context_event_tx: mpsc::UnboundedSender<crate::websocket::ServerEvent>,
     effective_tool_permissions: serde_json::Value,
     composition: DispatchContextComposition,
+    memory_reach: swage_context::memory::MemoryReach,
 ) -> Arc<dyn DelegationContextAssembler> {
     let swage_root = resolve_swage_root(&state).to_path_buf();
     Arc::new(GatewayDelegatedContextAssembler {
@@ -234,6 +237,7 @@ pub(crate) fn delegated_context_assembler(
         context_event_tx,
         effective_tool_permissions,
         composition,
+        memory_reach,
     })
 }
 
@@ -268,11 +272,12 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
         let assembly_name = context_choices.assembly_name;
         // A delegated child serves the operator through its parent and
-        // carries the same profile and index.
+        // carries the same profile and index, reaching as far as its own
+        // tools let it.
         let memory_index = Some(
             crate::memory::load_memory_index(&self.swage_root, &self.topic.location())
                 .await
-                .into_element(),
+                .into_element(self.memory_reach),
         );
         let mut session_variables: std::collections::BTreeMap<String, String> = self
             .state
@@ -873,6 +878,9 @@ impl DelegationHandler for GatewayDelegationHandler {
                 silent_ws_tx,
                 effective_tool_permissions_record(&effective_target_resolved),
                 composition.clone(),
+                swage_context::memory::MemoryReach::with_read_tool(
+                    target_dispatcher.offers(crate::tool::memory::MEMORY_READ_TOOL),
+                ),
             ),
             snapshot_recorder: Some(delegation_snapshot_recorder_for_state(self.state.clone())),
         };

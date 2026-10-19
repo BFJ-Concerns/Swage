@@ -586,6 +586,47 @@ pub(crate) async fn record_degraded_execution(
     Ok(())
 }
 
+/// Whether the dispatcher `build_gateway_dispatcher` will build for this turn
+/// offers `tool_name` to the model, read before that dispatcher exists —
+/// context is assembled first, and text in it that names a tool must not name
+/// one the model cannot call. The three gates are the build's own: the tool
+/// registered for the agent (`ToolRegistry::for_agent`), permitted by the
+/// resolved config (`build_permission_config`, whose topic, session and
+/// approval grants are left out because they only move a granted tool between
+/// allowed and approval-gated, both of which are offered), and admitted by the
+/// device advertisement filter for the session's host
+/// (`build_gateway_advertisement_filter`). Where the dispatcher already
+/// exists, ask it (`ToolDispatcher::offers`) instead.
+pub(crate) async fn turn_offers_tool(
+    state: &AppState,
+    config: &swage_config::ResolvedConfig,
+    agent_config: &AgentConfig,
+    session_metadata: Option<&serde_json::Value>,
+    tool_name: &str,
+) -> bool {
+    let Some(tool) = state
+        .active_tool_dispatcher()
+        .registry()
+        .for_agent(&agent_config.agent_id)
+        .get(tool_name)
+    else {
+        return false;
+    };
+    let permissions = build_permission_config(
+        config,
+        &state.config,
+        None,
+        None,
+        &std::collections::HashSet::new(),
+    );
+    if swage_tool::permission::check_permission(&permissions, tool_name).is_err() {
+        return false;
+    }
+    let device = crate::device::resolve_device(state, session_metadata).await;
+    build_gateway_advertisement_filter(device.as_ref(), agent_config)
+        .is_none_or(|filter| filter(tool.as_ref()))
+}
+
 pub(crate) async fn build_gateway_dispatcher_for_unattended_execution(
     state: &AppState,
     request: GatewayDispatcherRequest<'_>,
