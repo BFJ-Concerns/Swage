@@ -30,6 +30,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- Every scope follows one configuration reload policy. The global layer is the running configuration — loaded when the gateway starts, with its command-line overrides, and replaced by Settings saves — so a hand edit to the global `config.toml` applies at the next start in every session. A topic's or agent's `config.toml` and `instructions/` are read at each turn and overlaid on it, so an edit there applies to the next turn under that scope. Sessions whose topic or agent had a file of its own no longer re-read the global file live, and no longer lose command-line overrides when they do. A context-transfer target inherits each field it does not set from the policy in force where it is used, so a topic that changes the default transfer mode changes every inheriting target under it.
 - The README names Debian/Ubuntu build prerequisites, supported Node versions, and the binary path setup, with frontend install and build commands.
 
 - Provider setup documentation uses governed credentials through Settings → Providers, distinguishes GPT Responses from Chat Completions, and explains model-bound routing and the disabled Codex integration.
@@ -216,7 +217,6 @@ All notable changes to Swage are documented in this file.
 - Native file tools refuse to write into a workspace attached without permission to change files.
 - Experimentation variants serve a whole conversation; configuration changes apply when a new session first draws.
 
-- Answering a native file-tool approval with Allow runs the pending operation, including paths relative to a sibling folder; timed-out calls report an expired result.
 - Tool output written into an attached workspace no longer appears as untracked files in that workspace’s Git repository.
 - Session previews in conversation, topic and operator lists show the latest user or assistant message; tool and system messages do not replace the preview.
 - A turn interrupted mid-tool resumes without repeating tools that had already completed: each tool call is recorded as soon as the model selects it and settled when it finishes, a call cut off by a restart is settled as interrupted and one stopped with its turn is settled as cancelled, and the resumed conversation replays those calls with their results.

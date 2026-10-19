@@ -14,9 +14,6 @@ use crate::cli::{InstallArgs, UninstallArgs};
 pub struct ServiceInstallConfig {
     pub port: Option<u16>,
     pub host: Option<String>,
-    /// Topic whose configuration layer the service runs under (see
-    /// `StartArgs::config`).
-    pub config: Option<String>,
 }
 
 pub fn install_config_path() -> PathBuf {
@@ -60,7 +57,6 @@ async fn install_at_path(args: &InstallArgs, path: PathBuf) -> Result<(), Client
     let config = ServiceInstallConfig {
         port: args.port,
         host: args.host.clone(),
-        config: args.config.clone(),
     };
     let json = serde_json::to_string_pretty(&config).map_err(|source| ClientError::MetadataIo {
         source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
@@ -110,7 +106,6 @@ mod tests {
             &InstallArgs {
                 port: Some(4000),
                 host: Some("127.0.0.1".into()),
-                config: Some("/tmp/swage.toml".into()),
             },
             path.clone(),
         )
@@ -122,7 +117,6 @@ mod tests {
             Some(ServiceInstallConfig {
                 port: Some(4000),
                 host: Some("127.0.0.1".into()),
-                config: Some("/tmp/swage.toml".into()),
             })
         );
     }
@@ -137,7 +131,6 @@ mod tests {
             &InstallArgs {
                 port: None,
                 host: None,
-                config: None,
             },
             path.clone(),
         )

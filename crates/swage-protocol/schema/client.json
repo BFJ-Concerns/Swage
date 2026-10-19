@@ -1311,16 +1311,27 @@
       ]
     },
     "ContextTransferTargetConfig": {
+      "description": "A target's own context-transfer fields; an unset one inherits the\npolicy's default at use.",
       "type": "object",
       "properties": {
         "allowed_fields": {
-          "type": "array",
+          "type": [
+            "array",
+            "null"
+          ],
           "items": {
             "$ref": "#/$defs/ContextTransferField"
           }
         },
         "mode": {
-          "$ref": "#/$defs/ContextTransferMode"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContextTransferMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "summary_budget": {
           "type": [
@@ -1331,11 +1342,7 @@
           "minimum": 0
         }
       },
-      "additionalProperties": false,
-      "required": [
-        "mode",
-        "allowed_fields"
-      ]
+      "additionalProperties": false
     },
     "ConversationBranchListResponse": {
       "type": "object",

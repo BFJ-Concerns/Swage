@@ -25,9 +25,10 @@ output schema. Each definition carries a stable `id` that sessions reference.
 
 ### How the overlay works
 
-When a session starts, the gateway resolves the file-based configuration
-cascade (Global → Topic → Agent `.toml` files) into a resolved config, then
-overlays the agent definition on top:
+At each turn, the gateway overlays the session's topic and agent layers
+(their `config.toml` files and `instructions/` directories, Global → Topic →
+Agent) on the running configuration — the global layer as loaded at startup
+and replaced by Settings saves — then overlays the agent definition on top:
 
 1. Instructions are appended after operator instructions.
 2. Model preference takes effect only when the named model id exists in the
@@ -38,6 +39,11 @@ overlays the agent definition on top:
    stand).
 4. Skills, output schema, and output retry limit are set directly from the
    definition.
+
+A per-target context-transfer entry (`[communication.context_transfer.targets.<agent>]`)
+keeps only the fields it sets; each other field is the policy's default
+where the target is used, so a scope layer that changes the default
+changes every target under it that did not set its own.
 
 ### Creating and editing definitions
 
@@ -603,9 +609,11 @@ are made by editing `config.toml`. Restart the gateway to apply them:
 - **Desktop app:** quit and reopen the app.
 - **Standalone process:** stop and start the process.
 
-Sessions whose topic or agent has its own `config.toml` re-resolve the full
-configuration hierarchy (global file included) on each turn, so edits can
-reach those sessions without a restart.
+Only the global `config.toml` needs the restart: it is read when the gateway
+starts and rewritten by Settings saves, which apply at once. A topic's or
+agent's `config.toml` and `instructions/` are read at each turn and overlaid
+on the running configuration, so an edit there applies to the next turn
+under that scope, in every session alike, with no restart.
 
 ### Global switch
 
