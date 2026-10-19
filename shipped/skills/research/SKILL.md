@@ -61,6 +61,24 @@ the sources the user supplied or the plan chose, and never say that
 nothing was gathered or that no source failed when the lists say
 otherwise.
 
+What the organising pass did is its `organised` account: `orientation_cards`,
+how many orientation cards it authored; `assertions`, how many curation
+assertions — duplicates, supersessions — it made; and a `note` in its own
+words on what it did and anything that needs a human eye. Report the
+counts and the note as they stand: zero cards and zero assertions is a
+valid outcome when nothing warranted them, not a sign the pass was
+skipped.
+
+A sweep whose organising account cannot be validated fails — the
+organiser answered off-shape or not at all. The organiser works through
+its tools first and answers last, so when a run fails with "could not
+validate its organising account" its cards and assertions may already be
+in the knowledge base: those writes stand, but the run did not
+synthesise, and there are no findings to present. Report the run as
+failed, say that the organising pass left no validated account of what
+it did, and point the user at `knowledge_search` for what the sweep
+gathered; never present the landed writes as a completed sweep.
+
 Each finding carries its own trail: the claim, the exact `quote` the
 citation validated, the `observation_id` it was cited from, the `source`
 (the origin URL or path), and the `citation_id`. Show the quote and the

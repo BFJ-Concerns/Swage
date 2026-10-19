@@ -13,9 +13,9 @@ use uuid::Uuid;
 use swage_core::StorageError;
 
 use crate::model::{
-    LibraryEntry, LibraryEntryModule, LibrarySeeding, ModuleSourceReplacement, NewAuditEvent,
-    NewLibraryEntry, NewLibraryEntryModule, NewSurface, NewSurfaceModule, RemovedSurfaceModule,
-    Surface, SurfaceModule,
+    LibraryEntry, LibraryEntryModule, LibrarySeeding, ModuleDelivery, ModuleSourceReplacement,
+    NewAuditEvent, NewLibraryEntry, NewLibraryEntryModule, NewSurface, NewSurfaceModule,
+    RemovedSurfaceModule, Surface, SurfaceModule,
 };
 use crate::sqlite::SqliteStorage;
 use crate::sqlite::surface_annotation::{COLUMNS as ANNOTATION_COLUMNS, row_to_annotation};
@@ -23,12 +23,11 @@ use crate::sqlite::topic::{decode_tags, encode_tags};
 use crate::store::SurfaceStore;
 
 /// Every surface read selects the same column list, lineage included.
-const SURFACE_COLUMNS: &str =
-    "id, session_id, title, created_at, updated_at, library_entry_id, seeded_at, seeded_from_name";
+const SURFACE_COLUMNS: &str = "id, session_id, title, created_at, updated_at, library_entry_id, seeded_at, seeded_from_name, shape_only";
 const ENTRY_COLUMNS: &str = "id, name, description, tags, origin_topic_id, saved_from_surface_id, \
     created_at, updated_at";
 const MODULE_COLUMNS: &str =
-    "id, surface_id, kind, position, source, created_at, updated_at, revision";
+    "id, surface_id, kind, position, source, created_at, updated_at, revision, delivery_json";
 const ENTRY_MODULE_COLUMNS: &str = "id, entry_id, kind, position, source, created_at, updated_at";
 
 fn row_to_surface(row: &rusqlite::Row<'_>) -> rusqlite::Result<Surface> {
@@ -39,6 +38,7 @@ fn row_to_surface(row: &rusqlite::Row<'_>) -> rusqlite::Result<Surface> {
     let entry: Option<String> = row.get(5)?;
     let seeded_at: Option<String> = row.get(6)?;
     Ok(Surface {
+        shape_only: row.get(8)?,
         id: parse_uuid(&id)?,
         session_id: parse_uuid(&session_id)?,
         title: row.get(2)?,
@@ -90,6 +90,7 @@ fn row_to_module(row: &rusqlite::Row<'_>) -> rusqlite::Result<SurfaceModule> {
     let surface_id: String = row.get(1)?;
     let created: String = row.get(5)?;
     let updated: String = row.get(6)?;
+    let delivery: Option<String> = row.get(8)?;
     Ok(SurfaceModule {
         id: parse_uuid(&id)?,
         surface_id: parse_uuid(&surface_id)?,
@@ -97,9 +98,23 @@ fn row_to_module(row: &rusqlite::Row<'_>) -> rusqlite::Result<SurfaceModule> {
         position: row.get(3)?,
         source: row.get(4)?,
         revision: row.get(7)?,
+        delivery: parse_delivery(delivery.as_deref())?,
         created_at: parse_dt(&created)?,
         updated_at: parse_dt(&updated)?,
     })
+}
+
+/// The delivery a module row records, as written by `encode_delivery`.
+fn parse_delivery(raw: Option<&str>) -> rusqlite::Result<Option<ModuleDelivery>> {
+    raw.map(serde_json::from_str).transpose().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(error))
+    })
+}
+
+/// A module's delivery as the row stores it: JSON of the wire shape, or
+/// NULL for a module written by hand.
+fn encode_delivery(delivery: Option<&ModuleDelivery>) -> Option<String> {
+    delivery.map(|delivery| serde_json::to_string(delivery).expect("a delivery serialises"))
 }
 
 fn module_by_id(conn: &rusqlite::Connection, id: Uuid) -> rusqlite::Result<Option<SurfaceModule>> {
@@ -182,6 +197,7 @@ impl SurfaceStore for SqliteStorage {
                 ],
             )?;
             Ok(Surface {
+                shape_only: false,
                 id,
                 session_id: surface.session_id,
                 title: surface.title,
@@ -191,6 +207,36 @@ impl SurfaceStore for SqliteStorage {
                 seeded_from_name: None,
                 seeded_at: None,
             })
+        })
+        .await
+    }
+
+    async fn rename_surface(
+        &self,
+        id: Uuid,
+        title: &str,
+        mut audit_event: NewAuditEvent,
+    ) -> Result<Option<String>, StorageError> {
+        let title = title.to_owned();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let prior: Option<String> = tx
+                .query_row(
+                    "SELECT title FROM surfaces WHERE id = ?1",
+                    [id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(prior_title) = &prior {
+                tx.execute(
+                    "UPDATE surfaces SET title = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![title, Utc::now().to_rfc3339(), id.to_string()],
+                )?;
+                audit_event.metadata["prior_title"] = serde_json::json!(prior_title);
+                super::audit::insert_audit_event(&tx, audit_event)?;
+            }
+            tx.commit()?;
+            Ok(prior)
         })
         .await
     }
@@ -231,8 +277,8 @@ impl SurfaceStore for SqliteStorage {
             let now = Utc::now();
             let now_str = now.to_rfc3339();
             conn.execute(
-                "INSERT INTO surface_modules (id, surface_id, kind, position, source, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                "INSERT INTO surface_modules (id, surface_id, kind, position, source, created_at, updated_at, delivery_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)",
                 params![
                     id.to_string(),
                     module.surface_id.to_string(),
@@ -240,6 +286,7 @@ impl SurfaceStore for SqliteStorage {
                     module.position,
                     &module.source,
                     &now_str,
+                    encode_delivery(module.delivery.as_ref()),
                 ],
             )?;
             conn.execute(
@@ -253,6 +300,7 @@ impl SurfaceStore for SqliteStorage {
                 position: module.position,
                 source: module.source,
                 revision: 0,
+                delivery: module.delivery,
                 created_at: now,
                 updated_at: now,
             })
@@ -269,6 +317,7 @@ impl SurfaceStore for SqliteStorage {
         surface_id: Uuid,
         kind: &str,
         source: &str,
+        delivery: Option<ModuleDelivery>,
     ) -> Result<SurfaceModule, StorageError> {
         let kind = kind.to_owned();
         let source = source.to_owned();
@@ -278,10 +327,17 @@ impl SurfaceStore for SqliteStorage {
             // The position is read and written in one statement under the
             // connection lock: two appends never share a position.
             conn.execute(
-                "INSERT INTO surface_modules (id, surface_id, kind, position, source, created_at, updated_at)
-                 SELECT ?1, ?2, ?3, COALESCE(MAX(position) + 1, 0), ?4, ?5, ?5
+                "INSERT INTO surface_modules (id, surface_id, kind, position, source, created_at, updated_at, delivery_json)
+                 SELECT ?1, ?2, ?3, COALESCE(MAX(position) + 1, 0), ?4, ?5, ?5, ?6
                  FROM surface_modules WHERE surface_id = ?2",
-                params![id.to_string(), surface_id.to_string(), &kind, &source, &now_str],
+                params![
+                    id.to_string(),
+                    surface_id.to_string(),
+                    &kind,
+                    &source,
+                    &now_str,
+                    encode_delivery(delivery.as_ref()),
+                ],
             )?;
             conn.execute(
                 "UPDATE surfaces SET updated_at = ?1 WHERE id = ?2",
@@ -314,6 +370,7 @@ impl SurfaceStore for SqliteStorage {
         id: Uuid,
         expected_revision: i64,
         source: &str,
+        delivery: Option<ModuleDelivery>,
     ) -> Result<Option<ModuleSourceReplacement>, StorageError> {
         let source = source.to_owned();
         self.with_conn(move |conn| {
@@ -321,12 +378,20 @@ impl SurfaceStore for SqliteStorage {
             let now_str = Utc::now().to_rfc3339();
             // The revision is the guard: the update lands only on the row the
             // writer read. A zero-row update is either the stale case or a
-            // missing module — the read-back tells the two apart.
+            // missing module — the read-back tells the two apart. A delivery
+            // replaces the recorded one; an edit by hand leaves it standing.
             let changed = tx.execute(
                 "UPDATE surface_modules
-                 SET source = ?1, revision = revision + 1, updated_at = ?2
+                 SET source = ?1, revision = revision + 1, updated_at = ?2,
+                     delivery_json = COALESCE(?5, delivery_json)
                  WHERE id = ?3 AND revision = ?4",
-                params![&source, &now_str, id.to_string(), expected_revision],
+                params![
+                    &source,
+                    &now_str,
+                    id.to_string(),
+                    expected_revision,
+                    encode_delivery(delivery.as_ref()),
+                ],
             )?;
             if changed == 1 {
                 tx.execute(
@@ -535,14 +600,15 @@ impl SurfaceStore for SqliteStorage {
             let tx = conn.unchecked_transaction()?;
             tx.execute(
                 "INSERT INTO surfaces
-                     (id, session_id, title, created_at, updated_at, library_entry_id, seeded_at, seeded_from_name)
-                 VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?4, (SELECT name FROM surface_library_entries WHERE id = ?5))",
+                     (id, session_id, title, created_at, updated_at, library_entry_id, seeded_at, seeded_from_name, shape_only)
+                 VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?4, (SELECT name FROM surface_library_entries WHERE id = ?5), ?6)",
                 params![
                     id.to_string(),
                     surface.session_id.to_string(),
                     &surface.title,
                     &now_str,
                     entry_id.to_string(),
+                    seeding == LibrarySeeding::ShapeOnly,
                 ],
             )?;
             let seeds: Vec<LibraryEntryModule> = {
@@ -588,6 +654,7 @@ impl SurfaceStore for SqliteStorage {
                 title: surface.title,
                 created_at: now,
                 updated_at: now,
+                shape_only: seeding == LibrarySeeding::ShapeOnly,
                 library_entry_id: Some(entry_id),
                 seeded_from_name: Some(seeded_from_name),
                 seeded_at: Some(now),
@@ -714,11 +781,77 @@ mod tests {
                     kind: "document".into(),
                     position: position as i32,
                     source: (*source).into(),
+                    delivery: None,
                 })
                 .await
                 .unwrap();
         }
         surface
+    }
+
+    /// A delivered module records what delivered it and when; one written
+    /// by hand records nothing, and the record survives a re-read.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_appended_module_keeps_its_delivery_and_a_hand_written_one_has_none() {
+        let (storage, _topic, session) = make_session().await;
+        let surface = surface_with_modules(&storage, session, &[]).await;
+        let delivery = ModuleDelivery::ScheduleRun {
+            run_id: Uuid::new_v4(),
+            schedule_id: Uuid::new_v4(),
+            delivered_at: Utc::now(),
+        };
+        let delivered = storage
+            .append_surface_module(
+                surface.id,
+                "document",
+                "# Delivered",
+                Some(delivery.clone()),
+            )
+            .await
+            .unwrap();
+        let by_hand = storage
+            .append_surface_module(surface.id, "document", "# Mine", None)
+            .await
+            .unwrap();
+        assert_eq!(delivered.delivery, Some(delivery.clone()));
+        assert_eq!(by_hand.delivery, None);
+
+        let listed = storage.list_surface_modules(surface.id).await.unwrap();
+        assert_eq!(listed[0].delivery, Some(delivery.clone()));
+        assert_eq!(listed[1].delivery, None);
+
+        // An edit by hand keeps the delivery; a replace that is itself a
+        // delivery records the new one.
+        let edited = match storage
+            .replace_surface_module_source(delivered.id, delivered.revision, "# Edited", None)
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            ModuleSourceReplacement::Replaced(module) => module,
+            ModuleSourceReplacement::Stale(_) => panic!("the revision was the one read"),
+        };
+        assert_eq!(edited.delivery, Some(delivery));
+        let again = ModuleDelivery::ScheduleRun {
+            run_id: Uuid::new_v4(),
+            schedule_id: Uuid::new_v4(),
+            delivered_at: Utc::now(),
+        };
+        let redelivered = match storage
+            .replace_surface_module_source(
+                edited.id,
+                edited.revision,
+                "# Fresh",
+                Some(again.clone()),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            ModuleSourceReplacement::Replaced(module) => module,
+            ModuleSourceReplacement::Stale(_) => panic!("the revision was the one read"),
+        };
+        assert_eq!(redelivered.delivery, Some(again));
     }
 
     /// Save a surface the way the gateway does: its modules copied in order.
@@ -782,7 +915,7 @@ mod tests {
         assert_eq!(module.revision, 0, "a new module starts at revision 0");
 
         let outcome = storage
-            .replace_surface_module_source(module.id, module.revision, "after")
+            .replace_surface_module_source(module.id, module.revision, "after", None)
             .await
             .unwrap()
             .expect("the module exists");
@@ -804,13 +937,13 @@ mod tests {
         let surface = surface_with_modules(&storage, session, &["draft"]).await;
         let module = storage.list_surface_modules(surface.id).await.unwrap()[0].clone();
         storage
-            .replace_surface_module_source(module.id, 0, "the agent's edit")
+            .replace_surface_module_source(module.id, 0, "the agent's edit", None)
             .await
             .unwrap();
 
         // An editor opened at revision 0 saves after the agent's edit landed.
         let outcome = storage
-            .replace_surface_module_source(module.id, 0, "the person's edit")
+            .replace_surface_module_source(module.id, 0, "the person's edit", None)
             .await
             .unwrap()
             .expect("the module exists");
@@ -831,7 +964,7 @@ mod tests {
 
         assert!(
             storage
-                .replace_surface_module_source(Uuid::new_v4(), 0, "x")
+                .replace_surface_module_source(Uuid::new_v4(), 0, "x", None)
                 .await
                 .unwrap()
                 .is_none(),
@@ -1091,7 +1224,7 @@ mod tests {
         // entry nor the other.
         let module = storage.list_surface_modules(with_content.id).await.unwrap()[0].clone();
         storage
-            .replace_surface_module_source(module.id, module.revision, "## Today")
+            .replace_surface_module_source(module.id, module.revision, "## Today", None)
             .await
             .unwrap();
         assert_eq!(

@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 use super::{
     AgentBuilder, AgentConfig, AgentError, AgentEvent, AppState, Arc, CancellationToken,
     ChatMessage, GatewayDelegationHandler, GatewayError, SandboxGuard, ServerEvent, ToolDispatcher,
-    TurnRequest, TurnState, Uuid, WorkflowAgentCallResolution, build_approval_registrar,
+    TurnRequest, TurnState, Uuid, WorkflowAttemptResolution, build_approval_registrar,
     build_permission_config, mpsc, record_agent_call_attempt_before_execution,
     record_effort_snapshot, record_terminal_state_and_release, resolve_model_catalogue_entry,
     shutdown_sandbox_guard,
@@ -141,7 +141,7 @@ pub(super) async fn launch_turn_runtime(
         if let Some(resolved) = effort.as_ref() {
             record_effort_snapshot(report_json, resolved);
         }
-        let resolution = WorkflowAgentCallResolution {
+        let resolution = WorkflowAttemptResolution {
             model: Some(model_name.to_owned()),
             effort: effort
                 .as_ref()
@@ -250,12 +250,12 @@ pub(super) async fn launch_turn_runtime(
             record_effort_snapshot(report_json, resolved);
         }
         // The dispatch record names what the call *asked* for; what the
-        // turn actually resolved is only known here, so it is stamped onto
-        // the same journal entry as a second field rather than by rewriting
-        // the dispatch one. Each turn appends its own attempt, so a call
+        // turn actually resolved is only known here, so it is written over
+        // the attempt the run opened for this turn rather than into the
+        // dispatch record. Each turn resolves its own attempt, so a call
         // replay re-dispatched keeps the interrupted attempt beside the one
         // that follows it.
-        let resolution = WorkflowAgentCallResolution {
+        let resolution = WorkflowAttemptResolution {
             model: Some(model_name.to_owned()),
             effort: effort
                 .as_ref()

@@ -1230,10 +1230,12 @@ async fn native_file_write_respects_attachment_access_on_local_and_sandboxed_tur
                     )
                     .await;
                 if writable {
-                    assert_eq!(
-                        result.unwrap()["output"],
+                    let expected = if path == "existing.txt" {
+                        format!("Wrote 13 bytes to {path}; replaced 8 bytes")
+                    } else {
                         format!("Wrote 13 bytes to {path}")
-                    );
+                    };
+                    assert_eq!(result.unwrap()["output"], expected);
                     assert_eq!(
                         std::fs::read_to_string(root.path().join(path)).unwrap(),
                         "denied-probe\n"

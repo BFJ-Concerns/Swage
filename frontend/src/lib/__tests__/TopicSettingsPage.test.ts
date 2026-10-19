@@ -343,4 +343,21 @@ describe("TopicSettingsPage", () => {
     expect(topicsApi.updateTopic).toHaveBeenCalledWith("topic-1", { tags: ["ops", "daily"] });
     expect(document.body.textContent).toContain("Saved.");
   });
+  it("distinguishes same-name defaults and choices by save time and origin", async () => {
+    const times = ["2026-10-01T10:00:00Z", "2026-10-02T10:00:00Z"];
+    const entries = times.map((updated_at, i) => ({ id: String(i), name: "Plan", description: "Plan", tags: [], updated_at, origin_topic_deleted: false }));
+    vi.mocked(surfacesApi.listLibrary).mockResolvedValue({ entries });
+    vi.mocked(surfacesApi.listTopicDefaultSurfaces).mockResolvedValue({ entries: [entries[0]] });
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "surfaces" } });
+    await flushUi();
+    for (const [label, savedAt] of [["Default surfaces", times[0]], ["Surface library", times[1]]]) {
+      const rows = document.querySelectorAll(`[aria-label="${label}"] .record-row`);
+      expect(rows).toHaveLength(1);
+      const timestamp = rows[0].querySelector("time");
+      expect(timestamp?.dateTime, `${label} row save time`).toBe(savedAt);
+      expect(timestamp?.textContent).toContain(savedAt);
+    }
+    expect(document.body.textContent?.match(/General/g)).toHaveLength(2);
+  });
+
 });
