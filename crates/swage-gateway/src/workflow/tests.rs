@@ -19474,28 +19474,59 @@ async fn run_accounts_start_observes_immediate_outcomes() {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
     let (state, _) = scripted_state(&storage, vec![]);
-    let session = storage
-        .create_session(swage_storage::fixtures::new_session(topic.id))
-        .await
-        .expect("session");
     for (source, expected) in [
         ("return 42;", "completed"),
         ("await agent('bad', {bogusOption: true});", "failed"),
     ] {
-        let before = chrono::Utc::now();
-        let result = GatewayWorkflowLauncher::new(state.clone())
-            .start_inline(session.id, source, Value::Null, None, false)
+        let session = storage
+            .create_session(swage_storage::fixtures::new_session(topic.id))
             .await
-            .expect("start");
-        assert_eq!(
-            result["state"], expected,
-            "the start result must observe an immediately settled run"
-        );
+            .expect("session");
+        let pause = workflow_pause_test_hook::install("start-snapshot-read", session.id);
+        let launcher = GatewayWorkflowLauncher::new(state.clone());
+        // Waiting for settlement tests the terminal result, not whether the
+        // executor happened to finish within the launcher's 25 ms grace period.
+        let start = tokio::spawn(async move {
+            launcher
+                .start_inline(session.id, source, Value::Null, None, true)
+                .await
+                .expect("start")
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.acquire())
+            .await
+            .expect("start snapshot reached")
+            .expect("pause remains open")
+            .forget();
+        let record = storage
+            .list_workflow_runs(topic.id)
+            .await
+            .expect("runs")
+            .into_iter()
+            .find(|run| run.dispatching_session_id == Some(session.id))
+            .expect("launched run");
+        let (_, following_observation) = storage
+            .get_workflow_run_observation(record.id)
+            .await
+            .expect("following observation")
+            .expect("run");
+        pause.release.add_permits(1);
+        let result = start.await.expect("launcher finished");
+        assert_eq!(result["state"], expected);
         let observed = chrono::DateTime::parse_from_rfc3339(
             result["status_as_of"].as_str().expect("observation time"),
         )
         .expect("timestamp");
-        assert!(observed >= before && observed <= chrono::Utc::now());
+        assert!(
+            observed
+                >= record
+                    .completed_at
+                    .expect("settled run has completion time"),
+            "status_as_of must include the completion visible in its snapshot"
+        );
+        assert!(
+            observed <= following_observation,
+            "status_as_of must be captured with the snapshot, not later when returning it"
+        );
         if expected == "completed" {
             assert_eq!(result["final_output"], 42);
             assert_eq!(result["workers_dispatched"], 0);
