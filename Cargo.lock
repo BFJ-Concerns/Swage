@@ -2976,6 +2976,7 @@ dependencies = [
  "jsonschema",
  "libc",
  "mime_guess",
+ "percent-encoding",
  "rand 0.10.2",
  "reqwest",
  "rusqlite",

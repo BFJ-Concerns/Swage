@@ -2,6 +2,9 @@
 // manifest (crates/swage-protocol/src/client/routes.rs). Do not edit:
 // change the manifest and regenerate.
 
+import type { ChannelLinkCodeListResponse } from "./ChannelLinkCodeListResponse";
+import type { ChannelLinkListResponse } from "./ChannelLinkListResponse";
+import type { ChannelStatusListResponse } from "./ChannelStatusListResponse";
 import type { ConversationBranchListResponse } from "./ConversationBranchListResponse";
 import type { ConversationBranchResponse } from "./ConversationBranchResponse";
 import type { ConversationDetail } from "./ConversationDetail";
@@ -28,6 +31,7 @@ import type { MoveSurfaceModuleRequest } from "./MoveSurfaceModuleRequest";
 import type { ProviderSignInState } from "./ProviderSignInState";
 import type { RecentSessionsResponse } from "./RecentSessionsResponse";
 import type { RelinkWorkspaceAttachmentRequest } from "./RelinkWorkspaceAttachmentRequest";
+import type { RenameSurfaceRequest } from "./RenameSurfaceRequest";
 import type { RestartStatusResponse } from "./RestartStatusResponse";
 import type { SaveProviderSettings } from "./SaveProviderSettings";
 import type { SaveSettingsRequest } from "./SaveSettingsRequest";
@@ -74,6 +78,21 @@ async function request<T>(
     return undefined as T;
   }
   return (await response.json()) as T;
+}
+
+/** List channel statuses. */
+export async function listChannelStatuses(): Promise<ChannelStatusListResponse> {
+  return request<ChannelStatusListResponse>("GET", `/api/channels`);
+}
+
+/** List linked channel conversations. */
+export async function listChannelLinks(): Promise<ChannelLinkListResponse> {
+  return request<ChannelLinkListResponse>("GET", `/api/onboarding/channels`);
+}
+
+/** Read unredeemed channel link codes. */
+export async function listChannelLinkCodes(): Promise<ChannelLinkCodeListResponse> {
+  return request<ChannelLinkCodeListResponse>("GET", `/api/onboarding/channels/link-codes`);
 }
 
 /** List every topic. */
@@ -243,6 +262,16 @@ export async function removeTopicDefaultSurface(topicId: string, entryId: string
 /** Read a surface. */
 export async function getSurface(surfaceId: string): Promise<SurfaceResponse> {
   return request<SurfaceResponse>("GET", `/api/surfaces/${encodeURIComponent(surfaceId)}`);
+}
+
+/** Rename this session's surface. */
+export async function renameSurface(surfaceId: string, body: RenameSurfaceRequest): Promise<SurfaceResponse> {
+  return request<SurfaceResponse>("POST", `/api/surfaces/${encodeURIComponent(surfaceId)}`, body);
+}
+
+/** Resolve a note while keeping it in the record. */
+export async function resolveSurfaceAnnotation(surfaceId: string, annotationId: string): Promise<SurfaceAnnotationView> {
+  return request<SurfaceAnnotationView>("POST", `/api/surfaces/${encodeURIComponent(surfaceId)}/annotations/${encodeURIComponent(annotationId)}/resolve`);
 }
 
 /** Write a surface module: append one, or replace one's source against the revision read — a moved-on revision is refused with the module as it now stands. */

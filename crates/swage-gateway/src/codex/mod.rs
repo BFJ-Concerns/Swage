@@ -1007,7 +1007,7 @@ async fn handle_approval(
 fn path_allowed(path: &Path, roots: &[std::path::PathBuf]) -> bool {
     roots
         .iter()
-        .any(|root| crate::tool::workspace::validate_path(root, &path.to_string_lossy()).is_ok())
+        .any(|root| crate::tool::workspace::validate_path(root, path).is_ok())
 }
 
 async fn record_audit(
@@ -1233,10 +1233,12 @@ mod tests {
             event_tx,
             cancellation,
         };
-        let result =
-            tokio::time::timeout(std::time::Duration::from_secs(3), run_turn(state, request))
-                .await
-                .expect("scripted turn timed out");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            Box::pin(run_turn(state, request)),
+        )
+        .await
+        .expect("scripted turn timed out");
         let frames =
             match tokio::time::timeout(std::time::Duration::from_millis(100), &mut server).await {
                 Ok(server) => server
