@@ -142,7 +142,7 @@ vi.mock("../lib/api/materials", () => ({
 }));
 
 vi.mock("../lib/api/sessions", () => ({
-  listRecentSessions: vi.fn(async () => []),
+  listRecentSessions: vi.fn(),
 }));
 
 vi.mock("../lib/api/operator", () => ({
@@ -391,7 +391,9 @@ describe("App", () => {
 
   beforeEach(() => {
     websocketHarness.reset();
-    vi.clearAllMocks();
+    // Discard unused one-shot responses as well as calls between journeys.
+    vi.resetAllMocks();
+    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValue([]);
     setPath("/");
     delete window.swageDesktop;
     localStorage.clear();
@@ -1260,7 +1262,10 @@ describe("App", () => {
   it("submits the refreshed inherited topic default after a settings save", async () => {
     const topic = makeTopic({ effective_default_model: "old-model" });
     const entry = { provider_id: "local", model_id: "wire", aliases: [], generation_preset: null };
-    const before = makeSettings({ "old-model": entry, "new-model": entry });
+    const before = makeSettings({
+      "old-model": { ...entry, model_id: "old-model" },
+      "new-model": { ...entry, model_id: "new-model" },
+    });
     before.default_model = "old-model";
     const saved = structuredClone(before);
     saved.default_model = "new-model";
