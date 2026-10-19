@@ -9,8 +9,10 @@
 //! host-call pair that a [`HostCalls`] implementation answers. A program with
 //! no host has no door at all. Language stays: `eval` and `Function` compile
 //! source in the same caged realm and reach nothing the realm does not.
-//! The prototype's locale methods (`toLocaleString`, `localeCompare`)
-//! remain and follow the host's default locale.
+//! The locale methods the prototypes carry (`toLocaleString`,
+//! `localeCompare`, `toLocaleLowerCase`, `toLocaleUpperCase`) read the host's
+//! default locale, so the cage replaces each with the same loud failure as
+//! `Math.random`: a program that needs locale-aware text gets a host call.
 //!
 //! Two limits bound every program: a heap ceiling, and a ceiling on how long it
 //! may execute without yielding to the host. Crossing either terminates the
@@ -210,8 +212,10 @@ extension!(
 /// removes every global that reaches outside the program or makes runs differ
 /// — the engine's host object and the `console` it built on a print op, the
 /// clocks, the `Intl` constructors, WebAssembly, shared memory and the GC
-/// observers — and replaces `Math.random` with a loud failure. A program that
-/// needs output or a clock gets a host call; the cage never polyfills.
+/// observers — and replaces `Math.random` and the prototypes' locale methods
+/// with a loud failure, since each answers from the host rather than the
+/// program. A program that needs output, a clock or locale-aware text gets a
+/// host call; the cage never polyfills.
 const CAGE: &str = r#"
 (() => {
     const core = globalThis.Deno && globalThis.Deno.core;
@@ -236,18 +240,35 @@ const CAGE: &str = r#"
     ]) {
         delete globalThis[name];
     }
-    Object.defineProperty(Math, "random", {
-        value: () => {
-            const error = new Error(
-                "Math.random is not available: a Swage script must be deterministic, so its runs can be replayed"
-            );
-            error.name = "NondeterministicCallError";
-            throw error;
-        },
-        configurable: false,
-        enumerable: false,
-        writable: false,
-    });
+    const refuse = (owner, name, label, why) => {
+        Object.defineProperty(owner, name, {
+            value: () => {
+                const error = new Error(`${label} is not available: ${why}`);
+                error.name = "NondeterministicCallError";
+                throw error;
+            },
+            configurable: false,
+            enumerable: false,
+            writable: false,
+        });
+    };
+    refuse(
+        Math, "random", "Math.random",
+        "a Swage script must be deterministic, so its runs can be replayed"
+    );
+    const hostLocale =
+        "it reads the host's locale, so a Swage script's runs would differ between machines";
+    for (const [owner, label, names] of [
+        [Number.prototype, "Number.prototype", ["toLocaleString"]],
+        [BigInt.prototype, "BigInt.prototype", ["toLocaleString"]],
+        [Array.prototype, "Array.prototype", ["toLocaleString"]],
+        [Object.getPrototypeOf(Int8Array.prototype), "TypedArray.prototype", ["toLocaleString"]],
+        [String.prototype, "String.prototype", ["localeCompare", "toLocaleLowerCase", "toLocaleUpperCase"]],
+    ]) {
+        for (const name of names) {
+            refuse(owner, name, `${label}.${name}`, hostLocale);
+        }
+    }
 })();
 "#;
 
@@ -614,6 +635,53 @@ mod tests {
             random.starts_with("NondeterministicCallError: Math.random is not available"),
             "{random}"
         );
+    }
+
+    /// Every locale method the prototypes carry is refused by name — an
+    /// explicit locale argument included, since locale-aware text is the
+    /// host's to produce — and the refusal is the cage's one error name.
+    #[test]
+    fn the_cage_refuses_every_locale_method_on_the_prototypes() {
+        let mut program = program();
+        let outcomes = program
+            .execute_for_string(
+                "test",
+                r#"[
+                    () => (1234.5).toLocaleString(),
+                    () => (1234.5).toLocaleString("en-US"),
+                    () => 10n.toLocaleString(),
+                    () => [1, 2].toLocaleString(),
+                    () => new Int8Array([1]).toLocaleString(),
+                    () => "a".localeCompare("b"),
+                    () => "I".toLocaleLowerCase(),
+                    () => "i".toLocaleUpperCase(),
+                ].map((call) => {
+                    try { call(); return "returned"; }
+                    catch (error) { return error.name + ": " + error.message; }
+                }).join("\n")"#
+                    .to_owned(),
+            )
+            .expect("runs");
+        let refused = [
+            "Number.prototype.toLocaleString",
+            "Number.prototype.toLocaleString",
+            "BigInt.prototype.toLocaleString",
+            "Array.prototype.toLocaleString",
+            "TypedArray.prototype.toLocaleString",
+            "String.prototype.localeCompare",
+            "String.prototype.toLocaleLowerCase",
+            "String.prototype.toLocaleUpperCase",
+        ];
+        let outcomes: Vec<&str> = outcomes.lines().collect();
+        assert_eq!(outcomes.len(), refused.len(), "{outcomes:?}");
+        for (outcome, label) in outcomes.iter().zip(refused) {
+            assert!(
+                outcome.starts_with(&format!(
+                    "NondeterministicCallError: {label} is not available"
+                )),
+                "{label}: {outcome}"
+            );
+        }
     }
 
     /// The allow-list: every own name of the caged global object. A new
