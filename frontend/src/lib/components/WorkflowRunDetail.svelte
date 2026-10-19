@@ -10,6 +10,7 @@
   never reported reads "not recorded" with its reason, never as zero spend.
 -->
 <script lang="ts">
+  import { formatRunTime, formatRunDuration } from "../run-times";
   import { conversationPath } from "../router";
   import type { WorkflowJournalEntry } from "../protocol/WorkflowJournalEntry";
   import type { WorkflowRunDetailResponse } from "../protocol/WorkflowRunDetailResponse";
@@ -211,8 +212,8 @@
           {/if}
           {#if call.liveness}
             <dl class="liveness">
-              <dt>Started</dt><dd>{call.liveness.started_at}</dd>
-              <dt>First evidence</dt><dd>{call.liveness.first_evidence_at ?? "Not yet recorded"}</dd>
+              <dt>Started</dt><dd>{@render recordedTime(call.liveness.started_at)}</dd>
+              <dt>First evidence</dt><dd>{#if call.liveness.first_evidence_at}{@render recordedTime(call.liveness.first_evidence_at)}{:else}Not yet recorded{/if}</dd>
             </dl>
           {/if}
           <dl>
@@ -234,6 +235,7 @@
                   <th>Round</th>
                   <th>Started</th>
                   <th>Ended</th>
+                  <th>Duration</th>
                   <th>Outcome</th>
                 </tr>
               </thead>
@@ -242,8 +244,9 @@
                   <tr>
                     <td class="numeric">{round.attempt}</td>
                     <td class="numeric">{round.round}</td>
-                    <td>{round.started_at}</td>
-                    <td>{round.completed_at ?? "—"}</td>
+                    <td>{@render recordedTime(round.started_at)}</td>
+                    <td>{#if round.completed_at}{@render recordedTime(round.completed_at)}{:else}—{/if}</td>
+                    <td>{round.completed_at ? formatRunDuration(round.started_at, round.completed_at) : "—"}</td>
                     <td>{roundLabel(round)}</td>
                   </tr>
                 {/each}
@@ -255,6 +258,10 @@
     </ul>
   {/if}
 </section>
+
+{#snippet recordedTime(stamp: string)}
+  <time datetime={stamp} title={stamp}>{formatRunTime(stamp)}</time>
+{/snippet}
 
 <style>
   .run-detail {

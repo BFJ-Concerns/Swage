@@ -67,6 +67,22 @@ function emptyAccount(ending: WorkflowRunEnding): WorkflowRunTerminalAccount {
 describe("WorkflowRunView", () => {
   let component: MountedComponent | undefined;
 
+  it("renders run, interruption and cancellation times locally with exact stamps", () => {
+    const start = "2026-10-01T19:28:49.393288230Z";
+    const end = "2026-10-01T19:30:49.393288230Z";
+    const account = emptyAccount({ ending: "cancelled" });
+    account.cancellation = { source: "API request", requested_at: end };
+    component = render({ ...run(account), created_at: start, completed_at: end,
+      interruptions: [{ detected_at: start, run_state: "running" }] });
+    expect(document.querySelectorAll("time")).toHaveLength(4);
+    for (const time of document.querySelectorAll("time")) {
+      const stamp = time.getAttribute("datetime")!;
+      expect(time.title).toBe(stamp);
+      expect(time.textContent).toBe(new Date(stamp).toLocaleString());
+      expect(time.textContent).not.toBe(stamp);
+    }
+  });
+
   it("run accounts preserve the author defect and hide empty partial results", () => {
     const account = emptyAccount({ ending: "author_error", error: "UnknownAgentOptionError: unknown option bogusOption" });
     account.partial_results = { reason: "no result", results: [] };
@@ -85,7 +101,8 @@ describe("WorkflowRunView", () => {
     expect(getComputedStyle(document.querySelector(".detail")!).textTransform).toBe("none");
     const text = document.querySelector(".ending")?.textContent;
     expect(text).toContain("API request");
-    expect(text).toContain("2026-10-15T10:00:00Z");
+    expect(text).toContain(new Date("2026-10-15T10:00:00Z").toLocaleString());
+    expect(document.querySelector(".ending time")?.getAttribute("datetime")).toBe("2026-10-15T10:00:00Z");
     expect(text).toContain("operator");
     expect(text).toContain("session-1");
   });
@@ -294,8 +311,8 @@ describe("run page completeness", () => {
     const header = document.querySelector(".run header")!;
     expect(header.textContent).toContain("three-whys");
     expect(header.textContent).toContain("run-own");
-    expect(header.textContent).toContain("2026-09-02T10:00:00Z");
-    expect(header.textContent).toContain("2026-09-02T10:05:00Z");
+    expect(header.textContent).toContain(new Date("2026-09-02T10:00:00Z").toLocaleString());
+    expect(header.textContent).toContain(new Date("2026-09-02T10:05:00Z").toLocaleString());
     expect(header.querySelector("a")?.getAttribute("href")).toBe("/conversations/parent-session");
   });
 
@@ -323,7 +340,7 @@ describe("run page completeness", () => {
     page = mount(WorkflowRunView, { target: document.body, props: { detail: parked, loadState: "loaded", errorMessage: "" } });
     const awaited = document.querySelector(".awaited")!;
     expect(awaited).not.toBeNull();
-    if (kind === "timer") expect(awaited.textContent).toContain("2026-09-03T10:00:00Z");
+    if (kind === "timer") expect(awaited.textContent).toContain(new Date("2026-09-03T10:00:00Z").toLocaleString());
     if (kind === "hold") {
       expect(awaited.textContent).toContain("Ship the findings?");
       expect(awaited.textContent).toContain("approve, postpone");

@@ -115,6 +115,29 @@ async function render(detail: WorkflowRunDetailResponse): Promise<void> {
 }
 
 describe("WorkflowRunDetail", () => {
+  it("renders liveness and provider times locally while retaining exact stamps", async () => {
+    const started = "2026-10-01T19:28:49.393288230Z";
+    const ended = "2026-10-01T19:28:50.893288230Z";
+    await render(runWith({
+      ...baseCall,
+      liveness: { started_at: started, first_evidence_at: ended },
+      provider_rounds: [{ ...baseCall.provider_rounds![0], started_at: started, completed_at: ended }],
+    } as WorkflowAgentCallDetail));
+    for (const selector of [".liveness", ".rounds"]) {
+      const surface = document.querySelector(selector)!;
+      expect(surface.querySelectorAll("time")).toHaveLength(2);
+      for (const time of surface.querySelectorAll("time")) {
+        const stamp = time.getAttribute("datetime")!;
+        expect(time.title).toBe(stamp);
+        expect(time.textContent).toBe(new Date(stamp).toLocaleString());
+        expect(time.textContent).not.toBe(stamp);
+      }
+    }
+    expect(document.querySelector(".rounds tbody")?.textContent).toContain(
+      `${(1.5).toLocaleString(undefined, { maximumFractionDigits: 1 })} s`,
+    );
+  });
+
   it("shows what the worker was dispatched with and what it resolved", async () => {
     await render(runWith(baseCall));
 
@@ -400,7 +423,7 @@ describe("WorkflowRunDetail", () => {
     // The interrupted round ended when nothing could answer it any more, so
     // the Ended cell carries that time rather than a dash.
     const interruptedEnd = rows[1].querySelectorAll("td")[3].textContent;
-    expect(interruptedEnd).toContain("2026-09-02T10:04:07Z");
+    expect(interruptedEnd).toContain(new Date("2026-09-02T10:04:07Z").toLocaleString());
     expect(interruptedEnd).not.toContain("—");
     expect(document.querySelector(".attempts")!.textContent).toContain("2");
     // The call ran to its end on the last attempt, and that is what "ran
@@ -422,8 +445,8 @@ describe("complete worker detail", () => {
     expect(attempts[1].textContent).toContain("later-model, low");
     expect(attempts[0].querySelector("a")?.getAttribute("href")).toBe("/conversations/earlier-session");
     expect(attempts[1].querySelector("a")?.getAttribute("href")).toBe("/conversations/later-session");
-    expect(document.querySelector(".liveness")?.textContent).toContain("2026-09-02T11:00:00Z");
-    expect(document.querySelector(".liveness")?.textContent).toContain("2026-09-02T11:00:04Z");
+    expect(document.querySelector(".liveness")?.textContent).toContain(new Date("2026-09-02T11:00:00Z").toLocaleString());
+    expect(document.querySelector(".liveness")?.textContent).toContain(new Date("2026-09-02T11:00:04Z").toLocaleString());
     expect(document.body.textContent).toContain("narrowed nothing");
     expect(document.body.textContent).toContain("/Worktree/ExactCase");
     expect(document.querySelector('a[href="/conversations/worker-session"]')).not.toBeNull();
