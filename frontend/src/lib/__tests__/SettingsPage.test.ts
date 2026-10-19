@@ -152,6 +152,7 @@ function emptySettings(): SettingsResponse {
     },
     sessions: { archive_after_days: 7 },
     memory: { curator_idle_minutes: 10 },
+    attachments: { accepted_schemes: ["https", "data"] },
     voice: {},
     restart_required: false,
     can_restart: false,
@@ -189,6 +190,7 @@ describe("SettingsPage", () => {
       communication: payload.communication ?? emptySettings().communication,
       sessions: payload.sessions ?? emptySettings().sessions,
       memory: payload.memory ?? emptySettings().memory,
+      attachments: payload.attachments ?? emptySettings().attachments,
       voice: payload.voice ?? emptySettings().voice,
       restart_required: true,
       can_restart: false,
@@ -210,6 +212,23 @@ describe("SettingsPage", () => {
     component = undefined;
     document.body.innerHTML = "";
     vi.clearAllMocks();
+  });
+
+  it("labels the provider password input as API key", async () => {
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue({
+      ...emptySettings(),
+      providers: { google: {
+        protocol: "google", base_url: null, api_key: "", api_key_env: null,
+        has_credential: false,
+      } },
+      default_provider: "google",
+    });
+    component = mount(SettingsPage, { target: document.body, props: { tab: "providers" } });
+    await flushUi();
+
+    const input = document.querySelector<HTMLInputElement>('.provider-section input[type="password"]');
+    expect(input).not.toBeNull();
+    expect(input?.closest(".field")?.querySelector(".key")?.firstChild?.textContent).toBe("API key");
   });
 
   it("refuses invalid provider URL drafts before autosave and accepts corrections or clearing", async () => {
@@ -854,6 +873,17 @@ describe("SettingsPage", () => {
       gate: null,
     });
     expect(document.body.textContent).not.toContain("Select a topic before scheduling work.");
+  });
+
+  it("autosaves edited image reference schemes from Automation", async () => {
+    component = mount(SettingsPage, { target: document.body, props: { tab: "automation" } });
+    await flushUi();
+    const field = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Accepted image reference schemes"]');
+    expect(field?.value).toBe("https\ndata");
+    field!.value = "https\nhttp\ncustom+image";
+    field!.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    expect(settingsApi.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ attachments: { accepted_schemes: ["https", "http", "custom+image"] } }));
   });
 
   it("saves the session archive delay from the automation tab", async () => {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { SETTINGS_LABELS } from "../../settings-labels";
   import type { SettingsResponse } from "../../types";
   import { checkSpeechModel } from "../../api/workflows";
   interface Props {
@@ -36,8 +37,8 @@
 </script>
 
 <p class="prereq">Voice speaks to the default provider's endpoint, which must use the OpenAI protocol and serve the audio models named here. Leave a model empty to turn that capability off.</p>
-<div class="field"><div class="key">Transcription model<small>Model id sent with speech-to-text requests, such as whisper-1.</small></div><div class="val"><input type="text" class="text" aria-label="Transcription model" disabled={checking || saving} value={settings.voice.transcription_model ?? ""} oninput={(event) => setModel("transcription_model", event.currentTarget.value)} placeholder="Not set" autocomplete="off"/></div></div>
-<div class="field"><div class="key">Speech model<small>Model id sent with text-to-speech requests, such as tts-1.</small></div><div class="val speech"><input type="text" class="text" aria-label="Speech model" disabled={checking || saving} value={settings.voice.speech_model ?? ""} oninput={(event) => setModel("speech_model", event.currentTarget.value)} placeholder="Not set" autocomplete="off"/>
+<div class="field"><div class="key">{SETTINGS_LABELS["voice.transcription_model"]}<small>Model id sent with speech-to-text requests, such as whisper-1.</small></div><div class="val"><input type="text" class="text" aria-label={SETTINGS_LABELS["voice.transcription_model"]} disabled={checking || saving} value={settings.voice.transcription_model ?? ""} oninput={(event) => setModel("transcription_model", event.currentTarget.value)} placeholder="Not set" autocomplete="off"/></div></div>
+<div class="field"><div class="key">{SETTINGS_LABELS["voice.speech_model"]}<small>Model id sent with text-to-speech requests, such as tts-1.</small></div><div class="val speech"><input type="text" class="text" aria-label={SETTINGS_LABELS["voice.speech_model"]} disabled={checking || saving} value={settings.voice.speech_model ?? ""} oninput={(event) => setModel("speech_model", event.currentTarget.value)} placeholder="Not set" autocomplete="off"/>
   <button type="button" class="btn" disabled={checking || saving || !settings.voice.speech_model} onclick={checkSpeech}>{checking ? "Checking speech…" : "Check speech model"}</button>
   <small>The check saves these settings and requests a short audio sample from the default provider. Provider charges may apply.</small>
   {#if result && result.model === settings.voice.speech_model}
