@@ -672,7 +672,15 @@ async fn track_delegated_session(
                     let result = execution.await;
                     announce_delegated_outcome(state, session_id, turn_id, &result).await;
                     state.active_turns.lock().await.remove(&session_id);
-                    crate::turn_queue::spawn_drain(state.clone(), session_id);
+                    match state.storage.get_turn(turn_id).await {
+                        Ok(Some(turn)) => {
+                            if crate::turn_queue::drains_queue_after(turn.state) {
+                                crate::turn_queue::spawn_drain(state.clone(), session_id);
+                            }
+                        }
+                        Err(error) => tracing::warn!(%turn_id, %error, "could not read delegated outcome for queue drain"),
+                        _ => {}
+                    }
                     result
                 }
                 Err(_) => execution.await,
@@ -682,9 +690,18 @@ async fn track_delegated_session(
             // Completion can win the same poll that published the address.
             if let Ok(started) = started_rx.try_recv() {
                 let session_id = started.child_session_id;
-                announce_delegated_outcome(state, session_id, started.child_turn_id, &result).await;
+                let turn_id = started.child_turn_id;
+                announce_delegated_outcome(state, session_id, turn_id, &result).await;
                 if let Some(sender) = forward_started { let _ = sender.send(started); }
-                crate::turn_queue::spawn_drain(state.clone(), session_id);
+                match state.storage.get_turn(turn_id).await {
+                    Ok(Some(turn)) => {
+                        if crate::turn_queue::drains_queue_after(turn.state) {
+                            crate::turn_queue::spawn_drain(state.clone(), session_id);
+                        }
+                    }
+                    Err(error) => tracing::warn!(%turn_id, %error, "could not read delegated outcome for queue drain"),
+                    _ => {}
+                }
             }
             result
         },
@@ -1749,6 +1766,10 @@ mod settlement_tests {
             if shutdown {
                 crate::shutdown::shutdown_active_turns(&state).await;
             } else {
+                if ending == TurnState::Cancelled {
+                    super::super::cancel_turn(&state, session_id).await.unwrap();
+                    assert!(state.active_turns.lock().await[&session_id].is_cancelled());
+                }
                 state
                     .storage
                     .update_turn_state(turn.id, ending.clone())
@@ -1788,6 +1809,39 @@ mod settlement_tests {
         .expect("tracked child should return its durable result");
         assert!(!state.active_turns.lock().await.contains_key(&session_id));
         (state, session_id, receiver)
+    }
+
+    #[tokio::test]
+    async fn delegated_stop_leaves_queued_message_without_starting_another_turn() {
+        for ending in [TurnState::Cancelled, TurnState::Interrupted] {
+            let (state, session_id, mut events) = tracked_child(ending, true, None).await;
+            // Let an incorrectly spawned drain run, including its next turn.
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(300), async {
+                while events.recv().await.is_some() {}
+            })
+            .await;
+            assert_eq!(
+                state
+                    .storage
+                    .list_queued_turn_inputs(session_id)
+                    .await
+                    .unwrap()
+                    .len(),
+                1,
+                "stopping a delegated child must leave its queued message standing"
+            );
+            let thread_id = state.storage.list_by_session(session_id).await.unwrap()[0].id;
+            assert_eq!(
+                state
+                    .storage
+                    .list_turns_by_thread(thread_id)
+                    .await
+                    .unwrap()
+                    .len(),
+                1,
+                "stopping a delegated child must not start another turn"
+            );
+        }
     }
 
     #[tokio::test]
