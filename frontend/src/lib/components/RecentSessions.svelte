@@ -56,6 +56,7 @@
       const loaded = await listRecentSessions(topicFilter, showArchived);
       if (generation !== loadGeneration) return;
       entries = loaded;
+      errorMessage = "";
       loadState = "loaded";
     } catch (error) {
       if (generation !== loadGeneration) return;
@@ -103,6 +104,7 @@
   }
 
   function isExpanded(entry: RecentSessionsEntry): boolean {
+    if (entry.automated.length === 0) return false;
     return groupExpanded[entryKey(entry)] ?? entry.source.kind !== "schedule";
   }
 
@@ -121,13 +123,17 @@
     return `${count} ${noun}${count === 1 ? "" : "s"}`;
   }
 
-  // Only what the session flags establish: a run with neither flag may have
-  // succeeded or failed, so it is reported as ended, never as completed.
   function latestOutcome(entry: RecentSessionsEntry): string {
     const latest = entry.automated[0];
     if (latest.has_running_turn) return "Running";
-    if (latest.has_interrupted_turn) return "Interrupted";
+    const outcome = sessionOutcomeLabel(latest.latest_turn_state);
+    if (outcome) return outcome;
+    if (latest.latest_turn_state === "completed") return "Completed";
     return `Last run ended ${relativeTime(latest.last_activity)}`;
+  }
+
+  function hasInterruptionHistory(entry: RecentSessionsEntry): boolean {
+    return entry.automated.some((session, index) => session.has_interrupted_turn && (index > 0 || session.latest_turn_state !== "interrupted"));
   }
 
   // A schedule's brief can run to paragraphs and paths; the heading takes its
@@ -206,6 +212,7 @@
     </button>
   </header>
 
+  {#if loadState === "loaded" && errorMessage}<p class="state error" role="alert">Could not refresh sessions: {errorMessage}</p>{/if}
   {#if loadState === "loading"}
     <p class="state">Loading sessions…</p>
   {:else if loadState === "error"}
@@ -251,6 +258,7 @@
             >
               <span class="disclosure" aria-hidden="true">{isExpanded(entry) ? "▾" : "▸"}</span>
               {groupCount(entry)} · {latestOutcome(entry)}
+              {#if hasInterruptionHistory(entry)}<span>· Previous response interrupted</span>{/if}
             </button>
           {/if}
 
@@ -389,6 +397,7 @@
   }
 
   .row:disabled {
+    opacity: 0.6;
     cursor: default;
   }
 

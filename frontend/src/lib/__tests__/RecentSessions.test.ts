@@ -7,6 +7,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, tick, unmount } from "svelte";
 
+import { compile } from "svelte/compiler";
+import recentSessionsSource from "../components/RecentSessions.svelte?raw";
 import RecentSessions from "../components/RecentSessions.svelte";
 import * as sessionsApi from "../api/sessions";
 import type { RecentSession } from "../protocol/RecentSession";
@@ -17,6 +19,20 @@ vi.mock("../api/sessions", () => ({
 }));
 
 type MountedComponent = ReturnType<typeof mount>;
+
+function installRecentSessionsStyles(): HTMLStyleElement {
+  // Match Vite's scope on the mounted DOM when installing the external CSS.
+  const scope = Array.from(document.querySelector(".recent-sessions")!.classList).find(name => name.startsWith("svelte-"))!;
+  const compiled = compile(recentSessionsSource, {
+    cssHash: () => scope,
+    filename: decodeURIComponent(new URL("../components/RecentSessions.svelte", import.meta.url).pathname),
+    generate: "client",
+  });
+  const style = document.createElement("style");
+  style.textContent = compiled.css?.code ?? "";
+  document.head.append(style);
+  return style;
+}
 
 function makeSession(overrides: Partial<RecentSession> = {}): RecentSession {
   return {
@@ -301,7 +317,7 @@ describe("RecentSessions schedule groups", () => {
   });
 
   it("reports a run with neither flag as ended, not completed", async () => {
-    component = await render([scheduleEntry({ has_interrupted_turn: true })]);
+    component = await render([scheduleEntry({ has_interrupted_turn: true, latest_turn_state: "interrupted" })]);
     expect(summaryText()).toBe("▸ 11 runs · Interrupted");
     unmount(component);
     document.body.replaceChildren();
@@ -372,5 +388,60 @@ describe("RecentSessions message previews", () => {
     component = mount(RecentSessions, { target: document.body, props: { onSelectSession: vi.fn() } });
     await settle();
     expect(document.querySelector(".row.nested .preview")?.textContent).toBe("Open child");
+  });
+});
+
+describe("RecentSessions outcome history and empty schedules", () => {
+  let component: MountedComponent | undefined;
+  let stylesheet: HTMLStyleElement | undefined;
+
+  async function flushRender(): Promise<void> {
+    await tick();
+    await Promise.resolve();
+    flushSync();
+  }
+
+  beforeEach(() => {
+    vi.mocked(sessionsApi.listRecentSessions).mockReset();
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    if (component) unmount(component);
+    component = undefined;
+    stylesheet?.remove();
+    stylesheet = undefined;
+    document.body.replaceChildren();
+  });
+
+  it("labels earlier interruptions as history rather than the latest run state", async () => {
+    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValue([{
+      source: { kind: "schedule", id: "schedule", message: "Nightly" },
+      last_activity: "2026-10-01T00:00:00Z",
+      automated: [makeSession({ latest_turn_state: "completed", has_interrupted_turn: true })],
+    }]);
+    component = mount(RecentSessions, { target: document.body });
+    await flushRender();
+    expect(document.querySelector('.group-summary')?.textContent).toContain("Completed");
+    expect(document.querySelector('.group-summary')?.textContent).toContain("Previous response interrupted");
+  });
+
+  it("keeps an empty schedule disabled and collapsed even with a saved expansion", async () => {
+    localStorage.setItem("swage:recent-session-groups", JSON.stringify({ "schedule:empty": true }));
+    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValue([{
+      source: { kind: "schedule", id: "empty", message: "No runs yet" },
+      last_activity: "2026-10-01T00:00:00Z", automated: [],
+    }]);
+    component = mount(RecentSessions, { target: document.body });
+    await flushRender();
+    stylesheet = installRecentSessionsStyles();
+    const heading = document.querySelector<HTMLButtonElement>('.row.source')!;
+    expect(heading.disabled).toBe(true);
+    expect(getComputedStyle(heading).opacity).toBe("0.6");
+    expect(heading.getAttribute("aria-expanded")).toBe("false");
+    heading.click();
+    flushSync();
+    expect(document.querySelector('.group-summary')).toBeNull();
+    expect(document.querySelector('.automated')).toBeNull();
   });
 });
