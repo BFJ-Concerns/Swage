@@ -4,7 +4,7 @@
      default surfaces and tags, and its sessions. -->
 <script lang="ts">
   import { sessionOutcomeLabel } from "../session-outcome";
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import WorkspaceAccessOptions from "./WorkspaceAccessOptions.svelte";
   import {
     attachTopicWorkspace,
@@ -85,6 +85,14 @@
   });
 
   onMount(loadTopicSettings);
+
+  let previousTab: TopicSettingsTab | undefined;
+  $effect(() => {
+    if (previousTab !== undefined && previousTab !== tab && tab === "sessions") {
+      untrack(() => { void loadTopicSettings(); });
+    }
+    previousTab = tab;
+  });
 
   // The surfaces tab loads its library and defaults when it is shown,
   // whether the page mounted on it or the user moved to it.

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
+import { fromStore, writable } from "svelte/store";
 
 import TopicSettingsPage from "../components/TopicSettingsPage.svelte";
 import * as topicsApi from "../api/topics";
@@ -101,6 +102,22 @@ describe("TopicSettingsPage", () => {
     const recovered = rows.find(row => row.querySelector('strong')?.textContent?.trim() === "Recovered reply");
     expect(recovered).toBeDefined();
     expect(recovered!.querySelector('[aria-label="Last response failed"], [aria-label="Interrupted"]')).toBeNull();
+  });
+
+  it("refreshes outcomes when opening the Sessions tab", async () => {
+    const tab = writable<import("../router").TopicSettingsTab>("overview");
+    const currentTab = fromStore(tab);
+    const props = { topic, get tab() { return currentTab.current; } };
+    component = mount(TopicSettingsPage, { target: document.body, props });
+    await flushUi();
+    vi.mocked(topicsApi.listTopicSessions).mockResolvedValue([
+      { id: "session-1", agent_id: "gateway", created_at: "2026-10-01T00:00:00Z", last_activity: "2026-10-01T00:00:00Z", message_preview: "Review the release", has_interrupted_turn: false, latest_turn_state: "failed" },
+    ]);
+    tab.set("sessions");
+    await flushUi();
+    const row = document.querySelector(".record-row");
+    expect(row?.textContent).toContain("Last response failed");
+    expect(topicsApi.listTopicSessions).toHaveBeenCalledTimes(2);
   });
 
   it("waits for the workspace load before showing an empty list", async () => {
