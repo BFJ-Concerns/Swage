@@ -300,3 +300,175 @@ async fn shell_completions_include_gateway_subcommands() {
         "completions should include 'generate-completion' command"
     );
 }
+
+/// Discover a real non-loopback IPv4 interface rather than assuming a LAN range.
+#[cfg(unix)]
+fn local_lan_address() -> Option<std::net::Ipv4Addr> {
+    let mut head = std::ptr::null_mut();
+    // SAFETY: getifaddrs initialises head on success; the list and each address
+    // remain valid until freeifaddrs below, and casts are guarded by sa_family.
+    unsafe {
+        assert_eq!(libc::getifaddrs(&raw mut head), 0, "read host interfaces");
+        let mut entry = head;
+        let mut result = None;
+        while !entry.is_null() {
+            let address = (*entry).ifa_addr;
+            if !address.is_null() && (*address).sa_family as i32 == libc::AF_INET {
+                let address = &*address.cast::<libc::sockaddr_in>();
+                let ip = std::net::Ipv4Addr::from(address.sin_addr.s_addr.to_ne_bytes());
+                if !ip.is_loopback() && !ip.is_unspecified() {
+                    result = Some(ip);
+                    break;
+                }
+            }
+            entry = (*entry).ifa_next;
+        }
+        libc::freeifaddrs(head);
+        result
+    }
+}
+
+fn isolated_cli(root: &std::path::Path) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_swage"));
+    command
+        .env("SWAGE_HOME", root)
+        .env("XDG_RUNTIME_DIR", root.join("runtime"))
+        .env("NO_PROXY", "*")
+        .env("no_proxy", "*")
+        .kill_on_drop(true);
+    command
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn lan_bound_gateway_stops_gracefully() {
+    use std::time::Duration;
+    use swage_client::runtime::RuntimeMetadata;
+
+    let Some(ip) = local_lan_address() else {
+        eprintln!("SKIP: this host has no non-loopback IPv4 interface");
+        return;
+    };
+    let root = crate::support::scratch_tempdir();
+    let log_path = root.path().join("gateway.log");
+    let log = std::fs::File::create(&log_path).unwrap();
+    let mut gateway = isolated_cli(root.path())
+        .args([
+            "gateway",
+            "start",
+            "--foreground",
+            "--host",
+            &ip.to_string(),
+            "--port",
+            "0",
+        ])
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
+        .spawn()
+        .expect("start real LAN-bound gateway");
+    let metadata_path = root.path().join("run/metadata.json");
+    let metadata = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            assert!(
+                gateway.try_wait().unwrap().is_none(),
+                "gateway exited before readiness: {}",
+                std::fs::read_to_string(&log_path).unwrap()
+            );
+            if let Ok(metadata) = RuntimeMetadata::load_from(&metadata_path) {
+                break metadata;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("gateway must publish runtime metadata");
+    assert!(metadata.address.starts_with(&format!("http://{ip}:")));
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .get(format!("{}/api/health", metadata.address))
+        .send()
+        .await
+        .expect("real LAN-bound gateway must serve health")
+        .error_for_status()
+        .expect("health must succeed");
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        isolated_cli(root.path()).args(["gateway", "stop"]).output(),
+    )
+    .await
+    .expect("stop must finish")
+    .expect("invoke stop CLI");
+    assert!(
+        output.status.success(),
+        "LAN-bound gateway stop failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Gateway stopped"));
+    let status = tokio::time::timeout(Duration::from_secs(5), gateway.wait())
+        .await
+        .expect("gateway process must exit after graceful stop")
+        .unwrap();
+    assert!(status.success(), "gateway must exit cleanly: {status}");
+    assert!(!metadata_path.exists(), "stop must remove runtime metadata");
+}
+
+#[tokio::test]
+async fn cli_reports_a_refused_shutdown() {
+    assert_cli_reports_refusal(
+        axum::http::StatusCode::FORBIDDEN,
+        r#"{"code":"forbidden","message":"shutdown is only accessible from this machine"}"#,
+        "shutdown is only accessible from this machine",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn cli_reports_an_unstructured_shutdown_refusal() {
+    assert_cli_reports_refusal(
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "maintenance window",
+        "maintenance window",
+    )
+    .await;
+}
+
+async fn assert_cli_reports_refusal(
+    status: axum::http::StatusCode,
+    body: &'static str,
+    reason: &str,
+) {
+    use axum::routing::post;
+    use swage_client::runtime::RuntimeMetadata;
+
+    let root = crate::support::scratch_tempdir();
+    // The endpoint supplies a refusal; the assertion reads the real CLI's
+    // classification and advice, not this response body in isolation.
+    let router = Router::new().route("/api/shutdown", post(move || async move { (status, body) }));
+    let (address, server) = start_live_server(router).await;
+    let metadata = RuntimeMetadata::new(std::process::id(), format!("http://{address}"));
+    metadata
+        .save_to(&root.path().join("run/metadata.json"))
+        .unwrap();
+    let output = isolated_cli(root.path())
+        .args(["gateway", "stop"])
+        .output()
+        .await
+        .expect("invoke stop CLI");
+    server.abort();
+    assert!(!output.status.success(), "refused stop must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("refused"), "{stderr}");
+    assert!(stderr.contains(reason), "{stderr}");
+    assert!(
+        stderr.contains("--force"),
+        "refusal must give recovery advice: {stderr}"
+    );
+    assert!(
+        !stderr.contains("not responding"),
+        "a responding gateway must not be called unresponsive: {stderr}"
+    );
+}
