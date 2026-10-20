@@ -598,9 +598,10 @@ async fn track_delegated_session(
     token: CancellationToken,
     mut started_rx: tokio::sync::oneshot::Receiver<swage_agent::DetachedDelegation>,
     forward_started: Option<tokio::sync::oneshot::Sender<swage_agent::DetachedDelegation>>,
-    execution: impl std::future::Future<Output = Result<swage_storage::AgentMessage, AgentError>>,
+    mut execution: std::pin::Pin<
+        Box<impl std::future::Future<Output = Result<swage_storage::AgentMessage, AgentError>>>,
+    >,
 ) -> Result<swage_storage::AgentMessage, AgentError> {
-    tokio::pin!(execution);
     tokio::select! {
         biased;
         started = &mut started_rx => {
@@ -1283,22 +1284,26 @@ impl DelegationHandler for GatewayDelegationHandler {
             DelegateCompletionMode::Wait => {
                 let child_cancel_token = cancel_token.child_token();
                 let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-                let execution = executor.execute_delegation(
-                    &delegate_msg,
-                    Some(sender_turn_id),
-                    Some(sender_session_id),
-                    topic_id,
-                    target_agent_config,
-                    target_context_transfer_config,
-                    Some(target_dispatcher),
-                    session_metadata,
-                    child_cancel_token.clone(),
-                    Some(started_tx),
-                    existing_child,
-                    placement
-                        .as_ref()
-                        .map(|placement| placement.path.to_string_lossy().into_owned()),
-                    child_effort,
+                // Keep the child future off the tracking state's inline storage:
+                // polling nested delegations must fit the default worker stack.
+                let execution = Box::pin(
+                    executor.execute_delegation(
+                        &delegate_msg,
+                        Some(sender_turn_id),
+                        Some(sender_session_id),
+                        topic_id,
+                        target_agent_config,
+                        target_context_transfer_config,
+                        Some(target_dispatcher),
+                        session_metadata,
+                        child_cancel_token.clone(),
+                        Some(started_tx),
+                        existing_child,
+                        placement
+                            .as_ref()
+                            .map(|placement| placement.path.to_string_lossy().into_owned()),
+                        child_effort,
+                    ),
                 );
                 let result_msg = match Box::pin(track_delegated_session(
                     &self.state,
@@ -1383,22 +1388,24 @@ impl DelegationHandler for GatewayDelegationHandler {
                 let retain_worktree = child.is_some();
 
                 tokio::spawn(async move {
-                    let execution = executor.execute_delegation(
-                        &delegate_msg,
-                        Some(sender_turn_id),
-                        Some(sender_session_id),
-                        topic_id,
-                        target_agent_config,
-                        target_context_transfer_config,
-                        Some(target_dispatcher),
-                        session_metadata,
-                        child_cancel_token.clone(),
-                        Some(started_tx),
-                        existing_child,
-                        placement
-                            .as_ref()
-                            .map(|placement| placement.path.to_string_lossy().into_owned()),
-                        child_effort,
+                    let execution = Box::pin(
+                        executor.execute_delegation(
+                            &delegate_msg,
+                            Some(sender_turn_id),
+                            Some(sender_session_id),
+                            topic_id,
+                            target_agent_config,
+                            target_context_transfer_config,
+                            Some(target_dispatcher),
+                            session_metadata,
+                            child_cancel_token.clone(),
+                            Some(started_tx),
+                            existing_child,
+                            placement
+                                .as_ref()
+                                .map(|placement| placement.path.to_string_lossy().into_owned()),
+                            child_effort,
+                        ),
                     );
                     let result = Box::pin(track_delegated_session(
                         &tracking_state,
