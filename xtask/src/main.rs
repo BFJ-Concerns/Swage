@@ -693,6 +693,9 @@ fn source_tracker_tag_locations(contents: &str, syntax: SourceSyntax) -> Vec<(us
                     }
                 }
                 Region::BlockComment(depth) => {
+                    if tracker_tag_at(line, index) {
+                        locations.push((line_number + 1, index + 1));
+                    }
                     if tail.starts_with(b"/*") {
                         region = Region::BlockComment(depth + 1);
                         index += 1;
@@ -2237,6 +2240,39 @@ mod tests {
                 super::SourceSyntax::Rust
             ),
             vec![(1, 5), (2, 5)]
+        );
+    }
+
+    #[test]
+    fn tracker_tags_report_block_comment_columns() {
+        assert_eq!(
+            super::source_tracker_tag_locations(
+                "/* [a1b2] */\n/** [8uce] */",
+                super::SourceSyntax::Rust
+            ),
+            vec![(1, 4), (2, 5)]
+        );
+    }
+
+    #[test]
+    fn tracker_tags_report_typescript_block_comment_columns() {
+        assert_eq!(
+            super::source_tracker_tag_locations(
+                "/* [a1b2] */\n/** [8uce] */",
+                super::SourceSyntax::TypeScript
+            ),
+            vec![(1, 4), (2, 5)]
+        );
+    }
+
+    #[test]
+    fn tracker_tags_scan_nested_rust_block_comments_and_close_them() {
+        assert_eq!(
+            super::source_tracker_tag_locations(
+                "/* outer\n /* [a1b2] */ [8uce] */ let text = \"[c3d4]\"; // [e5f6]",
+                super::SourceSyntax::Rust,
+            ),
+            vec![(2, 5), (2, 15), (2, 49)]
         );
     }
 
