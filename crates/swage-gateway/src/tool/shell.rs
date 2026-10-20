@@ -47,6 +47,17 @@ impl Tool for ShellTool {
         "Execute a shell command in the workspace directory."
     }
 
+    fn execution_outcome(
+        &self,
+        result: &Value,
+    ) -> swage_protocol::client::conversation::ToolExecution {
+        if result["success"] == false {
+            swage_protocol::client::conversation::ToolExecution::failed()
+        } else {
+            swage_protocol::client::conversation::ToolExecution::succeeded()
+        }
+    }
+
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
@@ -181,10 +192,11 @@ impl Tool for ShellTool {
 
                 let mut output = truncated_output_value(&combined, self.max_output_bytes);
                 output["exit_code"] = json!(exit_status.code());
+                output["success"] = json!(exit_status.success());
                 if stdout.truncated {
                     output["stdout_truncated"] = json!(true);
                     output["stdout_total_bytes"] = json!(stdout.total_bytes);
-                    if let Some(path) = stdout.artifact_relative_path {
+                    if let Some(path) = stdout.reported_artifact_path {
                         output["stdout_artifact_path"] = json!(path);
                         output["stdout_follow_up"] = shell_output_follow_up(&path);
                     }
@@ -192,7 +204,7 @@ impl Tool for ShellTool {
                 if stderr.truncated {
                     output["stderr_truncated"] = json!(true);
                     output["stderr_total_bytes"] = json!(stderr.total_bytes);
-                    if let Some(path) = stderr.artifact_relative_path {
+                    if let Some(path) = stderr.reported_artifact_path {
                         output["stderr_artifact_path"] = json!(path);
                         output["stderr_follow_up"] = shell_output_follow_up(&path);
                     }
@@ -207,7 +219,7 @@ struct BoundedRead {
     bytes: Vec<u8>,
     total_bytes: usize,
     truncated: bool,
-    artifact_relative_path: Option<String>,
+    reported_artifact_path: Option<String>,
 }
 
 struct ShellOutputArtifactPaths {
@@ -281,8 +293,8 @@ where
         bytes: buf,
         total_bytes: total,
         truncated,
-        artifact_relative_path: truncated
-            .then(|| artifact_path.map(|path| path.relative))
+        reported_artifact_path: truncated
+            .then(|| artifact_path.map(|path| path.reported))
             .flatten(),
     })
 }
@@ -592,5 +604,43 @@ mod tests {
                 || canonical.to_str().unwrap().contains(output),
             "pwd output {output:?} should match workspace {canonical:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    #[tokio::test]
+    async fn regression_output_uses_runtime_directory_and_reads_back() {
+        use swage_tool::context::{MockToolContext, ToolOutputLocation, serialise_tool_context};
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("notes"), "reference").unwrap();
+        let mut base = MockToolContext::new("agent", "session");
+        base.working_directory = workspace.path().into();
+        let mut ctx = serialise_tool_context(&base);
+        ctx.tool_output_directory = Some(ToolOutputLocation {
+            directory: runtime.path().into(),
+        });
+        let result = ShellTool {
+            timeout: Duration::from_secs(5),
+            max_output_bytes: 16,
+        }
+        .execute(json!({"command":"ls -la; seq 1 100"}), &ctx)
+        .await
+        .unwrap();
+        let path = result["stdout_artifact_path"].as_str().unwrap();
+        assert!(
+            std::path::Path::new(path).starts_with(runtime.path()),
+            "{result}"
+        );
+        assert!(!workspace.path().join(".swage").exists());
+        let read = crate::tool::file_read::FileReadTool {
+            max_output_bytes: 10000,
+        }
+        .execute(result["stdout_follow_up"]["arguments"].clone(), &ctx)
+        .await
+        .unwrap();
+        assert!(read["output"].as_str().unwrap().contains("100\n"), "{read}");
     }
 }

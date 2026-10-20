@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 import { createClassComponent } from "svelte/legacy";
+import SessionStart from "../components/SessionStart.svelte";
 import AppLayout from "../components/AppLayout.svelte";
 import { parseRoute } from "../router";
 import type { ConversationStore } from "../stores/conversations";
@@ -98,6 +99,7 @@ function mockConversationStoreWithSessions(
 function mockSurfacesStore(): SurfacesStore {
   const surface = {
     id: "surface-1",
+    shape_only: false,
     session_id: "conv-1",
     title: "Release checklist",
     created_at: "2026-08-29T10:00:00Z",
@@ -142,6 +144,8 @@ function mockSurfacesStore(): SurfacesStore {
     moveModule: async () => {},
     annotate: async () => {},
     updateAnnotation: async () => {},
+    renameSurface: async () => {},
+    resolveAnnotation: async () => {},
     removeAnnotation: async () => {},
     stopListening: () => {},
   };
@@ -192,6 +196,7 @@ function mockStreamingStore(): StreamingStore {
     handleServerEvent: () => {},
     startTurn: () => {},
     cancelTurn: () => {},
+    clearConnectionError: () => {},
     reconcileAfterReconnect: () => {},
   };
 }
@@ -214,9 +219,6 @@ function mockTopicStore(
     },
     get currentTopic() {
       return hasCurrentTopic ? topic : null;
-    },
-    get recentTopics() {
-      return [];
     },
     get isLoading() {
       return false;
@@ -314,6 +316,12 @@ describe("AppLayout shell navigation", () => {
     }
     document.body.replaceChildren();
     vi.restoreAllMocks();
+  });
+
+  it("shows application navigation when providers are loaded without a session", () => {
+    component = mountLayout({ conversationStore: mockConversationStore(), pendingStart: null, hasCurrentTopic: false, routePath: "/settings/providers" });
+    expect(document.querySelector('nav[aria-label="Surface"]')).not.toBeNull();
+    expect([...document.querySelectorAll("button")].some((button) => button.textContent === "All sessions")).toBe(true);
   });
 
   it("shows the recent-sessions front door with the session-start control when nothing is in view", () => {
@@ -721,6 +729,7 @@ describe("AppLayout shell navigation", () => {
       topic_id: "default",
       selected_model_id: null,
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       created_at: "",
       last_activity: "",
       messages: [],
@@ -887,6 +896,15 @@ describe("AppLayout shell navigation", () => {
       expect(onNavigate).toHaveBeenCalledWith("/");
     },
   );
+
+  it("opens Channels from the Settings navigation", () => {
+    const onNavigate = vi.fn();
+    component = mountLayout({ onNavigate, routePath: "/settings/providers" });
+    const channels = Array.from(document.querySelectorAll('nav[aria-label="Settings sections"] button'))
+      .find((button) => button.textContent?.trim() === "Channels") as HTMLButtonElement | undefined;
+    flushSync(() => channels?.click());
+    expect(onNavigate).toHaveBeenCalledWith("/settings/channels");
+  });
 
   it("navigates to the agent definitions settings tab", () => {
     const onNavigate = vi.fn();
@@ -1210,5 +1228,42 @@ describe("ambient conversation channel", () => {
     );
 
     expect(onNewConversation).toHaveBeenCalledOnce();
+  });
+});
+
+
+describe("scope labels and catalogue selection", () => {
+  let component: MountedComponent | undefined;
+  afterEach(async () => {
+    if (component) await unmount(component);
+    component = undefined;
+    document.body.replaceChildren();
+  });
+  it("labels general scope without Topic and keeps the topic label", async () => {
+    const general = component = mountLayout({ hasCurrentTopic: false });
+    await Promise.resolve();
+    flushSync();
+    expect(document.querySelector('[aria-label="Session scope"]')?.textContent?.trim()).toBe("General");
+    await unmount(general);
+    component = mountLayout();
+    flushSync();
+    expect(document.querySelector('[aria-label="Session scope"]')?.textContent).toContain("Topic");
+    expect(document.querySelector('[aria-label="Session scope"]')?.textContent).toContain("default");
+  });
+
+  it("searches all sixty start topics and starts with the chosen late topic", () => {
+    const topics = Array.from({ length: 60 }, (_, i) => ({ id: `t-${i}`, name: `Topic ${i}`, slug: `t-${i}`, description: "", created_at: "" }));
+    const onStart = vi.fn();
+    component = mount(SessionStart, { target: document.body, props: { topics, onStart } });
+    flushSync();
+    const search = document.querySelector<HTMLInputElement>('input[aria-label="Search start topics"]');
+    expect(search).not.toBeNull();
+    flushSync(() => { search!.value = "59"; search!.dispatchEvent(new Event("input", { bubbles: true })); });
+    const select = document.querySelector<HTMLSelectElement>('select[aria-label="Topic"]')!;
+    expect(Array.from(select.options).map(option => option.textContent)).toEqual(["No topic — general assistant", "Topic 59"]);
+    flushSync(() => { select.value = "t-59"; select.dispatchEvent(new Event("change", { bubbles: true })); });
+    const button = Array.from(document.querySelectorAll("button")).find(button => button.textContent === "Start")!;
+    flushSync(() => button.click());
+    expect(onStart).toHaveBeenCalledWith({ topicId: "t-59", agentId: null });
   });
 });

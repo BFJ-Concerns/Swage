@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { SETTINGS_LABELS } from "../../settings-labels";
   import type { DiscoveredModel, ModelSettings } from "../../types";
 
   interface Props {
@@ -40,11 +41,11 @@
         <div class="model-facts">
           <span>{model.context_window ? `${model.context_window.toLocaleString()} ctx` : "context unknown"}</span>
           <span>{model.generation_preset ?? "provider generation defaults"}</span>
-          <label class="model-effort"><span aria-hidden="true">Default effort</span><select aria-label={`Default effort for ${modelKey}`} bind:value={model.default_effort}><option value={undefined}>No effort</option><option value="off">Off</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Maximum</option></select></label>
+          <label class="model-effort"><span aria-hidden="true">{SETTINGS_LABELS["models.*.default_effort"]}</span><select aria-label={`${SETTINGS_LABELS["models.*.default_effort"]} for ${modelKey}`} bind:value={model.default_effort}><option value={undefined}>No effort</option><option value="off">Off</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Maximum</option></select></label>
           {#if defaultModel === modelKey}<span class="fact-strong">Default</span>{/if}
         </div>
         <div class="opt-row row-actions">
-          <button type="button" class="opt" class:active={defaultModel === modelKey} disabled={!codexUsable} onclick={() => ondefault(modelKey)}>Use</button>
+          <button type="button" class="opt" class:active={defaultModel === modelKey} disabled={!codexUsable || defaultModel === modelKey} onclick={() => ondefault(modelKey)}>{defaultModel === modelKey ? "Default" : "Use"}</button>
           <button type="button" class="opt opt-warn" onclick={() => onremove(modelKey)}>Remove</button>
         </div>
       </div>
@@ -80,7 +81,7 @@
   .key small { display: block; margin-top: 4px; font-family: var(--font-body); font-weight: 400; font-size: 11px; line-height: 1.4; letter-spacing: 0; text-transform: none; color: var(--ink-soft); }
   .val { display: flex; gap: 10px; flex-wrap: wrap; }
   .val-stack { flex-direction: column; align-items: stretch; gap: 12px; }
-  .opt { position: relative; display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); padding: 6px 12px; font-family: var(--font-display); font-weight: 400; font-size: 14px; line-height: 1; letter-spacing: 0.04em; text-transform: uppercase; cursor: pointer; isolation: isolate; }
+  .opt { position: relative; display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); padding: 6px 12px; font-family: var(--font-mono); font-weight: 400; font-size: 14px; line-height: 1; letter-spacing: 0.04em; text-transform: none; cursor: pointer; isolation: isolate; }
   .opt:hover:not(:disabled):not(.active) { background: color-mix(in srgb, var(--ink) 8%, transparent); }
   .opt.active { background: var(--ink); color: var(--paper); }
   .opt.active::before { content: ""; position: absolute; inset: 0; background: var(--accent); transform: translate(2px, 2px); z-index: -1; mix-blend-mode: var(--shadow-blend); opacity: var(--shadow-opacity); pointer-events: none; }

@@ -2976,6 +2976,7 @@ dependencies = [
  "jsonschema",
  "libc",
  "mime_guess",
+ "percent-encoding",
  "rand 0.10.2",
  "reqwest",
  "rusqlite",
@@ -2990,6 +2991,7 @@ dependencies = [
  "swage-context",
  "swage-core",
  "swage-device",
+ "swage-gateway",
  "swage-hook",
  "swage-protocol",
  "swage-provider",
@@ -3135,6 +3137,7 @@ dependencies = [
  "swage-core",
  "swage-protocol",
  "swage-safety",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
@@ -4138,6 +4141,7 @@ version = "0.2.0"
 dependencies = [
  "serde_json",
  "sha2",
+ "swage-config",
  "swage-workflow",
 ]
 

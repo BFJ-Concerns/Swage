@@ -26,6 +26,12 @@ pub struct UserInfo {
     pub metadata: HashMap<String, Value>,
 }
 
+/// Runtime-owned storage kept separate from attached workspace permissions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
+pub struct ToolOutputLocation {
+    pub directory: PathBuf,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct SerializableToolContext {
@@ -33,6 +39,8 @@ pub struct SerializableToolContext {
     pub session_id: String,
     pub working_directory: PathBuf,
     pub allowed_paths: Vec<PathBuf>,
+    /// Writable runtime storage for tool-output artefacts, separate from workspaces.
+    pub tool_output_directory: Option<ToolOutputLocation>,
     pub user_info: Option<UserInfo>,
     pub call_id: Option<String>,
     pub turn_id: Option<Uuid>,
@@ -167,6 +175,7 @@ mod tests {
                 session_id: "s".into(),
                 working_directory: PathBuf::from("/work"),
                 allowed_paths: vec![],
+                tool_output_directory: None,
                 user_info: None,
                 call_id: None,
                 turn_id: None,

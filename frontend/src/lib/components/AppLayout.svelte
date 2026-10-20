@@ -26,6 +26,7 @@
   import TopicSettingsPage from "./TopicSettingsPage.svelte";
   import ThemeToggle from "./ThemeToggle.svelte";
   import WorkflowRunDetail from "./WorkflowRunDetail.svelte";
+  import { UNSETTLED_RUN_REFRESH_MS } from "../one-shot-runs";
   import { fetchWorkflowRun } from "../api/workflow-runs";
   import { conversationPath } from "../router";
   import type { DisplayPreferences } from "../display-preferences";
@@ -159,17 +160,29 @@
     workflowRunError = "";
     if (!requestedRunId) return;
     workflowRunLoadState = "loading";
-    fetchWorkflowRun(requestedRunId)
-      .then((loaded) => {
-        if (requestedRunId !== workflowRunId) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    async function refresh() {
+      let terminal = false;
+      try {
+        const loaded = await fetchWorkflowRun(requestedRunId!);
+        if (disposed || requestedRunId !== workflowRunId) return;
         workflowRunDetail = loaded;
         workflowRunLoadState = loaded === null ? "absent" : "loaded";
-      })
-      .catch((error: unknown) => {
-        if (requestedRunId !== workflowRunId) return;
+        workflowRunError = "";
+        terminal = loaded === null || ["completed", "failed", "cancelled"].includes(loaded.run.state);
+      } catch (error: unknown) {
+        if (disposed || requestedRunId !== workflowRunId) return;
         workflowRunError = error instanceof Error ? error.message : String(error);
         workflowRunLoadState = "error";
-      });
+      }
+      if (!disposed && !terminal) timer = setTimeout(refresh, UNSETTLED_RUN_REFRESH_MS);
+    }
+    void refresh();
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+    };
   });
   const settingsTab = $derived(route?.settingsTab ?? null);
   const settingsTopicSlug = $derived(route?.settingsTopicSlug ?? null);
@@ -220,11 +233,11 @@
   }
 </script>
 
-{#if inScope}
+{#if inScope || settingsMode}
   <header class="topbar">
     <button type="button" class="sessions-btn" onclick={() => onOpenSessions?.()}>All sessions</button>
     <span class="scope" aria-label="Session scope">
-      <span class="scope-label">Topic</span>
+      {#if currentTopic}<span class="scope-label">Topic</span>{/if}
       {#if currentTopic}
         <button type="button" class="scope-name" onclick={openTopicSettings} title="Topic settings">{scopeName}</button>
       {:else}
@@ -253,11 +266,13 @@
       <button type="button" class="back-btn" onclick={() => onNavigate?.("/")}>All sessions</button>
     {/if}
     <WorkflowRunView
+      {onNavigate}
       detail={workflowRunDetail}
       loadState={workflowRunLoadState}
       errorMessage={workflowRunError}
     />
     <WorkflowRunDetail
+      {onNavigate}
       detail={workflowRunDetail}
       loadState={workflowRunLoadState}
       errorMessage={workflowRunError}
@@ -275,6 +290,7 @@
         <button class:active={settingsTab === "skills"} onclick={() => onNavigate?.("/settings/skills")}>Skills</button>
         <button class:active={settingsTab === "automation"} onclick={() => onNavigate?.("/settings/automation")}>Automation</button>
         <button class:active={settingsTab === "voice"} onclick={() => onNavigate?.("/settings/voice")}>Voice</button>
+        <button class:active={settingsTab === "channels"} onclick={() => onNavigate?.("/settings/channels")}>Channels</button>
         <button class:active={settingsTab === "memory"} onclick={() => onNavigate?.("/settings/memory")}>Memory</button>
         {#each topicStore?.topics ?? [] as topic (topic.id)}
           <button
@@ -288,11 +304,13 @@
       </nav>
       <button class="close" onclick={closeSettings} aria-label="Close settings">×</button>
     </header>
-    {#if settingsTopicSlug}
-      <TopicSettingsPage topic={settingsTopic} tab={settingsTopicTab ?? undefined} {onNavigate} onTopicsChanged={() => topicStore?.loadTopics()} />
-    {:else}
-      <SettingsPage tab={settingsTab ?? undefined} topicId={currentTopic?.id ?? null} topics={topicStore?.topics ?? []} memoryPage={route?.settingsMemoryPage ?? null} {onSettingsSaved} />
-    {/if}
+    <div class="settings-body">
+      {#if settingsTopicSlug}
+        <TopicSettingsPage topic={settingsTopic} tab={settingsTopicTab ?? undefined} {onNavigate} onTopicsChanged={() => topicStore?.loadTopics()} />
+      {:else}
+        <SettingsPage tab={settingsTab ?? undefined} topicId={currentTopic?.id ?? null} topics={topicStore?.topics ?? []} memoryPage={route?.settingsMemoryPage ?? null} {onSettingsSaved} />
+      {/if}
+    </div>
   </div>
 {:else if libraryMode}
   <!-- The shared library's catalogue: what is saved, described and tagged,
@@ -403,17 +421,17 @@
   .library { height: 100vh; overflow: auto; }
   .back-btn { margin: .75rem; }
   nav { display: flex; gap: .5rem; flex-wrap: wrap; }
-  .settings-window { height: calc(100vh - 4rem); overflow: auto; }
-  .settings-chrome { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; padding: .75rem; border-bottom: 1px solid var(--ink); }
+  .settings-window { height: calc(100vh - 4rem); display: flex; flex-direction: column; overflow: hidden; }
+  .settings-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
+  .settings-chrome { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; padding: .75rem; border-bottom: 1px solid var(--ink); }
   .settings-chrome h2 { margin: 0; font-size: 1rem; }
   .settings-chrome .topic-tab { border-left: 1px dotted var(--rule-soft); padding-left: .5rem; }
   .settings-chrome .topic-tab ~ .topic-tab { border-left: none; padding-left: 0; }
   button.active { font-weight: bold; }
   .conversation { display: grid; grid-template-columns: minmax(16rem, 25%) 1fr; height: calc(100vh - 4rem); }
   .conversation aside { overflow: auto; border-right: 1px solid var(--ink); }
-  /* The work surface and its docked channel share the conversation surface's
-     two-column rule, mirrored: the work takes the wide column. */
-  .surfaces-surface { display: grid; grid-template-columns: 1fr minmax(20rem, 33%); height: calc(100vh - 4rem); }
+  /* The work takes the wide column; its docked conversation stays available. */
+  .surfaces-surface { display: grid; grid-template-columns: minmax(0, 1fr) minmax(20rem, 33%); height: calc(100vh - 4rem); }
   .surfaces-surface .work { min-width: 0; overflow: auto; border-right: 1px solid var(--ink); }
   .no-session { padding: 1rem; color: var(--ink-soft); }
   .operator { min-width: 0; overflow: auto; }

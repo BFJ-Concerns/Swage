@@ -277,6 +277,14 @@ impl Tool for BrowserScrollTool {
     }
 
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+        if params.get("ref").is_some_and(|value| {
+            !value.is_null() && value.as_str().is_none_or(|text| text.trim().is_empty())
+        }) {
+            return Err(ToolError::InvalidParameters {
+                name: self.name().into(),
+                message: "ref must be a non-empty string".into(),
+            });
+        }
         let direction = params.get("direction").and_then(Value::as_str);
         let reference = params.get("ref").and_then(Value::as_str);
         if direction.is_none() && reference.is_none() {
@@ -359,7 +367,7 @@ async fn write_full_snapshot(
     file.flush()
         .await
         .map_err(|error| artifact_error("snapshot", error))?;
-    Ok(Some(path.relative))
+    Ok(Some(path.reported))
 }
 
 async fn write_screenshot(
@@ -385,7 +393,7 @@ async fn write_screenshot(
         .await
         .map_err(|error| artifact_error("screenshot", error))?;
     let _ = audit;
-    Ok(Some(path.relative))
+    Ok(Some(path.reported))
 }
 
 async fn write_audit_event(

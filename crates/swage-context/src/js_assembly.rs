@@ -259,6 +259,14 @@ fn compose(
             source: block.source.clone(),
             token_count: tokeniser.count_messages(&block.messages),
             preview: safe_metadata_preview(&block.name, &block.source),
+            full_text: Some(
+                block
+                    .messages
+                    .iter()
+                    .map(ChatMessage::text_content)
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+            ),
             priority: block.priority,
             named_assembly: None,
         })
@@ -905,6 +913,7 @@ mod tests {
         let elements: Vec<Box<dyn ContextElement>> = vec![
             Box::new(OrientationElement::new(
                 SessionEnvironment {
+                    workspaces: vec![],
                     topic_name: String::new(),
                     topic_description: String::new(),
                     tool_root: crate::orientation::ToolRoot::ManagedScratch(
@@ -914,6 +923,7 @@ mod tests {
                     channel: None,
                 },
                 vec![],
+                std::collections::BTreeSet::new(),
             )),
             Box::new(PromptsElement::new(vec![PromptRule {
                 priority: 0,
@@ -1038,6 +1048,7 @@ mod tests {
         vec![
             Box::new(OrientationElement::new(
                 SessionEnvironment {
+                    workspaces: vec![],
                     topic_name: "Atelier".into(),
                     topic_description: String::new(),
                     tool_root: crate::orientation::ToolRoot::ManagedScratch(
@@ -1047,6 +1058,7 @@ mod tests {
                     channel: None,
                 },
                 vec![],
+                std::collections::BTreeSet::new(),
             )),
             Box::new(WorkingNormsElement::for_model(
                 "claude-opus-5",
@@ -1708,6 +1720,7 @@ mod tests {
         elements.push(Box::new(crate::memory::MemoryIndexElement::new(
             Some("remembered material".into()),
             Vec::new(),
+            crate::memory::MemoryReach::EntriesByReference,
         )));
         let output = assemble_source(HISTORY_AND_PROMPTS_ONLY, &elements);
 
@@ -1755,5 +1768,34 @@ mod tests {
             resolve_js_assembly("../../outside", &[(HierarchyLevel::Global, &config)]).is_none()
         );
         assert!(resolve_js_assembly("/outside", &[(HierarchyLevel::Global, &config)]).is_none());
+    }
+    #[test]
+    fn inspector_records_the_text_a_named_assembly_actually_composed() {
+        let output = assemble_source(HISTORY_AND_PROMPTS_ONLY, &baseline_bearing_elements());
+        assert!(output.report.errors.is_empty());
+        let report = serde_json::to_value(&output.report).unwrap();
+        let prompts = report["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "prompts")
+            .unwrap();
+        assert_eq!(prompts["full_text"], "operator instructions");
+        let norms = report["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "working_norms")
+            .unwrap();
+        let restored_norms = output
+            .messages
+            .iter()
+            .find(|message| message.text_content().contains("## Working norms"))
+            .expect("restored working norms message");
+        assert_eq!(
+            norms["full_text"],
+            restored_norms.text_content(),
+            "the report must retain the complete restored working norms"
+        );
     }
 }

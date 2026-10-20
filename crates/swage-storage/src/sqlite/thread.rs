@@ -1105,6 +1105,7 @@ mod tests {
             compact_tool_arguments_for_model(&serde_json::json!({"cmd": "pwd"}));
         storage
             .create_tool_call(NewToolCall {
+                execution: None,
                 turn_id: parent_turn.id,
                 agent_id: "agent-1".into(),
                 call_id: "call_1".into(),
@@ -1211,6 +1212,7 @@ mod tests {
             .unwrap();
         storage
             .create_tool_call(NewToolCall {
+                execution: None,
                 turn_id: parent_turn.id,
                 agent_id: "agent-1".into(),
                 call_id: "call_future".into(),

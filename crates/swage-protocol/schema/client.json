@@ -4,14 +4,29 @@
   "description": "Anchor type for the client surface's schema document.\n\nEvery wire type on the surface is reachable from here, so a single\n`schema_for!` call produces one document with the full type graph in\n`$defs`. The struct itself never crosses the wire — it exists only so\nthe schema generator has a root to walk from.",
   "type": "object",
   "properties": {
+    "answer_workflow_run_hold_response": {
+      "$ref": "#/$defs/AnswerWorkflowRunHoldResponse"
+    },
     "api_error": {
       "$ref": "#/$defs/ApiErrorBody"
     },
     "attachment_list": {
       "$ref": "#/$defs/AttachmentListResponse"
     },
+    "channel_link": {
+      "$ref": "#/$defs/ChannelLinkResponse"
+    },
+    "channel_link_code_list": {
+      "$ref": "#/$defs/ChannelLinkCodeListResponse"
+    },
     "channel_link_code_response": {
       "$ref": "#/$defs/ChannelLinkCodeResponse"
+    },
+    "channel_link_list": {
+      "$ref": "#/$defs/ChannelLinkListResponse"
+    },
+    "channel_status_list": {
+      "$ref": "#/$defs/ChannelStatusListResponse"
     },
     "client_event": {
       "$ref": "#/$defs/ClientEvent"
@@ -66,6 +81,9 @@
     },
     "create_workspace_attachment_request": {
       "$ref": "#/$defs/CreateWorkspaceAttachmentRequest"
+    },
+    "delegation_start_result": {
+      "$ref": "#/$defs/DelegationStartResult"
     },
     "delete_surface_annotation_response": {
       "$ref": "#/$defs/DeleteSurfaceAnnotationResponse"
@@ -145,6 +163,9 @@
     "relink_workspace_attachment_request": {
       "$ref": "#/$defs/RelinkWorkspaceAttachmentRequest"
     },
+    "rename_surface_request": {
+      "$ref": "#/$defs/RenameSurfaceRequest"
+    },
     "restart_status": {
       "$ref": "#/$defs/RestartStatusResponse"
     },
@@ -168,6 +189,9 @@
     },
     "schedule_run_list": {
       "$ref": "#/$defs/ScheduleRunListResponse"
+    },
+    "secret_list": {
+      "$ref": "#/$defs/SecretListResponse"
     },
     "send_message": {
       "$ref": "#/$defs/SendMessageRequest"
@@ -268,14 +292,26 @@
     "workflow_run_detail": {
       "$ref": "#/$defs/WorkflowRunDetailResponse"
     },
+    "workflow_run_ending_notice": {
+      "$ref": "#/$defs/WorkflowRunEndingNotice"
+    },
     "workflow_run_list": {
       "$ref": "#/$defs/WorkflowRunListResponse"
+    },
+    "workflow_run_start_result": {
+      "$ref": "#/$defs/WorkflowRunStartResult"
     },
     "workflow_run_started_event": {
       "$ref": "#/$defs/WorkflowRunStartedEvent"
     },
+    "workflow_run_status_request": {
+      "$ref": "#/$defs/WorkflowRunStatusRequest"
+    },
     "workflow_script_list": {
       "$ref": "#/$defs/WorkflowScriptListResponse"
+    },
+    "workflow_worker_activity": {
+      "$ref": "#/$defs/WorkflowWorkerActivity"
     },
     "workspace_attachment_list": {
       "$ref": "#/$defs/WorkspaceAttachmentListResponse"
@@ -288,6 +324,7 @@
     }
   },
   "required": [
+    "secret_list",
     "api_error",
     "client_event",
     "server_event",
@@ -299,6 +336,7 @@
     "create_channel_link_code_request",
     "create_topic_request",
     "create_surface_request",
+    "rename_surface_request",
     "memory_page_list",
     "memory_page",
     "memory_instruction_request",
@@ -322,6 +360,10 @@
     "update_workspace_trust_request",
     "relink_workspace_attachment_request",
     "workspace_attachment_list",
+    "channel_link",
+    "channel_link_list",
+    "channel_link_code_list",
+    "channel_status_list",
     "channel_link_code_response",
     "create_conversation_request",
     "create_conversation_branch_request",
@@ -378,12 +420,38 @@
     "workflow_decision_event_payload",
     "workflow_run_detail",
     "workflow_run_list",
+    "workflow_run_ending_notice",
+    "answer_workflow_run_hold_response",
+    "workflow_worker_activity",
+    "workflow_run_status_request",
+    "delegation_start_result",
+    "workflow_run_start_result",
     "workflow_run_started_event",
     "workflow_entry_event",
     "workflow_run_completed_event",
     "worker_isolation"
   ],
   "$defs": {
+    "AnswerWorkflowRunHoldResponse": {
+      "type": "object",
+      "properties": {
+        "hold": {
+          "$ref": "#/$defs/WorkflowRunHold"
+        },
+        "run_state": {
+          "$ref": "#/$defs/WorkflowRunState"
+        },
+        "wake_provisioned": {
+          "description": "Whether answering made a parked run due again. False when the run was\nstill holding its engine and will take the answer directly.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "hold",
+        "wake_provisioned",
+        "run_state"
+      ]
+    },
     "ApiErrorBody": {
       "description": "The body of every failed client-surface HTTP response.",
       "type": "object",
@@ -491,6 +559,13 @@
             "$ref": "#/$defs/AssemblyError"
           }
         },
+        "provider_attempts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ProviderAttemptRecord"
+          }
+        },
         "provider_visible": true,
         "tool_scope": true,
         "total_tokens": {
@@ -596,6 +671,23 @@
         "updated_at"
       ]
     },
+    "AttachmentsConfig": {
+      "description": "Admission policy for image references submitted with a turn.",
+      "type": "object",
+      "properties": {
+        "accepted_schemes": {
+          "description": "URI schemes accepted before checking the selected provider's capabilities.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "accepted_schemes"
+      ]
+    },
     "BackgroundJobResponse": {
       "type": "object",
       "properties": {
@@ -659,6 +751,13 @@
         "updated_at"
       ]
     },
+    "ChannelLinkCodeListResponse": {
+      "description": "The readable, unredeemed codes, represented on the wire as an array.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ChannelLinkCodeResponse"
+      }
+    },
     "ChannelLinkCodeResponse": {
       "description": "A short-lived, single-use channel link code.",
       "type": "object",
@@ -667,13 +766,127 @@
           "type": "string",
           "format": "date-time"
         },
+        "integration": {
+          "type": "string"
+        },
         "link_code": {
           "type": "string"
         }
       },
       "required": [
+        "integration",
         "link_code",
         "expires_at"
+      ]
+    },
+    "ChannelLinkListResponse": {
+      "description": "All linked channel conversations.",
+      "type": "object",
+      "properties": {
+        "links": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChannelLinkResponse"
+          }
+        }
+      },
+      "required": [
+        "links"
+      ]
+    },
+    "ChannelLinkResponse": {
+      "description": "A channel conversation linked to a topic and agent.",
+      "type": "object",
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "agent_id": {
+          "type": "string"
+        },
+        "conversation": {
+          "type": "string"
+        },
+        "home_target": true,
+        "integration": {
+          "type": "string"
+        },
+        "linked_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "topic_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "integration",
+        "account",
+        "conversation",
+        "topic_id",
+        "agent_id",
+        "linked_at",
+        "updated_at"
+      ]
+    },
+    "ChannelStatusListResponse": {
+      "type": "object",
+      "properties": {
+        "channels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChannelStatusResponse"
+          }
+        }
+      },
+      "required": [
+        "channels"
+      ]
+    },
+    "ChannelStatusResponse": {
+      "type": "object",
+      "properties": {
+        "delivery_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "integration": {
+          "type": "string"
+        },
+        "last_delivery_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "route_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "integration",
+        "status",
+        "route_count",
+        "delivery_count"
       ]
     },
     "ClientEvent": {
@@ -886,8 +1099,15 @@
           "format": "uint",
           "minimum": 0
         },
+        "calls": {
+          "description": "Every model call this succession pass made, in order: readers,\nsynthesis, then summary. A reused diagnosis adds no reader or\nsynthesis calls. Ordinary succession records its summary here too.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SuccessionCall"
+          }
+        },
         "diagnosis": {
-          "description": "How a successor built for a stalled session got its summary: the\nwalls it answers and the model calls that diagnosed them.",
+          "description": "The walls a successor built for a stalled session answers and the\ndiagnosis it carries.",
           "anyOf": [
             {
               "$ref": "#/$defs/DiagnosisRecord"
@@ -957,7 +1177,8 @@
         "actual_strategy",
         "messages_removed",
         "tokens_before",
-        "tokens_after"
+        "tokens_after",
+        "calls"
       ]
     },
     "CompactionThresholdConfig": {
@@ -1185,6 +1406,10 @@
     "ConversationDetail": {
       "type": "object",
       "properties": {
+        "agent_display_name": {
+          "description": "The display name resolved in the session's topic scope.",
+          "type": "string"
+        },
         "agent_id": {
           "description": "The agent definition the session runs under.",
           "type": "string"
@@ -1237,6 +1462,7 @@
       "required": [
         "id",
         "agent_id",
+        "agent_display_name",
         "created_at",
         "last_activity",
         "root_thread_id",
@@ -1260,6 +1486,10 @@
     "ConversationResponse": {
       "type": "object",
       "properties": {
+        "agent_display_name": {
+          "description": "The display name resolved in the session's topic scope.",
+          "type": "string"
+        },
         "agent_id": {
           "description": "The agent definition the session runs under.",
           "type": "string"
@@ -1294,6 +1524,7 @@
       "required": [
         "id",
         "agent_id",
+        "agent_display_name",
         "created_at",
         "last_activity"
       ]
@@ -1740,6 +1971,61 @@
         "reason"
       ]
     },
+    "DelegationStartResult": {
+      "description": "A delegated child's state observed when its start request returns.",
+      "type": "object",
+      "properties": {
+        "child_session_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "child_thread_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "child_turn_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "completion_mode": {
+          "type": "string"
+        },
+        "delegate_message_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "error_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status_as_of": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "target_agent_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "completion_mode",
+        "delegate_message_id",
+        "child_session_id",
+        "child_thread_id",
+        "child_turn_id",
+        "target_agent_id"
+      ]
+    },
     "DeleteSurfaceAnnotationResponse": {
       "description": "Confirms that an annotation was removed.",
       "type": "object",
@@ -1876,67 +2162,10 @@
         }
       ]
     },
-    "DiagnosisCall": {
-      "description": "One model call a diagnosis made.",
-      "type": "object",
-      "properties": {
-        "cost": {
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "failure_reason": {
-          "description": "Why the call failed, when it did.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "input_tokens": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "model": {
-          "description": "The provider-facing model id the call was sent to.",
-          "type": "string"
-        },
-        "output_tokens": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "report": {
-          "description": "What a reader reported. A synthesis's output is the record's\n`synthesis`.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "stage": {
-          "$ref": "#/$defs/DiagnosisStage"
-        }
-      },
-      "required": [
-        "stage",
-        "model",
-        "input_tokens",
-        "output_tokens"
-      ]
-    },
     "DiagnosisRecord": {
       "description": "The diagnosis behind a degradation-triggered successor, recorded so the\nassembly report alone reconstructs the pass.",
       "type": "object",
       "properties": {
-        "calls": {
-          "description": "The model calls this turn made for the diagnosis, readers first and\nthe synthesis last; empty when an earlier turn's diagnosis was reused.",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/DiagnosisCall"
-          }
-        },
         "reused_from_turn": {
           "description": "The turn whose recorded diagnosis this successor carries again,\nwhen the walls had not changed since.",
           "type": [
@@ -1966,23 +2195,7 @@
       },
       "required": [
         "signal",
-        "walls",
-        "calls"
-      ]
-    },
-    "DiagnosisStage": {
-      "description": "Which part of a diagnosis a model call was.",
-      "oneOf": [
-        {
-          "description": "A blind reader locating where one slice of the history went wrong.",
-          "type": "string",
-          "const": "reader"
-        },
-        {
-          "description": "The synthesis naming the problems from the readers' reports.",
-          "type": "string",
-          "const": "synthesis"
-        }
+        "walls"
       ]
     },
     "DiscoveredModel": {
@@ -2185,6 +2398,13 @@
     "ElementReport": {
       "type": "object",
       "properties": {
+        "full_text": {
+          "description": "The element's rendered text after substitution and assembly compaction.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "type": "string"
         },
@@ -2662,6 +2882,27 @@
         "entries"
       ]
     },
+    "ManagedSecretEncryptionDiagnostics": {
+      "type": "object",
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "key_source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "detail"
+      ]
+    },
     "MaterialListResponse": {
       "type": "object",
       "properties": {
@@ -3082,6 +3323,15 @@
             }
           ]
         },
+        "output_limit": {
+          "description": "The most output tokens one response may carry, when the catalogue\ndeclares it; absent, the provider adapter's account for the models it\nserves applies, and a model neither declares takes the adapter's\nfloor. A caller's own `max_tokens` is sent as it is either way.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "reasoning_replay": {
           "type": "boolean",
           "default": false
@@ -3174,6 +3424,90 @@
         "provider_id",
         "model_id",
         "aliases"
+      ]
+    },
+    "ModuleDelivery": {
+      "description": "What delivered a module to its surface, recorded as the module is\nwritten: the run or turn whose output it is, and when. A module a person\nor an agent writes by hand carries none.",
+      "oneOf": [
+        {
+          "description": "A scheduled run's output, routed to the surface.",
+          "type": "object",
+          "properties": {
+            "by": {
+              "type": "string",
+              "const": "schedule_run"
+            },
+            "delivered_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "run_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "schedule_id": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "by",
+            "run_id",
+            "schedule_id",
+            "delivered_at"
+          ]
+        },
+        {
+          "description": "A workflow run's delivery to its granted surface target; the effect\nkey is the run's durable name for that one delivery, so a recovery\nafter a crash finds the module already written instead of writing\nit again.",
+          "type": "object",
+          "properties": {
+            "by": {
+              "type": "string",
+              "const": "workflow_run"
+            },
+            "delivered_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "effect_key": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "run_id": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "by",
+            "run_id",
+            "effect_key",
+            "delivered_at"
+          ]
+        },
+        {
+          "description": "A conversation turn's response, routed to the surface.",
+          "type": "object",
+          "properties": {
+            "by": {
+              "type": "string",
+              "const": "turn"
+            },
+            "delivered_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "turn_id": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "by",
+            "turn_id",
+            "delivered_at"
+          ]
+        }
       ]
     },
     "MoveSurfaceModuleRequest": {
@@ -3366,6 +3700,80 @@
         }
       }
     },
+    "ProviderAttemptOutcome": {
+      "type": "string",
+      "enum": [
+        "outstanding",
+        "succeeded",
+        "failed",
+        "interrupted"
+      ]
+    },
+    "ProviderAttemptRecord": {
+      "description": "One actual stream attempt, including the initial request and any retries.",
+      "type": "object",
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "ended_at_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "model_id": {
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ProviderAttemptOutcome"
+        },
+        "provider": {
+          "description": "Provider adapter that opened this attempt (for example, `anthropic`).",
+          "type": "string"
+        },
+        "request": {
+          "description": "Concrete provider-visible request for this attempt, omitted if secret\nredaction could not be completed."
+        },
+        "round": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "route_id": {
+          "description": "Stable position in the provider chain, independent of retry number and\ncooldown order. A standalone provider uses `direct`.",
+          "type": "string"
+        },
+        "started_at_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "round",
+        "attempt",
+        "provider",
+        "model_id",
+        "route_id",
+        "started_at_ms",
+        "outcome"
+      ]
+    },
     "ProviderProtocol": {
       "oneOf": [
         {
@@ -3411,6 +3819,13 @@
             "string",
             "null"
           ]
+        },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "has_credential": {
           "type": "boolean"
@@ -3851,6 +4266,18 @@
         "path"
       ]
     },
+    "RenameSurfaceRequest": {
+      "description": "Rename only this session's surface, leaving its saved origin untouched.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ]
+    },
     "RequireApprovalEntry": {
       "anyOf": [
         {
@@ -3969,6 +4396,13 @@
           ],
           "default": null
         },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "protocol": {
           "$ref": "#/$defs/ProviderProtocol"
         },
@@ -3996,6 +4430,16 @@
     "SaveSettingsRequest": {
       "type": "object",
       "properties": {
+        "attachments": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AttachmentsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "communication": {
           "anyOf": [
             {
@@ -4600,6 +5044,95 @@
         "base_url"
       ]
     },
+    "SecretListResponse": {
+      "type": "object",
+      "properties": {
+        "managed_backend": {
+          "$ref": "#/$defs/ManagedSecretEncryptionDiagnostics"
+        },
+        "secrets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SecretResponse"
+          }
+        }
+      },
+      "required": [
+        "secrets",
+        "managed_backend"
+      ]
+    },
+    "SecretResponse": {
+      "type": "object",
+      "properties": {
+        "backend_kind": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "material_kind": {
+          "type": "string"
+        },
+        "metadata": true,
+        "name": {
+          "type": "string"
+        },
+        "owner_kind": {
+          "type": "string"
+        },
+        "reference": {
+          "type": "string"
+        },
+        "revealed_value": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revoked_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "scope_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope_kind": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "material_kind",
+        "owner_kind",
+        "backend_kind",
+        "scope_kind",
+        "reference",
+        "metadata",
+        "status",
+        "created_at",
+        "updated_at"
+      ]
+    },
     "SendMessageRequest": {
       "type": "object",
       "properties": {
@@ -4710,6 +5243,16 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0
+            },
+            "execution": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ToolExecution"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "parent_call_id": {
               "description": "call_id of the enclosing tool if this is a sub-tool invocation.\n\nOmitted from the serialised JSON when None.",
@@ -4874,6 +5417,10 @@
               "type": "string",
               "format": "uuid"
             },
+            "thread_id": {
+              "type": "string",
+              "format": "uuid"
+            },
             "turn_id": {
               "type": "string",
               "format": "uuid"
@@ -4887,6 +5434,7 @@
             "type",
             "session_id",
             "turn_id",
+            "thread_id",
             "queued_ids"
           ]
         },
@@ -5098,6 +5646,9 @@
                 "$ref": "#/$defs/SchemaValidationError"
               }
             },
+            "failure_message": {
+              "type": "string"
+            },
             "turn_id": {
               "type": "string",
               "format": "uuid"
@@ -5109,6 +5660,7 @@
           },
           "required": [
             "type",
+            "failure_message",
             "turn_id",
             "attempts",
             "errors"
@@ -5684,16 +6236,26 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
+        },
+        "max_delegation_depth": {
+          "description": "Maximum number of child levels in a delegation chain.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1
         }
       },
       "additionalProperties": false,
       "required": [
-        "archive_after_days"
+        "archive_after_days",
+        "max_delegation_depth"
       ]
     },
     "SettingsResponse": {
       "type": "object",
       "properties": {
+        "attachments": {
+          "$ref": "#/$defs/AttachmentsConfig"
+        },
         "can_restart": {
           "type": "boolean"
         },
@@ -5778,6 +6340,7 @@
         "sessions",
         "memory",
         "judge",
+        "attachments",
         "voice",
         "restart_required",
         "can_restart"
@@ -6043,6 +6606,76 @@
         "status"
       ]
     },
+    "SuccessionCall": {
+      "description": "One model call a succession pass made.",
+      "type": "object",
+      "properties": {
+        "cost": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "failure_reason": {
+          "description": "Why the call failed, when it did.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "input_tokens": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "model": {
+          "description": "The provider-facing model id the call was sent to.",
+          "type": "string"
+        },
+        "output_tokens": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "report": {
+          "description": "What a reader reported. A synthesis's output is in\n`CompactionRecord.diagnosis.synthesis`; summaries are carried in the\nsuccessor's conversation context.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stage": {
+          "$ref": "#/$defs/SuccessionStage"
+        }
+      },
+      "required": [
+        "stage",
+        "model",
+        "input_tokens",
+        "output_tokens"
+      ]
+    },
+    "SuccessionStage": {
+      "description": "Which part of succession a model call was.",
+      "oneOf": [
+        {
+          "description": "A blind reader locating where one slice of the history went wrong.",
+          "type": "string",
+          "const": "reader"
+        },
+        {
+          "description": "The synthesis naming the problems from the readers' reports.",
+          "type": "string",
+          "const": "synthesis"
+        },
+        {
+          "description": "The summary of established conversation state.",
+          "type": "string",
+          "const": "summary"
+        }
+      ]
+    },
     "SurfaceAnnotationView": {
       "description": "A note left on one of a surface's modules. `body` and `tags` are the author's\nown words: other parties' work product, to be read as data.",
       "type": "object",
@@ -6065,6 +6698,15 @@
         "module_id": {
           "type": "string",
           "format": "uuid"
+        },
+        "resolved_at": {
+          "description": "Resolution time; the note remains in the record after leaving the working view.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "default": null
         },
         "tags": {
           "type": "array",
@@ -6110,6 +6752,17 @@
           "items": {
             "$ref": "#/$defs/SurfaceAnnotationView"
           }
+        },
+        "delivery": {
+          "description": "The run or turn that delivered this module, when one did.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModuleDelivery"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "id": {
           "type": "string",
@@ -6192,6 +6845,10 @@
           "type": "string",
           "format": "uuid"
         },
+        "shape_only": {
+          "description": "True when the copy starts with shape alone, without its origin's content.",
+          "type": "boolean"
+        },
         "title": {
           "type": "string"
         },
@@ -6201,6 +6858,7 @@
         }
       },
       "required": [
+        "shape_only",
         "id",
         "session_id",
         "title",
@@ -6295,6 +6953,16 @@
           "format": "uint64",
           "minimum": 0
         },
+        "execution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolExecution"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "parent_call_id": {
           "type": [
             "string",
@@ -6335,6 +7003,53 @@
         "tool",
         "arguments",
         "truncated"
+      ]
+    },
+    "ToolCompletion": {
+      "type": "string",
+      "enum": [
+        "not_run",
+        "confirmed",
+        "unknown"
+      ]
+    },
+    "ToolExecution": {
+      "type": "object",
+      "properties": {
+        "completion": {
+          "$ref": "#/$defs/ToolCompletion"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ToolOutcome"
+        },
+        "stage": {
+          "$ref": "#/$defs/ToolExecutionStage"
+        }
+      },
+      "required": [
+        "outcome",
+        "stage",
+        "completion"
+      ]
+    },
+    "ToolExecutionStage": {
+      "type": "string",
+      "enum": [
+        "not_started",
+        "started",
+        "finished",
+        "unknown"
+      ]
+    },
+    "ToolOutcome": {
+      "description": "What the dispatcher established about a call, independently of its payload.",
+      "type": "string",
+      "enum": [
+        "succeeded",
+        "failed",
+        "refused",
+        "rejected",
+        "cancelled"
       ]
     },
     "ToolPermissionConfig": {
@@ -6452,6 +7167,14 @@
         },
         "description": {
           "type": "string"
+        },
+        "effective_default_model": {
+          "description": "Default model selected by the topic's configuration cascade.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "id": {
           "type": "string",
@@ -6623,6 +7346,12 @@
             }
           ]
         },
+        "failure_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "input_tokens": {
           "type": [
             "integer",
@@ -6668,6 +7397,7 @@
         "incomplete",
         "failed",
         "interrupted",
+        "cancelled",
         "awaiting_approval",
         "delegating"
       ]
@@ -6829,6 +7559,11 @@
         "synthesis": {
           "type": "boolean"
         },
+        "synthesis_unverified": {
+          "description": "Whether the configured speech model's availability is still unverified.",
+          "type": "boolean",
+          "default": false
+        },
         "transcription": {
           "type": "boolean"
         },
@@ -6981,7 +7716,7 @@
           ]
         },
         "attempts": {
-          "description": "Every attempt the call ran, oldest first, each stamped once its turn\nresolved the options it actually ran with. A call interrupted and\nre-dispatched by replay has more than one, and each names its own\nturn — so the record keeps the interrupted attempt rather than only\nthe one that settled. Empty until the first turn resolves.",
+          "description": "Every attempt the call was dispatched for, oldest first: opened by\nthe run with its cause before the turn starts, and resolved by the\nturn with the options it actually ran with. A call interrupted and\nre-dispatched by replay, or served by its declared fallback, has more\nthan one, each naming its own turn — so the record keeps the attempt\nthat was cut off beside the one that followed. An attempt with no\nturn was opened and never resolved.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/WorkflowAgentCallResolution"
@@ -7036,9 +7771,12 @@
       ]
     },
     "WorkflowAgentCallResolution": {
-      "description": "The options a dispatched worker's turn resolved for itself.",
+      "description": "One attempt of a dispatched call: why it was dispatched, when it was\nopened, and the options its turn resolved for itself. Opened by the run\nbefore the turn starts and resolved by the turn before any provider work,\nso an attempt the gateway dies between the two writes of stays in the\nrecord with its cause and no resolution.",
       "type": "object",
       "properties": {
+        "cause": {
+          "$ref": "#/$defs/WorkflowAttemptCause"
+        },
         "effort": {
           "anyOf": [
             {
@@ -7054,6 +7792,10 @@
             "string",
             "null"
           ]
+        },
+        "opened_at": {
+          "type": "string",
+          "format": "date-time"
         },
         "session_id": {
           "type": [
@@ -7076,7 +7818,11 @@
           ],
           "format": "uuid"
         }
-      }
+      },
+      "required": [
+        "cause",
+        "opened_at"
+      ]
     },
     "WorkflowArgumentContract": {
       "description": "The argument contract a workflow declares in its portable metadata.\n\nWorkflows may omit a schema. That is an explicit unconstrained contract,\nrather than an absent field that callers could mistake for an incomplete\nlisting.",
@@ -7105,6 +7851,54 @@
           },
           "required": [
             "kind"
+          ]
+        }
+      ]
+    },
+    "WorkflowAttemptCause": {
+      "description": "Why an attempt of an agent call was dispatched.",
+      "oneOf": [
+        {
+          "description": "The call's first dispatch.",
+          "type": "object",
+          "properties": {
+            "cause": {
+              "type": "string",
+              "const": "first"
+            }
+          },
+          "required": [
+            "cause"
+          ]
+        },
+        {
+          "description": "Replay re-dispatched the call after a gateway death cut the attempt\nbefore it off: that attempt's outcome is unknown, and the tool calls\nit issued may have been applied.",
+          "type": "object",
+          "properties": {
+            "cause": {
+              "type": "string",
+              "const": "after_interruption"
+            }
+          },
+          "required": [
+            "cause"
+          ]
+        },
+        {
+          "description": "The model the call named refused before any output, and the call's\ndeclared fallback served it instead; no interruption occurred.",
+          "type": "object",
+          "properties": {
+            "cause": {
+              "type": "string",
+              "const": "provider_fallback"
+            },
+            "primary_failure": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "cause",
+            "primary_failure"
           ]
         }
       ]
@@ -7406,6 +8200,20 @@
         "holds_open",
         "holds_answered",
         "answers_rejected"
+      ]
+    },
+    "WorkflowInterruptedRunState": {
+      "oneOf": [
+        {
+          "description": "The run was executing: its workers in flight lost their process, and\nreplay re-dispatches the calls that had not settled.",
+          "type": "string",
+          "const": "running"
+        },
+        {
+          "description": "The run was parked on a durable wait: nothing of it was executing,\nand the waker relaunches it when its wake is due.",
+          "type": "string",
+          "const": "parked"
+        }
       ]
     },
     "WorkflowJournalEntry": {
@@ -8394,6 +9202,14 @@
           "type": "string",
           "format": "date-time"
         },
+        "dispatching_session_id": {
+          "description": "The conversation whose turn launched this run, when there is one.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
         "error_message": {
           "type": [
             "string",
@@ -8414,6 +9230,13 @@
         "id": {
           "type": "string",
           "format": "uuid"
+        },
+        "interruptions": {
+          "description": "Every gateway interruption the run lived through, oldest first: a\nboot that found the run running (so it was marked interrupted and\nrelaunched by replay) or parked (its wait outlived the gateway).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkflowRunInterruption"
+          }
         },
         "script_id": {
           "type": [
@@ -8471,6 +9294,14 @@
         "topic_id": {
           "type": "string",
           "format": "uuid"
+        },
+        "wake_at": {
+          "description": "The next timer wake recorded for a parked run.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
         }
       },
       "required": [
@@ -8480,7 +9311,38 @@
         "state",
         "args",
         "budget",
+        "interruptions",
         "created_at"
+      ]
+    },
+    "WorkflowRunCancellation": {
+      "description": "The recorded request which cancelled a run.",
+      "type": "object",
+      "properties": {
+        "actor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requested_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "requested_at"
       ]
     },
     "WorkflowRunCompletedEvent": {
@@ -8564,6 +9426,23 @@
           ]
         },
         {
+          "description": "Invalid workflow input refused before its worker spawned.",
+          "type": "object",
+          "properties": {
+            "ending": {
+              "type": "string",
+              "const": "author_error"
+            },
+            "error": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ending",
+            "error"
+          ]
+        },
+        {
           "description": "An operator or a parent run cancelled it.",
           "type": "object",
           "properties": {
@@ -8610,6 +9489,36 @@
             "reason"
           ]
         }
+      ]
+    },
+    "WorkflowRunEndingNotice": {
+      "description": "An ended run awaiting acknowledgement by a lead or schedule gate.",
+      "type": "object",
+      "properties": {
+        "completed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "script_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "state"
       ]
     },
     "WorkflowRunEvent": {
@@ -8670,6 +9579,22 @@
     "WorkflowRunHandover": {
       "description": "The durable account a failed run leaves behind: what stopped it, which\ncall failed, and where the pending event queue stood, so whoever picks\nthe work up starts from the record instead of a re-run.",
       "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "classification": {
+              "type": "string",
+              "const": "author_error"
+            },
+            "failure": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "classification",
+            "failure"
+          ]
+        },
         {
           "description": "An attributed agent-call failure stopped the run.",
           "type": "object",
@@ -8886,6 +9811,25 @@
         "closed"
       ]
     },
+    "WorkflowRunInterruption": {
+      "description": "A gateway interruption a run lived through, recorded by the boot that\nfound the run with no gateway alive to serve it.",
+      "type": "object",
+      "properties": {
+        "detected_at": {
+          "description": "When the boot recorded it; the gateway's death itself left no stamp.",
+          "type": "string",
+          "format": "date-time"
+        },
+        "run_state": {
+          "description": "How the run stood when the gateway stopped.",
+          "$ref": "#/$defs/WorkflowInterruptedRunState"
+        }
+      },
+      "required": [
+        "detected_at",
+        "run_state"
+      ]
+    },
     "WorkflowRunListResponse": {
       "type": "object",
       "properties": {
@@ -8898,6 +9842,162 @@
       },
       "required": [
         "runs"
+      ]
+    },
+    "WorkflowRunStartResult": {
+      "description": "A run's observed state when its start request returns.",
+      "type": "object",
+      "properties": {
+        "args": true,
+        "budget": {
+          "$ref": "#/$defs/WorkflowBudget"
+        },
+        "carrying_skill": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "completed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "dispatching_session_id": {
+          "description": "The conversation whose turn launched this run, when there is one.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "error_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "final_output": true,
+        "handover": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowRunHandover"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "interruptions": {
+          "description": "Every gateway interruption the run lived through, oldest first: a\nboot that found the run running (so it was marked interrupted and\nrelaunched by replay) or parked (its wait outlived the gateway).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkflowRunInterruption"
+          }
+        },
+        "script_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "script_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "script_version": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "source": {
+          "description": "Source retained for runs whose workflow was not a saved script version.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_hash": {
+          "description": "SHA-256 of the exact source executed by this run.",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/WorkflowRunState"
+        },
+        "status_as_of": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "task": {
+          "description": "Opaque identity declared by the workflow script for grouping its runs.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "terminal_account": {
+          "description": "The run's terminal account: how it ended and where its workers stood.\nAbsent only while the run is still going.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowRunTerminalAccount"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "topic_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "view_url": {
+          "description": "Gateway-relative address, resolved against the origin the reader uses.",
+          "type": "string"
+        },
+        "wake_at": {
+          "description": "The next timer wake recorded for a parked run.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "workers_dispatched": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "view_url",
+        "id",
+        "topic_id",
+        "source_hash",
+        "state",
+        "args",
+        "budget",
+        "interruptions",
+        "created_at",
+        "status_as_of"
       ]
     },
     "WorkflowRunStartedEvent": {
@@ -8930,15 +10030,48 @@
         }
       ]
     },
+    "WorkflowRunStatusRequest": {
+      "type": "object",
+      "properties": {
+        "acknowledge_run_ids": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "maxItems": 100
+        },
+        "run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "WorkflowRunTerminalAccount": {
       "description": "The one terminal record of a run: what ended it, where every worker stood,\nand — when the script never returned — the completed work still recoverable\nfrom it.",
       "type": "object",
       "properties": {
+        "cancellation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowRunCancellation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "ending": {
           "$ref": "#/$defs/WorkflowRunEnding"
         },
         "partial_results": {
-          "description": "Present exactly when the run ended without its script returning.",
+          "description": "Present when a run ended without returning and has completed worker output.",
           "anyOf": [
             {
               "$ref": "#/$defs/WorkflowPartialResults"
@@ -9117,6 +10250,10 @@
             "null"
           ]
         },
+        "redispatched_after_interruption": {
+          "description": "Whether any attempt of this worker followed a gateway interruption:\nthe interrupted attempt's outcome is unknown and the tool calls it\nissued may have been applied, so this worker's effects may have been\nrepeated.",
+          "type": "boolean"
+        },
         "seq": {
           "type": "integer",
           "format": "uint64",
@@ -9147,7 +10284,53 @@
       },
       "required": [
         "journal_entry_id",
-        "seq"
+        "seq",
+        "redispatched_after_interruption"
+      ]
+    },
+    "WorkflowWorkerActivity": {
+      "description": "One worker's activity in an open-run overview.",
+      "type": "object",
+      "properties": {
+        "agent_definition_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "liveness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkflowWorkerLiveness"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "status": {
+          "$ref": "#/$defs/WorkflowJournalEntryStatus"
+        }
+      },
+      "required": [
+        "id",
+        "seq",
+        "status"
       ]
     },
     "WorkflowWorkerLiveness": {

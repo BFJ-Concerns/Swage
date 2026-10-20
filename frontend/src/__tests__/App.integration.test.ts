@@ -142,7 +142,7 @@ vi.mock("../lib/api/materials", () => ({
 }));
 
 vi.mock("../lib/api/sessions", () => ({
-  listRecentSessions: vi.fn(async () => []),
+  listRecentSessions: vi.fn(),
 }));
 
 vi.mock("../lib/api/operator", () => ({
@@ -157,6 +157,7 @@ vi.mock("../lib/api/operator", () => ({
 vi.mock("../lib/api/settings", () => ({
   discoverModels: vi.fn(),
   fetchSettings: vi.fn(),
+  fetchProviderSecrets: vi.fn(),
   restartGateway: vi.fn(),
   saveSettings: vi.fn(),
 }));
@@ -252,9 +253,10 @@ function makeSettings(
       message_ttl_secs: 86_400,
       expiry_interval_secs: 60,
     },
-    sessions: { archive_after_days: 7 },
+    sessions: { archive_after_days: 7, max_delegation_depth: 4 },
     memory: { curator_idle_minutes: 10 },
     judge: { model: "" },
+    attachments: { accepted_schemes: ["https", "data"] },
     voice: {},
     restart_required: false,
     can_restart: false,
@@ -390,7 +392,9 @@ describe("App", () => {
 
   beforeEach(() => {
     websocketHarness.reset();
-    vi.clearAllMocks();
+    // Discard unused one-shot responses as well as calls between journeys.
+    vi.resetAllMocks();
+    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValue([]);
     setPath("/");
     delete window.swageDesktop;
     localStorage.clear();
@@ -405,6 +409,10 @@ describe("App", () => {
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(
       makeOperatorOverview(),
     );
+    vi.mocked(settingsApi.fetchProviderSecrets).mockResolvedValue({
+      secrets: [],
+      managed_backend: { status: "ready", detail: "", key_source: null },
+    });
     vi.mocked(settingsApi.fetchSettings).mockRejectedValue(
       new Error("settings are not configured in this test"),
     );
@@ -454,6 +462,7 @@ describe("App", () => {
     const created: ConversationResponse = {
       id: "conv-general",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
     };
@@ -541,6 +550,7 @@ describe("App", () => {
     resolveCreation({
       id: "conv-late",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: topic.id,
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
@@ -651,6 +661,25 @@ describe("App", () => {
     expect(websocketHarness.client.connect).toHaveBeenCalledWith(first.id);
   });
 
+  it("connects the shown deep link even when its scope list fails", async () => {
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([makeTopic()]);
+    vi.mocked(conversationsApi.getConversation).mockResolvedValue(
+      makeConversationDetail({ id: "conv-linked", messages: [{
+        role: "assistant", content: "Visible linked conversation",
+        timestamp: "2026-04-07T12:01:00Z", turn_state: "completed",
+      }] }),
+    );
+    vi.mocked(conversationsApi.listConversations).mockRejectedValueOnce(new Error("Scope list unavailable"));
+    setPath("/conversations/conv-linked");
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    expect(document.querySelector(".message-display")?.textContent).toContain("Visible linked conversation");
+    expect(websocketHarness.clientFor("conv-linked")).toBeDefined();
+    expect(websocketHarness.clientFor("conv-linked")!.connect).toHaveBeenCalledWith("conv-linked");
+    expect(document.body.textContent).toContain("Scope list unavailable");
+  });
+
   it("restores a deep-linked conversation on startup and opens its WebSocket", async () => {
     const defaultTopic = makeTopic();
     const linkedConversation = makeConversationSummary({
@@ -711,6 +740,45 @@ describe("App", () => {
     expect(document.querySelector(".message-display")?.textContent).toContain(
       "Restored from URL",
     );
+  });
+
+  it.each([false, true])("keeps session agent names across topics and reload when definitions fail: %s", async (failDefinitions) => {
+    const firstTopic = makeTopic({ id: "first-topic", name: "First" });
+    const secondTopic = makeTopic({ id: "second-topic", name: "Second" });
+    vi.mocked(topicsApi.listTopics).mockResolvedValue([firstTopic, secondTopic]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValue([]);
+    vi.mocked(conversationsApi.getConversation).mockImplementation(async (id) =>
+      makeConversationDetail({
+        id,
+        topic_id: id === "first-session" ? firstTopic.id : secondTopic.id,
+        agent_id: "shared-reader",
+        agent_display_name: id === "first-session" ? "First reader" : "Second reader",
+      }),
+    );
+    let finishDefinitions!: () => void;
+    vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockImplementation(async (topicId) => {
+      if (topicId === firstTopic.id) return [makeAgentDefinition({ id: "shared-reader", display_name: "First reader" })];
+      await new Promise<void>((resolve) => { finishDefinitions = resolve; });
+      if (failDefinitions) throw new Error("second topic definitions unavailable");
+      return [makeAgentDefinition({ id: "shared-reader", display_name: "Second reader" })];
+    });
+    setPath("/conversations/first-session");
+    component = mount(App, { target: document.body });
+    const label = () => document.querySelector('[aria-label="Session agent"]')?.textContent;
+    await vi.waitFor(() => expect(label()).toBe("First reader"));
+    setPath("/conversations/second-session");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    await vi.waitFor(() => expect(finishDefinitions).toBeTypeOf("function"));
+    await vi.waitFor(() => expect(label()).toBe("Second reader"));
+    finishDefinitions();
+    await settleUi();
+    expect(label()).toBe("Second reader");
+
+    unmount(component);
+    component = undefined;
+    vi.mocked(agentDefinitionsApi.listEffectiveAgentDefinitions).mockResolvedValue([]);
+    component = mount(App, { target: document.body });
+    await vi.waitFor(() => expect(label()).toBe("Second reader"));
   });
 
   it("keeps the gateway available when startup agent inventory loading fails", async () => {
@@ -793,6 +861,7 @@ describe("App", () => {
     const replacementConversation: ConversationResponse = {
       id: "replacement-id",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: "proj-default",
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
@@ -1149,11 +1218,113 @@ describe("App", () => {
     expect(surfaceNavigation?.parentElement?.textContent).toContain("MANAGED");
   });
 
+  it.each(["topic-a", "topic-b"])("preselects and submits %s's model for a fresh session", async (model) => {
+    const selectedTopic = makeTopic({ effective_default_model: model });
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([selectedTopic]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValue([]);
+    const entry = { provider_id: "local", model_id: "wire", aliases: [], generation_preset: null, default_effort: null };
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(makeSettings({
+      global: entry, "topic-a": entry,
+    }));
+    vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce({
+      id: "created-topic-session", topic_id: selectedTopic.id, agent_id: "gateway",
+      agent_display_name: "Swage default",
+      created_at: "2026-10-15T00:00:00Z", last_activity: "2026-10-15T00:00:00Z",
+    });
+    component = mount(App, { target: document.body });
+    await settleUi();
+    await startSessionInTopic(selectedTopic.id);
+    const picker = document.querySelector<HTMLSelectElement>('[aria-label="Model"]');
+    expect(picker?.value).toBe(model);
+    const textarea = document.querySelector("textarea")!;
+    flushSync(() => {
+      textarea.value = "Use the topic model";
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    flushSync(() => (document.querySelector(".action.send") as HTMLButtonElement).click());
+    await settleUi();
+    expect(conversationsApi.createConversation).toHaveBeenCalledWith(selectedTopic.id, model, null, null);
+  });
+
+  it.each([null, "global"])("topic default %s controls model availability", async (model) => {
+    const selectedTopic = makeTopic({ effective_default_model: model });
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([selectedTopic]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([]);
+    const entry = { provider_id: "local", model_id: "wire", aliases: [], generation_preset: null, default_effort: null };
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValueOnce(makeSettings({ global: entry }));
+    if (model) vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce({
+      id: "created-topic-session", topic_id: selectedTopic.id, agent_id: "gateway",
+      agent_display_name: "Swage default",
+      created_at: "2026-10-15T00:00:00Z", last_activity: "2026-10-15T00:00:00Z",
+    });
+    component = mount(App, { target: document.body });
+    await settleUi();
+    await startSessionInTopic(selectedTopic.id);
+    const picker = document.querySelector<HTMLSelectElement>('[aria-label="Model"]');
+    const offered = Array.from(picker?.options ?? []).map(option => option.value);
+    expect(offered).toEqual(model ? ["global"] : []);
+    if (model) expect(picker?.value).toBe("global");
+    else expect(document.body.textContent).toContain("No models are configured.");
+    const textarea = document.querySelector("textarea")!;
+    flushSync(() => {
+      textarea.value = "Use the inherited model";
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const send = document.querySelector<HTMLButtonElement>(".action.send")!;
+    expect(send.disabled).toBe(!model);
+    flushSync(() => send.click());
+    flushSync(() => textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    await settleUi();
+    if (model) expect(conversationsApi.createConversation).toHaveBeenCalledWith(selectedTopic.id, "global", null, null);
+    else expect(conversationsApi.createConversation).not.toHaveBeenCalled();
+  });
+
+  it("submits the refreshed inherited topic default after a settings save", async () => {
+    const topic = makeTopic({ effective_default_model: "old-model" });
+    const entry = { provider_id: "local", model_id: "wire", aliases: [], generation_preset: null };
+    const before = makeSettings({
+      "old-model": { ...entry, model_id: "old-model" },
+      "new-model": { ...entry, model_id: "new-model" },
+    });
+    before.default_model = "old-model";
+    const saved = structuredClone(before);
+    saved.default_model = "new-model";
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValueOnce(before).mockResolvedValueOnce(before).mockResolvedValue(saved);
+    vi.mocked(settingsApi.saveSettings).mockResolvedValue(saved);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([topic]).mockResolvedValueOnce([{ ...topic, effective_default_model: "new-model" }]);
+    vi.mocked(conversationsApi.listConversations).mockResolvedValue([]);
+    vi.mocked(conversationsApi.createConversation).mockResolvedValueOnce({
+      id: "created-topic-session", topic_id: topic.id, agent_id: "gateway",
+      agent_display_name: "Swage default",
+      created_at: "2026-10-15T00:00:00Z", last_activity: "2026-10-15T00:00:00Z",
+    });
+    component = mount(App, { target: document.body });
+    await settleUi();
+    await startSessionInTopic(topic.id);
+    const settings = Array.from(document.querySelectorAll("button")).find(b => b.textContent?.trim() === "Settings");
+    flushSync(() => settings!.click());
+    await settleUi();
+    const model = Array.from(document.querySelectorAll("button")).find(b => b.textContent?.trim().startsWith("new-model"));
+    flushSync(() => model!.click());
+    await expect.poll(() => document.body.textContent, { timeout: 2000 }).toContain("Saved automatically. Changes apply to new turns.");
+    flushSync(() => document.querySelector<HTMLButtonElement>('button[aria-label="Close settings"]')!.click());
+    await settleUi();
+    const textarea = document.querySelector("textarea")!;
+    flushSync(() => {
+      textarea.value = "Use the saved default";
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    flushSync(() => document.querySelector<HTMLButtonElement>(".action.send")!.click());
+    await settleUi();
+    expect(conversationsApi.createConversation).toHaveBeenCalledWith(topic.id, "new-model", null, null);
+  });
+
   it("creates and navigates when the sidebar starts a conversation", async () => {
     const defaultTopic = makeTopic();
     const created: ConversationResponse = {
       id: "conv-new",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: defaultTopic.id,
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
@@ -1209,6 +1380,7 @@ describe("App", () => {
     const createdFromChannel: ConversationResponse = {
       id: "conv-channel-new",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: defaultTopic.id,
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
@@ -1216,6 +1388,7 @@ describe("App", () => {
     const createdFromSidebar: ConversationResponse = {
       id: "conv-sidebar-new",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: defaultTopic.id,
       created_at: "2026-04-07T12:04:00Z",
       last_activity: "2026-04-07T12:04:00Z",
@@ -1299,6 +1472,7 @@ describe("App", () => {
     const created: ConversationResponse = {
       id: "conv-auto",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: defaultTopic.id,
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
@@ -1336,6 +1510,7 @@ describe("App", () => {
     const created: ConversationResponse = {
       id: "conv-agent",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: defaultTopic.id,
       created_at: "2026-04-07T12:03:00Z",
       last_activity: "2026-04-07T12:03:00Z",
@@ -1971,7 +2146,7 @@ describe("App", () => {
     vi.mocked(settingsApi.saveSettings)
       .mockResolvedValueOnce(saved)
       .mockResolvedValueOnce(configured);
-    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([makeTopic()]);
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([makeTopic({ effective_default_model: null })]).mockResolvedValueOnce([makeTopic({ effective_default_model: "local/new-model" })]);
     vi.mocked(conversationsApi.listConversations).mockResolvedValueOnce([
       makeConversationSummary({ id: "conv-settings-model" }),
     ]);
@@ -1990,11 +2165,11 @@ describe("App", () => {
     flushSync(() => settingsButton!.click());
     await settleUi();
     const newModelButton = Array.from(document.querySelectorAll("button")).find(
-      (button) => button.textContent?.trim().startsWith("local/new-model"),
+      (button) => button.textContent?.trim() === "new-model · local",
     );
     flushSync(() => newModelButton!.click());
-    await waitForText(
-      "Saved automatically. New turns will use the updated runtime.",
+    await expect.poll(() => document.body.textContent, { timeout: 2000 }).toContain(
+      "Saved automatically. Changes apply to new turns.",
     );
 
     const closeButton = document.querySelector<HTMLButtonElement>(
@@ -2033,11 +2208,11 @@ describe("App", () => {
     const existingModelButton = Array.from(
       document.querySelectorAll("button"),
     ).find((button) =>
-      button.textContent?.trim().startsWith("local/existing-model"),
+      button.textContent?.trim() === "existing-model · local",
     );
     flushSync(() => existingModelButton!.click());
-    await waitForText(
-      "Saved automatically. New turns will use the updated runtime.",
+    await expect.poll(() => document.body.textContent, { timeout: 2000 }).toContain(
+      "Saved automatically. Changes apply to new turns.",
     );
     expect(document.body.textContent).not.toContain(
       "transient catalogue failure",

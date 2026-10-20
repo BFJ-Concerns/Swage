@@ -18,8 +18,82 @@ pub enum TurnState {
     Incomplete,
     Failed,
     Interrupted,
+    Cancelled,
     AwaitingApproval,
     Delegating,
+}
+
+/// What the dispatcher established about a call, independently of its payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutcome {
+    Succeeded,
+    Failed,
+    Refused,
+    Rejected,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExecutionStage {
+    NotStarted,
+    Started,
+    Finished,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCompletion {
+    NotRun,
+    Confirmed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+pub struct ToolExecution {
+    pub outcome: ToolOutcome,
+    pub stage: ToolExecutionStage,
+    pub completion: ToolCompletion,
+}
+
+impl ToolExecution {
+    pub const fn succeeded() -> Self {
+        Self {
+            outcome: ToolOutcome::Succeeded,
+            stage: ToolExecutionStage::Finished,
+            completion: ToolCompletion::Confirmed,
+        }
+    }
+    pub const fn failed() -> Self {
+        Self {
+            outcome: ToolOutcome::Failed,
+            ..Self::succeeded()
+        }
+    }
+    pub const fn refused() -> Self {
+        Self {
+            outcome: ToolOutcome::Refused,
+            stage: ToolExecutionStage::NotStarted,
+            completion: ToolCompletion::NotRun,
+        }
+    }
+    pub const fn cancelled(started: bool) -> Self {
+        Self {
+            outcome: ToolOutcome::Cancelled,
+            stage: if started {
+                ToolExecutionStage::Started
+            } else {
+                ToolExecutionStage::NotStarted
+            },
+            completion: if started {
+                ToolCompletion::Unknown
+            } else {
+                ToolCompletion::NotRun
+            },
+        }
+    }
 }
 
 /// Request body for the conversation and topic-session creation endpoints.
@@ -54,6 +128,8 @@ pub struct ConversationResponse {
     pub topic_id: Option<Uuid>,
     /// The agent definition the session runs under.
     pub agent_id: String,
+    /// The display name resolved in the session's topic scope.
+    pub agent_display_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_model_id: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -84,6 +160,8 @@ pub struct ConversationDetail {
     pub topic_id: Option<Uuid>,
     /// The agent definition the session runs under.
     pub agent_id: String,
+    /// The display name resolved in the session's topic scope.
+    pub agent_display_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_model_id: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -162,6 +240,9 @@ pub struct ConversationThreadDetail {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct ToolCallView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub execution: Option<ToolExecution>,
     pub call_id: String,
     pub tool: String,
     #[ts(type = "Record<string, unknown>")]

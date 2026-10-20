@@ -30,6 +30,11 @@ read_only_paths: Array<string>,
  */
 masked_paths: Array<string>,
 /**
+ * Where tools keep their output artefacts, carried to the child
+ * independently of its working directory; writable, as a write path.
+ */
+tool_output_directory?: string | null,
+/**
  * Host-selected environment inherited by sandboxed commands.
  */
 environment: { [key in string]: string },

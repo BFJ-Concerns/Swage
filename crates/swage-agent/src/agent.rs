@@ -60,6 +60,59 @@ mod tests {
     }
 
     #[test]
+    fn model_error_rendering_distinguishes_post_work_rejection_from_refusal() {
+        let _root = tempfile::tempdir().unwrap();
+        for (name, detail) in [
+            (
+                "url_fetch",
+                "offset_bytes is only supported for text and JSON responses",
+            ),
+            (
+                "file_read",
+                "offset_bytes must be a valid UTF-8 byte boundary",
+            ),
+        ] {
+            let refusal = ToolError::InvalidParameters {
+                name: name.to_string(),
+                message: detail.to_string(),
+            };
+            let before = format_tool_error_for_model(&refusal);
+            assert_eq!(
+                before,
+                format!(
+                    "Tool error: invalid parameters for `{name}`: {detail}. Correct the arguments and retry."
+                )
+            );
+            let after = format_tool_error_for_model(&refusal.after_execution());
+            assert!(
+                after.contains("operation ran before its result was rejected"),
+                "{name}: {after}"
+            );
+            assert!(
+                after.contains(&before),
+                "source detail and advice lost: {after}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_error_rendering_preserves_uncertain_execution() {
+        let _root = tempfile::tempdir().unwrap();
+        let source = ToolError::Timeout {
+            name: "shell".to_string(),
+            duration: Duration::from_secs(30),
+        };
+        let detail = format_tool_error_for_model(&source);
+        let rendered = format_tool_error_for_model(&source.execution_uncertain());
+        assert!(rendered.contains("operation may have run"), "{rendered}");
+        assert!(
+            rendered.contains(&detail),
+            "source detail and advice lost: {rendered}"
+        );
+        assert!(!rendered.contains("operation ran before"), "{rendered}");
+    }
+
+    #[test]
     fn format_tool_error_for_model_labels_permission_denial() {
         let error = ToolError::PermissionDenied {
             name: "shell".to_string(),
@@ -123,6 +176,191 @@ mod approval_tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn settlement_approval_feedback_keeps_post_execution_validation_truthful() {
+        use swage_tool::tool::Tool;
+        struct ReadThenReject;
+        #[async_trait::async_trait]
+        impl Tool for ReadThenReject {
+            fn name(&self) -> &str {
+                "read_then_reject"
+            }
+            fn description(&self) -> &str {
+                "Read a file."
+            }
+            fn parameters(&self) -> Value {
+                serde_json::json!({"type":"object", "properties":{"path":{"type":"string"}}, "required":["path"]})
+            }
+            async fn execute(
+                &self,
+                params: Value,
+                _ctx: &dyn swage_tool::context::ToolContext,
+            ) -> Result<Value, swage_core::ToolError> {
+                let content = std::fs::read_to_string(params["path"].as_str().unwrap()).unwrap();
+                assert_eq!(content, "read me");
+                Err(swage_core::ToolError::InvalidParameters {
+                    name: self.name().into(),
+                    message: "offset beyond the content read".into(),
+                }
+                .after_execution())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input");
+        std::fs::write(&path, "read me").unwrap();
+        let dispatcher = ToolDispatcher::allow_all(vec![Arc::new(ReadThenReject) as Arc<dyn Tool>]);
+        let ctx = AgentToolContext::new("agent", "session", dir.path());
+        let result = dispatcher
+            .dispatch(
+                "read_then_reject",
+                serde_json::json!({"path":path}),
+                &ctx,
+                "agent",
+            )
+            .await;
+        let result = tool_dispatch_result(result).unwrap();
+        let result = crate::approval::with_user_approval_note(
+            result,
+            crate::approval::ApprovalDecisionScope::Once,
+        );
+        let feedback = result.model_content(&result.content);
+        assert!(
+            !feedback.contains("did not run"),
+            "post-execution validation must not deny execution: {feedback}"
+        );
+        assert!(
+            feedback.contains("ran after approval"),
+            "execution must be confirmed: {feedback}"
+        );
+        assert!(result.is_error);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn settlement_delivered_approval_wins_an_already_ready_timer() {
+        for _ in 0..16 {
+            let registered = Arc::new(Mutex::new(None));
+            let slot = registered.clone();
+            let (agent, execution) = approval_fixture(Arc::new(move |id, sender| {
+                *slot.lock().unwrap() = Some((id, sender));
+                crate::approval::ApprovalChannelRegistration::default()
+            }))
+            .await;
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut scope = TurnApprovalScope::default();
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let gate = agent.handle_approval_gate(
+                &execution,
+                swage_storage::ApprovalKind::Tool,
+                Some("shell".into()),
+                None,
+                None,
+                "Allow shell?".into(),
+                None,
+                std::time::Duration::from_millis(250),
+                swage_core::ApprovalTimeoutPolicy::Reject,
+                &tx,
+                &cancel,
+                &mut scope,
+            );
+            tokio::pin!(gate);
+            loop {
+                tokio::select! {
+                    event = rx.recv() => if matches!(event, Some(AgentEvent::ApprovalRequired { .. })) { break; },
+                    result = &mut gate => panic!("gate completed without a decision: {result:?}"),
+                }
+            }
+            let (id, sender) = registered.lock().unwrap().take().unwrap();
+            agent
+                .storage
+                .update_approval_state(id, swage_storage::ApprovalState::Approved, None)
+                .await
+                .unwrap();
+            sender
+                .send(crate::approval::ApprovalDecision {
+                    decision: crate::approval::ApprovalDecisionValue::Approved,
+                    scope: crate::approval::ApprovalDecisionScope::Once,
+                    reason: None,
+                })
+                .unwrap();
+            // The gate itself is not polled during this wait: both its delivered
+            // decision and timer are ready when it next runs.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let outcome = gate.await.unwrap();
+            assert!(
+                matches!(
+                    outcome,
+                    crate::approval::ApprovalGateOutcome::Approved { .. }
+                ),
+                "a delivered accepted decision must beat the timer: {outcome:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn settlement_committed_approval_waits_for_delivery_after_deadline() {
+        let registered = Arc::new(Mutex::new(None));
+        let slot = registered.clone();
+        let (agent, execution) = approval_fixture(Arc::new(move |id, sender| {
+            *slot.lock().unwrap() = Some((id, sender));
+            crate::approval::ApprovalChannelRegistration::default()
+        }))
+        .await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut scope = TurnApprovalScope::default();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let gate = agent.handle_approval_gate(
+            &execution,
+            swage_storage::ApprovalKind::Tool,
+            Some("shell".into()),
+            None,
+            None,
+            "Allow shell?".into(),
+            None,
+            std::time::Duration::from_millis(250),
+            swage_core::ApprovalTimeoutPolicy::Reject,
+            &tx,
+            &cancel,
+            &mut scope,
+        );
+        tokio::pin!(gate);
+        loop {
+            tokio::select! {
+                event = rx.recv() => if matches!(event, Some(AgentEvent::ApprovalRequired { .. })) { break; },
+                result = &mut gate => panic!("gate completed without a decision: {result:?}"),
+            }
+        }
+        let (id, sender) = registered.lock().unwrap().take().unwrap();
+        agent
+            .storage
+            .update_approval_state(id, swage_storage::ApprovalState::Approved, None)
+            .await
+            .unwrap();
+        // The gate itself is not polled during this wait: both its delivered
+        // decision and timer are ready when it next runs.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut gate)
+                .await
+                .is_err(),
+            "a committed answer must wait for its pending delivery rather than expire"
+        );
+        sender
+            .send(crate::approval::ApprovalDecision {
+                decision: crate::approval::ApprovalDecisionValue::Approved,
+                scope: crate::approval::ApprovalDecisionScope::Once,
+                reason: None,
+            })
+            .unwrap();
+        let outcome = gate.await.unwrap();
+        assert!(
+            matches!(
+                outcome,
+                crate::approval::ApprovalGateOutcome::Approved { .. }
+            ),
+            "a delivered accepted decision must beat the timer: {outcome:?}"
+        );
+    }
+
     async fn approval_fixture(
         registrar: ApprovalChannelRegistrar,
     ) -> (Agent, TurnExecutionContext) {
@@ -173,6 +411,111 @@ mod approval_tests {
             topic_id: Some(topic.id),
         };
         (agent, execution)
+    }
+
+    /// Hold the real retry wrapper's first attempt chunk across cancellation,
+    /// modelling a queued receiver that has not delivered it to the agent yet.
+    struct QueuedAttemptCancellationProvider {
+        cancel: Option<tokio_util::sync::CancellationToken>,
+        polled: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for QueuedAttemptCancellationProvider {
+        fn model_id(&self) -> &str {
+            "queued-attempt"
+        }
+        async fn complete(
+            &self,
+            _: CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unreachable!()
+        }
+        async fn complete_with_tools(
+            &self,
+            _: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unreachable!()
+        }
+        fn stream(
+            &self,
+            request: CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+            let Some(cancel) = self.cancel.clone() else {
+                let polled = self.polled.clone();
+                return Box::pin(futures::stream::poll_fn(move |_| {
+                    polled.store(true, Ordering::SeqCst);
+                    std::task::Poll::Pending
+                }));
+            };
+            let retry = swage_provider::retry::RetryProvider::new(
+                Self {
+                    cancel: None,
+                    polled: self.polled.clone(),
+                },
+                swage_provider::retry::RetryConfig::default(),
+            );
+            let mut stream = retry.stream(request);
+            let mut queued = None;
+            Box::pin(futures::stream::poll_fn(move |cx| {
+                if let Some(chunk) = queued.take() {
+                    return std::task::Poll::Ready(Some(chunk));
+                }
+                match stream.as_mut().poll_next(cx) {
+                    std::task::Poll::Ready(Some(chunk @ StreamChunk::ProviderAttempt(_)))
+                        if !cancel.is_cancelled() =>
+                    {
+                        queued = Some(chunk);
+                        cancel.cancel();
+                        std::task::Poll::Pending
+                    }
+                    other => other,
+                }
+            }))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancellation_preserves_a_queued_initial_attempt() {
+        let (mut agent, execution) = approval_fixture(Arc::new(|_, _| {
+            crate::approval::ApprovalChannelRegistration::default()
+        }))
+        .await;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let polled = Arc::new(AtomicBool::new(false));
+        agent.provider = Arc::new(QueuedAttemptCancellationProvider {
+            cancel: Some(cancel.clone()),
+            polled: polled.clone(),
+        });
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let request = serde_json::from_value(serde_json::json!({ "messages": [] })).unwrap();
+        let result = agent
+            .consume_provider_stream(
+                request, &execution, &tx, &cancel, "", &mut 0, &mut 0, &mut false, false, 3,
+            )
+            .await;
+        assert!(matches!(result, Err(AgentError::Cancelled)));
+        assert!(
+            polled.load(Ordering::SeqCst),
+            "the concrete provider was polled before cancellation"
+        );
+        let attempts: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                AgentEvent::ProviderAttempt { record, .. } => Some(record),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            attempts.len(),
+            1,
+            "cancellation must preserve the queued initial attempt as interrupted"
+        );
+        assert_eq!(
+            attempts[0].outcome,
+            swage_core::ProviderAttemptOutcome::Interrupted
+        );
+        assert_eq!(attempts[0].round, 3);
+        assert!(attempts[0].ended_at_ms.unwrap() >= attempts[0].started_at_ms);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -574,6 +917,497 @@ mod approval_tests {
         );
     }
 
+    struct CompletedDelegation;
+
+    #[async_trait::async_trait]
+    impl crate::delegation::DelegationHandler for CompletedDelegation {
+        async fn handle_delegation(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: Option<Value>,
+            _: Option<String>,
+            _: Option<swage_protocol::client::workflow::WorkerIsolation>,
+            _: Option<Vec<String>>,
+            _: Option<&str>,
+            _: swage_core::DispatchContextComposition,
+            _: &str,
+            _: &str,
+            _: Uuid,
+            _: Uuid,
+            _: tokio_util::sync::CancellationToken,
+            _: swage_core::DelegateCompletionMode,
+        ) -> Result<crate::delegation::DelegationOutcome, AgentError> {
+            Ok(crate::delegation::DelegationOutcome::Completed(
+                serde_json::json!({"response": "survey complete"}),
+            ))
+        }
+    }
+
+    struct DelegateThenWait(std::sync::atomic::AtomicBool);
+
+    #[async_trait::async_trait]
+    impl LlmProvider for DelegateThenWait {
+        fn model_id(&self) -> &str {
+            "delegate-then-wait"
+        }
+        async fn complete(
+            &self,
+            _: CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unreachable!()
+        }
+        async fn complete_with_tools(
+            &self,
+            _: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unreachable!()
+        }
+        fn stream(
+            &self,
+            _: CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+            if self.0.swap(true, Ordering::SeqCst) {
+                return Box::pin(futures::stream::pending());
+            }
+            Box::pin(futures::stream::iter([
+                StreamChunk::ToolUse {
+                    call_id: "call-worker".into(),
+                    name: "delegate".into(),
+                    arguments: serde_json::json!({"target_agent": "worker", "task": "survey", "context": []}),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(swage_core::FinishReason::ToolUse),
+                },
+            ]))
+        }
+    }
+
+    struct PauseDelegationResult {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl swage_hook::Hook for PauseDelegationResult {
+        fn name(&self) -> &str {
+            "pause-delegation-result"
+        }
+        async fn execute(&self, event: &HookEvent) -> HookOutcome {
+            let HookEvent::PostToolUse { result, .. } = event else {
+                panic!("expected the delegation's tool result");
+            };
+            assert_eq!(
+                result["response"], "survey complete",
+                "the delegation must complete before its durable state is inspected: {result}"
+            );
+            self.entered.notify_one();
+            self.release.notified().await;
+            HookOutcome::Continue
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delegation_remains_recoverable_until_its_tool_result_is_recorded() {
+        use swage_storage::store::ToolCallStore;
+        for refuse_resume in [false, true] {
+            let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+            let topic = storage.general_scope().await.unwrap();
+            let session = storage
+                .create_session(swage_storage::fixtures::new_session(topic.id))
+                .await
+                .unwrap();
+            let thread = ThreadStore::create(
+                &*storage,
+                NewThread {
+                    session_id: session.id,
+                    agent_id: "agent".into(),
+                },
+            )
+            .await
+            .unwrap();
+            let turn = storage
+                .create_turn(NewTurn {
+                    thread_id: thread.id,
+                    agent_id: "agent".into(),
+                    state: TurnState::Pending,
+                    user_input: Some("survey".into()),
+                    parent_turn_id: None,
+                })
+                .await
+                .unwrap();
+            if refuse_resume {
+                storage
+                    .with_conn(|conn| {
+                        conn.execute_batch(
+                            "CREATE TRIGGER refuse_resume BEFORE UPDATE OF state ON turns
+                     WHEN OLD.state = 'delegating' AND NEW.state = 'processing'
+                     BEGIN SELECT RAISE(ABORT, 'resume refused'); END;",
+                        )
+                    })
+                    .await
+                    .unwrap();
+            }
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let mut hooks = HookRegistry::new();
+            hooks.register(swage_hook::HookRegistration {
+                hook: Arc::new(PauseDelegationResult {
+                    entered: entered.clone(),
+                    release: release.clone(),
+                }),
+                event_filter: Some(|event| matches!(event, HookEvent::PostToolUse { .. })),
+                matcher: None,
+                priority: 0,
+                failure_mode: swage_hook::FailureMode::FailOpen,
+                timeout: std::time::Duration::from_secs(5),
+            });
+            let mut registry = swage_tool::registry::ToolRegistry::new();
+            registry
+                .register_builtin(Arc::new(swage_tool::delegate::DelegateTool))
+                .unwrap();
+            let agent = Agent {
+                config: AgentConfig::new("agent").with_workspace("/work", vec!["/work".into()]),
+                provider: Arc::new(DelegateThenWait(AtomicBool::new(false))),
+                storage: storage.clone(),
+                tool_dispatcher: Some(ToolDispatcher::new(
+                    Arc::new(registry),
+                    swage_tool::permission::PermissionConfig {
+                        allow: vec!["*".into()],
+                        deny: vec![],
+                        bundles: std::collections::HashMap::new(),
+                        require_approval: vec![],
+                    },
+                    Arc::new(swage_tool::rate_limit::RateLimiter::new()),
+                    swage_tool::rate_limit::RateLimitConfig::default(),
+                    Arc::new(LeakDetector::default()),
+                    false,
+                )),
+                hook_registry: Some(Arc::new(hooks)),
+                leak_detector: None,
+                approval_registrar: None,
+                request_judge: None,
+                delegation_handler: Some(Arc::new(CompletedDelegation)),
+                context_transfer_config: swage_config::ContextTransferConfig::default(),
+            };
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let running = agent.process_turn_streaming(
+                TurnRequest {
+                    execution: TurnExecutionContext {
+                        session_id: session.id,
+                        thread_id: thread.id,
+                        turn_id: turn.id,
+                        topic_id: Some(topic.id),
+                    },
+                    user_message: "survey".into(),
+                    assembled_context: vec![ChatMessage::new(Role::User, "survey")],
+                    parent_turn_id: None,
+                    existing_turn_id: Some(turn.id),
+                    cancellation_token: tokio_util::sync::CancellationToken::new(),
+                    compaction_focus: None,
+                    effort: None,
+                },
+                event_tx,
+            );
+            let inspect = async {
+                entered.notified().await;
+                let call = storage
+                    .get_tool_call_by_turn_and_call_id(turn.id, "call-worker")
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(call.result.is_none());
+                assert_eq!(
+                    storage.get_turn(turn.id).await.unwrap().unwrap().state,
+                    TurnState::Delegating,
+                    "a returned delegation with no durable tool result must remain recoverable"
+                );
+                release.notify_one();
+                while let Some(event) = event_rx.recv().await {
+                    if let AgentEvent::ToolEnd { status, .. } = event {
+                        let call = storage
+                            .get_tool_call_by_turn_and_call_id(turn.id, "call-worker")
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        let state = storage.get_turn(turn.id).await.unwrap().unwrap().state;
+                        if refuse_resume {
+                            assert_eq!(status, "error");
+                            assert_eq!(state, TurnState::Delegating);
+                            assert!(
+                                call.result.is_none(),
+                                "a refused state transition must roll the tool result back"
+                            );
+                        } else {
+                            assert_eq!(status, "success");
+                            assert_eq!(
+                                state,
+                                TurnState::Processing,
+                                "a durable result must no longer select the parent for restart resumption"
+                            );
+                            assert!(call.result.as_deref().unwrap().contains("survey complete"));
+                            assert!(call.model_result.is_some());
+                            assert_eq!(
+                                call.execution,
+                                Some(
+                                    swage_protocol::client::conversation::ToolExecution::succeeded(
+                                    )
+                                )
+                            );
+                        }
+                        return;
+                    }
+                }
+                panic!("tool result was not emitted");
+            };
+            Box::pin(tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                tokio::select! {
+                    () = inspect => {},
+                    result = running => panic!("turn ended before its tool result was inspected: {result:?}"),
+                }
+            })).await.unwrap();
+            // Dropping the pending provider turn models a process exit at this
+            // boundary without running the normal cancellation settlement.
+        }
+    }
+
+    struct DelegateThenEcho {
+        round: std::sync::atomic::AtomicUsize,
+        another_delegation: bool,
+        separate_round: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for DelegateThenEcho {
+        fn model_id(&self) -> &str {
+            "delegate-then-wait"
+        }
+        async fn complete(
+            &self,
+            _: CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unreachable!()
+        }
+        async fn complete_with_tools(
+            &self,
+            _: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unreachable!()
+        }
+        fn stream(
+            &self,
+            _: CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+            let round = self.round.fetch_add(1, Ordering::SeqCst);
+            if round > usize::from(self.separate_round) {
+                return Box::pin(futures::stream::pending());
+            }
+            let mut chunks = vec![
+                StreamChunk::ToolUse {
+                    call_id: "call-worker".into(),
+                    name: "delegate".into(),
+                    arguments: serde_json::json!({"target_agent": "worker", "task": "survey", "context": []}),
+                },
+                StreamChunk::ToolUse {
+                    call_id: "call-echo".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::json!({"text": "hello"}),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(swage_core::FinishReason::ToolUse),
+                },
+            ];
+            if self.another_delegation {
+                chunks.insert(1, StreamChunk::ToolUse {
+                    call_id: "call-next-worker".into(),
+                    name: "delegate".into(),
+                    arguments: serde_json::json!({"target_agent": "worker", "task": "survey again", "context": []}),
+                });
+            }
+            if self.separate_round {
+                if round == 0 {
+                    chunks.truncate(1);
+                    chunks.push(StreamChunk::Done {
+                        finish_reason: Some(swage_core::FinishReason::ToolUse),
+                    });
+                } else {
+                    chunks.remove(0);
+                }
+            }
+            Box::pin(futures::stream::iter(chunks))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_delegation_settlement_is_not_consumed_by_the_next_tool() {
+        use swage_storage::store::ToolCallStore;
+        for (another_delegation, separate_round) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+            let topic = storage.general_scope().await.unwrap();
+            let session = storage
+                .create_session(swage_storage::fixtures::new_session(topic.id))
+                .await
+                .unwrap();
+            let thread = ThreadStore::create(
+                &*storage,
+                NewThread {
+                    session_id: session.id,
+                    agent_id: "agent".into(),
+                },
+            )
+            .await
+            .unwrap();
+            let turn = storage
+                .create_turn(NewTurn {
+                    thread_id: thread.id,
+                    agent_id: "agent".into(),
+                    state: TurnState::Pending,
+                    user_input: Some("survey".into()),
+                    parent_turn_id: None,
+                })
+                .await
+                .unwrap();
+            storage
+                .with_conn(|conn| {
+                    conn.execute_batch(
+                        "CREATE TRIGGER refuse_resume BEFORE UPDATE OF result ON tool_calls
+                     WHEN OLD.call_id = 'call-worker'
+                     BEGIN SELECT RAISE(ABORT, 'delegate result refused'); END;",
+                    )
+                })
+                .await
+                .unwrap();
+            let mut registry = swage_tool::registry::ToolRegistry::new();
+            registry
+                .register_builtin(Arc::new(swage_tool::delegate::DelegateTool))
+                .unwrap();
+            registry.register(Arc::new(EchoTool)).unwrap();
+            let agent = Agent {
+                config: AgentConfig::new("agent").with_workspace("/work", vec!["/work".into()]),
+                provider: Arc::new(DelegateThenEcho {
+                    round: std::sync::atomic::AtomicUsize::new(0),
+                    another_delegation,
+                    separate_round,
+                }),
+                storage: storage.clone(),
+                tool_dispatcher: Some(ToolDispatcher::new(
+                    Arc::new(registry),
+                    swage_tool::permission::PermissionConfig {
+                        allow: vec!["*".into()],
+                        deny: vec![],
+                        bundles: std::collections::HashMap::new(),
+                        require_approval: vec![],
+                    },
+                    Arc::new(swage_tool::rate_limit::RateLimiter::new()),
+                    swage_tool::rate_limit::RateLimitConfig::default(),
+                    Arc::new(LeakDetector::default()),
+                    false,
+                )),
+                hook_registry: None,
+                leak_detector: None,
+                approval_registrar: None,
+                request_judge: None,
+                delegation_handler: Some(Arc::new(CompletedDelegation)),
+                context_transfer_config: swage_config::ContextTransferConfig::default(),
+            };
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let running = agent.process_turn_streaming(
+                TurnRequest {
+                    execution: TurnExecutionContext {
+                        session_id: session.id,
+                        thread_id: thread.id,
+                        turn_id: turn.id,
+                        topic_id: Some(topic.id),
+                    },
+                    user_message: "survey".into(),
+                    assembled_context: vec![ChatMessage::new(Role::User, "survey")],
+                    parent_turn_id: None,
+                    existing_turn_id: Some(turn.id),
+                    cancellation_token: tokio_util::sync::CancellationToken::new(),
+                    compaction_focus: None,
+                    effort: None,
+                },
+                event_tx,
+            );
+            let inspect = async {
+                let mut child_completed = false;
+                let mut delegate_record_refused = false;
+                while let Some(event) = event_rx.recv().await {
+                    if let AgentEvent::DelegationCompleted { success, .. } = &event {
+                        assert!(
+                            *success,
+                            "the child must complete successfully before the write failure"
+                        );
+                        child_completed = true;
+                    }
+                    if let AgentEvent::ToolEnd {
+                        call_id,
+                        status,
+                        result,
+                        ..
+                    } = &event
+                        && call_id == "call-worker"
+                    {
+                        assert_eq!(status, "error");
+                        assert!(result.to_string().contains("delegate result refused"));
+                        delegate_record_refused = true;
+                    }
+                    if let AgentEvent::ToolEnd {
+                        call_id, status, ..
+                    } = event
+                    {
+                        if call_id != "call-echo" {
+                            continue;
+                        }
+                        assert!(
+                            child_completed && delegate_record_refused,
+                            "the child must answer and its result write fail before the ordinary tool settles"
+                        );
+                        assert_eq!(status, "success");
+                        if another_delegation {
+                            let later = storage
+                                .get_tool_call_by_turn_and_call_id(turn.id, "call-next-worker")
+                                .await
+                                .unwrap()
+                                .unwrap();
+                            assert!(
+                                later.result.is_some(),
+                                "a later delegation records only its own result"
+                            );
+                        }
+                        let call = storage
+                            .get_tool_call_by_turn_and_call_id(turn.id, "call-worker")
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        assert!(
+                            call.result.is_none(),
+                            "the failed delegate result is still unrecorded"
+                        );
+                        assert_eq!(
+                            storage.get_turn(turn.id).await.unwrap().unwrap().state,
+                            TurnState::Delegating,
+                            "settling a later ordinary tool must not consume an unsettled delegation's recovery mark"
+                        );
+                        return;
+                    }
+                }
+                panic!("no echo result");
+            };
+            Box::pin(tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                tokio::select! {
+                    () = inspect => {},
+                    result = running => panic!("turn ended before its tool result was inspected: {result:?}"),
+                }
+            })).await.unwrap();
+            // Dropping the pending provider turn models a process exit at this
+            // boundary without running the normal cancellation settlement.
+        }
+    }
+
     struct EchoTool;
 
     #[async_trait::async_trait]
@@ -648,6 +1482,7 @@ mod approval_tests {
                 &event_tx,
                 &tokio_util::sync::CancellationToken::new(),
                 &mut TurnApprovalScope::default(),
+                None,
             )
             .await
             .expect("approved dispatch")
@@ -1109,7 +1944,10 @@ impl Agent {
         // zero, so a reader can tell "spent nothing" from "cannot say".
         let mut usage_reported = false;
         let mut total_tool_calls: u32 = 0;
+        let mut identical_failures: std::collections::HashMap<(String, String), u32> =
+            Default::default();
         let mut tool_position: i32 = 0;
+        let mut delegation_wait_owner = None;
         let mut round = 0usize;
         let mut incomplete_reason;
 
@@ -1123,7 +1961,7 @@ impl Agent {
                     .await;
                 let _ = self
                     .storage
-                    .update_turn_state(turn.id, TurnState::Interrupted)
+                    .update_turn_state(turn.id, TurnState::Cancelled)
                     .await;
                 let _ = self
                     .storage
@@ -1168,7 +2006,7 @@ impl Agent {
                     if cancel_token.is_cancelled() {
                         let _ = self
                             .storage
-                            .update_turn_state(turn.id, TurnState::Interrupted)
+                            .update_turn_state(turn.id, TurnState::Cancelled)
                             .await;
                         let _ = self
                             .storage
@@ -1187,6 +2025,7 @@ impl Agent {
                     let record = match self
                         .storage
                         .create_tool_call(NewToolCall {
+                            execution: None,
                             turn_id: turn.id,
                             agent_id: self.config.agent_id.clone(),
                             call_id: call.call_id.clone(),
@@ -1212,6 +2051,9 @@ impl Agent {
                                 "tool call refused: its record could not be written: {error}"
                             );
                             let _ = event_tx.send(AgentEvent::ToolEnd {
+                                execution: Some(
+                                    swage_protocol::client::conversation::ToolExecution::refused(),
+                                ),
                                 call_id: call.call_id.clone(),
                                 tool_name: call.name.clone(),
                                 result: Value::String(refusal.clone()),
@@ -1232,96 +2074,121 @@ impl Agent {
                     let start = std::time::Instant::now();
 
                     // PreToolUse hook — may block, request approval, or proceed.
-                    let dispatch_result = match self
-                        .dispatch_pre_tool_use(&call.name, &call.arguments)
-                        .await
-                    {
-                        Err(AgentError::HookBlocked { reason, .. }) => {
-                            (reason, true, "blocked".to_string()).into()
-                        }
-                        Err(e) => (format!("hook error: {e}"), true, "error".to_string()).into(),
-                        Ok(PreToolUseOutcome::RequestApproval {
-                            prompt,
-                            context,
-                            timeout,
-                        }) => {
-                            if approval_scope.runs_granted_calls_unreviewed() {
-                                // A broader approval decision covers later gates
-                                // within this still-running turn, and an
-                                // unattended turn runs its granted calls
-                                // without review.
-                                self.dispatch_tool_call(
-                                    call,
-                                    &execution,
-                                    &llm_request.messages,
-                                    &event_tx,
-                                    &cancel_token,
-                                    &mut approval_scope,
-                                )
-                                .await?
-                            } else {
-                                // Hook-driven approval gate.
-                                use crate::approval::{
-                                    ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS,
-                                };
-                                let gate_timeout = timeout.unwrap_or(
-                                    std::time::Duration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS),
-                                );
-                                match self
-                                    .handle_approval_gate(
-                                        &execution,
-                                        swage_storage::model::ApprovalKind::Hook,
-                                        Some(call.name.clone()),
-                                        Some(call.arguments.clone()),
-                                        None,
-                                        prompt,
-                                        context,
-                                        gate_timeout,
-                                        swage_core::ApprovalTimeoutPolicy::default(),
-                                        &event_tx,
-                                        &cancel_token,
-                                        &mut approval_scope,
-                                    )
-                                    .await?
-                                {
-                                    ApprovalGateOutcome::Approved { scope } => {
-                                        // Approved — proceed with normal dispatch.
-                                        crate::approval::with_user_approval_note(
-                                            self.dispatch_tool_call(
-                                                call,
+                    let dispatch_result = async {
+                        Ok(
+                            match self
+                                .dispatch_pre_tool_use(&call.name, &call.arguments)
+                                .await
+                            {
+                                Err(AgentError::HookBlocked { reason, .. }) => {
+                                    (reason, true, "blocked".to_string()).into()
+                                }
+                                Err(e) => {
+                                    (format!("hook error: {e}"), true, "error".to_string()).into()
+                                }
+                                Ok(PreToolUseOutcome::RequestApproval {
+                                    prompt,
+                                    context,
+                                    timeout,
+                                }) => {
+                                    if approval_scope.runs_granted_calls_unreviewed() {
+                                        // A broader approval decision covers later gates
+                                        // within this still-running turn, and an
+                                        // unattended turn runs its granted calls
+                                        // without review.
+                                        self.dispatch_tool_call(
+                                            call,
+                                            &execution,
+                                            &llm_request.messages,
+                                            &event_tx,
+                                            &cancel_token,
+                                            &mut approval_scope,
+                                            Some(record.id),
+                                        )
+                                        .await?
+                                    } else {
+                                        // Hook-driven approval gate.
+                                        use crate::approval::{
+                                            ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS,
+                                        };
+                                        let gate_timeout =
+                                            timeout.unwrap_or(std::time::Duration::from_secs(
+                                                DEFAULT_APPROVAL_TIMEOUT_SECS,
+                                            ));
+                                        match self
+                                            .handle_approval_gate(
                                                 &execution,
-                                                &llm_request.messages,
+                                                swage_storage::model::ApprovalKind::Hook,
+                                                Some(call.name.clone()),
+                                                Some(call.arguments.clone()),
+                                                None,
+                                                prompt,
+                                                context,
+                                                gate_timeout,
+                                                swage_core::ApprovalTimeoutPolicy::default(),
                                                 &event_tx,
                                                 &cancel_token,
                                                 &mut approval_scope,
                                             )
-                                            .await?,
-                                            scope,
-                                        )
-                                    }
-                                    ApprovalGateOutcome::Rejected { feedback } => {
-                                        (feedback, true, "rejected".to_string()).into()
-                                    }
-                                    ApprovalGateOutcome::Expired { feedback } => {
-                                        (feedback, true, "expired".to_string()).into()
-                                    }
-                                    ApprovalGateOutcome::Interrupted => {
-                                        return Err(AgentError::Cancelled);
+                                            .await?
+                                        {
+                                            ApprovalGateOutcome::Approved { scope } => {
+                                                // Approved — proceed with normal dispatch.
+                                                crate::approval::with_user_approval_note(
+                                                    self.dispatch_tool_call(
+                                                        call,
+                                                        &execution,
+                                                        &llm_request.messages,
+                                                        &event_tx,
+                                                        &cancel_token,
+                                                        &mut approval_scope,
+                                                        Some(record.id),
+                                                    )
+                                                    .await?,
+                                                    scope,
+                                                )
+                                            }
+                                            ApprovalGateOutcome::Rejected { feedback } => {
+                                                (feedback, true, "rejected".to_string()).into()
+                                            }
+                                            ApprovalGateOutcome::Expired { feedback } => {
+                                                (feedback, true, "expired".to_string()).into()
+                                            }
+                                            ApprovalGateOutcome::TimedOut => {
+                                                return Err(AgentError::ApprovalTimedOut);
+                                            }
+                                            ApprovalGateOutcome::Interrupted => {
+                                                return Err(AgentError::Cancelled);
+                                            }
+                                        }
                                     }
                                 }
-                            }
-                        }
-                        Ok(PreToolUseOutcome::Proceed) => {
-                            self.dispatch_tool_call(
-                                call,
-                                &execution,
-                                &llm_request.messages,
-                                &event_tx,
-                                &cancel_token,
-                                &mut approval_scope,
-                            )
-                            .await?
-                        }
+                                Ok(PreToolUseOutcome::Proceed) => {
+                                    self.dispatch_tool_call(
+                                        call,
+                                        &execution,
+                                        &llm_request.messages,
+                                        &event_tx,
+                                        &cancel_token,
+                                        &mut approval_scope,
+                                        Some(record.id),
+                                    )
+                                    .await?
+                                }
+                            },
+                        )
+                    }
+                    .await;
+                    let approval_timed_out =
+                        matches!(&dispatch_result, Err(AgentError::ApprovalTimedOut));
+                    let dispatch_result = match dispatch_result {
+                        Err(AgentError::ApprovalTimedOut) => (
+                            "Tool call rejected: approval timed out before execution".to_string(),
+                            true,
+                            "expired".to_string(),
+                        )
+                            .into(),
+                        result => result?,
                     };
 
                     let duration_ms = start.elapsed().as_millis() as u64;
@@ -1333,21 +2200,7 @@ impl Agent {
                         .unwrap_or_else(|_| Value::String(result_content.clone()));
                     let result_metadata = extract_tool_result_metadata(&result_value);
 
-                    // These tools can return a structured result successfully even
-                    // when the operation failed. Keep that result and the model's
-                    // feedback intact, but record the operation's outcome.
-                    let status = if status == "success"
-                        && match call.name.as_str() {
-                            "shell" => result_value["exit_code"]
-                                .as_i64()
-                                .is_some_and(|code| code != 0),
-                            "workflow_run" => result_value["state"] == "failed",
-                            _ => false,
-                        } {
-                        "error".to_string()
-                    } else {
-                        status.clone()
-                    };
+                    let status = status.clone();
 
                     // PostToolUse hook — informational, fire-and-forget.
                     self.dispatch_post_tool_use(&call.name, &call.arguments, &result_value)
@@ -1373,23 +2226,55 @@ impl Agent {
                     let mut safe_result = safe_result;
                     let mut end_result = result_value;
                     let mut end_status = status.clone();
-                    if let Err(error) = self
-                        .storage
-                        .update_tool_call_result(
-                            record.id,
-                            result_content,
-                            &model_result,
-                            &status,
-                            duration_ms as i64,
-                            result_metadata.truncated,
-                            result_metadata.total_bytes,
-                        )
-                        .await
+                    // Dispatch is sequential: the first call to leave the turn
+                    // Delegating owns that wait. Keep its record ID across
+                    // settlement failures and provider rounds; a later call,
+                    // including another delegation, cannot take its place.
+                    // A failed state read stops dispatch rather than letting
+                    // the next call claim a wait whose owner is unknown.
+                    if delegation_wait_owner.is_none()
+                        && self
+                            .storage
+                            .get_turn(turn.id)
+                            .await?
+                            .is_some_and(|turn| turn.state == TurnState::Delegating)
                     {
-                        let reason = format!(
-                            "tool '{}' ran but its record could not be settled: {error}",
-                            call.name
-                        );
+                        delegation_wait_owner = Some(record.id);
+                    }
+                    let owns_delegation_wait = delegation_wait_owner == Some(record.id);
+                    let settlement = async {
+                        if owns_delegation_wait {
+                            let mut settled = record;
+                            settled.result = Some(result_content.clone());
+                            settled.model_result = Some(model_result.clone());
+                            settled.status = Some(status.clone());
+                            settled.duration_ms = Some(duration_ms as i64);
+                            settled.truncated = result_metadata.truncated;
+                            settled.total_bytes = result_metadata.total_bytes;
+                            settled.execution = Some(dispatch_result.execution);
+                            self.storage.settle_delegation_result(settled).await
+                        } else {
+                            self.storage
+                                .update_tool_call_result(
+                                    record.id,
+                                    result_content,
+                                    &model_result,
+                                    &status,
+                                    duration_ms as i64,
+                                    result_metadata.truncated,
+                                    result_metadata.total_bytes,
+                                    Some(dispatch_result.execution),
+                                )
+                                .await
+                        }
+                    }
+                    .await;
+                    if owns_delegation_wait && settlement.is_ok() {
+                        delegation_wait_owner = None;
+                    }
+                    if let Err(error) = settlement {
+                        let reason =
+                            format!("tool '{}' record could not be settled: {error}", call.name);
                         let _ = event_tx.send(AgentEvent::RecordIntegrityLost {
                             turn_id: turn.id,
                             reason: reason.clone(),
@@ -1400,6 +2285,7 @@ impl Agent {
                         end_status = "error".to_string();
                     }
                     let _ = event_tx.send(AgentEvent::ToolEnd {
+                        execution: Some(dispatch_result.execution),
                         call_id: call.call_id.clone(),
                         tool_name: call.name.clone(),
                         result: end_result,
@@ -1408,6 +2294,30 @@ impl Agent {
                     });
                     tool_position += 1;
                     total_tool_calls += 1;
+                    if approval_timed_out {
+                        return Err(AgentError::ApprovalTimedOut);
+                    }
+
+                    if !self.config.approval_prompts_enabled && is_error {
+                        let identity = (
+                            call.name.clone(),
+                            serde_json::to_string(&call.arguments).expect("JSON arguments"),
+                        );
+                        let failures = identical_failures.entry(identity).or_default();
+                        *failures += 1;
+                        if *failures >= self.config.max_identical_tool_failures.clamp(1, 100) {
+                            let reason = format!(
+                                "Repeated failing tool call '{}': {}",
+                                call.name, safe_result
+                            );
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: reason.clone(),
+                                provider_failure: false,
+                            });
+                            self.fail_turn_and_idle(turn.id, thread_id).await;
+                            return Err(AgentError::RepeatedToolFailure(reason));
+                        }
+                    }
 
                     tool_results.push(ToolResult {
                         call_id: call.call_id.clone(),
@@ -1421,13 +2331,18 @@ impl Agent {
             .await;
             let tool_results = match tool_dispatch_result {
                 Ok(tool_results) => tool_results,
+                Err(AgentError::ApprovalTimedOut) => {
+                    self.persist_terminal_response(&execution, &accumulated)
+                        .await?;
+                    return Err(AgentError::ApprovalTimedOut);
+                }
                 Err(AgentError::Cancelled) => {
                     // This function owns the accumulated partial: no cancellation
                     // from tool dispatch may leave without persisting it here.
                     self.persist_cancelled_partial(thread_id, turn.id, &accumulated)
                         .await;
                     // Settle every started row without a recorded result as
-                    // cancelled: dropping the dispatch stopped its execution.
+                    // cancelled. Completion certainty remains separate.
                     if let Err(error) = self
                         .storage
                         .settle_started_tool_calls(
@@ -1751,7 +2666,7 @@ impl Agent {
         collect_tool_calls: bool,
         round: usize,
     ) -> Result<StreamRoundOutcome, AgentError> {
-        use futures::StreamExt;
+        use futures::{FutureExt, StreamExt};
 
         let request_snapshot = self.provider.provider_request_snapshot(&request, true);
         let _ = event_tx.send(AgentEvent::ProviderRequestPrepared {
@@ -1765,17 +2680,45 @@ impl Agent {
         let mut tool_calls = Vec::new();
         let mut reasoning = Vec::new();
         let mut incomplete_reason = None;
+        let mut active_attempt: Option<swage_core::ProviderAttemptRecord> = None;
 
+        let mut stream_polled = false;
         loop {
             tokio::select! {
+                // Cancellation is read first: once the token is cancelled,
+                // a chunk the provider already queued is drained below as
+                // the cancellation's own diagnostics, never taken through
+                // the ordinary path — which would record an attempt as
+                // outstanding and then again as interrupted.
+                biased;
                 _ = cancel_token.cancelled() => {
+                    // A retry may already have queued its initial attempt
+                    // without delivering it to this consumer. Preserve ready
+                    // diagnostics before dropping the stream; never start an
+                    // unpolled stream or wait for more provider output here.
+                    if stream_polled {
+                        while let Some(Some(chunk)) = stream.next().now_or_never() {
+                            if let StreamChunk::ProviderAttempt(mut record) = chunk {
+                                record.round = round;
+                                active_attempt = record.ended_at_ms.is_none().then(|| record.clone());
+                                if record.ended_at_ms.is_some() {
+                                    let _ = event_tx.send(AgentEvent::ProviderAttempt { turn_id: execution.turn_id, record });
+                                }
+                            }
+                        }
+                    }
+                    if let Some(mut record) = active_attempt.take() {
+                        record.ended_at_ms = Some(chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default());
+                        record.outcome = swage_core::ProviderAttemptOutcome::Interrupted;
+                        let _ = event_tx.send(AgentEvent::ProviderAttempt { turn_id: execution.turn_id, record });
+                    }
                     let accumulated_partial = format!("{accumulated_prefix}{text}");
                     self.persist_cancelled_partial(
                         execution.thread_id,
                         execution.turn_id,
                         &accumulated_partial,
                     ).await;
-                    let _ = self.storage.update_turn_state(execution.turn_id, TurnState::Interrupted).await;
+                    let _ = self.storage.update_turn_state(execution.turn_id, TurnState::Cancelled).await;
                     let _ = self.storage.update_state(execution.thread_id, ThreadState::Idle).await;
                     let _ = event_tx.send(AgentEvent::ProviderRoundSettled {
                         turn_id: execution.turn_id,
@@ -1784,7 +2727,10 @@ impl Agent {
                     });
                     return Err(AgentError::Cancelled);
                 }
-                chunk = stream.next() => {
+                chunk = futures::future::poll_fn(|cx| {
+                    stream_polled = true;
+                    stream.as_mut().poll_next(cx)
+                }) => {
                     match chunk {
                         Some(StreamChunk::Done { finish_reason: Some(swage_core::FinishReason::Refusal) }) => {
                             self.persist_terminal_response(execution, &format!("{accumulated_prefix}{text}")).await?;
@@ -1836,6 +2782,11 @@ impl Agent {
                                 round,
                                 witness,
                             });
+                        }
+                        Some(StreamChunk::ProviderAttempt(mut record)) => {
+                            record.round = round;
+                            active_attempt = record.ended_at_ms.is_none().then(|| record.clone());
+                            let _ = event_tx.send(AgentEvent::ProviderAttempt { turn_id: execution.turn_id, record });
                         }
                         Some(StreamChunk::ProviderRetryStarted { attempt, max_retries, provider, wait_ms }) => {
                             let _ = event_tx.send(AgentEvent::ProviderRetryStarted {
@@ -2054,24 +3005,25 @@ fn tool_dispatch_result(
     match result {
         Ok(output) => {
             let result_str = serde_json::to_string(&output.result).unwrap_or_default();
-            Ok((result_str, false, "success".to_string()).into())
+            let is_error = output.execution.outcome
+                != swage_protocol::client::conversation::ToolOutcome::Succeeded;
+            let mut result: ToolDispatchResult = (
+                result_str,
+                is_error,
+                if is_error { "error" } else { "success" }.to_owned(),
+            )
+                .into();
+            result.execution = output.execution;
+            Ok(result)
         }
         Err(error) => {
-            let execution_prevented = matches!(
-                error,
-                swage_core::ToolError::InvalidParameters { .. }
-                    | swage_core::ToolError::NotFound { .. }
-                    | swage_core::ToolError::PermissionDenied { .. }
-                    | swage_core::ToolError::RequiresApproval { .. }
-                    | swage_core::ToolError::RequiresLocationApproval { .. }
-            );
             let mut result: ToolDispatchResult = (
                 format_tool_error_for_model(&error),
                 true,
                 "error".to_string(),
             )
                 .into();
-            result.execution_prevented = execution_prevented;
+            result.execution = error.execution();
             Ok(result)
         }
     }
@@ -2085,6 +3037,14 @@ pub fn format_tool_error_for_model(error: &swage_core::ToolError) -> String {
     use swage_core::ToolError;
 
     match error {
+        ToolError::AfterExecution { source } => format!(
+            "The operation ran before its result was rejected. {}",
+            format_tool_error_for_model(source)
+        ),
+        ToolError::ExecutionUncertain { source } => format!(
+            "The operation may have run; completion is unconfirmed. {}",
+            format_tool_error_for_model(source)
+        ),
         ToolError::NotFound { name } => format!(
             "Tool error: `{name}` is not available. Use one of the advertised tools or continue without it."
         ),
@@ -2161,6 +3121,7 @@ impl Agent {
         event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
         cancel_token: &tokio_util::sync::CancellationToken,
         dispatch_started_at: std::time::Instant,
+        ctx: &AgentToolContext,
     ) -> Result<Result<ToolOutput, swage_core::ToolError>, AgentError>
     where
         F: Future<Output = Result<ToolOutput, swage_core::ToolError>>,
@@ -2172,18 +3133,37 @@ impl Agent {
             _ = cancel_token.cancelled() => {
                 let _ = self
                     .storage
-                    .update_turn_state(execution.turn_id, TurnState::Interrupted)
+                    .update_turn_state(execution.turn_id, TurnState::Cancelled)
                     .await;
                 let _ = self
                     .storage
                     .update_state(execution.thread_id, ThreadState::Idle)
                     .await;
+                let execution_outcome = swage_protocol::client::conversation::ToolExecution::cancelled(ctx.execution_started.load(std::sync::atomic::Ordering::SeqCst));
+                let duration_ms = dispatch_started_at.elapsed().as_millis() as u64;
+                if let Some(record_id) = ctx.tool_call_record_id {
+                    let model_result = swage_core::compact_tool_result_for_model_with_reference(
+                        swage_storage::store::CANCELLED_TOOL_RESULT, true,
+                        swage_core::tool_result_reference(&execution.turn_id.to_string(), &call.call_id),
+                    );
+                    if let Err(error) = self.storage.update_tool_call_result(
+                        record_id, swage_storage::store::CANCELLED_TOOL_RESULT, &model_result,
+                        swage_storage::store::CANCELLED_TOOL_STATUS, duration_ms as i64,
+                        false, None, Some(execution_outcome),
+                    ).await {
+                        let _ = event_tx.send(AgentEvent::RecordIntegrityLost {
+                            turn_id: execution.turn_id,
+                            reason: format!("cancelled tool '{}' could not be settled: {error}", call.name),
+                        });
+                    }
+                }
                 let _ = event_tx.send(AgentEvent::ToolEnd {
+                    execution: Some(execution_outcome),
                     call_id: call.call_id.clone(),
                     tool_name: call.name.clone(),
-                    result: Value::Null,
+                    result: Value::String(swage_storage::store::CANCELLED_TOOL_RESULT.to_string()),
                     status: "cancelled".to_string(),
-                    duration_ms: Some(dispatch_started_at.elapsed().as_millis() as u64),
+                    duration_ms: Some(duration_ms),
                 });
                 Err(AgentError::Cancelled)
             }
@@ -2234,6 +3214,7 @@ impl Agent {
                     &approved_ctx,
                     skip_tool_permission_gate,
                     dispatch_started_at,
+                    ctx,
                 )
                 .await?;
             return tool_dispatch_result(result);
@@ -2255,13 +3236,12 @@ impl Agent {
             || (judgement.confident && judgement.verdict != crate::judge::JudgeVerdict::Unavailable)
         {
             if judgement.verdict != crate::judge::JudgeVerdict::Allowed {
-                let mut result: ToolDispatchResult = (
+                let result: ToolDispatchResult = (
                     crate::judge::refused_feedback(&call.name, &reach, &judgement),
                     true,
                     "refused".to_string(),
                 )
                     .into();
-                result.execution_prevented = true;
                 return Ok(result);
             }
             let result = self
@@ -2274,6 +3254,7 @@ impl Agent {
                     &approved_ctx,
                     skip_tool_permission_gate,
                     dispatch_started_at,
+                    ctx,
                 )
                 .await?;
             return tool_dispatch_result(result).map(|mut result| {
@@ -2313,6 +3294,7 @@ impl Agent {
                         event_tx,
                         cancel_token,
                         dispatch_started_at,
+                        ctx,
                     )
                     .await?
                 } else {
@@ -2328,6 +3310,7 @@ impl Agent {
                         event_tx,
                         cancel_token,
                         dispatch_started_at,
+                        ctx,
                     )
                     .await?
                 };
@@ -2340,6 +3323,7 @@ impl Agent {
             ApprovalGateOutcome::Expired { feedback } => {
                 Ok((feedback, true, "expired".to_string()).into())
             }
+            ApprovalGateOutcome::TimedOut => Err(AgentError::ApprovalTimedOut),
             ApprovalGateOutcome::Interrupted => Err(AgentError::Cancelled),
         }
     }
@@ -2358,6 +3342,7 @@ impl Agent {
         approved_ctx: &AgentToolContext,
         skip_tool_permission_gate: bool,
         dispatch_started_at: std::time::Instant,
+        ctx: &AgentToolContext,
     ) -> Result<Result<ToolOutput, swage_core::ToolError>, AgentError> {
         if skip_tool_permission_gate {
             self.race_tool_dispatch(
@@ -2372,6 +3357,7 @@ impl Agent {
                 event_tx,
                 cancel_token,
                 dispatch_started_at,
+                ctx,
             )
             .await
         } else {
@@ -2387,6 +3373,7 @@ impl Agent {
                 event_tx,
                 cancel_token,
                 dispatch_started_at,
+                ctx,
             )
             .await
         }
@@ -2493,6 +3480,7 @@ impl Agent {
         event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
         cancel_token: &tokio_util::sync::CancellationToken,
         approval_scope: &mut TurnApprovalScope,
+        record_id: Option<Uuid>,
     ) -> Result<ToolDispatchResult, AgentError> {
         // Emit ToolStart — client can render a "running…" indicator.
         let _ = event_tx.send(AgentEvent::ToolStart {
@@ -2520,7 +3508,9 @@ impl Agent {
         .with_turn_id(execution.turn_id)
         .with_thread_id(execution.thread_id);
         let ctx = AgentToolContext {
+            tool_call_record_id: record_id,
             allowed_paths: self.config.allowed_paths.clone(),
+            tool_output_directory: self.config.tool_output_directory.clone(),
             ..ctx
         };
         let dispatch_started_at = std::time::Instant::now();
@@ -2537,13 +3527,11 @@ impl Agent {
                 event_tx,
                 cancel_token,
                 dispatch_started_at,
+                &ctx,
             )
             .await?
         {
-            Ok(output) => {
-                let result_str = serde_json::to_string(&output.result).unwrap_or_default();
-                Ok((result_str, false, "success".to_string()).into())
-            }
+            Ok(output) => tool_dispatch_result(Ok(output)),
             Err(swage_core::ToolError::RequiresApproval {
                 name: _,
                 timeout_secs,
@@ -2571,14 +3559,11 @@ impl Agent {
                             event_tx,
                             cancel_token,
                             dispatch_started_at,
+                            &ctx,
                         )
                         .await?
                     {
-                        Ok(output) => {
-                            let result_str =
-                                serde_json::to_string(&output.result).unwrap_or_default();
-                            return Ok((result_str, false, "success".to_string()).into());
-                        }
+                        Ok(output) => return tool_dispatch_result(Ok(output)),
                         Err(swage_core::ToolError::RequiresLocationApproval {
                             path,
                             access,
@@ -2642,14 +3627,11 @@ impl Agent {
                                 event_tx,
                                 cancel_token,
                                 dispatch_started_at,
+                                &ctx,
                             )
                             .await?
                         {
-                            Ok(output) => {
-                                let result_str =
-                                    serde_json::to_string(&output.result).unwrap_or_default();
-                                Ok((result_str, false, "success".to_string()).into())
-                            }
+                            Ok(output) => tool_dispatch_result(Ok(output)),
                             Err(swage_core::ToolError::RequiresLocationApproval {
                                 path,
                                 access,
@@ -2684,6 +3666,7 @@ impl Agent {
                     ApprovalGateOutcome::Expired { feedback } => {
                         Ok((feedback, true, "expired".to_string()).into())
                     }
+                    ApprovalGateOutcome::TimedOut => Err(AgentError::ApprovalTimedOut),
                     ApprovalGateOutcome::Interrupted => {
                         // State transitions already done by handle_approval_gate.
                         Err(AgentError::Cancelled)
@@ -2771,11 +3754,25 @@ impl Agent {
                 };
 
                 // Suspend the parent turn — durable state so restart recovery
-                // can find it and transition to Interrupted.
-                let _ = self
+                // can find it and resume it. The mark is what selects the
+                // turn for resumption, so a delegation whose wait cannot be
+                // recorded is not started: the model is told, and the turn
+                // goes on as it was.
+                if let Err(error) = self
                     .storage
                     .update_turn_state(execution.turn_id, TurnState::Delegating)
-                    .await;
+                    .await
+                {
+                    return Ok(ToolDispatchResult {
+                        content: format!(
+                            "delegation not started: the turn's wait could not be recorded ({error}); a restart could not resume it"
+                        ),
+                        is_error: true,
+                        status: "error".to_string(),
+                        approval_note: None,
+                        execution: swage_protocol::client::conversation::ToolExecution::refused(),
+                    });
+                }
 
                 // Emit DelegationStarted event so clients can track progress.
                 let _ = event_tx.send(AgentEvent::DelegationStarted {
@@ -2804,13 +3801,10 @@ impl Agent {
                     )
                     .await;
 
-                // Resume the parent turn — back to Processing regardless of
-                // outcome. The tool call result (success or error string) is
-                // what the LLM sees.
-                let _ = self
-                    .storage
-                    .update_turn_state(execution.turn_id, TurnState::Processing)
-                    .await;
+                // Keep the durable wait until the caller records this tool's
+                // result. Settlement returns the turn to Processing in the
+                // same transaction, so neither side of a restart loses or
+                // repeats the delegation's result.
 
                 match delegation_result {
                     Ok(crate::delegation::DelegationOutcome::Completed(result)) => {
@@ -2868,12 +3862,11 @@ impl Agent {
         {
             // The gateway settles human decisions before delivering them.
             // A timeout or conflicting decision must never resume the gate.
-            let matches_decision = state != swage_storage::ApprovalState::Expired
-                && self
-                    .storage
-                    .get_approval(approval_id)
-                    .await?
-                    .is_some_and(|approval| approval.state == state);
+            let matches_decision = self
+                .storage
+                .get_approval(approval_id)
+                .await?
+                .is_some_and(|approval| approval.state == state);
             let awaiting = self
                 .storage
                 .get_turn(turn_id)
@@ -2895,6 +3888,7 @@ impl Agent {
         turn_id: Uuid,
         thread_id: Uuid,
         reason: &str,
+        cancelled: bool,
     ) -> Result<crate::approval::ApprovalGateOutcome, AgentError> {
         self.storage
             .update_approval_state(
@@ -2904,7 +3898,14 @@ impl Agent {
             )
             .await?;
         self.storage
-            .update_turn_state(turn_id, TurnState::Interrupted)
+            .update_turn_state(
+                turn_id,
+                if cancelled {
+                    TurnState::Cancelled
+                } else {
+                    TurnState::Interrupted
+                },
+            )
             .await?;
         if self
             .storage
@@ -2916,7 +3917,11 @@ impl Agent {
                 .update_state(thread_id, ThreadState::Idle)
                 .await?;
         }
-        Ok(crate::approval::ApprovalGateOutcome::Interrupted)
+        Ok(if cancelled {
+            crate::approval::ApprovalGateOutcome::Interrupted
+        } else {
+            crate::approval::ApprovalGateOutcome::TimedOut
+        })
     }
 
     /// Execute the approval gate: create an approval request, transition the
@@ -2992,7 +3997,7 @@ impl Agent {
             });
         };
 
-        let (tx, rx) = tokio::sync::oneshot::channel::<crate::approval::ApprovalDecision>();
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<crate::approval::ApprovalDecision>();
         let _registration = registrar(approval.id, tx);
 
         // 4. Emit ApprovalRequired only once a decision can be received.
@@ -3020,7 +4025,9 @@ impl Agent {
         }
 
         let gate_result = tokio::select! {
-            result = rx => {
+            biased;
+            _ = cancel_token.cancelled() => GateResult::Cancelled,
+            result = &mut rx => {
                 match result {
                     Ok(d) => GateResult::Decision(d),
                     // Sender dropped — treat as timeout (request abandoned).
@@ -3028,7 +4035,43 @@ impl Agent {
                 }
             }
             _ = tokio::time::sleep(timeout) => GateResult::Timeout,
-            _ = cancel_token.cancelled() => GateResult::Cancelled,
+        };
+
+        // Expiry competes with the durable decision, not merely delivery on
+        // the channel. A client may commit its answer before its sender is
+        // polled again; that committed answer owns the gate.
+        let gate_result = if matches!(gate_result, GateResult::Timeout)
+            && !self
+                .storage
+                .update_approval_state(
+                    approval.id,
+                    ApprovalState::Expired,
+                    Some("approval timed out"),
+                )
+                .await?
+        {
+            match self.storage.get_approval(approval.id).await? {
+                Some(record)
+                    if matches!(
+                        record.state,
+                        ApprovalState::Approved | ApprovalState::Rejected
+                    ) =>
+                {
+                    tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => GateResult::Cancelled,
+                        decision = &mut rx => GateResult::Decision(decision.unwrap_or(crate::approval::ApprovalDecision {
+                            decision: if record.state == ApprovalState::Approved { crate::approval::ApprovalDecisionValue::Approved } else { crate::approval::ApprovalDecisionValue::Rejected },
+                            // A lost delivery cannot establish a retained grant.
+                            scope: crate::approval::ApprovalDecisionScope::Once,
+                            reason: record.decision_reason,
+                        })),
+                    }
+                }
+                _ => GateResult::Timeout,
+            }
+        } else {
+            gate_result
         };
 
         match gate_result {
@@ -3040,6 +4083,7 @@ impl Agent {
                     execution.turn_id,
                     execution.thread_id,
                     "cancelled by inter-agent message",
+                    true,
                 )
                 .await
             }
@@ -3133,6 +4177,7 @@ impl Agent {
                             execution.turn_id,
                             execution.thread_id,
                             "approval timed out",
+                            false,
                         )
                         .await
                     }
@@ -3529,6 +4574,7 @@ mod judge_seam_tests {
                 &event_tx,
                 &tokio_util::sync::CancellationToken::new(),
                 &mut scope,
+                None,
             )
             .await
             .expect("dispatch settles")
@@ -3628,7 +4674,10 @@ mod judge_seam_tests {
         );
         assert!(result.is_error);
         assert_eq!(result.status, "refused");
-        assert!(result.execution_prevented);
+        assert_eq!(
+            result.execution,
+            swage_protocol::client::conversation::ToolExecution::refused()
+        );
         assert!(result.approval_note.is_none());
         assert!(
             result
@@ -3658,7 +4707,10 @@ mod judge_seam_tests {
         );
         assert!(result.is_error);
         assert_eq!(result.status, "refused");
-        assert!(result.execution_prevented);
+        assert_eq!(
+            result.execution,
+            swage_protocol::client::conversation::ToolExecution::refused()
+        );
         assert!(
             result
                 .content
@@ -3692,6 +4744,7 @@ mod judge_seam_tests {
                 &event_tx,
                 &tokio_util::sync::CancellationToken::new(),
                 &mut scope,
+                None,
             )
             .await
             .expect("dispatch settles");
@@ -3753,6 +4806,7 @@ mod judge_seam_tests {
                 &tx,
                 &tokio_util::sync::CancellationToken::new(),
                 &mut scope,
+                None,
             )
             .await
             .expect("dispatch settles");
@@ -3782,7 +4836,10 @@ mod judge_seam_tests {
             assert_eq!(judge.asked.lock().unwrap().len(), 1);
         }
         if expected == "refused" {
-            assert!(result.execution_prevented);
+            assert_eq!(
+            result.execution,
+            swage_protocol::client::conversation::ToolExecution::refused()
+        );
             assert!(result.content.contains("a recorded decision"));
         }
         assert!(
@@ -3866,6 +4923,7 @@ mod judge_seam_tests {
                 &tx,
                 &tokio_util::sync::CancellationToken::new(),
                 &mut scope,
+                None,
             )
             .await
             .expect("refusal is a tool result");
@@ -3875,7 +4933,10 @@ mod judge_seam_tests {
             "an unrecorded judgement must never execute the tool"
         );
         assert_eq!(result.status, "refused", "{}", result.content);
-        assert!(result.execution_prevented);
+        assert_eq!(
+            result.execution,
+            swage_protocol::client::conversation::ToolExecution::refused()
+        );
         assert!(
             result.content.contains("judgement disk failure"),
             "{}",
@@ -3962,6 +5023,7 @@ mod judge_seam_tests {
                 &tx,
                 &tokio_util::sync::CancellationToken::new(),
                 &mut TurnApprovalScope::default(),
+                None,
             )
             .await
             .unwrap();

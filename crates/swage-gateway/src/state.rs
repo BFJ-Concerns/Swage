@@ -27,7 +27,7 @@ use swage_storage::{
     store::{Storage, TopicStore},
 };
 
-use crate::channel_gateway::{ChannelOrigin, DeliveryTarget, ExternalChannelIntegration};
+use crate::channel_gateway::ChannelOrigin;
 use crate::{
     capabilities::WorkflowCapabilities, device::DeviceRuntime, lifecycle::ActivityTracker,
     onboarding::RecoveryExportSnapshot, presence::PresenceRuntime, secret::SecretManager,
@@ -77,6 +77,8 @@ impl ApprovalWaiter {
 /// concurrent modification from multiple handler tasks.
 #[derive(Clone)]
 pub struct AppState {
+    #[cfg(feature = "test-fixtures")]
+    pub(crate) test_root: Option<Arc<tempfile::TempDir>>,
     /// Configuration root selected when this gateway instance was constructed.
     pub config_root: PathBuf,
     /// Persistent storage backend (sessions, threads, turns, messages, tool calls).
@@ -113,6 +115,8 @@ pub struct AppState {
     /// Dispatch pipeline: resolves tool lookups, permission checks, rate limiting,
     /// schema validation, execution, and leak detection for every tool call.
     pub tool_dispatcher: Arc<ToolDispatcher>,
+    /// The browser process and profile outlive replaceable tool dispatchers.
+    pub(crate) browser_host: Arc<std::sync::OnceLock<Arc<crate::browser::BrowserHost>>>,
     /// Records the timestamp of the last significant gateway activity.
     ///
     /// Used by operator and presence surfaces to report how recently the
@@ -157,8 +161,6 @@ pub struct AppState {
     pub devices: Arc<AsyncMutex<DeviceRuntime>>,
     /// One-time device pairing codes awaiting redemption by a remote device.
     pub pairing_codes: Arc<AsyncMutex<HashMap<String, PairingCodeRecord>>>,
-    /// One-time external-channel link codes awaiting redemption by a chat sender.
-    pub channel_link_codes: Arc<AsyncMutex<HashMap<String, ChannelLinkCodeRecord>>>,
     /// Canonical secret-management and resolution surface.
     pub secret_manager: Arc<SecretManager>,
     /// Configured Telegram bot client, if the channel is enabled.
@@ -208,15 +210,6 @@ struct AgentMessageExpiryRuntime {
 
 #[derive(Debug, Clone)]
 pub struct PairingCodeRecord {
-    pub expires_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ChannelLinkCodeRecord {
-    pub integration: ExternalChannelIntegration,
-    pub topic_id: Option<Uuid>,
-    pub agent_id: Option<String>,
-    pub home_target: Option<DeliveryTarget>,
     pub expires_at: DateTime<Utc>,
 }
 
@@ -365,6 +358,8 @@ impl AppState {
             });
         }
         Self {
+            #[cfg(feature = "test-fixtures")]
+            test_root: None,
             config_root,
             storage: storage.clone(),
             topic_store,
@@ -391,7 +386,6 @@ impl AppState {
             presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
             devices: Arc::new(AsyncMutex::new(DeviceRuntime::default())),
             pairing_codes: Arc::new(AsyncMutex::new(HashMap::new())),
-            channel_link_codes: Arc::new(AsyncMutex::new(HashMap::new())),
             secret_manager: Arc::new(SecretManager::new(storage.clone())),
             telegram: None,
             recovery_exports: Arc::new(AsyncMutex::new(Vec::new())),
@@ -404,6 +398,7 @@ impl AppState {
             runtime_config: Arc::new(RwLock::new(config)),
             runtime_provider: Arc::new(RwLock::new(provider)),
             runtime_tool_dispatcher: Arc::new(RwLock::new(tool_dispatcher)),
+            browser_host: Arc::default(),
             codex_supervisor,
             worktree_host: Arc::new(crate::worktree::WorktreeHost::new(
                 crate::worktree::WorktreeConfig {
@@ -761,7 +756,7 @@ mod tests {
 
     fn make_minimal_state() -> AppState {
         let storage = Arc::new(MockStorage::new());
-        AppState::new(
+        AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
             Arc::new(MockProvider::new(vec![])) as Arc<dyn swage_provider::LlmProvider>,
@@ -819,7 +814,7 @@ mod tests {
     #[test]
     fn appstate_new_initialises_approval_channels() {
         let storage = Arc::new(MockStorage::new());
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
             Arc::new(MockProvider::new(vec![])) as Arc<dyn swage_provider::LlmProvider>,
@@ -828,5 +823,16 @@ mod tests {
             None,
         );
         assert!(state.approval_channels.lock().unwrap().is_empty());
+    }
+}
+
+impl AppState {
+    /// The inter-agent message router over this gateway's store and its
+    /// lifecycle hooks: every path that sends or delivers an agent message —
+    /// a delegation, a Result carried into a thread, the agent-message API —
+    /// builds its router here, so no path delivers past the hooks another
+    /// honours.
+    pub(crate) fn message_router(&self) -> swage_agent::MessageRouter {
+        swage_agent::MessageRouter::new(self.storage.clone(), self.hook_registry.clone())
     }
 }

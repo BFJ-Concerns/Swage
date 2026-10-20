@@ -89,6 +89,7 @@ async fn create_full_hierarchy(
 
     let tool_call = storage
         .create_tool_call(NewToolCall {
+            execution: None,
             turn_id: turn.id,
             agent_id: agent_id.to_string(),
             call_id: "toolu_int_01".to_string(),

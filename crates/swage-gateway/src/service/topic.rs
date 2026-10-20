@@ -37,6 +37,7 @@ fn validate_topic_slug(slug: &str) -> Result<TopicSlug, GatewayError> {
 pub struct TopicService {
     pub(crate) topic_store: Arc<dyn TopicStore>,
     config_root: PathBuf,
+    config: swage_config::ResolvedConfig,
 }
 
 impl TopicService {
@@ -44,7 +45,41 @@ impl TopicService {
         Self {
             topic_store,
             config_root,
+            config: swage_config::ResolvedConfig::default(),
         }
+    }
+
+    pub fn with_config(mut self, config: swage_config::ResolvedConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    fn topic_to_response(
+        &self,
+        topic: swage_storage::model::Topic,
+    ) -> Result<TopicResponse, GatewayError> {
+        let config = crate::turn::load_session_config_from_root(
+            &self.config_root,
+            self.config.clone(),
+            &topic.location(),
+            "gateway",
+        );
+        let default_model = match config {
+            Ok(config) => (!config.models.default.is_empty()).then_some(config.models.default),
+            Err(error) => {
+                tracing::warn!(topic_id = %topic.id, %error, "topic default model is unavailable");
+                None
+            }
+        };
+        Ok(TopicResponse {
+            id: topic.id,
+            name: topic.name,
+            description: topic.description,
+            slug: topic.slug.to_string(),
+            tags: topic.tags,
+            effective_default_model: default_model,
+            created_at: topic.created_at,
+        })
     }
 
     /// Create a new topic.
@@ -95,7 +130,7 @@ impl TopicService {
             })
             .await?;
         if !req.description.trim().is_empty() {
-            return Ok(topic_to_response(
+            return self.topic_to_response(
                 self.topic_store
                     .update(
                         topic.id,
@@ -105,17 +140,20 @@ impl TopicService {
                         None,
                     )
                     .await?,
-            ));
+            );
         }
 
-        Ok(topic_to_response(topic))
+        self.topic_to_response(topic)
     }
 
     /// List all topics.
     pub async fn list_topics(&self) -> Result<TopicListResponse, GatewayError> {
         let topics = self.topic_store.list_all().await?;
         Ok(TopicListResponse {
-            topics: topics.into_iter().map(topic_to_response).collect(),
+            topics: topics
+                .into_iter()
+                .map(|topic| self.topic_to_response(topic))
+                .collect::<Result<_, _>>()?,
         })
     }
 
@@ -124,8 +162,8 @@ impl TopicService {
         self.topic_store
             .get(id)
             .await?
-            .map(topic_to_response)
             .ok_or(GatewayError::TopicNotFound { id })
+            .and_then(|topic| self.topic_to_response(topic))
     }
 
     /// Partially update a topic.
@@ -154,12 +192,9 @@ impl TopicService {
             None => None,
         };
 
-        let tags = req.tags.map(|tags| {
-            tags.into_iter()
-                .map(|tag| tag.trim().to_lowercase())
-                .filter(|tag| !tag.is_empty())
-                .collect::<Vec<_>>()
-        });
+        // The one tag rule (`swage_core::tags`): trimmed, lower-cased, kept
+        // once — the same form the library saves and the catalogue filters by.
+        let tags = req.tags.map(swage_core::tags::canonical_tags);
         let topic = self
             .topic_store
             .update(id, req.name, req.description, new_slug, tags)
@@ -172,7 +207,7 @@ impl TopicService {
                 other => GatewayError::Storage(other),
             })?;
 
-        Ok(topic_to_response(topic))
+        self.topic_to_response(topic)
     }
 
     /// Delete a topic.
@@ -190,17 +225,6 @@ impl TopicService {
         }
 
         Ok(())
-    }
-}
-
-fn topic_to_response(p: swage_storage::model::Topic) -> TopicResponse {
-    TopicResponse {
-        id: p.id,
-        name: p.name,
-        description: p.description,
-        slug: p.slug.to_string(),
-        tags: p.tags,
-        created_at: p.created_at,
     }
 }
 

@@ -146,6 +146,22 @@ impl ChannelQueueStore for SqliteStorage {
         .await
     }
 
+    async fn list_pending_channel_messages(
+        &self,
+    ) -> Result<Vec<ChannelInboundMessage>, StorageError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, integration, account, conversation, external_id, sender, content,
+                        state, discard_reason, turn_id, received_at, presented_at
+                 FROM channel_inbound_messages
+                 WHERE state = 'pending'
+                   AND NOT EXISTS (SELECT 1 FROM turn_queue_channel_messages q WHERE q.message_id = channel_inbound_messages.id)
+                 ORDER BY received_at ASC, rowid ASC",
+            )?;
+            stmt.query_map([], row_to_channel_message)?.collect()
+        }).await
+    }
+
     async fn list_pending_channel_origins(
         &self,
     ) -> Result<Vec<PendingChannelOrigin>, StorageError> {
@@ -274,7 +290,8 @@ impl ChannelQueueStore for SqliteStorage {
                 delegated_output_tokens: None,
                 execution_isolation: None,
                 failure_message: None,
-            })
+                            attribution: None,
+})
         })
         .await
     }
@@ -305,8 +322,28 @@ impl ChannelQueueStore for SqliteStorage {
         .await
     }
 
+    async fn list_channel_messages_by_turn(
+        &self,
+        turn_id: Uuid,
+    ) -> Result<Vec<ChannelInboundMessage>, StorageError> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, integration, account, conversation, external_id, sender, content,
+                        state, discard_reason, turn_id, received_at, presented_at
+                 FROM channel_inbound_messages
+                 WHERE turn_id = ?1
+                 ORDER BY received_at ASC, rowid ASC",
+            )?;
+            stmt.query_map(params![turn_id.to_string()], row_to_channel_message)?
+                .collect()
+        })
+        .await
+    }
+
     async fn requeue_presented_for_inflight_turns(&self) -> Result<u64, StorageError> {
         self.with_conn(|conn| {
+            // A delegating turn is not in this set: recovery resumes it
+            // with its presented rows carried on the continuation.
             let affected = conn.execute(
                 "UPDATE channel_inbound_messages
                  SET state = 'pending',
@@ -316,7 +353,7 @@ impl ChannelQueueStore for SqliteStorage {
                  WHERE state = 'presented'
                    AND turn_id IN (
                        SELECT id FROM turns
-                       WHERE state IN ('pending', 'processing', 'awaiting_approval', 'delegating')
+                       WHERE state IN ('pending', 'processing', 'awaiting_approval')
                    )",
                 [],
             )?;
@@ -540,5 +577,110 @@ mod tests {
         let rows = storage.list_pending_by_origin(origin).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].content, "stuck");
+    }
+
+    /// A turn cut off while delegating keeps its presented rows: recovery
+    /// resumes that turn with them, so re-presenting them would run the
+    /// chat's message a second time beside the resumption.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn requeue_leaves_a_delegating_turns_messages_presented() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let (thread_id, agent_id) = thread(&storage).await;
+        storage
+            .ingest_channel_inbound(vec![inbound("14", "delegated")], "telegram", "bot-1", "14")
+            .await
+            .unwrap();
+        let origin = storage
+            .list_pending_channel_origins()
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let rows = storage
+            .list_pending_by_origin(origin.clone())
+            .await
+            .unwrap();
+        let turn = storage
+            .begin_channel_turn(thread_id, &agent_id, "delegated", vec![rows[0].id])
+            .await
+            .unwrap();
+        storage
+            .update_turn_state(turn.id, TurnState::Delegating)
+            .await
+            .unwrap();
+
+        let requeued = storage
+            .requeue_presented_for_inflight_turns()
+            .await
+            .unwrap();
+        assert_eq!(requeued, 0);
+        assert!(
+            storage
+                .list_pending_by_origin(origin)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let presented = storage
+            .list_channel_messages_by_turn(turn.id)
+            .await
+            .unwrap();
+        assert_eq!(presented.len(), 1);
+        assert_eq!(presented[0].id, rows[0].id);
+        assert_eq!(presented[0].turn_id, Some(turn.id));
+    }
+
+    /// The rows a turn presented are read back by the turn, in arrival
+    /// order, and a turn no channel started has none.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn channel_messages_list_by_the_turn_that_presented_them() {
+        let storage = SqliteStorage::in_memory().unwrap();
+        let (thread_id, agent_id) = thread(&storage).await;
+        storage
+            .ingest_channel_inbound(
+                vec![inbound("15", "first"), inbound("16", "second")],
+                "telegram",
+                "bot-1",
+                "16",
+            )
+            .await
+            .unwrap();
+        let origin = storage
+            .list_pending_channel_origins()
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let rows = storage.list_pending_by_origin(origin).await.unwrap();
+        let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
+        let turn = storage
+            .begin_channel_turn(thread_id, &agent_id, "first\n\nsecond", ids.clone())
+            .await
+            .unwrap();
+        let other = storage
+            .create_turn(crate::model::NewTurn {
+                thread_id,
+                agent_id: agent_id.clone(),
+                state: TurnState::Completed,
+                user_input: Some("typed".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+
+        let presented = storage
+            .list_channel_messages_by_turn(turn.id)
+            .await
+            .unwrap();
+        assert_eq!(presented.iter().map(|row| row.id).collect::<Vec<_>>(), ids);
+        assert!(
+            storage
+                .list_channel_messages_by_turn(other.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

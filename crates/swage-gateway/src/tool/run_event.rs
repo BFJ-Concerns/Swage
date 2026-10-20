@@ -120,7 +120,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let state = crate::state::AppState::new(
+        let state = crate::state::AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),

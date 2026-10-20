@@ -6,7 +6,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 
 use crate::error::ApiError;
-use crate::secret::{CreateSecretRequest, RotateSecretRequest};
+use crate::secret::{CreateSecretRequest, RotateSecretRequest, parse_secret_reference};
 use crate::state::AppState;
 
 pub use swage_protocol::client::settings::{
@@ -82,6 +82,7 @@ pub async fn load_settings(state: &AppState) -> Result<SettingsResponse, ApiErro
             Ok((
                 id.clone(),
                 ProviderSettings {
+                    display_name: provider.display_name.clone(),
                     protocol: try_wire_from_config(provider.protocol.clone())?,
                     worker_staleness_threshold_ms: provider.worker_staleness_threshold_ms,
                     base_url: provider.base_url.clone(),
@@ -132,6 +133,7 @@ pub async fn load_settings(state: &AppState) -> Result<SettingsResponse, ApiErro
         communication: try_wire_from_config(config.communication)?,
         sessions: config.sessions,
         memory: config.memory,
+        attachments: config.attachments,
         judge: config.judge,
         voice: try_wire_from_config(config.voice)?,
         restart_required: state.restart_required(),
@@ -139,11 +141,57 @@ pub async fn load_settings(state: &AppState) -> Result<SettingsResponse, ApiErro
     })
 }
 
+/// A global save can name an assembly used only in a topic or agent scope.
+/// Accept it when any known hierarchy resolves it; turn-time resolution still
+/// chooses the assembly for the particular session's scope and agent.
+async fn validate_context_assembly(state: &AppState, name: &str) -> Result<(), ApiError> {
+    let name = name.trim();
+    if name == "default" {
+        return Ok(());
+    }
+    let resolves = |scope: &ScopeLocation, agent: Option<&str>| {
+        let hierarchy = swage_config::configuration_hierarchy(&state.config_root, scope, agent);
+        let levels = hierarchy
+            .iter()
+            .map(|(level, path)| (level.clone(), path.as_path()))
+            .collect::<Vec<_>>();
+        swage_context::js_assembly::resolve_js_assembly(name, &levels).is_some()
+    };
+    if resolves(&ScopeLocation::General, None) {
+        return Ok(());
+    }
+    for topic in state
+        .topic_store
+        .list_scopes()
+        .await
+        .map_err(swage_core::GatewayError::from)?
+    {
+        let scope = topic.location();
+        if resolves(&scope, None) {
+            return Ok(());
+        }
+        let definitions =
+            crate::service::effective_agent_definitions(state.storage.as_ref(), topic.id).await?;
+        if definitions
+            .iter()
+            .any(|definition| resolves(&scope, Some(&definition.definition.id)))
+        {
+            return Ok(());
+        }
+    }
+    Err(ApiError::validation(format!(
+        "unknown context assembly '{name}': no assembly resolves in any known scope"
+    )))
+}
+
 pub async fn save_settings(
     state: &AppState,
     request: SaveSettingsRequest,
 ) -> Result<SettingsResponse, ApiError> {
     validate_settings_request(&request)?;
+    if let Some(context) = &request.context {
+        validate_context_assembly(state, &context.assembly).await?;
+    }
     let prior_settings = settings_audit_snapshot(&load_settings(state).await?)?;
     let SaveSettingsRequest {
         default_provider,
@@ -161,6 +209,7 @@ pub async fn save_settings(
         communication,
         sessions,
         memory,
+        attachments,
         judge,
         voice,
     } = request;
@@ -176,6 +225,7 @@ pub async fn save_settings(
         providers.insert(
             provider_id.clone(),
             swage_config::ProviderEndpointConfig {
+                display_name: provider.display_name.clone(),
                 worker_staleness_threshold_ms: provider.worker_staleness_threshold_ms,
                 protocol: config_from_wire(provider.protocol.clone())?,
                 api_key_secret_ref: provider.api_key_secret_ref.clone(),
@@ -236,6 +286,7 @@ pub async fn save_settings(
             communication: communication.clone(),
             sessions: sessions.clone(),
             memory: memory.clone(),
+            attachments: attachments.clone(),
             judge: judge.clone(),
             voice: voice.clone(),
         },
@@ -258,8 +309,15 @@ pub async fn save_settings(
             ApiError::validation(format!("failed to create config directory: {error}"))
         })?;
     }
+    // Validate every pasted-key reference before writing any secret, so a
+    // later refusal cannot leave an earlier provider's credential rotated.
+    let mut provider_keys = Vec::with_capacity(requested_providers.len());
     for (provider_id, provider) in &requested_providers {
-        let secret_ref = persist_provider_key(state, provider_id, provider).await?;
+        let secret_id = validate_provider_key_rotation(state, provider).await?;
+        provider_keys.push((provider_id, provider, secret_id));
+    }
+    for (provider_id, provider, secret_id) in provider_keys {
+        let secret_ref = persist_provider_key(state, provider_id, provider, secret_id).await?;
         if let Some(secret_ref) = secret_ref {
             partial
                 .providers
@@ -280,7 +338,8 @@ pub async fn save_settings(
         .as_ref()
         .and_then(|providers| providers.entries.as_ref())
         .expect("settings save always writes provider entries");
-    let mut runtime_config = state.active_config();
+    let previous_config = state.active_config();
+    let mut runtime_config = previous_config.clone();
     runtime_config.providers.default = default_provider;
     runtime_config.providers.entries = saved_providers.clone();
     runtime_config.models.default = default_model;
@@ -317,6 +376,7 @@ pub async fn save_settings(
         communication.unwrap_or_else(|| runtime_config.communication.clone());
     runtime_config.sessions = sessions.unwrap_or_else(|| runtime_config.sessions.clone());
     runtime_config.memory = memory.unwrap_or_else(|| runtime_config.memory.clone());
+    runtime_config.attachments = attachments.unwrap_or_else(|| runtime_config.attachments.clone());
     runtime_config.judge = judge.unwrap_or_else(|| runtime_config.judge.clone());
     runtime_config.voice = voice.unwrap_or_else(|| runtime_config.voice.clone());
 
@@ -325,9 +385,21 @@ pub async fn save_settings(
         &runtime_config,
         state.storage.clone(),
         &state.config_root,
+        &state.browser_host,
     );
-    let voice_provider =
-        crate::startup::create_voice_provider(&runtime_config, &state.secret_manager).await;
+    // Keep observed speech failures until the voice configuration changes or a
+    // speech retry succeeds; an unrelated settings save is not a voice check.
+    let voice_provider = if runtime_config.voice == previous_config.voice
+        && runtime_config.providers == previous_config.providers
+        && runtime_config.models == previous_config.models
+        && requested_providers
+            .values()
+            .all(|provider| provider.api_key.as_deref().is_none_or(str::is_empty))
+    {
+        state.active_voice_provider()
+    } else {
+        crate::startup::create_voice_provider(&runtime_config, &state.secret_manager).await
+    };
     state.replace_runtime(runtime_config, provider, tool_dispatcher);
     state.replace_voice_provider(voice_provider);
     let response = load_settings(state).await?;
@@ -568,6 +640,7 @@ fn save_provider_into_endpoint_config(
     provider: SaveProviderSettings,
 ) -> Result<swage_config::ProviderEndpointConfig, ApiError> {
     Ok(swage_config::ProviderEndpointConfig {
+        display_name: provider.display_name.clone(),
         worker_staleness_threshold_ms: provider.worker_staleness_threshold_ms,
         protocol: config_from_wire(provider.protocol)?,
         base_url: provider.base_url,
@@ -598,6 +671,7 @@ fn settings_response_from_saved_config(
             (
                 id.clone(),
                 ProviderSettings {
+                    display_name: provider.display_name.clone(),
                     protocol: wire_from_config(provider.protocol.clone()),
                     worker_staleness_threshold_ms: provider.worker_staleness_threshold_ms,
                     base_url: provider.base_url.clone(),
@@ -615,7 +689,7 @@ fn settings_response_from_saved_config(
     SettingsResponse {
         providers,
         default_provider,
-        models,
+        models: models.into_iter().collect(),
         default_model,
         generation_presets: wire_from_config(generation_presets),
         tool_runtime: tool_runtime_from_config(&active_config.tools)
@@ -629,6 +703,7 @@ fn settings_response_from_saved_config(
         communication: wire_from_config(active_config.communication),
         sessions: active_config.sessions,
         memory: active_config.memory,
+        attachments: active_config.attachments,
         judge: active_config.judge,
         voice: wire_from_config(active_config.voice),
         restart_required: true,
@@ -808,6 +883,7 @@ fn validate_settings_request(request: &SaveSettingsRequest) -> Result<(), ApiErr
     // refuse.
     refuse_declared_section_problems(request.sessions.as_ref())?;
     refuse_declared_section_problems(request.memory.as_ref())?;
+    refuse_declared_section_problems(request.attachments.as_ref())?;
     refuse_declared_section_problems(request.judge.as_ref())?;
     if let Some(voice) = &request.voice
         && [&voice.transcription_model, &voice.speech_model]
@@ -859,6 +935,7 @@ struct RuntimeSectionUpdates {
     communication: Option<swage_config::CommunicationConfig>,
     sessions: Option<swage_config::SessionsConfig>,
     memory: Option<swage_config::MemoryConfig>,
+    attachments: Option<swage_config::AttachmentsConfig>,
     judge: Option<swage_config::JudgeConfig>,
     voice: Option<swage_config::VoiceConfig>,
 }
@@ -878,12 +955,16 @@ fn apply_runtime_settings_to_partial(
         communication,
         sessions,
         memory,
+        attachments,
         judge,
         voice,
     } = updates;
     // A declared section's partial is its own `From`: no field is restated.
     if let Some(sessions) = sessions {
         partial.sessions = Some(sessions.into());
+    }
+    if let Some(attachments) = attachments {
+        partial.attachments = Some(attachments.into());
     }
     if let Some(memory) = memory {
         partial.memory = Some(memory.into());
@@ -1096,10 +1177,36 @@ fn validate_named_list(label: &str, values: &[String]) -> Result<(), ApiError> {
     Ok(())
 }
 
+async fn validate_provider_key_rotation(
+    state: &AppState,
+    provider: &SaveProviderSettings,
+) -> Result<Option<uuid::Uuid>, ApiError> {
+    if provider.api_key.as_deref().is_none_or(str::is_empty) {
+        return Ok(None);
+    }
+    let Some(reference) = provider.api_key_secret_ref.as_deref() else {
+        return Ok(None);
+    };
+    let id = parse_secret_reference(reference)?;
+    let existing = state.secret_manager.get_secret(id).await?;
+    if existing.backend_kind != crate::secret::MANAGED_BACKEND {
+        let source = match existing.backend_kind.as_str() {
+            crate::secret::ENV_BACKEND => "environment variable",
+            crate::secret::FILE_BACKEND => "file",
+            _ => "external source",
+        };
+        return Err(ApiError::validation(format!(
+            "This credential is read from its {source}. Update it there instead of pasting a replacement key."
+        )));
+    }
+    Ok(Some(id))
+}
+
 async fn persist_provider_key(
     state: &AppState,
     provider_id: &str,
     provider: &SaveProviderSettings,
+    secret_id: Option<uuid::Uuid>,
 ) -> Result<Option<String>, ApiError> {
     let Some(api_key) = provider
         .api_key
@@ -1109,11 +1216,7 @@ async fn persist_provider_key(
         return Ok(None);
     };
 
-    if let Some(reference) = provider.api_key_secret_ref.as_deref() {
-        let id = reference
-            .strip_prefix("secret:")
-            .and_then(|raw| uuid::Uuid::parse_str(raw).ok())
-            .ok_or_else(|| ApiError::validation("invalid provider secret reference".to_string()))?;
+    if let Some(id) = secret_id {
         let secret = state
             .secret_manager
             .rotate_secret(
@@ -1322,6 +1425,100 @@ async fn discover_openrouter_models() -> Result<Vec<DiscoveredModel>, ApiError> 
 #[cfg(test)]
 mod tests {
     use crate::test_support::SwageHomeGuard;
+    use swage_storage::store::SecretStore;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn settings_context_assembly_validation_checks_known_hierarchies_before_writing() {
+        use swage_storage::store::{AgentDefinitionStore, AuditStore, TopicStore};
+
+        let home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let topic = storage
+            .create(swage_storage::NewTopic {
+                name: "Assembly topic".into(),
+                slug: "assembly-topic".into(),
+            })
+            .await
+            .unwrap();
+        for (id, topic_id) in [("global-agent", None), ("topic-agent", Some(topic.id))] {
+            storage
+                .upsert_agent_definition(swage_storage::NewAgentDefinition {
+                    id: id.into(),
+                    topic_id,
+                    display_name: id.into(),
+                    description: String::new(),
+                    instructions: String::new(),
+                    model_id: None,
+                    tool_permissions: None,
+                    skills: vec![],
+                    output_schema: None,
+                    output_max_retries: None,
+                })
+                .await
+                .unwrap();
+        }
+        let state = AppState::new_with_config_root(
+            storage.clone(),
+            storage.clone(),
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        save_settings(&state, succession_settings_request(None))
+            .await
+            .unwrap();
+        let path = home.path().join("config.toml");
+        let prior_config = std::fs::read_to_string(&path).unwrap();
+        let prior_events = storage.list_audit_events().await.unwrap().len();
+        let request = succession_settings_request(Some(json!({
+            "assembly": "missing-assembly", "timeout": 5
+        })));
+        let error = save_settings(&state, request.clone())
+            .await
+            .expect_err("an unknown context assembly must be refused before writing");
+        assert_eq!(
+            error.code(),
+            swage_protocol::client::error::ErrorCode::ValidationError
+        );
+        assert!(error.message().contains("missing-assembly"), "{error:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), prior_config);
+        assert_eq!(state.active_config().context.assembly, "default");
+        assert_eq!(
+            storage.list_audit_events().await.unwrap().len(),
+            prior_events
+        );
+
+        // The same name becomes valid through each real hierarchy in turn.
+        // No case relies on a previous case's assembly file remaining behind.
+        for directory in [
+            home.path().to_path_buf(),
+            topic.location().data_dir(home.path()),
+            ScopeLocation::General.agent_dir(home.path(), "global-agent"),
+            topic.location().agent_dir(home.path(), "topic-agent"),
+            topic.location().agent_dir(home.path(), "global-agent"),
+            ScopeLocation::General.agent_dir(home.path(), "gateway"),
+        ] {
+            let assemblies = directory.join("assemblies");
+            std::fs::create_dir_all(&assemblies).unwrap();
+            let assembly = assemblies.join("missing-assembly.js");
+            std::fs::write(&assembly, "export default function () { return []; }").unwrap();
+            let saved = save_settings(&state, request.clone())
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("assembly under {}: {error:?}", directory.display())
+                });
+            assert_eq!(saved.context.assembly, "missing-assembly");
+            assert!(!saved.restart_required);
+            std::fs::remove_file(assembly).unwrap();
+        }
+        // Once the file disappears, even a previously saved name is refused.
+        let error = save_settings(&state, request)
+            .await
+            .expect_err("removed assembly");
+        assert!(error.message().contains("missing-assembly"));
+    }
 
     fn succession_settings_request(context: Option<serde_json::Value>) -> SaveSettingsRequest {
         let mut value = serde_json::json!({
@@ -1340,6 +1537,303 @@ mod tests {
             value["context"] = context;
         }
         serde_json::from_value(value).expect("settings request")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn provider_settings_rotate_the_reference_created_by_the_first_save() {
+        let home = SwageHomeGuard::new();
+        let _key = crate::secret::tests::with_secret_env();
+        let storage = std::sync::Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let state = AppState::new_with_config_root(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        let mut request = succession_settings_request(None);
+        request.providers.get_mut("local").unwrap().api_key = Some("first-fixture-key".into());
+        let first = save_settings(&state, request).await.unwrap();
+        let reference = first.providers["local"].api_key_secret_ref.clone().unwrap();
+        assert!(reference.starts_with("secret://managed/"));
+        let before = state
+            .secret_manager
+            .list_secrets()
+            .await
+            .unwrap()
+            .secrets
+            .remove(0);
+        let mut request = succession_settings_request(None);
+        let provider = request.providers.get_mut("local").unwrap();
+        provider.api_key_secret_ref = Some(reference.clone());
+        provider.api_key = Some("rotated-fixture-key".into());
+        let result = save_settings(&state, request).await;
+        assert!(
+            result.is_ok(),
+            "rotation of the saved reference failed: {result:?}"
+        );
+        assert_eq!(
+            result.unwrap().providers["local"]
+                .api_key_secret_ref
+                .as_deref(),
+            Some(reference.as_str())
+        );
+        let after = state
+            .secret_manager
+            .list_secrets()
+            .await
+            .unwrap()
+            .secrets
+            .remove(0);
+        assert!(
+            after.updated_at > before.updated_at,
+            "rotation must advance the stored timestamp"
+        );
+        assert_eq!(
+            state
+                .secret_manager
+                .resolve(&reference)
+                .await
+                .unwrap()
+                .value,
+            "rotated-fixture-key"
+        );
+        assert!(after.revealed_value.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn provider_settings_refuse_mixed_key_pastes_without_rotating_any_credential() {
+        let home = tempfile::tempdir().unwrap();
+        let _key = crate::secret::tests::with_secret_env();
+        let storage = std::sync::Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let state = AppState::new_with_config_root(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        let managed = state
+            .secret_manager
+            .create_secret(CreateSecretRequest {
+                name: "managed-provider-key".into(),
+                material_kind: "provider_key".into(),
+                owner_kind: "provider".into(),
+                backend_kind: "managed".into(),
+                scope_kind: "global".into(),
+                scope_id: None,
+                metadata: None,
+                value: Some("original-managed-key".into()),
+                external_reference: None,
+            })
+            .await
+            .unwrap();
+        let external = state
+            .secret_manager
+            .create_secret(CreateSecretRequest {
+                name: "environment-provider-key".into(),
+                material_kind: "provider_key".into(),
+                owner_kind: "provider".into(),
+                backend_kind: "env".into(),
+                scope_kind: "global".into(),
+                scope_id: None,
+                metadata: None,
+                value: None,
+                external_reference: Some("SWAGE_MIXED_PASTE_PROVIDER_KEY".into()),
+            })
+            .await
+            .unwrap();
+        let mut request = succession_settings_request(None);
+        let other = request.providers["local"].clone();
+        request.providers.insert("other".into(), other);
+        // Assign the managed reference to the first visited entry so the
+        // regression exercises partial rotation regardless of HashMap order.
+        for (provider, secret) in request.providers.values_mut().zip([&managed, &external]) {
+            provider.api_key_secret_ref = Some(secret.reference.clone());
+            provider.api_key = Some("replacement-key".into());
+        }
+        let before = storage.get_secret(managed.id).await.unwrap().unwrap();
+        let result = save_settings(&state, request).await;
+        assert!(
+            result
+                .unwrap_err()
+                .message()
+                .contains("read from its environment variable")
+        );
+        assert_eq!(
+            state
+                .secret_manager
+                .resolve(&managed.reference)
+                .await
+                .unwrap()
+                .value,
+            "original-managed-key",
+            "a refused multi-provider save must not rotate the earlier managed credential"
+        );
+        let after = storage.get_secret(managed.id).await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(after).unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
+        assert!(!home.path().join("config.toml").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn provider_settings_refuse_pasted_rotation_of_external_credentials() {
+        let home = SwageHomeGuard::new();
+        let _key = crate::secret::tests::with_secret_env();
+        let storage = std::sync::Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let state = AppState::new_with_config_root(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        let path = home.path().join("provider-key");
+        std::fs::write(&path, "file-fixture-key").unwrap();
+        for (backend, external, message) in [
+            (
+                "file",
+                path.to_string_lossy().into_owned(),
+                "read from its file",
+            ),
+            (
+                "env",
+                "SWAGE_EXTERNAL_PROVIDER_KEY".into(),
+                "read from its environment variable",
+            ),
+        ] {
+            let secret = state
+                .secret_manager
+                .create_secret(CreateSecretRequest {
+                    name: format!("external-{backend}"),
+                    material_kind: "provider_key".into(),
+                    owner_kind: "provider".into(),
+                    backend_kind: backend.into(),
+                    scope_kind: "global".into(),
+                    scope_id: None,
+                    metadata: None,
+                    value: None,
+                    external_reference: Some(external),
+                })
+                .await
+                .unwrap();
+            let before = storage.get_secret(secret.id).await.unwrap().unwrap();
+            let mut request = succession_settings_request(None);
+            let provider = request.providers.get_mut("local").unwrap();
+            provider.api_key_secret_ref = Some(secret.reference.clone());
+            provider.api_key = Some("ignored-pasted-key".into());
+            let result = save_settings(&state, request).await;
+            assert!(
+                result.is_err(),
+                "pasted rotation of {backend}-backed credential must be refused"
+            );
+            assert!(result.unwrap_err().message().contains(message));
+            let after = storage.get_secret(secret.id).await.unwrap().unwrap();
+            assert_eq!(
+                serde_json::to_value(after).unwrap(),
+                serde_json::to_value(before).unwrap()
+            );
+            if backend == "file" {
+                assert_eq!(
+                    state
+                        .secret_manager
+                        .resolve(&secret.reference)
+                        .await
+                        .unwrap()
+                        .value,
+                    "file-fixture-key"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_settings_preserve_display_names_across_save_and_reload() {
+        let home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::new_with_config_root(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        let mut value = serde_json::to_value(succession_settings_request(None)).unwrap();
+        value["providers"]["local"]["display_name"] = json!("Homelab proxy");
+        value["providers"]["local"]["api_key_env"] = json!("PROXY_KEY");
+        let request = serde_json::from_value(value).unwrap();
+        let saved = serde_json::to_value(save_settings(&state, request).await.unwrap()).unwrap();
+        assert_eq!(saved["providers"]["local"]["display_name"], "Homelab proxy");
+        let loaded = serde_json::to_value(load_settings(&state).await.unwrap()).unwrap();
+        assert_eq!(
+            loaded["providers"]["local"]["display_name"],
+            "Homelab proxy"
+        );
+        assert_eq!(loaded["providers"]["local"]["api_key_env"], "PROXY_KEY");
+        assert!(loaded["providers"]["local"]["api_key_secret_ref"].is_null());
+        let file = tokio::fs::read_to_string(home.path().join("config.toml"))
+            .await
+            .unwrap();
+        let config: swage_config::PartialConfig = toml::from_str(&file).unwrap();
+        let encoded = serde_json::to_value(config).unwrap();
+        assert_eq!(
+            encoded["providers"]["entries"]["local"]["display_name"],
+            "Homelab proxy"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_settings_serialise_catalogues_in_key_order() {
+        let home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let mut config = swage_config::ResolvedConfig::default();
+        // Many reversed keys make iteration order observable independently of
+        // whichever random seed each HashMap receives.
+        for id in (0..24).rev().map(|n| format!("provider-{n:02}")) {
+            config
+                .providers
+                .entries
+                .insert(id, swage_config::ProviderEndpointConfig::default());
+        }
+        for id in (0..24).rev().map(|n| format!("model-{n:02}")) {
+            config.models.entries.insert(
+                id.clone(),
+                swage_config::ModelEndpointConfig {
+                    provider_id: "provider-00".into(),
+                    model_id: id,
+                    ..Default::default()
+                },
+            );
+        }
+        let state = AppState::new_with_config_root(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        let text = serde_json::to_string(&load_settings(&state).await.unwrap()).unwrap();
+        for catalogue in ["provider", "model"] {
+            let positions: Vec<_> = (0..24)
+                .map(|n| text.find(&format!("\"{catalogue}-{n:02}\":")).unwrap())
+                .collect();
+            assert!(
+                positions.windows(2).all(|pair| pair[0] < pair[1]),
+                "{catalogue} keys are not sorted: {text}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1800,7 +2294,7 @@ mod tests {
     #[test]
     fn settings_response_from_saved_config_echoes_secret_refs_without_raw_keys() {
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
@@ -1813,6 +2307,7 @@ mod tests {
         providers.insert(
             "llama-cpp".to_string(),
             swage_config::ProviderEndpointConfig {
+                display_name: None,
                 worker_staleness_threshold_ms: None,
                 protocol: swage_config::Protocol::OpenAi,
                 base_url: Some("http://127.0.0.1:8080/v1".to_string()),
@@ -1866,10 +2361,11 @@ mod tests {
                 capabilities: swage_config::ModelCapabilitiesConfig {
                     reasoning_replay: true,
                     effort: None,
+                    output_limit: None,
                 },
             },
         );
-        let state = AppState::new(
+        let state = AppState::new_with_config_root(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
@@ -1877,6 +2373,7 @@ mod tests {
             initial_config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
+            swage_home.path().to_path_buf(),
         );
 
         let request = SaveSettingsRequest {
@@ -1884,6 +2381,7 @@ mod tests {
             providers: [(
                 "local".to_string(),
                 SaveProviderSettings {
+                    display_name: None,
                     protocol: swage_protocol::client::settings::ProviderProtocol::OpenAi,
                     worker_staleness_threshold_ms: None,
                     base_url: Some("http://127.0.0.1:65535/v1".to_string()),
@@ -1909,6 +2407,7 @@ mod tests {
                     capabilities: swage_protocol::client::settings::ModelCapabilitiesConfig {
                         reasoning_replay: true,
                         effort: None,
+                        output_limit: None,
                     },
                 },
             )]
@@ -1952,6 +2451,7 @@ mod tests {
             communication: None,
             sessions: None,
             memory: None,
+            attachments: None,
             judge: None,
             voice: None,
         };
@@ -2010,6 +2510,119 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_speech_disables_capabilities_and_a_successful_retry_restores_them() {
+        use crate::voice::{SynthesiseSpeechRequest, synthesise_speech, voice_capabilities};
+        use axum::{Router, http::StatusCode, routing::post};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let _home = SwageHomeGuard::new();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counted = requests.clone();
+        let upstream = Router::new().route(
+            "/audio/speech",
+            post(move || {
+                let counted = counted.clone();
+                async move {
+                    if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                        (
+                            StatusCode::NOT_FOUND,
+                            r#"{"error":{"param":"model","code":"model_not_found","message":"speech model not found"}}"#,
+                        )
+                    } else {
+                        (StatusCode::OK, "RIFFAUDIO")
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let storage = Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::new(
+            storage.clone(),
+            storage,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let settings_request = |model: &str| {
+            let mut request =
+                voice_settings_request(Some(swage_protocol::client::settings::VoiceConfig {
+                    transcription_model: Some("whisper".into()),
+                    speech_model: Some(model.into()),
+                }));
+            request.providers.get_mut("local").unwrap().base_url = Some(base_url.clone());
+            request
+        };
+        save_settings(&state, settings_request("not-a-real-audio-model"))
+            .await
+            .unwrap();
+        let request = || SynthesiseSpeechRequest {
+            text: "Check speech.".into(),
+            voice: None,
+            format: None,
+        };
+        let error = synthesise_speech(&state, request()).await.unwrap_err();
+        assert!(error.to_string().contains("404"), "{error}");
+
+        let voice = voice_capabilities(&state).await;
+        assert!(
+            !voice.synthesis,
+            "a provider 404 must stop advertising synthesis"
+        );
+        assert!(
+            voice.transcription,
+            "speech failure must not disable transcription"
+        );
+        let reason = voice.unavailable_reason.unwrap();
+        assert!(
+            reason.contains("404") && reason.contains("not-a-real-audio-model"),
+            "{reason}"
+        );
+        assert!(!crate::capabilities::workflow_capabilities(&state).await.tts);
+
+        save_settings(&state, settings_request("not-a-real-audio-model"))
+            .await
+            .unwrap();
+        let saved_failure = voice_capabilities(&state).await;
+        assert!(
+            !saved_failure.synthesis,
+            "saving unchanged voice settings must retain the observed failure"
+        );
+        assert_eq!(saved_failure.unavailable_reason, Some(reason));
+
+        let recovered = synthesise_speech(&state, request()).await.unwrap();
+        assert_eq!(recovered.audio_bytes, b"RIFFAUDIO");
+        assert!(voice_capabilities(&state).await.synthesis);
+        assert_eq!(voice_capabilities(&state).await.unavailable_reason, None);
+        assert!(crate::capabilities::workflow_capabilities(&state).await.tts);
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        save_settings(&state, settings_request("not-a-real-audio-model"))
+            .await
+            .unwrap();
+        assert!(
+            voice_capabilities(&state).await.synthesis,
+            "saving unchanged voice settings must retain successful validation"
+        );
+        save_settings(&state, settings_request("replacement-speech-model"))
+            .await
+            .unwrap();
+        assert!(!voice_capabilities(&state).await.synthesis);
+        assert!(
+            voice_capabilities(&state)
+                .await
+                .unavailable_reason
+                .unwrap()
+                .contains("has not been checked")
+        );
+        server.abort();
+    }
+
     fn voice_settings_request(
         voice: Option<swage_protocol::client::settings::VoiceConfig>,
     ) -> SaveSettingsRequest {
@@ -2018,6 +2631,7 @@ mod tests {
             providers: [(
                 "local".to_string(),
                 SaveProviderSettings {
+                    display_name: None,
                     protocol: swage_protocol::client::settings::ProviderProtocol::OpenAi,
                     worker_staleness_threshold_ms: None,
                     base_url: Some("http://127.0.0.1:65535/v1".to_string()),
@@ -2056,6 +2670,7 @@ mod tests {
             communication: None,
             sessions: None,
             memory: None,
+            attachments: None,
             judge: None,
             voice,
         }
@@ -2065,7 +2680,7 @@ mod tests {
     async fn save_settings_hot_applies_a_declared_section_and_refuses_by_its_own_rule() {
         let swage_home = SwageHomeGuard::new();
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
-        let state = AppState::new(
+        let state = AppState::new_with_config_root(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
@@ -2073,6 +2688,7 @@ mod tests {
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
+            swage_home.path().to_path_buf(),
         );
 
         let mut request = voice_settings_request(None);
@@ -2113,11 +2729,77 @@ mod tests {
         assert_eq!(state.active_config().memory.curator_idle_minutes, 45);
     }
 
+    #[tokio::test]
+    async fn delegation_depth_saves_hot_applies_reloads_and_refuses_zero() {
+        let home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::new(
+            storage.clone(),
+            storage,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        assert_eq!(
+            serde_json::to_value(state.active_config().sessions).unwrap()["max_delegation_depth"],
+            4,
+            "the gateway loads the depth default"
+        );
+        let mut request = voice_settings_request(None);
+        request.sessions = Some(
+            serde_json::from_value(
+                serde_json::json!({"archive_after_days": 7, "max_delegation_depth": 2}),
+            )
+            .unwrap(),
+        );
+        let response = save_settings(&state, request.clone()).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(response.sessions).unwrap()["max_delegation_depth"],
+            2
+        );
+        assert_eq!(
+            serde_json::to_value(state.active_config().sessions).unwrap()["max_delegation_depth"],
+            2,
+            "new chains read the saved depth without a restart"
+        );
+        let reloaded = swage_config::load_resolved_config_from(
+            home.path(),
+            &ScopeLocation::General,
+            "default",
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(reloaded.sessions).unwrap()["max_delegation_depth"],
+            2,
+            "the declared setting survives a file reload"
+        );
+        request.sessions = Some(
+            serde_json::from_value(
+                serde_json::json!({"archive_after_days": 7, "max_delegation_depth": 0}),
+            )
+            .unwrap(),
+        );
+        let result = save_settings(&state, request).await;
+        assert!(result.is_err(), "the settings API refuses a zero depth");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("sessions.max_delegation_depth")
+        );
+        assert_eq!(
+            serde_json::to_value(state.active_config().sessions).unwrap()["max_delegation_depth"],
+            2,
+            "a refused save leaves the active setting intact"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn save_settings_hot_applies_voice_model_routes() {
         let swage_home = SwageHomeGuard::new();
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
-        let state = AppState::new(
+        let state = AppState::new_with_config_root(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
@@ -2125,6 +2807,7 @@ mod tests {
             swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
+            swage_home.path().to_path_buf(),
         );
 
         save_settings(&state, voice_settings_request(None))
@@ -2153,8 +2836,15 @@ mod tests {
         .expect("voice routes should save and hot-apply");
         assert_eq!(response.voice.speech_model.as_deref(), Some("tts-1"));
         let configured = crate::voice::voice_capabilities(&state).await;
-        assert!(configured.transcription && configured.synthesis);
-        assert_eq!(configured.unavailable_reason, None);
+        assert!(configured.transcription);
+        assert!(!configured.synthesis);
+        assert!(
+            configured
+                .unavailable_reason
+                .as_deref()
+                .unwrap()
+                .contains("has not been checked")
+        );
         assert!(!state.restart_required());
 
         let reloaded = swage_config::load_resolved_config_from(
@@ -2190,6 +2880,7 @@ mod tests {
             initial_config.providers.entries.insert(
                 id.to_string(),
                 swage_config::ProviderEndpointConfig {
+                    display_name: None,
                     worker_staleness_threshold_ms: threshold,
                     protocol: swage_config::Protocol::OpenAi,
                     base_url: Some("http://127.0.0.1:65535/v1".to_string()),
@@ -2200,7 +2891,7 @@ mod tests {
                 },
             );
         }
-        let state = AppState::new(
+        let state = AppState::new_with_config_root(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
@@ -2208,6 +2899,7 @@ mod tests {
             initial_config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
+            swage_home.path().to_path_buf(),
         );
 
         let loaded = load_settings(&state).await.expect("load settings");
@@ -2228,6 +2920,7 @@ mod tests {
                 (
                     id.clone(),
                     SaveProviderSettings {
+                        display_name: None,
                         protocol: provider.protocol.clone(),
                         worker_staleness_threshold_ms: provider.worker_staleness_threshold_ms,
                         base_url: provider.base_url.clone(),
@@ -2256,6 +2949,7 @@ mod tests {
             communication: None,
             sessions: None,
             memory: None,
+            attachments: None,
             judge: None,
             voice: None,
         };
@@ -2340,7 +3034,7 @@ mod tests {
             provider_type: "searxng".to_string(),
             base_url: "http://127.0.0.1:8080".to_string(),
         });
-        let state = AppState::new(
+        let state = AppState::new_with_config_root(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
@@ -2348,6 +3042,7 @@ mod tests {
             config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
+            swage_home.path().to_path_buf(),
         );
         assert!(
             state
@@ -2366,6 +3061,7 @@ mod tests {
             providers: [(
                 "local".to_string(),
                 SaveProviderSettings {
+                    display_name: None,
                     protocol: swage_protocol::client::settings::ProviderProtocol::OpenAi,
                     worker_staleness_threshold_ms: None,
                     base_url: Some("http://127.0.0.1:65535/v1".to_string()),
@@ -2414,6 +3110,7 @@ mod tests {
             communication: None,
             sessions: None,
             memory: None,
+            attachments: None,
             judge: None,
             voice: None,
         };
@@ -2509,7 +3206,7 @@ mod tests {
         let _swage_home = SwageHomeGuard::new();
 
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
@@ -2548,6 +3245,7 @@ mod tests {
             providers: [(
                 "local".to_string(),
                 SaveProviderSettings {
+                    display_name: None,
                     protocol: swage_protocol::client::settings::ProviderProtocol::OpenAi,
                     worker_staleness_threshold_ms: None,
                     base_url: Some("http://127.0.0.1:65535/v1".to_string()),
@@ -2587,6 +3285,7 @@ mod tests {
             communication: Some(wire_from_config(communication.clone())),
             sessions: None,
             memory: None,
+            attachments: None,
             judge: None,
             voice: None,
         };
@@ -2635,6 +3334,7 @@ mod tests {
             communication: None,
             sessions: None,
             memory: None,
+            attachments: None,
             judge: None,
             voice: None,
         };
@@ -2765,5 +3465,73 @@ mod tests {
         assert!(body.contains("[context]"));
         assert!(body.contains("assembly = \"compact\""));
         assert!(body.contains("budget = 8192"));
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn image_scheme_settings_save_hot_apply_reload_and_refuse() {
+        let swage_home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
+        let state = AppState::new(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
+                as std::sync::Arc<dyn swage_provider::LlmProvider>,
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        assert_eq!(
+            load_settings(&state)
+                .await
+                .unwrap()
+                .attachments
+                .accepted_schemes,
+            ["https", "data"]
+        );
+        let mut request = voice_settings_request(None);
+        request.attachments = Some(swage_config::AttachmentsConfig {
+            accepted_schemes: vec!["http".into()],
+        });
+        let response = save_settings(&state, request.clone()).await.unwrap();
+        assert_eq!(response.attachments.accepted_schemes, ["http"]);
+        assert_eq!(state.active_config().attachments.accepted_schemes, ["http"]);
+        assert!(!state.restart_required());
+        let reloaded = swage_config::load_resolved_config_from(
+            swage_home.path(),
+            &ScopeLocation::General,
+            "default",
+        )
+        .unwrap();
+        assert_eq!(reloaded.attachments.accepted_schemes, ["http"]);
+        // Exercise the gate with the running setting, rather than only its saved representation.
+        crate::turn::check_attachment_support(
+            &crate::capabilities::WorkflowCapabilities::for_protocol(
+                swage_config::Protocol::OpenAi,
+            ),
+            &state.active_config().attachments,
+            &[swage_protocol::client::turn::MessageAttachment::ImageUrl {
+                url: "http://example.test/a.png".into(),
+            }],
+        )
+        .unwrap();
+        for invalid in [vec![], vec!["https:".into()]] {
+            request.attachments = Some(swage_config::AttachmentsConfig {
+                accepted_schemes: invalid,
+            });
+            let error = save_settings(&state, request.clone())
+                .await
+                .expect_err("invalid policy must be refused");
+            assert!(
+                error.to_string().contains("attachments.accepted_schemes"),
+                "{error}"
+            );
+            assert_eq!(state.active_config().attachments.accepted_schemes, ["http"]);
+            let reloaded = swage_config::load_resolved_config_from(
+                swage_home.path(),
+                &ScopeLocation::General,
+                "default",
+            )
+            .unwrap();
+            assert_eq!(reloaded.attachments.accepted_schemes, ["http"]);
+        }
     }
 }

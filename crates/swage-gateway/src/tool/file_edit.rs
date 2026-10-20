@@ -14,8 +14,8 @@ use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
 use crate::tool::workspace::{
-    FileContent, location_approval_error, read_file_content, require_workspace_write_access,
-    resolve_context_path,
+    FileContent, binary_size_description, location_approval_error, read_file_content,
+    require_workspace_write_access, resolve_context_path,
 };
 
 // ---------------------------------------------------------------------------
@@ -28,6 +28,12 @@ pub struct FileEditTool;
 impl Tool for FileEditTool {
     fn name(&self) -> &str {
         "file_edit"
+    }
+
+    fn display_hints(&self) -> swage_tool::tool::ToolDisplayHints {
+        swage_tool::tool::ToolDisplayHints {
+            summary_param: Some("/changes/0/path"),
+        }
     }
 
     fn description(&self) -> &str {
@@ -115,7 +121,8 @@ impl Tool for FileEditTool {
                     return Err(ToolError::ExecutionFailed {
                         name: self.name().to_string(),
                         message: format!(
-                            "File appears to be binary ({len} bytes): {}",
+                            "File appears to be binary ({}): {}",
+                            binary_size_description(len),
                             change.requested_path
                         ),
                     });
@@ -647,6 +654,19 @@ fn write_error(tool_name: &str, requested_path: &str, error: std::io::Error) -> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn declared_headline_renders_the_call_argument() {
+        let tool = FileEditTool;
+        assert_eq!(
+            swage_tool::tool::display_summary(
+                &tool.display_hints(),
+                &json!({"changes": [{"path": "notes/a.txt", "edits": []}]})
+            )
+            .as_deref(),
+            Some("notes/a.txt")
+        );
+    }
+
     use super::*;
     use tempfile::TempDir;
 

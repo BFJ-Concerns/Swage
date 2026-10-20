@@ -49,7 +49,7 @@ export interface ConversationStore {
     timestamp: string;
     turn_state: Extract<
       MessageView["turn_state"],
-      "completed" | "refused" | "incomplete" | "failed" | "interrupted"
+      "completed" | "refused" | "incomplete" | "failed" | "interrupted" | "cancelled"
     >;
     /** The thread the reply belongs to; absent means the thread in view. */
     thread_id?: string;
@@ -73,7 +73,7 @@ export interface ConversationStore {
    */
   settleUnansweredRequest?(
     settlement: {
-      turn_state: Extract<MessageView["turn_state"], "failed" | "interrupted">;
+      turn_state: Extract<MessageView["turn_state"], "failed" | "interrupted" | "cancelled">;
       tool_calls: MessageView["tool_calls"];
     },
     conversationId?: string | null,
@@ -109,6 +109,8 @@ function sortByRecency(list: ConversationSummary[]): ConversationSummary[] {
 }
 
 export function createConversationStore(): ConversationStore {
+  const drainedQueueIds = new Map<string, Set<string>>();
+
   // Back the custom API with real Svelte stores so async updates re-render
   // mounted components instead of leaving them stuck on initial state.
   const conversationsStore = writable<ConversationSummary[]>([]);
@@ -250,6 +252,8 @@ export function createConversationStore(): ConversationStore {
     updateConversationSummary(ownerId, message);
   }
 
+  let listGeneration = 0;
+
   return {
     // ---------------------------------------------------------------------------
     // Reactive state (read-only to callers via readonly interface)
@@ -280,13 +284,15 @@ export function createConversationStore(): ConversationStore {
     // ---------------------------------------------------------------------------
 
     async loadConversations(topicId) {
+      const generation = ++listGeneration;
+      conversationsStore.set([]);
       isLoadingStore.set(true);
       try {
         const list = await api.listConversations(topicId);
+        if (generation !== listGeneration) return;
         conversationsStore.set(sortByRecency(list));
       } finally {
-        // Always clear loading — even on error, so the UI isn't stuck.
-        isLoadingStore.set(false);
+        if (generation === listGeneration) isLoadingStore.set(false);
       }
     },
 
@@ -313,6 +319,7 @@ export function createConversationStore(): ConversationStore {
         id: resp.id,
         topic_id: resp.topic_id ?? undefined,
         agent_id: resp.agent_id,
+        agent_display_name: resp.agent_display_name,
         selected_model_id: resp.selected_model_id ?? null,
         created_at: resp.created_at,
         last_activity: resp.last_activity,
@@ -404,6 +411,7 @@ export function createConversationStore(): ConversationStore {
     },
 
     appendQueuedMessage(queued, conversationId) {
+      if (drainedQueueIds.get(conversationId)?.has(queued.id)) return;
       const activeConversation = get(activeConversationStore);
       if (activeConversation?.id !== conversationId) return;
       const held = activeConversation.queued ?? [];
@@ -422,6 +430,9 @@ export function createConversationStore(): ConversationStore {
     },
 
     clearQueuedMessages(conversationId, queuedIds) {
+      const seen = drainedQueueIds.get(conversationId) ?? new Set<string>();
+      for (const id of queuedIds) seen.add(id);
+      drainedQueueIds.set(conversationId, seen);
       const activeConversation = get(activeConversationStore);
       if (activeConversation?.id !== conversationId) return;
       const drained = new Set(queuedIds);

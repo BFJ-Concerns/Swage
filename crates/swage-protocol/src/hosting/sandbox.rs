@@ -57,6 +57,9 @@ pub struct SandboxPolicy {
     /// empty; a file reads as empty. Enforced by the mount layer, so the
     /// fallback backend cannot honour them.
     pub masked_paths: Vec<PathBuf>,
+    /// Where tools keep their output artefacts, carried to the child
+    /// independently of its working directory; writable, as a write path.
+    pub tool_output_directory: Option<PathBuf>,
     /// Host-selected environment inherited by sandboxed commands.
     pub environment: std::collections::BTreeMap<String, String>,
     /// Time to wait for graceful shutdown before SIGKILL.
@@ -98,6 +101,7 @@ pub struct SandboxPolicyBuilder {
     write_paths: Vec<PathBuf>,
     read_only_paths: Vec<PathBuf>,
     masked_paths: Vec<PathBuf>,
+    tool_output_directory: Option<PathBuf>,
     // 5 second default — long enough for a clean shutdown, short enough not
     // to stall the host on a hung agent.
     shutdown_grace_period: Duration,
@@ -115,6 +119,7 @@ impl SandboxPolicyBuilder {
             write_paths: Vec::new(),
             read_only_paths: Vec::new(),
             masked_paths: Vec::new(),
+            tool_output_directory: None,
             shutdown_grace_period: Duration::from_secs(5),
             tool_call_timeout: Duration::from_secs(30),
             llm_request_timeout: Duration::from_secs(60),
@@ -155,6 +160,13 @@ impl SandboxPolicyBuilder {
     }
 
     /// Overrides the graceful shutdown timeout (default: 5s).
+    /// Sets the runtime-owned directory for tool-output artefacts. Add it as
+    /// a write path too: the policy carries the location, not the grant.
+    pub fn tool_output_directory(mut self, path: impl Into<PathBuf>) -> Self {
+        self.tool_output_directory = Some(path.into());
+        self
+    }
+
     pub fn shutdown_grace_period(mut self, duration: Duration) -> Self {
         self.shutdown_grace_period = duration;
         self
@@ -187,6 +199,7 @@ impl SandboxPolicyBuilder {
             write_paths: self.write_paths,
             read_only_paths: self.read_only_paths,
             masked_paths: self.masked_paths,
+            tool_output_directory: self.tool_output_directory,
             environment: std::collections::BTreeMap::new(),
             shutdown_grace_period: self.shutdown_grace_period,
             tool_call_timeout: self.tool_call_timeout,

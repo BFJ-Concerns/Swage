@@ -51,7 +51,6 @@ fn memory_curator_definition() -> NewAgentDefinition {
             "allow": ["memory_read", "memory_write"],
             "deny": [],
             "bundles": {},
-            "require_approval": [],
         })),
         skills: Vec::new(),
         output_schema: None,
@@ -300,6 +299,11 @@ pub fn validate_definition(definition: &NewAgentDefinition) -> Result<(), Gatewa
         ));
     }
     if let Some(overlay) = &definition.tool_permissions {
+        if overlay.get("require_approval").is_some() {
+            return Err(GatewayError::ValidationError(
+                "agent-definition tool_permissions cannot set require_approval; configure approvals in the configuration files".into(),
+            ));
+        }
         serde_json::from_value::<swage_config::model::ToolPermissionConfig>(overlay.clone())
             .map_err(|error| {
                 GatewayError::ValidationError(format!(
@@ -381,6 +385,44 @@ mod validation_tests {
             output_schema: None,
             output_max_retries: None,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refuses_approval_fields_before_saving_an_agent_definition() {
+        let storage = std::sync::Arc::new(SqliteStorage::in_memory().unwrap());
+        let state = crate::test_support::state(storage.clone());
+        for approvals in [serde_json::json!(["shell"]), serde_json::json!([])] {
+            let mut bad = definition("restricted");
+            bad.tool_permissions = Some(
+                serde_json::json!({"allow": ["*"], "deny": [], "bundles": {}, "require_approval": approvals}),
+            );
+            let error = upsert_agent_definition(&state, bad, "test", None)
+                .await
+                .err()
+                .expect("an unsupported approval field must be refused");
+            assert!(error.to_string().contains("require_approval"), "{error}");
+            assert!(
+                storage
+                    .resolve_agent_definition("restricted", Uuid::nil())
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "refused definition was persisted"
+            );
+        }
+        let mut good = definition("restricted");
+        good.tool_permissions =
+            Some(serde_json::json!({"allow": ["file_read"], "deny": [], "bundles": {}}));
+        upsert_agent_definition(&state, good, "test", None)
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .resolve_agent_definition("restricted", Uuid::nil())
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

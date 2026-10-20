@@ -14,7 +14,7 @@ use swage_core::{
 };
 use swage_hook::{HookEvent, HookOutcome, HookRegistry};
 use swage_protocol::client::turn::MessageAttachment;
-use swage_protocol::client::workflow::{WorkflowAgentCallResolution, WorkflowProviderRoundOutcome};
+use swage_protocol::client::workflow::{WorkflowAttemptResolution, WorkflowProviderRoundOutcome};
 use swage_storage::model::{
     AppendMessage, ApprovalKind, ApprovalState, InboundAudit, NewAgentMessage, NewApprovalRequest,
     NewTurn, ToolCallRecord, TurnState,
@@ -30,7 +30,7 @@ use swage_context::tokeniser::TiktokenTokeniser;
 
 use swage_agent::{
     AgentBuilder, AgentConfig, AgentError, AgentEvent, DelegationExecutor, DelegationHandler,
-    MessageRouter, TurnRequest,
+    TurnRequest,
 };
 use swage_safety::LeakDetector;
 use swage_sandbox::{Sandbox, llm_handler::HostLlmHandler};
@@ -88,9 +88,9 @@ pub(crate) use operator_guidance::*;
 pub(crate) use projection::route_approval_agent_event;
 use projection::{ProjectedTurn, TurnProjection, project_agent_events};
 pub(crate) use provider_record::*;
-#[cfg(test)]
-use runtime_launch::effort_capability_for_model;
 use runtime_launch::{RuntimeLaunch, launch_turn_runtime, requested_effort};
+#[cfg(test)]
+use runtime_launch::{effort_capability_for_model, output_limit_for_model};
 use sandbox_approval::{
     SandboxDegradationApproval, SandboxDegradationApprovalRequest,
     request_sandbox_degradation_approval,
@@ -224,81 +224,8 @@ pub(super) async fn process_turn_with_composition_and_focus(
     // and replace the cached write bit before assembly or sandbox creation.
     reauthorise_worker_placement_for_turn(state, &mut session).await?;
 
-    // Load topic-specific config. Missing topic config falls back to the
-    // startup config, but present invalid config fails the turn before any
-    // user message is written.
-    let config = load_session_config(state, &scope, &session.agent_id)?;
-
-    // A durable agent definition, when one exists for this agent, gives the
-    // session its character on top of the resolved file config: instructions
-    // append, the model preference fills an unselected default, and the
-    // permission overlay narrows grants. Resolution failure falls open to
-    // the file config — a broken definition must not brick the session.
-    let config = match crate::service::resolve_effective_agent_definition(
-        state.storage.as_ref(),
-        &session.agent_id,
-        topic_id,
-    )
-    .await
-    {
-        Ok(Some(definition)) => apply_agent_definition(config, &definition.definition),
-        Ok(None) => config,
-        Err(error) => {
-            tracing::warn!(
-                agent_id = %session.agent_id,
-                %error,
-                "failed to resolve the agent definition; using file config alone"
-            );
-            config
-        }
-    };
-
-    // A worker session carries the full lineage of dispatching contexts in
-    // session metadata: the worker's grants are the intersection of its own
-    // and every inherited bound, re-resolved on every turn so nested dispatch
-    // cannot expand authority and suspension cannot freeze it.
-    // Unlike the definition overlay above, resolution failure here fails the
-    // turn: falling open would run the worker wider than its dispatcher.
-    let bound_agent_ids = dispatch_bound_agent_ids(session.metadata.as_ref())?;
-    let config = apply_dispatch_bounds(
-        state,
-        &scope,
-        topic_id,
-        config,
-        &bound_agent_ids,
-        &format!("worker session {session_id}"),
-    )
-    .await?;
-    let bound_task_definition_ids = dispatch_bound_task_definition_ids(session.metadata.as_ref())?;
-    let config = apply_dispatch_task_bounds(
-        state,
-        config,
-        &bound_task_definition_ids,
-        &format!("worker session {session_id}"),
-    )
-    .await?;
-    let config = apply_workflow_call_tools(config, session.metadata.as_ref())?;
-
-    // Task names ride child-session metadata, while the definition is
-    // resolved afresh for every execution. Missing or unreadable tasks fail
-    // closed: silently running a different contract would be false success.
-    let task_definition_id = session
-        .metadata
-        .as_ref()
-        .and_then(|m| m.get("task_definition"))
-        .and_then(serde_json::Value::as_str);
-    let (config, task_defines_output_retries) = match task_definition_id {
-        Some(task_id) => {
-            let definition =
-                crate::service::resolve_task_definition(state.storage.as_ref(), task_id).await?;
-            let defines_output_retries = definition.output_max_retries.is_some();
-            (
-                apply_task_definition(config, &definition)?,
-                defines_output_retries,
-            )
-        }
-        None => (config, false),
-    };
+    let (config, task_defines_output_retries) =
+        resolve_turn_admission_config(state, &scope, &session).await?;
 
     let (config, effective_model_source, selected_model_id) = resolve_turn_model_and_attachments(
         state,
@@ -307,7 +234,8 @@ pub(super) async fn process_turn_with_composition_and_focus(
         session.selected_model_id.as_deref(),
         session_id,
         &attachments,
-    )?;
+    )
+    .await?;
 
     // Skill discovery, topic memory loading, and assembly search paths all use
     // the root retained when this application state was constructed.
@@ -346,7 +274,12 @@ pub(super) async fn process_turn_with_composition_and_focus(
         }
     };
 
-    if task_definition_id.is_some()
+    if session
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("task_definition"))
+        .and_then(serde_json::Value::as_str)
+        .is_some()
         && let Err(error) = crate::experimentation::select_session_variant(
             state,
             &config.experimentation,
@@ -508,15 +441,6 @@ pub(super) async fn process_turn_with_composition_and_focus(
         }
     };
     let assembly_name = context_choices.assembly_name;
-    let memory_index = if session_carries_memory(&session) {
-        Some(
-            crate::memory::load_memory_index(swage_root, &scope)
-                .await
-                .into_element(),
-        )
-    } else {
-        None
-    };
     let mut session_variables: std::collections::BTreeMap<String, String> =
         record_failed_turn_and_release_on_error(
             state,
@@ -563,7 +487,56 @@ pub(super) async fn process_turn_with_composition_and_focus(
         worker_placement,
     );
 
-    let environment = build_session_environment(&topic, &tool_root, &session);
+    // The agent's configuration is settled before context is assembled: the
+    // standing text (orientation, memory) asks which tools this turn will offer.
+    let session_approval_grants = state
+        .session_approval_grants
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    append_approved_location_paths(
+        &mut allowed_paths,
+        &session_approval_grants,
+        topic_id,
+        session_id,
+        session.metadata.as_ref(),
+    );
+    let mut agent_config = build_agent_config_with_workspace(
+        session.agent_id.clone(),
+        &config,
+        output_schema_override,
+        &tool_root.path,
+        allowed_paths,
+    );
+    let output_directory = managed_scratch_workspace(&state.config_root, &scope, session.id);
+    agent_config.tool_output_directory = Some(output_directory);
+    if !task_defines_output_retries && let Some(max_retries) = max_output_retries_override {
+        agent_config.max_output_retries = max_retries;
+    }
+    agent_config.approval_prompts_enabled = attendance == TurnAttendance::Attended;
+    let offered_tools = dispatcher::turn_offered_tools(
+        state,
+        &config,
+        &agent_config,
+        session.metadata.as_ref(),
+        Some(topic_id),
+        Some(session_id),
+        &session_approval_grants,
+    )
+    .await;
+    let memory_index = if session_carries_memory(&session) {
+        Some(
+            crate::memory::load_memory_index(swage_root, &scope)
+                .await
+                .into_element(swage_context::memory::MemoryReach::with_read_tool(
+                    offered_tools.contains(crate::tool::memory::MEMORY_READ_TOOL),
+                )),
+        )
+    } else {
+        None
+    };
+
+    let environment = build_session_environment(&topic, &tool_root, &session, &workspace_policy);
     let available_skills = available_skills_for_agent(&scope, &session.agent_id, Some(swage_root));
 
     let operator_guidance = operator_guidance_rules(Some(swage_root), &workspace_policy);
@@ -571,12 +544,14 @@ pub(super) async fn process_turn_with_composition_and_focus(
 
     let elements = build_assembly_elements(
         &config.instructions,
+        &config.instruction_sources,
         operator_guidance,
         active_skills,
         history_messages,
         memory_index,
         environment,
         available_skills,
+        offered_tools,
         config.default_model_id(),
         context_choices.working_norms_scaffold,
         &hierarchy,
@@ -622,6 +597,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
     )
     .await;
     let (assembled_messages, mut assembly_report) = (output.messages, output.report);
+    redact_element_texts(state, &mut assembly_report).await;
     assembly_report.tool_scope = Some(serde_json::json!({
         "effective_root": tool_root.path,
     }));
@@ -650,29 +626,6 @@ pub(super) async fn process_turn_with_composition_and_focus(
             effective_model_source,
         );
     }
-    let session_approval_grants = state
-        .session_approval_grants
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    append_approved_location_paths(
-        &mut allowed_paths,
-        &session_approval_grants,
-        topic_id,
-        session_id,
-        session.metadata.as_ref(),
-    );
-    let mut agent_config = build_agent_config_with_workspace(
-        session.agent_id.clone(),
-        &config,
-        output_schema_override,
-        &tool_root.path,
-        allowed_paths,
-    );
-    if !task_defines_output_retries && let Some(max_retries) = max_output_retries_override {
-        agent_config.max_output_retries = max_retries;
-    }
-    agent_config.approval_prompts_enabled = attendance == TurnAttendance::Attended;
 
     // Step 9: Resolve tool permissions from config cascade and build the
     // ToolDispatcher with the resolved permission set. When sandboxing is
@@ -768,7 +721,9 @@ pub(super) async fn process_turn_with_composition_and_focus(
 
     // Wait for the agent task to finish and surface any panic or error.
     let mut terminal_account = None;
-    match agent_handle.await {
+    let agent_result = agent_handle.await;
+    let cancelled = matches!(&agent_result, Ok(Err(AgentError::Cancelled)));
+    match agent_result {
         Ok(Ok(_outbound)) => {}
         Ok(Err(AgentError::ProviderRefused)) => {
             terminal_account = Some(
@@ -784,8 +739,25 @@ pub(super) async fn process_turn_with_composition_and_focus(
         }
         Ok(Err(AgentError::Cancelled)) => {
             // Cancellation is cooperative — the agent already set
-            // TurnState::Interrupted and ThreadState::Idle in storage.
+            // TurnState::Cancelled and ThreadState::Idle in storage.
             let _ = ws_tx.send(ServerEvent::Cancelled {});
+        }
+        Ok(Err(error @ AgentError::ApprovalTimedOut)) => {
+            let message = error.to_string();
+            if let Some(reason) = projection::record_failure_explanation(
+                state,
+                session_id,
+                turn_id.unwrap_or(prepared_turn_id),
+                &message,
+            )
+            .await
+            {
+                record_integrity_lost.get_or_insert(reason);
+            }
+            let _ = ws_tx.send(ServerEvent::Error {
+                code: "approval_timeout".to_string(),
+                message,
+            });
         }
         Ok(Err(AgentError::OutputSchemaFailed { .. })) => {
             // The agent already emitted AgentEvent::OutputSchemaFailed through
@@ -850,21 +822,31 @@ pub(super) async fn process_turn_with_composition_and_focus(
     // force_turn_failure, not update_turn_state: the agent has usually
     // already marked the turn Completed, and the ordinary write's
     // first-terminal-wins guard would silently no-op — this transition is
-    // the guard's one sanctioned override. The state write may itself fail
+    // the guard's one sanctioned override. A stopped turn keeps cancellation;
+    // record loss is still retained and reported separately. The state write may itself fail
     // on the same broken store — then the log and the client error are the
     // loudest surfaces left.
     if let Some(reason) = record_integrity_lost {
         tracing::error!(turn_id = ?turn_id, %reason, "turn record integrity lost");
-        if let Err(error) = state
-            .storage
-            .force_turn_failure(turn_id.unwrap_or(prepared_turn_id))
-            .await
+        if !cancelled
+            && let Err(error) = state
+                .storage
+                .force_turn_failure(turn_id.unwrap_or(prepared_turn_id))
+                .await
         {
             tracing::error!(error = %error, "failed to mark record-degraded turn as failed");
         }
+        let message = format!("The turn's audit record is incomplete: {reason}");
+        projection::record_failure_explanation(
+            state,
+            session_id,
+            turn_id.unwrap_or(prepared_turn_id),
+            &message,
+        )
+        .await;
         let _ = ws_tx.send(ServerEvent::Error {
             code: "turn_record_lost".to_string(),
-            message: format!("The turn's audit record is incomplete: {reason}"),
+            message,
         });
     }
 
@@ -877,15 +859,46 @@ pub(super) async fn process_turn_with_composition_and_focus(
     release_active_turn(state, session_id, prepared_turn_id).await?;
 
     // A turn that ended on its own hands the session to whatever queued
-    // behind it; a stopped turn leaves the queue standing.
-    let final_state = state
-        .storage
-        .get_turn(turn_id.unwrap_or(prepared_turn_id))
-        .await
-        .ok()
-        .flatten()
-        .map(|turn| turn.state)
-        .unwrap_or(TurnState::Completed);
+    // behind it; a stopped turn leaves the queue standing. The state is
+    // read back from the turn's row — a reconstructive read (record
+    // durability contract): a row that cannot be read is a recorded gap,
+    // and the queue drains as the safe default, since a queue held for a
+    // stop nobody recorded would wait on a person who may not be there.
+    let final_turn_id = turn_id.unwrap_or(prepared_turn_id);
+    let final_state = match state.storage.get_turn(final_turn_id).await {
+        Ok(Some(turn)) => turn.state,
+        unreadable => {
+            let reason = match unreadable {
+                Ok(_) => "the turn's row is gone at the end of the turn".to_owned(),
+                Err(error) => error.to_string(),
+            };
+            if let Err(gap_error) = crate::record_durability::record_reconstruction_gap(
+                state.storage.as_ref(),
+                Some(session_id),
+                final_turn_id,
+                "final turn state",
+                &reason,
+            )
+            .await
+            {
+                // The gap itself cannot be recorded: past the point of no
+                // return, the contract's escalation — the turn marked
+                // failed through the sanctioned override and the client
+                // told — not an error out of a turn that already answered.
+                tracing::error!(turn_id = %final_turn_id, %reason, error = %gap_error, "turn record integrity lost at the final-state read");
+                if let Err(error) = state.storage.force_turn_failure(final_turn_id).await {
+                    tracing::error!(error = %error, "failed to mark record-degraded turn as failed");
+                }
+                let _ = ws_tx.send(ServerEvent::Error {
+                    code: "turn_record_lost".to_string(),
+                    message: format!(
+                        "The turn's audit record is incomplete: the final state could not be read ({reason}) and the gap could not be recorded ({gap_error})"
+                    ),
+                });
+            }
+            TurnState::Completed
+        }
+    };
     if crate::turn_queue::drains_queue_after(final_state) {
         crate::turn_queue::spawn_drain(state.clone(), session_id);
     }
@@ -919,3 +932,166 @@ pub(crate) mod tests;
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod output_scratch_regressions {
+    use super::*;
+    use swage_core::StreamChunk;
+    use swage_storage::{SessionStore, TopicStore, WorkspaceAttachmentStore};
+
+    #[tokio::test]
+    async fn regression_delegated_disabled_sandbox_turn_retains_shell_artifact() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let storage = Arc::new(tests::MockStorage::new());
+        let (state, session_id) = tests::make_state_with_storage_and_root(
+            vec![],
+            storage.clone(),
+            Some(root.path().into()),
+        )
+        .await;
+        let topic = storage.general_scope().await.unwrap();
+        let attachment = storage
+            .create_workspace_attachment(swage_storage::NewWorkspaceAttachment {
+                topic_id: topic.id,
+                label: "workspace".into(),
+                path: workspace.path().to_str().unwrap().into(),
+                permissions: vec!["read".into()],
+                is_trusted: true,
+            })
+            .await
+            .unwrap();
+        let mut config = swage_config::ResolvedConfig::default();
+        config.sandbox.enabled = false;
+        let (agent_config, tool_root) = build_agent_config_for_topic_workspace(
+            &state,
+            "gateway".into(),
+            &config,
+            None,
+            &topic,
+            session_id,
+            Some(attachment.id),
+        )
+        .await;
+        assert_eq!(tool_root.source, ToolRootSource::AttachedWorkspace);
+        let build = build_gateway_dispatcher_for_unattended_execution(
+            &state,
+            GatewayDispatcherRequest {
+                config: &config,
+                agent_config: &agent_config,
+                session_metadata: None,
+                topic_id: Some(topic.id),
+                active_workspace_attachment_id: Some(attachment.id),
+                ws_tx: mpsc::unbounded_channel().0,
+                session_id: Some(session_id),
+                turn_id: Some(Uuid::new_v4()),
+            },
+            "delegated turn",
+        )
+        .await
+        .unwrap();
+        assert!(build.sandbox_guard.is_none());
+        let output = agent_config.tool_output_directory.unwrap();
+        let mut base = swage_tool::context::MockToolContext::new("gateway", session_id.to_string());
+        base.working_directory = agent_config.working_directory;
+        let mut ctx = swage_tool::context::serialise_tool_context(&base);
+        ctx.tool_output_directory = Some(swage_tool::context::ToolOutputLocation {
+            directory: output.clone(),
+        });
+        let result = crate::tool::shell::ShellTool {
+            timeout: std::time::Duration::from_secs(5),
+            max_output_bytes: 4,
+        }
+        .execute(
+            serde_json::json!({"command": "printf 'delegated artifact'"}),
+            &ctx,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "delegated turn without a sandbox must retain shell output (output directory exists: {}): {result:?}",
+            output.is_dir()
+        );
+        let result = result.unwrap();
+        let path = Path::new(result["stdout_artifact_path"].as_str().unwrap());
+        assert!(path.starts_with(output));
+        assert_eq!(std::fs::read(path).unwrap(), b"delegated artifact");
+        assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn regression_disabled_sandbox_turn_can_write_artifacts_with_attached_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let storage = Arc::new(tests::MockStorage::new());
+        let (state, session_id) = tests::make_state_with_storage_and_root(
+            vec![
+                StreamChunk::Delta {
+                    content: "done".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            storage.clone(),
+            Some(root.path().into()),
+        )
+        .await;
+        {
+            let mut config = state.runtime_config.write().unwrap();
+            config.sandbox.enabled = false;
+            config.sandbox.allow_degraded_execution = true;
+        }
+        let topic = storage.general_scope().await.unwrap();
+        let attachment = storage
+            .create_workspace_attachment(swage_storage::NewWorkspaceAttachment {
+                topic_id: topic.id,
+                label: "workspace".into(),
+                path: workspace.path().to_str().unwrap().into(),
+                permissions: vec!["read".into()],
+                is_trusted: true,
+            })
+            .await
+            .unwrap();
+        storage
+            .set_session_active_workspace(session_id, Some(attachment.id))
+            .await
+            .unwrap();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "hello",
+            mpsc::unbounded_channel().0,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .unwrap();
+        let output = managed_scratch_workspace(root.path(), &topic.location(), session_id);
+        let mut base = swage_tool::context::MockToolContext::new("gateway", session_id.to_string());
+        base.working_directory = workspace.path().into();
+        let mut ctx = swage_tool::context::serialise_tool_context(&base);
+        ctx.tool_output_directory = Some(swage_tool::context::ToolOutputLocation {
+            directory: output.clone(),
+        });
+        let result = crate::tool::shell::ShellTool {
+            timeout: std::time::Duration::from_secs(5),
+            max_output_bytes: 4,
+        }
+        .execute(
+            serde_json::json!({"command": "printf 'artifact text'"}),
+            &ctx,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "disabled sandbox turn must permit output artefacts: {result:?}"
+        );
+        let result = result.unwrap();
+        let path = std::path::Path::new(result["stdout_artifact_path"].as_str().unwrap());
+        assert!(path.starts_with(output));
+        assert_eq!(std::fs::read(path).unwrap(), b"artifact text");
+        assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 0);
+    }
+}

@@ -162,6 +162,8 @@ pub enum StreamChunk {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         finish_reason: Option<FinishReason>,
     },
+    /// The durable state of an actual provider stream attempt.
+    ProviderAttempt(swage_protocol::client::context::ProviderAttemptRecord),
     /// A provider retry is waiting before the next attempt.
     ProviderRetryStarted {
         /// 1-indexed retry attempt number.

@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use swage_core::{Role, StorageError};
 pub use swage_protocol::client::conversation::MessageOrigin;
+pub use swage_protocol::client::surface::ModuleDelivery;
 use uuid::Uuid;
 
 /// One durable string value scoped to a session.
@@ -50,7 +51,9 @@ pub enum TurnState {
     Incomplete,
     /// Turn ended with an error.
     Failed,
-    /// Turn was cut short (e.g. by a stop signal).
+    /// Turn was stopped by cancellation.
+    Cancelled,
+    /// Turn was interrupted without a cancellation decision.
     Interrupted,
     /// Turn is suspended, waiting for human review of a tool call or
     /// hook-triggered approval request.
@@ -86,7 +89,8 @@ impl TurnState {
             | Self::Refused
             | Self::Incomplete
             | Self::Failed
-            | Self::Interrupted => true,
+            | Self::Interrupted
+            | Self::Cancelled => true,
             Self::Pending | Self::Processing | Self::AwaitingApproval | Self::Delegating => false,
         }
     }
@@ -102,6 +106,7 @@ impl std::fmt::Display for TurnState {
             TurnState::Incomplete => "incomplete",
             TurnState::Failed => "failed",
             TurnState::Interrupted => "interrupted",
+            TurnState::Cancelled => "cancelled",
             TurnState::AwaitingApproval => "awaiting_approval",
             TurnState::Delegating => "delegating",
         };
@@ -121,6 +126,7 @@ impl FromStr for TurnState {
             "incomplete" => Ok(TurnState::Incomplete),
             "failed" => Ok(TurnState::Failed),
             "interrupted" => Ok(TurnState::Interrupted),
+            "cancelled" => Ok(TurnState::Cancelled),
             "awaiting_approval" => Ok(TurnState::AwaitingApproval),
             "delegating" => Ok(TurnState::Delegating),
             other => Err(format!("unknown turn state: {other}")),
@@ -399,6 +405,17 @@ pub struct DeviceRegistration {
     pub workspace_roots: Vec<String>,
     pub capabilities: Vec<String>,
     pub registered_at: DateTime<Utc>,
+}
+
+/// An unredeemed channel link code, persisted until redemption or expiry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelLinkCode {
+    pub code: String,
+    pub integration: String,
+    pub topic_id: Option<Uuid>,
+    pub agent_id: Option<String>,
+    pub home_target: Option<serde_json::Value>,
+    pub expires_at: DateTime<Utc>,
 }
 
 /// A durable onboarding link for an external communication channel.
@@ -1302,6 +1319,12 @@ pub struct Turn {
     /// The explanation the person was shown when the turn ended without a
     /// reply; `None` for a turn that never failed with one.
     pub failure_message: Option<String>,
+    /// How the turn was started, as the queue drain that created it
+    /// recorded: whether a person attends it and where its reply is
+    /// delivered. `None` for a turn created outside the queue — an
+    /// automation's placeholder, an API call's, a delegation child's —
+    /// which runs unattended and delivers to no channel of its own.
+    pub attribution: Option<TurnAttribution>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
@@ -1311,6 +1334,8 @@ pub struct Turn {
 /// The database is authoritative for surface content; renderings are derived.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Surface {
+    /// True when this surface was seeded without the origin scope's content.
+    pub shape_only: bool,
     pub id: Uuid,
     /// The session this surface belongs to. A surface is the session's own:
     /// it opens with the session, stays with the session's record, and is
@@ -1349,6 +1374,9 @@ pub struct SurfaceModule {
     /// The module's durable source, in the kind's own format (markdown for
     /// the document module).
     pub source: String,
+    /// The run or turn that delivered this module, recorded as it was
+    /// written; none for a module written by hand.
+    pub delivery: Option<ModuleDelivery>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1367,6 +1395,7 @@ pub struct NewSurfaceModule {
     pub kind: String,
     pub position: i32,
     pub source: String,
+    pub delivery: Option<ModuleDelivery>,
 }
 
 /// The outcome of replacing a module's source against the revision the
@@ -1395,6 +1424,8 @@ pub struct RemovedSurfaceModule {
 /// addresses a position inside a module's content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SurfaceAnnotation {
+    /// Resolution keeps the note in the record.
+    pub resolved_at: Option<DateTime<Utc>>,
     pub id: Uuid,
     pub surface_id: Uuid,
     pub module_id: Uuid,
@@ -1530,6 +1561,7 @@ pub struct Message {
 /// A tool call within a turn — persisted for conversation history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallRecord {
+    pub execution: Option<swage_protocol::client::conversation::ToolExecution>,
     pub id: Uuid,
     pub turn_id: Uuid,
     /// The agent that issued this tool call, for multi-agent query scoping.
@@ -1586,6 +1618,7 @@ pub struct ToolCallRecord {
 /// `id` and `created_at` are assigned by the storage layer.
 #[derive(Debug, Clone)]
 pub struct NewToolCall {
+    pub execution: Option<swage_protocol::client::conversation::ToolExecution>,
     pub turn_id: Uuid,
     /// The agent that issued this tool call.
     pub agent_id: String,
@@ -2141,6 +2174,18 @@ pub struct NewThread {
     pub agent_id: String,
 }
 
+/// What the queue drain recorded about the inputs a turn was started
+/// from, kept on the turn so a resumption after a restart runs as the
+/// original did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnAttribution {
+    /// A batch is attended if any of its inputs was attended at its source.
+    pub attended: bool,
+    /// The channel destinations the turn's reply is delivered to, as the
+    /// inputs named them; empty for a turn that delivers to none.
+    pub delivery_targets: Vec<serde_json::Value>,
+}
+
 /// Input for creating a new turn within a thread.
 ///
 /// `id`, `created_at`, and `completed_at` are assigned by the storage layer.
@@ -2286,6 +2331,7 @@ pub struct NewMessage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueuedTurnInput {
     /// Identifies the originating client's optimistic send, when supplied.
+    pub delivery_targets: Vec<serde_json::Value>,
     pub client_id: Option<Uuid>,
     /// Whether the source expects a person to review tool approvals.
     pub attended: bool,
@@ -2308,6 +2354,7 @@ pub struct QueuedTurnInput {
 /// Input for queueing a message behind a running turn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NewQueuedTurnInput {
+    pub delivery_targets: Vec<serde_json::Value>,
     pub client_id: Option<Uuid>,
     pub attended: bool,
     pub session_id: Uuid,
@@ -2321,12 +2368,13 @@ pub struct NewQueuedTurnInput {
     pub channel_message_ids: Vec<Uuid>,
 }
 
-/// A session's queue run as one turn: the turn row, and one recorded message
+/// The queue's first consecutive thread group: its turn and one recorded message
 /// per queued input in arrival order.
 #[derive(Debug, Clone)]
 pub struct DrainedTurnQueue {
     /// A batch is attended if any of its inputs was attended at its source.
     pub attended: bool,
+    pub delivery_targets: Vec<serde_json::Value>,
     pub schedule_run_ids: Vec<Uuid>,
     pub channel_origins: Vec<PendingChannelOrigin>,
     pub turn: Turn,
@@ -2480,8 +2528,20 @@ pub struct WorkflowRunRecord {
     /// workers are grouped beneath in the recent-sessions list. `None` for a
     /// run started by the operator API or a schedule.
     pub dispatching_session_id: Option<Uuid>,
+    /// Every gateway interruption the run lived through, oldest first.
+    /// Generic JSON; the contract is
+    /// `swage_protocol::client::workflow::WorkflowRunInterruption`.
+    pub interruptions: Vec<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// What a boot's interruption pass found: the runs it marked interrupted
+/// because they were running, and the runs it found parked.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GatewayInterruptionCounts {
+    pub running_interrupted: u64,
+    pub parked: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -2701,6 +2761,7 @@ mod tests {
         let turn_id = Uuid::new_v4();
         let now = Utc::now();
         let record = ToolCallRecord {
+            execution: None,
             id,
             turn_id,
             agent_id: "agent-1".to_string(),
@@ -2745,6 +2806,7 @@ mod tests {
     #[test]
     fn tool_call_record_serialises_with_none_fields() {
         let record = ToolCallRecord {
+            execution: None,
             id: Uuid::new_v4(),
             turn_id: Uuid::new_v4(),
             agent_id: "agent-2".to_string(),
@@ -2781,6 +2843,7 @@ mod tests {
     #[test]
     fn new_tool_call_is_debug_clone() {
         let original = NewToolCall {
+            execution: None,
             turn_id: Uuid::new_v4(),
             agent_id: "agent-1".to_string(),
             call_id: "toolu_03".to_string(),
@@ -2808,6 +2871,7 @@ mod tests {
     fn tool_call_record_carries_parent_call_id() {
         let parent_id = "toolu_parent".to_string();
         let record = ToolCallRecord {
+            execution: None,
             id: Uuid::new_v4(),
             turn_id: Uuid::new_v4(),
             agent_id: "agent-1".to_string(),
@@ -2838,6 +2902,7 @@ mod tests {
     #[test]
     fn new_tool_call_carries_parent_call_id() {
         let sub = NewToolCall {
+            execution: None,
             turn_id: Uuid::new_v4(),
             agent_id: "agent-1".to_string(),
             call_id: "sub_01".to_string(),
@@ -3292,6 +3357,7 @@ mod tests {
             delegated_output_tokens: None,
             execution_isolation: None,
             failure_message: None,
+            attribution: None,
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
@@ -3349,6 +3415,7 @@ mod tests {
             delegated_output_tokens: None,
             execution_isolation: None,
             failure_message: None,
+            attribution: None,
         };
         assert_eq!(turn_with_cost.cost_microcents, Some(42));
 
@@ -3380,6 +3447,7 @@ mod tests {
             delegated_output_tokens: None,
             execution_isolation: None,
             failure_message: None,
+            attribution: None,
         };
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
         assert!(
@@ -3414,6 +3482,7 @@ mod tests {
             delegated_output_tokens: None,
             execution_isolation: None,
             failure_message: None,
+            attribution: None,
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");
@@ -3446,6 +3515,7 @@ mod tests {
             delegated_output_tokens: None,
             execution_isolation: None,
             failure_message: None,
+            attribution: None,
         };
 
         let json = serde_json::to_string(&turn).expect("serialisation should succeed");

@@ -23,6 +23,7 @@ use swage_core::{
     ChatMessage, CompletionRequest, ProviderError, Role, ToolReplayPart,
     render_message_for_model_context, role_label_for_model_context,
 };
+use swage_protocol::client::context::{SuccessionCall, SuccessionStage};
 use swage_provider::LlmProvider;
 
 use crate::element::ContextElement;
@@ -150,21 +151,84 @@ pub fn summarised_count(history_len: usize, retain_at_most: Option<usize>) -> us
 }
 
 /// Run the pass: summarise the older half of `history` against `carried`
-/// and return the successor's parts.
+/// and return the successor's parts. Append each completion to `calls` even
+/// when the pass fails, for the caller to attach to its compaction record.
 pub async fn succeed(
     request: SuccessionRequest<'_>,
     provider: &dyn LlmProvider,
     tokeniser: &dyn Tokeniser,
+    calls: &mut Vec<SuccessionCall>,
 ) -> Result<Succession, SuccessionError> {
     let summarised = split_point(&request)?;
+    let summary = summarise(
+        request.carried,
+        &request.history[..summarised],
+        request.focus,
+        provider,
+        calls,
+    )
+    .await?;
+    successor(&request, summary, THRESHOLD_STRATEGY, tokeniser)
+}
+
+/// Summarise established conversation state against the context the successor
+/// carries. A diagnosis can accompany these notes without replacing them.
+/// Append the completion to `calls` before interpreting its result.
+pub async fn summarise(
+    carried: &[ChatMessage],
+    history: &[ChatMessage],
+    focus: Option<&str>,
+    provider: &dyn LlmProvider,
+    calls: &mut Vec<SuccessionCall>,
+) -> Result<String, SuccessionError> {
     let response = provider
-        .complete(summary_request(
-            request.carried,
-            &request.history[..summarised],
-            request.focus,
-        ))
-        .await?;
-    successor(&request, response.content, THRESHOLD_STRATEGY, tokeniser)
+        .complete(summary_request(carried, history, focus))
+        .await;
+    let mut call = recorded_call(provider, SuccessionStage::Summary, None, &response);
+    if let Ok(response) = &response {
+        if response.finish_reason == swage_core::FinishReason::Length {
+            call.failure_reason = Some("the summary reached its output limit".to_string());
+        } else if response.content.trim().is_empty() {
+            call.failure_reason = Some(SuccessionError::EmptySummary.to_string());
+        }
+    }
+    calls.push(call);
+    let response = response?;
+    if response.content.trim().is_empty() {
+        return Err(SuccessionError::EmptySummary);
+    }
+    Ok(response.content)
+}
+
+/// Record a completion's destination, usage and provider failure. The caller
+/// records any stage-specific failure and any reader report afterwards.
+pub fn recorded_call(
+    provider: &dyn LlmProvider,
+    stage: SuccessionStage,
+    model: Option<&str>,
+    outcome: &Result<swage_core::CompletionResponse, ProviderError>,
+) -> SuccessionCall {
+    let model = model.unwrap_or(provider.model_id()).to_string();
+    match outcome {
+        Ok(response) => SuccessionCall {
+            stage,
+            model,
+            input_tokens: response.input_tokens,
+            output_tokens: response.output_tokens,
+            cost: response.cost,
+            report: None,
+            failure_reason: None,
+        },
+        Err(error) => SuccessionCall {
+            stage,
+            model,
+            input_tokens: 0,
+            output_tokens: 0,
+            cost: None,
+            report: None,
+            failure_reason: Some(error.to_string()),
+        },
+    }
 }
 
 /// Where `request`'s history splits into the summarised part and the part
@@ -270,6 +334,7 @@ pub fn successor_after(
         failure_reason: None,
         focus: request.focus.map(str::to_owned),
         diagnosis: None,
+        calls: Vec::new(),
     };
     Ok(Succession {
         element,
@@ -300,6 +365,7 @@ pub fn failure_record(
         failure_reason: Some(error.to_string()),
         focus: focus.map(str::to_owned),
         diagnosis: None,
+        calls: Vec::new(),
     }
 }
 
@@ -486,6 +552,7 @@ mod tests {
             },
             &provider,
             &CharTokeniser,
+            &mut Vec::new(),
         )
         .await
         .expect("succession runs");
@@ -571,6 +638,7 @@ mod tests {
             },
             &provider,
             &CharTokeniser,
+            &mut Vec::new(),
         )
         .await
         .expect_err("the provider failed");
@@ -601,6 +669,7 @@ mod tests {
             },
             &provider,
             &CharTokeniser,
+            &mut Vec::new(),
         )
         .await
         .expect_err("a blank summary would discard the older half for nothing");
@@ -620,6 +689,7 @@ mod tests {
             },
             &provider,
             &CharTokeniser,
+            &mut Vec::new(),
         )
         .await
         .expect_err("nothing to summarise");

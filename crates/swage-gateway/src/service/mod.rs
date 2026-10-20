@@ -66,7 +66,7 @@ mod tests {
             .general_scope()
             .await
             .expect("default topic should exist");
-        let state = crate::state::AppState::new(
+        let state = crate::state::AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(MockProvider::new(vec![])),
@@ -1051,6 +1051,7 @@ default_effort = "high"
 
         svc.storage
             .create_tool_call(NewToolCall {
+                execution: None,
                 turn_id: turn.id,
                 agent_id: "gateway".to_string(),
                 call_id: "toolu_01".into(),
@@ -1136,6 +1137,7 @@ default_effort = "high"
         // Native python_execute call.
         svc.storage
             .create_tool_call(NewToolCall {
+                execution: None,
                 turn_id: turn.id,
                 agent_id: "gateway".to_string(),
                 call_id: "py_01".into(),
@@ -1159,6 +1161,7 @@ default_effort = "high"
         // Sub-tool dispatched from within python_execute.
         svc.storage
             .create_tool_call(NewToolCall {
+                execution: None,
                 turn_id: turn.id,
                 agent_id: "gateway".to_string(),
                 call_id: "sub_01".into(),

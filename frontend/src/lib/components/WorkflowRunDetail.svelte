@@ -5,24 +5,28 @@
   what it cost or why that is not known, and how it stopped.
 
   Read-only by design: the journal is the record of what already happened,
-  fetched on open rather than streamed, so what renders is always what was
+  read through the run view's refresh path, so what renders is always what was
   durably recorded. Absence is rendered as absence — a call whose usage was
   never reported reads "not recorded" with its reason, never as zero spend.
 -->
 <script lang="ts">
+  import { formatRunTime, formatRunDuration } from "../run-times";
+  import { conversationPath } from "../router";
+  import type { WorkflowJournalEntry } from "../protocol/WorkflowJournalEntry";
   import type { WorkflowRunDetailResponse } from "../protocol/WorkflowRunDetailResponse";
-  import type { WorkflowAgentCallDetail } from "../protocol/WorkflowAgentCallDetail";
   import type { WorkflowCallUsage } from "../protocol/WorkflowCallUsage";
   import type { WorkflowWorkerTermination } from "../protocol/WorkflowWorkerTermination";
   import type { WorkflowProviderRound } from "../protocol/WorkflowProviderRound";
+  import type { WorkflowAgentCallResolution } from "../protocol/WorkflowAgentCallResolution";
 
   interface Props {
+    onNavigate?: (path: string) => void;
     detail: WorkflowRunDetailResponse | null;
     loadState: "loading" | "loaded" | "absent" | "error";
     errorMessage: string;
   }
 
-  let { detail, loadState, errorMessage }: Props = $props();
+  let { detail, loadState, errorMessage, onNavigate }: Props = $props();
 
   const agentCalls = $derived(
     (detail?.journal ?? []).filter((entry) => entry.agent_call !== null),
@@ -89,15 +93,52 @@
     }
   }
 
-  // The last attempt is the one the call ended on; the earlier ones are the
-  // attempts an interruption cut off before it.
-  function resolvedLabel(call: WorkflowAgentCallDetail): string {
-    const resolved = call.dispatch?.attempts.at(-1);
-    if (!resolved) return "not yet resolved";
-    return [resolved.model ?? "default model", resolved.effort ?? "default effort"].join(
-      ", ",
-    );
+  // Each attempt after the first says why it was dispatched, in the record's
+  // own words — a cause, never an outcome: a fallback attempt was dispatched
+  // because the primary failed, and whether it served is the round's
+  // result, read from the rounds beside it; an interruption leaves the
+  // attempt before it with an unknown outcome.
+  function attemptLine(attempt: WorkflowAgentCallResolution, index: number): string {
+    const ordinal = `attempt ${index + 1}`;
+    switch (attempt.cause.cause) {
+      case "first":
+        return `${ordinal} — the first dispatch`;
+      case "after_interruption":
+        return `${ordinal} — dispatched again after a gateway interruption: attempt ${index}'s outcome is unknown and the tool calls it issued may have been applied twice`;
+      case "provider_fallback":
+        return `${ordinal} — dispatched to the declared fallback because the primary failed (${attempt.cause.primary_failure})`;
+    }
   }
+
+  function resolvedLabel(attempt: WorkflowAgentCallResolution): string {
+    if (attempt.turn_id == null) return "opened, not yet resolved by a turn";
+    return [attempt.model ?? "default model", attempt.effort ?? "default effort"].join(", ");
+  }
+
+  function briefingPreview(prompt: string): string {
+    const text = prompt.replace(/\s+/g, " ").trim();
+    return text.length > 160 ? `${text.slice(0, 160)}…` : text;
+  }
+
+  function navigate(event: MouseEvent, path: string) {
+    if (onNavigate && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.button === 0) {
+      event.preventDefault();
+      onNavigate(path);
+    }
+  }
+
+  function terminationFor(entry: WorkflowJournalEntry): WorkflowWorkerTermination {
+    const original = entry.agent_call!.termination;
+    const workers = detail?.run.terminal_account?.workers;
+    if (original.termination !== "outstanding" || !workers) return original;
+    return Object.values(workers).flat().find((worker) => worker.journal_entry_id === entry.id)?.termination ?? original;
+  }
+
+  function placementInAccount(path: string): boolean {
+    const workers = detail?.run.terminal_account?.workers;
+    return workers ? Object.values(workers).some((group) => group.some((worker) => worker.placement === path)) : false;
+  }
+
 </script>
 
 <section class="run-detail" aria-label="Workflow run">
@@ -117,11 +158,17 @@
     <ul class="calls">
       {#each agentCalls as entry (entry.id)}
         {@const call = entry.agent_call!}
+        {@const termination = terminationFor(entry)}
         <li class="call">
           <h3>{entry.label ?? call.dispatch?.agent_definition_id ?? "Worker"}</h3>
 
+          <dl>
+            <dt>Status</dt>
+            <dd class="termination">{terminationLabel(termination)}</dd>
+            <dt>Provider rounds</dt>
+            <dd>{call.provider_rounds == null ? "Not recorded" : call.provider_rounds.length}</dd>
+          </dl>
           {#if call.dispatch}
-            <p class="prompt">{call.dispatch.prompt}</p>
             <dl>
               <dt>Asked for</dt>
               <dd>
@@ -129,19 +176,40 @@
                 {call.dispatch.requested_effort ?? "no effort named"}
               </dd>
               <dt>Ran with</dt>
-              <dd>{resolvedLabel(call)}</dd>
-              {#if call.dispatch.attempts.length > 1}
-                <dt>Attempts</dt>
-                <dd class="attempts">
-                  {call.dispatch.attempts.length} — an earlier attempt was
-                  interrupted and the call dispatched again
-                </dd>
-              {/if}
+              <dd>{call.dispatch.attempts.length ? resolvedLabel(call.dispatch.attempts[call.dispatch.attempts.length - 1]) : "not yet resolved"}</dd>
               {#if call.dispatch.placement}
                 <dt>Placed at</dt>
                 <dd>
-                  {call.dispatch.placement.path}
+                  {#if placementInAccount(call.dispatch.placement.path)}
+                    Shown in the terminal account
+                  {:else}
+                    {call.dispatch.placement.path}
+                  {/if}
                   ({call.dispatch.placement.can_write ? "writable" : "read-only"})
+                </dd>
+              {/if}
+            </dl>
+            <details class="briefing">
+              <summary>
+                Briefing <span class="preview">{briefingPreview(call.dispatch.prompt)}</span>
+                <span class="expand">Expand</span><span class="collapse">Collapse</span>
+              </summary>
+              <p class="prompt">{call.dispatch.prompt}</p>
+            </details>
+            <dl>
+              {#if call.dispatch.attempts.length > 0}
+                <dt>Attempts</dt>
+                <dd class="attempts">
+                  <ol class="plain">
+                    {#each call.dispatch.attempts as attempt, index (index)}
+                      <li>
+                        <p>{attemptLine(attempt, index)} — {resolvedLabel(attempt)}</p>
+                        {#if attempt.session_id}
+                          <a href={conversationPath(attempt.session_id)} onclick={(event) => navigate(event, conversationPath(attempt.session_id!))}>Attempt {index + 1} session</a>
+                        {/if}
+                      </li>
+                    {/each}
+                  </ol>
                 </dd>
               {/if}
               <dt>Granted</dt>
@@ -158,11 +226,18 @@
             </p>
           {/if}
 
+          {#if call.session_id}
+            <a href={conversationPath(call.session_id)} onclick={(event) => navigate(event, conversationPath(call.session_id!))}>Worker session</a>
+          {/if}
+          {#if call.liveness}
+            <dl class="liveness">
+              <dt>Started</dt><dd>{@render recordedTime(call.liveness.started_at)}</dd>
+              <dt>First evidence</dt><dd>{#if call.liveness.first_evidence_at}{@render recordedTime(call.liveness.first_evidence_at)}{:else}Not yet recorded{/if}</dd>
+            </dl>
+          {/if}
           <dl>
             <dt>Spend</dt>
-            <dd class="usage">{usageLabel(call.usage, call.termination)}</dd>
-            <dt>Stopped</dt>
-            <dd class="termination">{terminationLabel(call.termination)}</dd>
+            <dd class="usage">{usageLabel(call.usage, termination)}</dd>
           </dl>
 
           {#if call.provider_rounds == null}
@@ -177,6 +252,7 @@
                   <th>Round</th>
                   <th>Started</th>
                   <th>Ended</th>
+                  <th>Duration</th>
                   <th>Outcome</th>
                 </tr>
               </thead>
@@ -185,8 +261,9 @@
                   <tr>
                     <td class="numeric">{round.attempt}</td>
                     <td class="numeric">{round.round}</td>
-                    <td>{round.started_at}</td>
-                    <td>{round.completed_at ?? "—"}</td>
+                    <td>{@render recordedTime(round.started_at)}</td>
+                    <td>{#if round.completed_at}{@render recordedTime(round.completed_at)}{:else}—{/if}</td>
+                    <td>{round.completed_at ? formatRunDuration(round.started_at, round.completed_at) : "—"}</td>
                     <td>{roundLabel(round)}</td>
                   </tr>
                 {/each}
@@ -198,6 +275,10 @@
     </ul>
   {/if}
 </section>
+
+{#snippet recordedTime(stamp: string)}
+  <time datetime={stamp} title={stamp}>{formatRunTime(stamp)}</time>
+{/snippet}
 
 <style>
   .run-detail {
@@ -233,6 +314,25 @@
   .call {
     border-bottom: var(--rule);
     padding-block: 0.5rem;
+  }
+
+  .briefing summary {
+    cursor: pointer;
+    overflow-wrap: anywhere;
+  }
+
+  .preview {
+    color: var(--ink-soft);
+  }
+
+  .collapse,
+  .briefing[open] .preview,
+  .briefing[open] .expand {
+    display: none;
+  }
+
+  .briefing[open] .collapse {
+    display: inline;
   }
 
   .prompt {

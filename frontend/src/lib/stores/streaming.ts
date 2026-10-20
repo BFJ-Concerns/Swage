@@ -48,10 +48,12 @@ export interface ProviderRetryState {
  * outside this projection so callers can select the state for the surface
  * they are rendering. */
 export interface ConversationStreamState {
+  /** Destination of the live reply; null denotes the root thread. */
+  readonly threadId: string | null;
   readonly isStreaming: boolean;
   readonly activeTurnGeneration: number;
   readonly streamedContent: string;
-  readonly turnError: { code: string; message: string } | null;
+  readonly turnError: { code: string; message: string; selectedModelId?: string } | null;
   readonly turnStartedAt: string | null;
   readonly activeToolCalls: ToolCallView[];
   readonly providerRetry: ProviderRetryState | null;
@@ -65,7 +67,7 @@ export interface StreamingStore {
   /** Monotonic local identity for the current streamed projection. */
   readonly activeTurnGeneration: number;
   readonly streamedContent: string;
-  readonly turnError: { code: string; message: string } | null;
+  readonly turnError: { code: string; message: string; selectedModelId?: string } | null;
   readonly turnStartedAt: string | null;
   // Live tool calls for the current turn. Populated as tool_start/tool_end
   // events arrive. Cleared when the turn completes normally. Preserved (for
@@ -78,6 +80,8 @@ export interface StreamingStore {
   // matching the approval UI.
   readonly pendingApproval: PendingApproval | null;
   handleServerEvent(event: ServerEvent, conversationId?: string): void;
+  /** Clear an ownership refusal once that conversation connects successfully. */
+  clearConnectionError(conversationId: string): void;
   reconcileAfterReconnect(
     recoveredTurnGeneration: number,
     conversationId?: string | null,
@@ -87,10 +91,8 @@ export interface StreamingStore {
   cancelTurn(): void;
 }
 
-// The outcome an interrupted call shows: the result recovery records for a
-// started call (swage-storage `INTERRUPTED_TOOL_RESULT`), so a stopped row
-// reads the same live as it does after a reload.
-const INTERRUPTED_TOOL_RESULT = "tool call did not report a result; its outcome is unknown";
+// Cancellation records the stop decision without asserting completed effects.
+const CANCELLED_TOOL_RESULT = "tool call was cancelled when its turn was stopped";
 
 // ---------------------------------------------------------------------------
 // Injected dependencies
@@ -117,7 +119,7 @@ export interface StreamingStoreOptions {
       timestamp: string;
       turn_state: Extract<
         MessageView["turn_state"],
-        "completed" | "refused" | "incomplete" | "failed" | "interrupted"
+        "completed" | "refused" | "incomplete" | "failed" | "interrupted" | "cancelled"
       >;
       thread_id?: string;
       turn_id?: string;
@@ -129,7 +131,7 @@ export interface StreamingStoreOptions {
      */
     settleUnansweredRequest?(
       settlement: {
-        turn_state: Extract<MessageView["turn_state"], "failed" | "interrupted">;
+        turn_state: Extract<MessageView["turn_state"], "failed" | "interrupted" | "cancelled">;
         tool_calls: ToolCallView[];
       },
       conversationId?: string | null,
@@ -172,14 +174,14 @@ export function createStreamingStore(
   interface InternalStreamState {
     isStreamingStore: Writable<boolean>;
     streamedContentStore: Writable<string>;
-    turnErrorStore: Writable<{ code: string; message: string } | null>;
+    turnErrorStore: Writable<{ code: string; message: string; selectedModelId?: string } | null>;
     turnStartedAtStore: Writable<string | null>;
     activeToolCallsStore: Writable<ToolCallView[]>;
     providerRetryStore: Writable<ProviderRetryState | null>;
     pendingApprovalStore: Writable<PendingApproval | null>;
     isStreamingState: { current: boolean };
     streamedContentState: { current: string };
-    turnErrorState: { current: { code: string; message: string } | null };
+    turnErrorState: { current: { code: string; message: string; selectedModelId?: string } | null };
     turnStartedAtState: { current: string | null };
     activeToolCallsState: { current: ToolCallView[] };
     providerRetryState: { current: ProviderRetryState | null };
@@ -187,10 +189,13 @@ export function createStreamingStore(
     activeTurnGeneration: number;
     /** The thread the running turn was sent on; null is the root thread. */
     threadId: string | null;
+    selectedModelId: string | null;
+    queuedModelSelections: Map<string, { queuedId: string | null; modelId: string | null }>;
   }
 
   const streams = new Map<string | null, InternalStreamState>();
   const emptyStream: ConversationStreamState = {
+    threadId: null,
     isStreaming: false,
     activeTurnGeneration: 0,
     streamedContent: "",
@@ -202,9 +207,11 @@ export function createStreamingStore(
   };
 
   function createStreamState(): InternalStreamState {
+    const threadIdStore = writable<string | null>(null);
+    const threadIdState = fromStore(threadIdStore);
     const isStreamingStore = writable(false);
     const streamedContentStore = writable("");
-    const turnErrorStore = writable<{ code: string; message: string } | null>(null);
+    const turnErrorStore = writable<{ code: string; message: string; selectedModelId?: string } | null>(null);
     const turnStartedAtStore = writable<string | null>(null);
     const activeToolCallsStore = writable<ToolCallView[]>([]);
     const providerRetryStore = writable<ProviderRetryState | null>(null);
@@ -224,8 +231,11 @@ export function createStreamingStore(
       activeToolCallsState: fromStore(activeToolCallsStore),
       providerRetryState: fromStore(providerRetryStore),
       pendingApprovalState: fromStore(pendingApprovalStore),
+      selectedModelId: null,
+      queuedModelSelections: new Map(),
       activeTurnGeneration: 0,
-      threadId: null,
+      get threadId() { return threadIdState.current; },
+      set threadId(value: string | null) { threadIdStore.set(value); },
     };
   }
 
@@ -248,6 +258,7 @@ export function createStreamingStore(
   function streamView(stream: InternalStreamState | undefined): ConversationStreamState {
     if (!stream) return emptyStream;
     return {
+      get threadId() { return stream.threadId; },
       get isStreaming() { return stream.isStreamingState.current; },
       get activeTurnGeneration() { return stream.activeTurnGeneration; },
       get streamedContent() { return stream.streamedContentState.current; },
@@ -260,6 +271,7 @@ export function createStreamingStore(
   }
 
   function setStreamActive(conversationId: string | null, stream: InternalStreamState, active: boolean): void {
+    if (!active) stream.selectedModelId = null;
     stream.isStreamingStore.set(active);
     if (conversationId) options?.connectionStore?.setStreamActive?.(conversationId, active);
   }
@@ -271,7 +283,7 @@ export function createStreamingStore(
     content: string,
     turn_state: Extract<
       MessageView["turn_state"],
-      "completed" | "refused" | "incomplete" | "failed" | "interrupted"
+      "completed" | "refused" | "incomplete" | "failed" | "interrupted" | "cancelled"
     >,
     turn_id?: string,
     tool_calls?: ToolCallView[],
@@ -293,7 +305,7 @@ export function createStreamingStore(
   function settleResponse(
     conversationId: string | null,
     stream: InternalStreamState,
-    turnState: Extract<MessageView["turn_state"], "completed" | "refused" | "incomplete" | "failed" | "interrupted">,
+    turnState: Extract<MessageView["turn_state"], "completed" | "refused" | "incomplete" | "failed" | "interrupted" | "cancelled">,
     turnId?: string,
     toolCalls?: ToolCallView[],
   ): void {
@@ -323,7 +335,7 @@ export function createStreamingStore(
       return streamView(currentStreamState()).streamedContent;
     },
 
-    get turnError(): { code: string; message: string } | null {
+    get turnError(): { code: string; message: string; selectedModelId?: string } | null {
       return streamView(currentStreamState()).turnError;
     },
 
@@ -401,6 +413,7 @@ export function createStreamingStore(
                               ...sub,
                               result: event.result,
                               status: event.status,
+                              execution: event.execution,
                               duration_ms: event.duration_ms,
                               truncated: event.truncated,
                               total_bytes: event.total_bytes ?? null,
@@ -420,6 +433,7 @@ export function createStreamingStore(
                       ...call,
                       result: event.result,
                       status: event.status,
+                              execution: event.execution,
                       duration_ms: event.duration_ms,
                       truncated: event.truncated,
                       total_bytes: event.total_bytes ?? null,
@@ -442,14 +456,21 @@ export function createStreamingStore(
           break;
 
         case "error": {
-          // Turn failed mid-stream. Preserve whatever the user saw so the
-          // conversation history reflects the partial response.
+          // Preserve the terminal reason beside whatever the user saw.
+          const approvalTimedOut = event.code === "approval_timeout";
           const refused = event.code === "provider_refused";
-          settleResponse(
-            ownerId, stream, refused ? "refused" : "failed", undefined,
-            refused ? get(stream.activeToolCallsStore) : undefined,
-          );
-          stream.turnErrorStore.set({ code: event.code, message: event.message });
+          if (approvalTimedOut && !get(stream.streamedContentStore) && options?.conversationStore?.settleUnansweredRequest) {
+            options.conversationStore.settleUnansweredRequest(
+              { turn_state: "interrupted", tool_calls: get(stream.activeToolCallsStore) }, ownerId,
+            );
+            stream.activeToolCallsStore.set([]);
+          } else {
+            settleResponse(
+              ownerId, stream, approvalTimedOut ? "interrupted" : refused ? "refused" : "failed", undefined,
+              refused ? get(stream.activeToolCallsStore) : undefined,
+            );
+          }
+          stream.turnErrorStore.set({ code: event.code, message: event.message, ...(stream.selectedModelId ? { selectedModelId: stream.selectedModelId } : {}) });
           setStreamActive(ownerId, stream, false);
           stream.turnStartedAtStore.set(null);
           // Refused turns own their calls in history; other errors retain
@@ -461,18 +482,9 @@ export function createStreamingStore(
 
         case "output_schema_failed": {
           settleResponse(ownerId, stream, "failed");
-          const details = event.errors
-            .map((error) =>
-              error.path
-                ? `${error.path}: ${error.message}`
-                : error.message,
-            )
-            .join("; ");
           stream.turnErrorStore.set({
             code: "output_schema_failed",
-            message: details
-              ? `Structured output validation failed after ${event.attempts} attempts: ${details}`
-              : `Structured output validation failed after ${event.attempts} attempts.`,
+            message: event.failure_message,
           });
           setStreamActive(ownerId, stream, false);
           stream.turnStartedAtStore.set(null);
@@ -481,26 +493,21 @@ export function createStreamingStore(
         }
 
         case "cancelled": {
-          // User-initiated cancel. A call still running when the turn
-          // stopped has no result — whether it is still pending or the
-          // gateway already ended it as cancelled — so its outcome is
-          // interrupted, as recovery records it. Calls that finished keep
-          // the outcome they reported.
           const settledCalls = get(stream.activeToolCallsStore).map((call) =>
             call.status === null || (call.status === "cancelled" && call.result == null)
-              ? { ...call, status: "interrupted", result: INTERRUPTED_TOOL_RESULT }
+              ? { ...call, status: "cancelled", result: CANCELLED_TOOL_RESULT }
               : call,
           );
           if (get(stream.streamedContentStore)) {
             // Preserve partial content (they may want to read what was
             // generated before they stopped it); the calls stay beside it.
-            settleResponse(ownerId, stream, "interrupted");
+            settleResponse(ownerId, stream, "cancelled");
             stream.activeToolCallsStore.set(settledCalls);
           } else if (options?.conversationStore?.settleUnansweredRequest) {
             // No reply: the turn's account rides on its request, where the
             // conversation shows it after a reload too.
             options.conversationStore.settleUnansweredRequest(
-              { turn_state: "interrupted", tool_calls: settledCalls },
+              { turn_state: "cancelled", tool_calls: settledCalls },
               ownerId,
             );
             stream.activeToolCallsStore.set([]);
@@ -582,6 +589,10 @@ export function createStreamingStore(
         case "message_queued":
           // The message found a turn running and waits for the next one; the
           // gateway holds it, every open view shows it as queued.
+          if (event.queued.client_id) {
+            const selection = stream.queuedModelSelections.get(event.queued.client_id);
+            if (selection) selection.queuedId = event.queued.id;
+          }
           options?.conversationStore?.appendQueuedMessage?.(event.queued, event.session_id);
           break;
 
@@ -590,7 +601,15 @@ export function createStreamingStore(
           // its own) and a new turn is running on them: this is that turn
           // starting, as far as this view is concerned — no client called
           // startTurn for it.
+          stream.selectedModelId = null;
+          for (const [clientId, selection] of stream.queuedModelSelections) {
+            if (selection.queuedId && event.queued_ids.includes(selection.queuedId)) {
+              stream.selectedModelId = selection.modelId;
+              stream.queuedModelSelections.delete(clientId);
+            }
+          }
           options?.conversationStore?.clearQueuedMessages?.(event.session_id, event.queued_ids);
+          stream.threadId = event.thread_id;
           stream.streamedContentStore.set("");
           stream.turnErrorStore.set(null);
           stream.activeToolCallsStore.set([]);
@@ -626,6 +645,13 @@ export function createStreamingStore(
       }
     },
 
+    clearConnectionError(conversationId: string): void {
+      const stream = streams.get(conversationId);
+      if (stream && get(stream.turnErrorStore)?.code === "already_connected") {
+        stream.turnErrorStore.set(null);
+      }
+    },
+
     reconcileAfterReconnect(
       recoveredTurnGeneration: number,
       conversationId = currentConversationId(),
@@ -639,7 +665,7 @@ export function createStreamingStore(
         !get(stream.isStreamingStore) ||
         stream.activeTurnGeneration !== recoveredTurnGeneration ||
         (lastMessage?.role !== "assistant" && lastMessage?.origin !== "platform") ||
-        !["completed", "refused", "failed", "interrupted"].includes(lastMessage?.turn_state ?? "")
+        !["completed", "refused", "failed", "interrupted", "cancelled"].includes(lastMessage?.turn_state ?? "")
       ) return;
 
       // The HTTP refresh recovered the terminal reply or platform account that the
@@ -665,10 +691,12 @@ export function createStreamingStore(
         // the message list are left as they are.
         const threadId = options?.conversationStore?.activeThreadId ?? null;
         if (conversationId) {
+          stream.queuedModelSelections.set(clientId, { queuedId: null, modelId: selectedModelId ?? null });
           options?.connectionStore?.sendMessage(conversationId, content, selectedModelId, undefined, threadId, clientId);
         }
         return;
       }
+      stream.selectedModelId = selectedModelId ?? null;
       // Clear state from any previous turn.
       stream.streamedContentStore.set("");
       stream.turnErrorStore.set(null);
@@ -739,6 +767,7 @@ export function withConversationAutoCreate(
     },
     streamFor(conversationId): ConversationStreamState {
       const stream = base.streamFor?.(conversationId) ?? {
+        threadId: null,
         isStreaming: base.isStreaming,
         activeTurnGeneration: base.activeTurnGeneration,
         streamedContent: base.streamedContent,
@@ -757,7 +786,7 @@ export function withConversationAutoCreate(
     get streamedContent(): string {
       return base.streamedContent;
     },
-    get turnError(): { code: string; message: string } | null {
+    get turnError(): { code: string; message: string; selectedModelId?: string } | null {
       return base.turnError;
     },
     get turnStartedAt(): string | null {
@@ -773,6 +802,7 @@ export function withConversationAutoCreate(
       return base.pendingApproval;
     },
     handleServerEvent: (event, conversationId) => base.handleServerEvent(event, conversationId),
+    clearConnectionError: (conversationId) => base.clearConnectionError(conversationId),
     reconcileAfterReconnect: (turnGeneration, conversationId, recoveredMessages) =>
       base.reconcileAfterReconnect(turnGeneration, conversationId, recoveredMessages),
     cancelTurn: () => base.cancelTurn(),
