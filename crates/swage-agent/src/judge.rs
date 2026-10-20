@@ -2,11 +2,12 @@
 //!
 //! A tool call that reaches beyond the session's grants — a filesystem
 //! location outside its granted locations — needs someone to answer for it.
-//! In an attended session that is the person at the approval card. In an
-//! unattended session nobody is watching, so the request goes to a judging
-//! model: it sees the call and the agent's stated justification and says yes
-//! or no with a reason. Without a yes — a refusal, an unreadable verdict, no
-//! judge configured — the request fails closed and the model is told why.
+//! The judging model sees the call and the agent's stated justification and
+//! says yes or no with a reason. In an attended session it decides confident
+//! cases and passes uncertain or unavailable judgements to the person. In an
+//! unattended session nobody is watching, so without a yes — a refusal, an
+//! unreadable verdict, no judge configured — the request fails closed and
+//! the model is told why.
 //!
 //! The agent runtime owns the seam and the fail-closed rule; what judges, and
 //! how, is the caller's: the gateway supplies a [`RequestJudge`] backed by its
@@ -87,6 +88,12 @@ pub struct JudgeRequest {
     pub arguments: Value,
     /// The agent's stated reason for the request, when it gave one.
     pub justification: Option<String>,
+    /// The task the turn was given — a person's, a schedule's or a
+    /// delegating agent's own words, as the turn's record holds them — the
+    /// one thing the judge reads that this agent did not write, which is why
+    /// it says what the request is for and never that it is permitted;
+    /// `None` when the record has none.
+    pub task: Option<String>,
     pub reach: RequestedReach,
 }
 
@@ -113,11 +120,13 @@ impl JudgeVerdict {
     }
 }
 
-/// One judgement: the verdict, the judge's reason in its own words, and the
+/// One judgement: the verdict, confidence, the judge's reason, and the
 /// model that gave it (absent when none did).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Judgement {
     pub verdict: JudgeVerdict,
+    /// Whether the judge can decide without asking the person.
+    pub confident: bool,
     pub reason: String,
     pub judge: Option<String>,
 }
@@ -127,6 +136,7 @@ impl Judgement {
     pub fn unavailable(reason: impl Into<String>) -> Self {
         Self {
             verdict: JudgeVerdict::Unavailable,
+            confident: false,
             reason: reason.into(),
             judge: None,
         }
@@ -140,6 +150,21 @@ pub trait RequestJudge: Send + Sync {
 }
 
 pub type SharedRequestJudge = Arc<dyn RequestJudge>;
+
+/// Characters of a turn's task the judge reads; a longer task is cut here,
+/// its tail marked, so one request's judgement stays one capped completion.
+pub const TASK_EXCERPT_CHARS: usize = 2000;
+
+/// The turn's task as the judge reads it: its opening `TASK_EXCERPT_CHARS`
+/// characters, marked where a longer task was cut.
+pub fn task_excerpt(task: &str) -> String {
+    if task.chars().count() <= TASK_EXCERPT_CHARS {
+        task.to_owned()
+    } else {
+        let head: String = task.chars().take(TASK_EXCERPT_CHARS).collect();
+        format!("{head}…")
+    }
+}
 
 /// The justification a call carries, read from its arguments.
 pub fn justification_from_arguments(arguments: &Value) -> Option<String> {
@@ -229,6 +254,7 @@ mod tests {
             &reach,
             &Judgement {
                 verdict: JudgeVerdict::Refused,
+                confident: true,
                 reason: "the task never named this path".into(),
                 judge: Some("judge".into()),
             },

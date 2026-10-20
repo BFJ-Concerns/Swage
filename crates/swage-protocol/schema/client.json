@@ -2450,7 +2450,7 @@
       ]
     },
     "JudgeConfig": {
-      "description": "The judging model: who answers for a request a session's grants do\nnot cover when no person is watching (an unattended turn reaching a\nlocation outside its granted locations).",
+      "description": "The judging model: who answers for a request a session's grants do\nnot cover — alone in an unattended turn, and first in an attended one,\nwhere the person takes the cases it is not sure of.",
       "type": "object",
       "properties": {
         "model": {
