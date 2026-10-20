@@ -699,15 +699,7 @@ async fn track_delegated_session(
                     let result = execution.await;
                     announce_delegated_outcome(state, session_id, turn_id, &result).await;
                     state.active_turns.lock().await.remove(&session_id);
-                    match state.storage.get_turn(turn_id).await {
-                        Ok(Some(turn)) => {
-                            if crate::turn_queue::drains_queue_after(turn.state) {
-                                crate::turn_queue::spawn_drain(state.clone(), session_id);
-                            }
-                        }
-                        Err(error) => tracing::warn!(%turn_id, %error, "could not read delegated outcome for queue drain"),
-                        _ => {}
-                    }
+                    drain_queue_after_delegated_turn(state, session_id, turn_id).await;
                     result
                 }
                 Err(_) => execution.await,
@@ -720,18 +712,28 @@ async fn track_delegated_session(
                 let turn_id = started.child_turn_id;
                 announce_delegated_outcome(state, session_id, turn_id, &result).await;
                 if let Some(sender) = forward_started { let _ = sender.send(started); }
-                match state.storage.get_turn(turn_id).await {
-                    Ok(Some(turn)) => {
-                        if crate::turn_queue::drains_queue_after(turn.state) {
-                            crate::turn_queue::spawn_drain(state.clone(), session_id);
-                        }
-                    }
-                    Err(error) => tracing::warn!(%turn_id, %error, "could not read delegated outcome for queue drain"),
-                    _ => {}
-                }
+                drain_queue_after_delegated_turn(state, session_id, turn_id).await;
             }
             result
         },
+    }
+}
+
+/// Start the child session's queued work once its delegated turn has settled,
+/// unless the turn was stopped or interrupted, which leaves the queue standing.
+async fn drain_queue_after_delegated_turn(state: &AppState, session_id: Uuid, turn_id: Uuid) {
+    match state.storage.get_turn(turn_id).await {
+        Ok(Some(turn)) => {
+            if crate::turn_queue::drains_queue_after(turn.state) {
+                crate::turn_queue::spawn_drain(state.clone(), session_id);
+            }
+        }
+        Ok(None) => {
+            tracing::warn!(%turn_id, "delegated turn missing; its queue was not drained");
+        }
+        Err(error) => {
+            tracing::warn!(%turn_id, %error, "could not read delegated outcome for queue drain");
+        }
     }
 }
 
