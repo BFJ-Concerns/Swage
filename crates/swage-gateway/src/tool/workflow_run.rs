@@ -261,7 +261,7 @@ mod tests {
             })
             .await
             .expect("session");
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -356,7 +356,7 @@ mod tests {
             })
             .await
             .expect("session");
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),

@@ -17,8 +17,8 @@ use super::{
     ChatMessage, GatewayDelegationHandler, GatewayError, SandboxGuard, ServerEvent, ToolDispatcher,
     TurnRequest, TurnState, Uuid, WorkflowAttemptResolution, build_approval_registrar,
     build_permission_config, mpsc, record_agent_call_attempt_before_execution,
-    record_effort_snapshot, record_terminal_state_and_release, resolve_model_catalogue_entry,
-    shutdown_sandbox_guard,
+    record_effort_snapshot, record_output_limit_snapshot, record_terminal_state_and_release,
+    resolve_model_catalogue_entry, shutdown_sandbox_guard,
 };
 use swage_agent::OutboundMessage;
 
@@ -37,6 +37,25 @@ pub(crate) fn effort_capability_for_model(
             provider.effort_capability(model.map_or(catalogue_entry, |model| &model.model_id))
         })
         .unwrap_or(swage_core::EffortCapability::None)
+}
+
+/// The output limit a turn's request carries: the caller's own value (a
+/// generation preset's `max_tokens`), else the catalogue entry's declaration,
+/// else the provider adapter's account of the documented limit for the
+/// effective model; `None` where no source declares one, and the adapter's
+/// protocol floor then applies on the wire.
+pub(crate) fn output_limit_for_model(
+    caller: Option<u32>,
+    config: &swage_config::ResolvedConfig,
+    catalogue_entry: &str,
+    provider: &dyn swage_provider::LlmProvider,
+) -> Option<swage_core::ResolvedOutputLimit> {
+    let model = config.models.entries.get(catalogue_entry);
+    swage_core::resolve_output_limit(
+        caller,
+        model.and_then(|model| model.capabilities.output_limit),
+        provider.output_limit(model.map_or(catalogue_entry, |model| &model.model_id)),
+    )
 }
 
 /// The effort a turn asks for: the caller's override, else the session's
@@ -190,6 +209,20 @@ pub(super) async fn launch_turn_runtime(
         tokio::spawn(async move { crate::codex::run_turn(codex_state, codex_request).await })
     } else {
         let provider = crate::startup::selected_model_provider(state, config).await;
+        // The output limit is resolved once, here, against the effective
+        // model: the agent's request carries it as its own `max_tokens`, so
+        // the adapter sends it and the per-round request record shows it,
+        // and the source is written into the turn's audit snapshot.
+        let mut agent_config = agent_config;
+        if let Some(resolved) = output_limit_for_model(
+            agent_config.max_tokens,
+            config,
+            &config.models.default,
+            provider.as_ref(),
+        ) {
+            agent_config.max_tokens = Some(resolved.tokens);
+            record_output_limit_snapshot(report_json, resolved);
+        }
         let mut agent_builder = AgentBuilder::new()
             .config(agent_config)
             .provider(Arc::clone(&provider))

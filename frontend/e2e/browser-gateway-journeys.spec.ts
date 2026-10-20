@@ -1,22 +1,14 @@
 // The provider is controlled; Chromium, the rendered Svelte app, HTTP/WebSocket
 // transport, gateway turn loop, storage, cancellation and approvals are live.
-import { createServer } from "node:net";
 import { access, readFile, rm } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "@playwright/test";
 import { makeScratchDir } from "./scratch-root.mjs";
+import { unusedPorts } from "./unused-ports.mjs";
 
 const frontendDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-
-async function unusedPort(): Promise<number> {
-  const server = createServer();
-  await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
-  const port = (server.address() as { port: number }).port;
-  await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
-  return port;
-}
 
 async function waitForHealth(baseUrl: string): Promise<void> {
   await expect.poll(async () => {
@@ -32,8 +24,7 @@ async function startIsolatedStack(): Promise<{ baseUrl: string; child: ChildProc
   const root = await makeScratchDir("swage-browser-e2e-isolation-");
   let child: ChildProcess | undefined;
   try {
-    const gatewayPort = await unusedPort();
-    const providerPort = await unusedPort();
+    const [gatewayPort, providerPort] = await unusedPorts(2);
     child = spawn(process.execPath, [join(frontendDir, "e2e/run-stack.mjs")], {
       cwd: frontendDir,
       stdio: "pipe",

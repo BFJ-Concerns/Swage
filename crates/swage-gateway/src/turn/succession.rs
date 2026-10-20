@@ -517,9 +517,28 @@ where
         .await
         .inspect_err(|error| tracing::warn!(%error, "wall signal: report unreadable"))
         .ok()??;
-    let report: serde_json::Value = serde_json::from_str(&report).ok()?;
-    let records: Vec<CompactionRecord> =
-        serde_json::from_value(report.get("compaction_applied")?.clone()).ok()?;
+    // A report that is not the shape the kernel wrote is no diagnosis: the
+    // safe default is to diagnose afresh, said so here rather than passed
+    // over in silence (a derivable read under the record durability
+    // contract — the diagnosis is re-derivable from the wall signal).
+    let report: serde_json::Value = match serde_json::from_str(&report) {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(%error, %turn_id, "wall signal: the earlier report is not JSON; diagnosing afresh");
+            return None;
+        }
+    };
+    let Some(compaction) = report.get("compaction_applied") else {
+        tracing::warn!(%turn_id, "wall signal: the earlier report carries no compaction records; diagnosing afresh");
+        return None;
+    };
+    let records: Vec<CompactionRecord> = match serde_json::from_value(compaction.clone()) {
+        Ok(records) => records,
+        Err(error) => {
+            tracing::warn!(%error, %turn_id, "wall signal: the earlier report's compaction records do not read; diagnosing afresh");
+            return None;
+        }
+    };
     records.into_iter().find_map(|record| {
         let ran = record.requested_strategy == DEGRADATION_STRATEGY
             && record.actual_strategy == THRESHOLD_STRATEGY;
@@ -860,6 +879,51 @@ fn diagnosis_request(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A snapshot store holding one report, as a turn's earlier report would
+    /// be read back.
+    struct OneReport(Option<String>);
+
+    #[async_trait::async_trait]
+    impl swage_storage::store::ContextSnapshotStore for OneReport {
+        async fn store_snapshot(&self, _: Uuid, _: &str) -> Result<(), swage_core::StorageError> {
+            unreachable!("the test never writes")
+        }
+        async fn get_snapshot(&self, _: Uuid) -> Result<Option<String>, swage_core::StorageError> {
+            Ok(self.0.clone())
+        }
+        async fn list_snapshots_by_topic(
+            &self,
+            _: Uuid,
+            _: usize,
+        ) -> Result<Vec<swage_storage::model::ContextSnapshotRecord>, swage_core::StorageError>
+        {
+            unreachable!("the test never lists")
+        }
+    }
+
+    /// An earlier report that is not what the kernel writes — not JSON, or
+    /// records of another shape — yields no prior diagnosis, so the wall
+    /// signal is diagnosed afresh: the documented safe default, never a
+    /// reused reading of something unreadable.
+    #[tokio::test]
+    async fn an_unreadable_earlier_report_yields_no_prior_diagnosis() {
+        let turn_id = Uuid::new_v4();
+        for report in [
+            None,
+            Some("not json".to_owned()),
+            Some(json!({ "compaction_applied": "not a list" }).to_string()),
+            Some(json!({ "compaction_applied": [{ "element": "history" }] }).to_string()),
+            Some(json!({ "elements": [] }).to_string()),
+        ] {
+            assert!(
+                prior_diagnosis(&OneReport(report.clone()), turn_id)
+                    .await
+                    .is_none(),
+                "{report:?}"
+            );
+        }
+    }
 
     fn rounds(outcomes: &[serde_json::Value]) -> Vec<ProviderRoundRecord> {
         outcomes

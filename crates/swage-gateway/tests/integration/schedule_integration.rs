@@ -159,7 +159,7 @@ fn test_state_with_config(
     config: swage_config::ResolvedConfig,
 ) -> AppState {
     let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
-    AppState::new(
+    AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
@@ -167,6 +167,32 @@ fn test_state_with_config(
         swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
         None,
     )
+}
+
+#[tokio::test]
+async fn default_schedule_fixture_retains_its_memory_root_until_last_clone() {
+    let database = tempfile::TempDir::new().unwrap();
+    let state = test_state(
+        &database.path().join("schedule.db"),
+        MockProvider::new(vec![]),
+    );
+    let root = state.config_root.clone();
+    let retained = state.clone();
+    drop(state);
+    let reference = swage_gateway::memory::MemoryReference::parse("general/isolation").unwrap();
+    swage_gateway::memory::write_entry(
+        &retained.config_root,
+        &swage_core::ScopeLocation::General,
+        &reference,
+        "Schedule fixture memory",
+        "retained by the schedule state",
+    )
+    .await
+    .unwrap();
+    assert!(root.join("general/memory/isolation.md").is_file());
+    assert_ne!(root, swage_config::discovery::effective_root_path());
+    drop(retained);
+    assert!(!root.exists(), "last schedule state must release its root");
 }
 
 async fn json_response(response: axum::response::Response) -> Value {
@@ -3092,6 +3118,31 @@ async fn agent_change_is_refused_without_mutating_the_schedule_api() {
     assert_eq!(after.message, before.message);
     assert_eq!(after.expression, before.expression);
     assert_eq!(after.updated_at, before.updated_at);
+}
+
+#[tokio::test]
+async fn default_schedule_fixture_retains_its_root_through_a_live_request() {
+    let directory = crate::support::scratch_tempdir();
+    let state = test_state(
+        &directory.path().join("schedule.db"),
+        MockProvider::new(vec![]),
+    );
+    let root = state.config_root.clone();
+    assert!(root.is_dir());
+    assert_ne!(root, swage_config::discovery::effective_root_path());
+    let router = swage_gateway::server::build_router(state);
+    let (address, server) = crate::support::start_live_server(router).await;
+    let response = reqwest::get(format!("http://{address}/api/health"))
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    assert!(
+        root.is_dir(),
+        "the listening consumer must retain the fixture root"
+    );
+    server.abort();
+    let _ = server.await;
+    assert!(!root.exists(), "stopping the consumer releases the root");
 }
 
 #[tokio::test(flavor = "multi_thread")]

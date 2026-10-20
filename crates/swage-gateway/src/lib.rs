@@ -57,6 +57,8 @@ pub mod context;
 pub mod device;
 pub mod error;
 pub mod experimentation;
+#[cfg(feature = "test-fixtures")]
+pub mod fixtures;
 pub mod handlers;
 pub mod knowledge;
 pub mod knowledge_mirror;
@@ -116,7 +118,7 @@ pub(crate) mod test_support {
     ) -> crate::state::AppState {
         use swage_storage::{Storage, TopicStore};
 
-        crate::state::AppState::new(
+        crate::state::AppState::for_test(
             std::sync::Arc::clone(&storage) as std::sync::Arc<dyn Storage>,
             storage as std::sync::Arc<dyn TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -205,6 +207,7 @@ pub(crate) mod test_support {
         _lock: std::sync::MutexGuard<'static, ()>,
         _temp_dir: Option<tempfile::TempDir>,
         root: PathBuf,
+        previous: Option<OsString>,
     }
 
     impl SwageHomeGuard {
@@ -214,11 +217,13 @@ pub(crate) mod test_support {
                 .unwrap_or_else(|error| error.into_inner());
             let temp_dir = tempfile::TempDir::new().expect("temporary swage home");
             let root = temp_dir.path().to_path_buf();
+            let previous = std::env::var_os("SWAGE_HOME");
             unsafe { std::env::set_var("SWAGE_HOME", &root) };
             Self {
                 _lock: lock,
                 _temp_dir: Some(temp_dir),
                 root,
+                previous,
             }
         }
 
@@ -227,11 +232,13 @@ pub(crate) mod test_support {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             let root = path.as_ref().to_path_buf();
+            let previous = std::env::var_os("SWAGE_HOME");
             unsafe { std::env::set_var("SWAGE_HOME", &root) };
             Self {
                 _lock: lock,
                 _temp_dir: None,
                 root,
+                previous,
             }
         }
 
@@ -246,7 +253,10 @@ pub(crate) mod test_support {
 
     impl Drop for SwageHomeGuard {
         fn drop(&mut self) {
-            unsafe { std::env::remove_var("SWAGE_HOME") };
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var("SWAGE_HOME", value) },
+                None => unsafe { std::env::remove_var("SWAGE_HOME") },
+            }
         }
     }
 

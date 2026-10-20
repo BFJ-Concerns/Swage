@@ -174,31 +174,58 @@ mod tests {
     use tempfile::TempDir;
     // Shared crate-wide lock — prevents races with http.rs tests that also
     // manipulate XDG_RUNTIME_DIR during parallel test execution.
-    use crate::test_helpers::ENV_LOCK;
+    use crate::test_helpers::{ENV_LOCK, with_temp_xdg, with_temp_xdg_locked};
 
-    /// Run `f` with no explicit data root and a temporary runtime directory,
-    /// restoring the caller's environment afterwards regardless of panics.
-    fn with_temp_xdg<F: FnOnce(&TempDir)>(f: F) {
+    #[test]
+    fn xdg_fixture_restores_present_and_absent_environment_even_after_panic() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let dir = TempDir::new().unwrap();
-        let original_home = std::env::var_os("SWAGE_HOME");
-        let original_runtime = std::env::var_os("XDG_RUNTIME_DIR");
-        // SAFETY: all environment mutation in this crate is serialised by ENV_LOCK.
-        unsafe {
-            std::env::remove_var("SWAGE_HOME");
-            std::env::set_var("XDG_RUNTIME_DIR", dir.path());
+        let saved_home = std::env::var_os("SWAGE_HOME");
+        let saved_runtime = std::env::var_os("XDG_RUNTIME_DIR");
+        let original = TempDir::new().unwrap();
+        for present in [false, true] {
+            for panics in [false, true] {
+                for key in ["SWAGE_HOME", "XDG_RUNTIME_DIR"] {
+                    unsafe {
+                        if present {
+                            std::env::set_var(key, original.path());
+                        } else {
+                            std::env::remove_var(key);
+                        }
+                    }
+                }
+                let outcome = std::panic::catch_unwind(|| {
+                    with_temp_xdg_locked(|dir| {
+                        assert!(std::env::var_os("SWAGE_HOME").is_none());
+                        assert_eq!(
+                            RuntimeMetadata::metadata_path(),
+                            dir.path().join("swage/metadata.json")
+                        );
+                        RuntimeMetadata::new(42, "http://127.0.0.1:1234".into())
+                            .save()
+                            .unwrap();
+                        assert!(dir.path().join("swage/metadata.json").is_file());
+                        assert!(!original.path().join("run/metadata.json").exists());
+                        assert!(!original.path().join("swage/metadata.json").exists());
+                        assert!(!panics, "exercise fixture unwinding");
+                    })
+                });
+                assert_eq!(outcome.is_err(), panics);
+                for key in ["SWAGE_HOME", "XDG_RUNTIME_DIR"] {
+                    assert_eq!(
+                        std::env::var_os(key),
+                        present.then(|| original.path().as_os_str().to_owned())
+                    );
+                }
+            }
         }
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&dir)));
-        match original_home {
-            Some(value) => unsafe { std::env::set_var("SWAGE_HOME", value) },
-            None => unsafe { std::env::remove_var("SWAGE_HOME") },
-        }
-        match original_runtime {
-            Some(value) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", value) },
-            None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
-        }
-        if let Err(e) = result {
-            std::panic::resume_unwind(e);
+        for (key, value) in [
+            ("SWAGE_HOME", saved_home),
+            ("XDG_RUNTIME_DIR", saved_runtime),
+        ] {
+            match value {
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                None => unsafe { std::env::remove_var(key) },
+            }
         }
     }
 

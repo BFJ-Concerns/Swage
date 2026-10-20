@@ -258,6 +258,18 @@ pub trait LlmProvider: Send + Sync {
         None
     }
 
+    /// The most output tokens one response from the named model may carry,
+    /// when the adapter knows it: its account of the provider's documented
+    /// limit for models it recognises. The catalogue's own declaration for
+    /// the model takes precedence; `None` means the adapter cannot say, and
+    /// a request carrying no limit of its own then takes the adapter's
+    /// protocol floor. Every decorating or forwarding impl delegates
+    /// explicitly — a default method is invisible to a wrapper.
+    fn output_limit(&self, model: &str) -> Option<u32> {
+        let _ = model;
+        None
+    }
+
     /// Return the provider-visible request body for a completion request.
     ///
     /// Concrete providers override this with their exact wire conversion. The
@@ -392,6 +404,10 @@ impl LlmProvider for Arc<dyn LlmProvider> {
 
     fn effort_capability(&self, model: &str) -> Option<EffortCapability> {
         (**self).effort_capability(model)
+    }
+
+    fn output_limit(&self, model: &str) -> Option<u32> {
+        (**self).output_limit(model)
     }
 
     fn provider_request_snapshot(
@@ -533,6 +549,7 @@ mod tests {
     fn provider_config_try_from_missing_env_var() {
         // Use a name that is extremely unlikely to be set.
         let provider = swage_config::ProviderEndpointConfig {
+            display_name: None,
             protocol: swage_config::Protocol::Anthropic,
             api_key_secret_ref: None,
             api_key_env: Some("TEVIK_TEST_KEY_DEFINITELY_NOT_SET_XYZ".into()),
@@ -562,6 +579,7 @@ mod tests {
     #[test]
     fn provider_config_try_from_resolves_env_var() {
         let provider = swage_config::ProviderEndpointConfig {
+            display_name: None,
             protocol: swage_config::Protocol::Anthropic,
             api_key_secret_ref: None,
             api_key_env: Some("TEVIK_TEST_API_KEY_XYZ".into()),

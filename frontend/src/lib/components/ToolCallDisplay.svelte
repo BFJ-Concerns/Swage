@@ -90,33 +90,29 @@
     });
   }
 
-  // Unwrap serialised output envelopes without changing the recorded result.
+  // Decode the recorded envelope once; its text content is never an envelope.
   function readableResult(value: unknown): string {
-    // Bound decoding for malformed or unusually deep nested output.
-    for (let depth = 0; depth < 20; depth++) {
-      if (typeof value === "string") {
-        const text = value;
-        try {
-          const decoded: unknown = JSON.parse(text);
-          if (typeof decoded === "string" || (decoded !== null && typeof decoded === "object")) {
-            value = decoded;
-            continue;
-          }
-        } catch {
-          // Ordinary tool output is text, not necessarily JSON.
-        }
-        return readableText(text);
+    // Records can themselves be serialised text.
+    for (let depth = 0; depth < 20 && typeof value === "string"; depth++) {
+      try {
+        const decoded: unknown = JSON.parse(value);
+        if (typeof decoded !== "string" && (decoded === null || typeof decoded !== "object")) break;
+        value = decoded;
+      } catch {
+        break;
       }
-      if (
-        value !== null && typeof value === "object" &&
-        "output" in value && typeof value.output === "string"
-      ) {
-        value = value.output;
-        continue;
-      }
-      return value == null ? "" : JSON.stringify(value, null, 2);
     }
-    return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    if (
+      value !== null && typeof value === "object" &&
+      "output" in value && typeof value.output === "string"
+    ) {
+      value = value.output;
+    }
+    if (typeof value === "string") {
+      const structure = embeddedStructure(value);
+      return structure === undefined ? readableText(value) : JSON.stringify(readableStructure(structure), null, 2);
+    }
+    return value == null ? "" : JSON.stringify(value, null, 2);
   }
 
   const resultText = $derived(readableResult(toolCall.result));

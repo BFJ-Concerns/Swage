@@ -165,6 +165,57 @@ describe("MemoryPanel", () => {
     expect(document.body.textContent).not.toContain("Beds are labelled north to south.");
   });
 
+  it.each([false, true].flatMap((changedTarget) =>
+    [false, true].map((refreshFirst) => ({ changedTarget, refreshFirst })),
+  ))("opens a pending notice after curation ($changedTarget, $refreshFirst)", async ({ changedTarget, refreshFirst }) => {
+    const listing = deferred<Response>();
+    const refresh = deferred<Response>();
+    const instruction = deferred<Response>();
+    let listings = 0;
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(String(input), "http://swage.test");
+      if (url.pathname === "/api/memory/instructions" && init?.method === "POST") return instruction.promise;
+      if (url.pathname === "/api/memory/pages") {
+        listings += 1;
+        return listings === 1 ? listing.promise : refresh.promise;
+      }
+      if (url.pathname === "/api/memory/page") return json({ reference: "general/profile", body: "Notice target body", summary: null });
+      return json({ error: "unexpected request" }, 500);
+    });
+    const targetStore = writable<{ scope: string; reference: string } | null>(changedTarget ? null : { scope: "general", reference: "general/profile" });
+    const target = fromStore(targetStore);
+    component = mount(MemoryPanel, {
+      target: document.body,
+      props: { topics: [], get page() { return target.current; } },
+    });
+    await vi.waitFor(() => expect(listings).toBe(1));
+    if (changedTarget) {
+      listing.resolve(json({ pages: [] }));
+      await vi.waitFor(() => expect(document.body.textContent).toContain("No memory pages yet"));
+    }
+    enterInstruction("Check my profile");
+    await vi.waitFor(() => expect(fetch.mock.calls.some(([input]) => String(input).includes("/instructions"))).toBe(true));
+    // The new target arrives while the instruction is still in flight.
+    const pending = changedTarget ? deferred<Response>() : listing;
+    const refreshed = changedTarget ? deferred<Response>() : refresh;
+    if (changedTarget) {
+      fetch.mockImplementation(async (input) => {
+        const url = new URL(String(input), "http://swage.test");
+        if (url.pathname === "/api/memory/pages") return ++listings === 2 ? pending.promise : refreshed.promise;
+        return json({ reference: "general/profile", body: "Notice target body", summary: null });
+      });
+      flushSync(() => targetStore.set({ scope: "general", reference: "general/profile" }));
+      await vi.waitFor(() => expect(listings).toBe(2));
+    }
+    instruction.resolve(json({ reply: "Checked", pages_changed: [] }));
+    await vi.waitFor(() => expect(listings).toBe(changedTarget ? 3 : 2));
+    const pages = [{ reference: "general/profile", summary: null }];
+    (refreshFirst ? refreshed : pending).resolve(json({ pages }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    (refreshFirst ? pending : refreshed).resolve(json({ pages }));
+    await vi.waitFor(() => expect(document.querySelector(".detail > article pre")?.textContent).toBe("Notice target body"));
+  });
+
   it("sends an instruction to the curator for the chosen scope and shows its reply and the changed page", async () => {
     let sent: unknown;
     const topicPages = [{ reference: "topic/conventions", summary: null as string | null }];
