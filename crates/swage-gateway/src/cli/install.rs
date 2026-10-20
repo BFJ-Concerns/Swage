@@ -57,10 +57,11 @@ async fn install_at_path(args: &InstallArgs, path: PathBuf) -> Result<(), Client
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|source| ClientError::MetadataIo { source })?;
     }
+    let saved = load_install_config_at_path(path.clone())?.unwrap_or_default();
     let config = ServiceInstallConfig {
-        port: args.port,
-        host: args.host.clone(),
-        config: args.config.clone(),
+        port: args.port.or(saved.port),
+        host: args.host.clone().or(saved.host),
+        config: args.config.clone().or(saved.config),
     };
     let json = serde_json::to_string_pretty(&config).map_err(|source| ClientError::MetadataIo {
         source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
@@ -125,6 +126,85 @@ mod tests {
                 config: Some("/tmp/swage.toml".into()),
             })
         );
+    }
+
+    #[tokio::test]
+    async fn partial_defaults_preserve_unspecified_saved_values() {
+        let dir = tempfile::Builder::new()
+            .prefix("install-defaults-")
+            .tempdir_in(
+                std::env::var_os("SWAGE_TEST_SCRATCH_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(std::env::temp_dir),
+            )
+            .unwrap();
+        let path = dir.path().join("service.json");
+        install_at_path(
+            &InstallArgs {
+                port: Some(4000),
+                host: Some("127.0.0.1".into()),
+                config: Some("chosen-topic".into()),
+            },
+            path.clone(),
+        )
+        .await
+        .unwrap();
+        for (args, expected) in [
+            (
+                InstallArgs {
+                    port: Some(4321),
+                    host: Some("192.0.2.10".into()),
+                    config: None,
+                },
+                ServiceInstallConfig {
+                    port: Some(4321),
+                    host: Some("192.0.2.10".into()),
+                    config: Some("chosen-topic".into()),
+                },
+            ),
+            (
+                InstallArgs {
+                    port: None,
+                    host: None,
+                    config: Some("another-topic".into()),
+                },
+                ServiceInstallConfig {
+                    port: Some(4321),
+                    host: Some("192.0.2.10".into()),
+                    config: Some("another-topic".into()),
+                },
+            ),
+            (
+                InstallArgs {
+                    port: Some(0),
+                    host: None,
+                    config: None,
+                },
+                ServiceInstallConfig {
+                    port: Some(0),
+                    host: Some("192.0.2.10".into()),
+                    config: Some("another-topic".into()),
+                },
+            ),
+            (
+                InstallArgs {
+                    port: None,
+                    host: Some("::1".into()),
+                    config: None,
+                },
+                ServiceInstallConfig {
+                    port: Some(0),
+                    host: Some("::1".into()),
+                    config: Some("another-topic".into()),
+                },
+            ),
+        ] {
+            install_at_path(&args, path.clone()).await.unwrap();
+            assert_eq!(
+                load_install_config_at_path(path.clone()).unwrap(),
+                Some(expected)
+            );
+        }
     }
 
     #[tokio::test]
