@@ -47,7 +47,7 @@
 </div></div>
 
 <style>
-  .prereq{margin:0 0 12px;color:var(--ink-soft);font-size:13px;line-height:1.55}.field{display:grid;grid-template-columns:220px 1fr;gap:24px;border-top:1px solid var(--rule-soft);padding:14px 0;align-items:baseline}.key{font-family:var(--font-mono);font-weight:500;font-size:11px;line-height:1.5;letter-spacing:.18em;text-transform:uppercase}.key small{display:block;margin-top:4px;font-family:var(--font-body);font-weight:400;font-size:11px;line-height:1.4;letter-spacing:0;text-transform:none;color:var(--ink-soft)}.val{display:flex;gap:10px;flex-wrap:wrap}.text{width:100%;max-width:480px;padding:9px 11px;border:1px solid var(--ink);background:var(--paper);color:var(--ink);font-family:var(--font-body);font-size:13px}@media(max-width:760px){.field{grid-template-columns:1fr;gap:10px}}
+  .prereq { margin: 0 0 12px; color: var(--ink-soft); font-size: 13px; line-height: 1.55; }
   .speech { flex-direction: column; align-items: flex-start; }
   .btn { background: var(--paper); color: var(--ink); border: 1px solid var(--ink); padding: 8px 16px; font-family: var(--font-display); font-size: 14px; line-height: 1; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; }
   .btn:hover:not(:disabled) { background: var(--ink); color: var(--paper); }

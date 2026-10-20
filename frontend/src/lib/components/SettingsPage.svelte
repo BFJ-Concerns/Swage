@@ -9,6 +9,7 @@
   this component just reads the tab and shows the matching field set.
 -->
 <script lang="ts">
+  import "./settings/controls.css";
   import { onDestroy, onMount, untrack } from "svelte";
   import { fetchSettings, restartGateway, saveSettings } from "../api/settings";
   import ScheduleAutomationPanel from "./ScheduleAutomationPanel.svelte";
