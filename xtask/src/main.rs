@@ -720,7 +720,7 @@ fn source_tracker_tag_locations(contents: &str, syntax: SourceSyntax) -> Vec<(us
                     if tracker_tag_at(line, index) {
                         locations.push((line_number + 1, index + 1));
                     }
-                    if tail.starts_with(b"/*") {
+                    if syntax == SourceSyntax::Rust && tail.starts_with(b"/*") {
                         region = Region::BlockComment(depth + 1);
                         index += 1;
                     } else if tail.starts_with(b"*/") {
@@ -2297,6 +2297,32 @@ mod tests {
                 super::SourceSyntax::Rust,
             ),
             vec![(2, 5), (2, 15), (2, 49)]
+        );
+    }
+
+    #[test]
+    fn tracker_tags_close_non_rust_block_comments_at_first_terminator() {
+        let source = "/* example /* text */ const value = \"[a1b2]\";";
+        assert!(
+            super::source_tracker_tag_locations(source, super::SourceSyntax::TypeScript).is_empty()
+        );
+        assert!(
+            super::source_tracker_tag_locations(
+                &format!("<script>{source}</script>"),
+                super::SourceSyntax::Svelte
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn tracker_tags_keep_rust_nested_block_comments_open() {
+        assert_eq!(
+            super::source_tracker_tag_locations(
+                "/* example /* text */ [a1b2] */",
+                super::SourceSyntax::Rust
+            ),
+            vec![(1, 23)]
         );
     }
 
