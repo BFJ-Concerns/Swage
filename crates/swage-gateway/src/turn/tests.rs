@@ -3240,15 +3240,24 @@ impl SessionStore for MockStorage {
                         id: turn.id,
                         state: turn.state.clone(),
                     });
-                let has_processing_turn = turns.iter().any(|turn| {
-                    matches!(
-                        turn.state,
-                        TurnState::Processing | TurnState::Delegating | TurnState::AwaitingApproval
-                    )
-                });
+                let active_turn = turns
+                    .iter()
+                    .find(|turn| {
+                        matches!(
+                            turn.state,
+                            TurnState::Processing
+                                | TurnState::Delegating
+                                | TurnState::AwaitingApproval
+                        )
+                    })
+                    .map(|turn| swage_storage::SessionTurnActivity {
+                        id: turn.id,
+                        state: turn.state.clone(),
+                    });
                 swage_storage::SessionActivity {
+                    has_processing_turn: active_turn.is_some(),
+                    active_turn,
                     latest_turn,
-                    has_processing_turn,
                     last_activity: latest.map_or(session.created_at, |message| message.created_at),
                     latest_message: latest.map(|message| message.content.clone()),
                     has_interrupted_turn,

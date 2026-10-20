@@ -379,6 +379,8 @@ pub struct SessionActivity {
     pub has_interrupted_turn: bool,
     /// The newest turn across every thread in the session.
     pub latest_turn: Option<SessionTurnActivity>,
+    /// The newest processing, delegating or awaiting-approval turn.
+    pub active_turn: Option<SessionTurnActivity>,
     /// Any turn is processing, delegating or awaiting approval.
     pub has_processing_turn: bool,
 }

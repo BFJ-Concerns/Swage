@@ -633,6 +633,63 @@ async fn operator_counts_processing_detached_children_without_a_foreground_token
     assert_eq!(settled["gateway"]["active_turn_count"], 0);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn operator_activity_describes_active_turn_before_newer_failure() {
+    let state = test_state();
+    let router = build_router(state.clone());
+    let parent = create_conversation(&router).await;
+    let active = operator_child(
+        &state,
+        swage_storage::SessionOrigin::Delegation {
+            parent_session_id: parent,
+        },
+        TurnState::AwaitingApproval,
+    )
+    .await;
+    let session_id = state
+        .storage
+        .get(active.thread_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .session_id;
+    let newer = state
+        .storage
+        .create_turn(NewTurn {
+            thread_id: active.thread_id,
+            agent_id: "worker".into(),
+            state: TurnState::Failed,
+            user_input: Some("later failure".into()),
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+    let (_, body) = get_json(&router, "/api/operator/overview").await;
+    let row = body["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == session_id.to_string())
+        .unwrap();
+    assert_eq!(row["activity"], "awaiting_approval", "{body}");
+    assert_eq!(row["has_running_turn"], true);
+    assert!(row["ending"].is_null());
+    state
+        .storage
+        .update_turn_state(active.id, TurnState::Completed)
+        .await
+        .unwrap();
+    let (_, body) = get_json(&router, "/api/operator/overview").await;
+    let row = body["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == session_id.to_string())
+        .unwrap();
+    assert_eq!(row["has_running_turn"], false);
+    assert_eq!(row["ending"], "failed", "latest ended turn {}", newer.id);
+}
+
 async fn operator_run(state: &AppState, parent: Option<Uuid>) -> swage_storage::WorkflowRunRecord {
     state
         .storage

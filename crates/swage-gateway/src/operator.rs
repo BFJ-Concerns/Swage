@@ -141,8 +141,8 @@ async fn list_operator_sessions(
     for activity in activities {
         let session = activity.session;
         if let Some(topic) = scopes.get(&session.topic_id) {
-            let latest_turn = activity.latest_turn;
-            let origin = latest_turn
+            let current_turn = activity.active_turn.or(activity.latest_turn);
+            let origin = current_turn
                 .as_ref()
                 .and_then(|turn| scheduled_turns.get(&turn.id))
                 .map(|schedule_id| SessionOrigin::ScheduleRun {
@@ -192,7 +192,7 @@ async fn list_operator_sessions(
                 }
             }
             // A held worker can serve several calls in the same session.
-            let worker_ending = latest_turn
+            let worker_ending = current_turn
                 .as_ref()
                 .and_then(|turn| worker_endings.get(&turn.id))
                 .copied();
@@ -201,7 +201,7 @@ async fn list_operator_sessions(
                 None
             } else {
                 worker_ending.or_else(|| {
-                    latest_turn.as_ref().and_then(|turn| match turn.state {
+                    current_turn.as_ref().and_then(|turn| match turn.state {
                         TurnState::Cancelled => Some(OperatorSessionEnding::Cancelled),
                         TurnState::Failed => Some(OperatorSessionEnding::Failed),
                         TurnState::Interrupted => Some(OperatorSessionEnding::Interrupted),
@@ -227,7 +227,7 @@ async fn list_operator_sessions(
                 agent_id: session.agent_id.clone(),
                 parent_session_id: parent_session(state, &origin).await?,
                 activity: if has_running_turn {
-                    latest_turn
+                    current_turn
                         .as_ref()
                         .map(|turn| turn.state.to_string())
                         .unwrap_or_else(|| "processing".into())

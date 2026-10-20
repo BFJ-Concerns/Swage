@@ -66,25 +66,32 @@ fn row_to_session_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionA
     let last_activity: String = row.get(11)?;
     let latest_message: Option<String> = row.get(12)?;
     let has_interrupted_turn: bool = row.get(13)?;
-    let latest_turn = row
-        .get::<_, Option<String>>(14)?
-        .map(|id| {
-            let state: String = row.get(15)?;
-            Ok::<_, rusqlite::Error>(SessionTurnActivity {
-                id: parse_uuid(&id)?,
-                state: state.parse().map_err(|error: String| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        15,
-                        rusqlite::types::Type::Text,
-                        error.into(),
-                    )
-                })?,
+    let read_turn = |id_column: usize, state_column: usize| {
+        row.get::<_, Option<String>>(id_column)?
+            .map(|id| {
+                let state: String = row.get(state_column)?;
+                Ok::<_, rusqlite::Error>(SessionTurnActivity {
+                    id: parse_uuid(&id)?,
+                    state: state.parse().map_err(|error: String| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            state_column,
+                            rusqlite::types::Type::Text,
+                            error.into(),
+                        )
+                    })?,
+                })
             })
-        })
-        .transpose()?;
+            .transpose()
+    };
+    let has_processing_turn = row.get(16)?;
     Ok(SessionActivity {
-        latest_turn,
-        has_processing_turn: row.get(16)?,
+        latest_turn: read_turn(14, 15)?,
+        active_turn: if has_processing_turn {
+            read_turn(17, 18)?
+        } else {
+            None
+        },
+        has_processing_turn,
         last_activity: parse_dt(&last_activity)?,
         latest_message,
         has_interrupted_turn,
@@ -104,7 +111,9 @@ const SESSION_ACTIVITY_COLUMNS: &str = "
     COALESCE(turn_activity.has_interrupted_turn, 0) AS has_interrupted_turn,
     turn_activity.id AS latest_turn_id,
     turn_activity.state AS latest_turn_state,
-    COALESCE(turn_activity.has_processing_turn, 0) AS has_processing_turn";
+    COALESCE(turn_activity.has_processing_turn, 0) AS has_processing_turn,
+    turn_activity.active_turn_id,
+    turn_activity.active_turn_state";
 
 // Equal-time turns retain the first encountered in thread-creation order,
 // then insertion order within that thread.
@@ -123,6 +132,8 @@ const SESSION_ACTIVITY_JOIN: &str = "
     ) AS latest ON latest.session_id = sessions.id AND latest.recency = 1
     LEFT JOIN (
         SELECT threads.session_id, turns.id, turns.state,
+               FIRST_VALUE(turns.id) OVER active_first AS active_turn_id,
+               FIRST_VALUE(turns.state) OVER active_first AS active_turn_state,
                MAX(turns.state = 'interrupted') OVER (
                    PARTITION BY threads.session_id
                ) AS has_interrupted_turn,
@@ -136,6 +147,12 @@ const SESSION_ACTIVITY_JOIN: &str = "
                ) AS recency
         FROM turns
         JOIN threads ON threads.id = turns.thread_id
+        WINDOW active_first AS (
+            PARTITION BY threads.session_id
+            ORDER BY (turns.state IN ('processing', 'delegating', 'awaiting_approval')) DESC,
+                     turns.created_at DESC, threads.created_at ASC,
+                     threads.rowid ASC, turns.rowid ASC
+        )
     ) AS turn_activity ON turn_activity.session_id = sessions.id AND turn_activity.recency = 1";
 
 fn parse_uuid(s: &str) -> rusqlite::Result<Uuid> {
