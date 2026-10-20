@@ -437,6 +437,9 @@ All notable changes to Swage are documented in this file.
 - Settings save feedback is quiet and transient, and says that saved changes, including Sandbox, apply to new turns.
 - Automation settings name every input for assistive technology, with visible labels for context, approval and permission fields and seconds stated for both timeouts.
 - Settings refuses context assembly names absent from every known global, topic and agent hierarchy, naming the unknown assembly before saving.
+- Long sessions no longer fail ordinary file and shell calls with "missing required field" after the model copies earlier tool calls from its history.
+- Interrupted sandbox IPC reads retain partial frames, so the next call can complete the frame without corrupting the connection.
+- Sandboxed shell commands honour `shell_timeout_secs` even after closing their output streams, report that limit when they time out, and leave later calls receiving their own replies.
 
 ## 0.2.0 — 2026-08-13
 
