@@ -441,15 +441,6 @@ pub(super) async fn process_turn_with_composition_and_focus(
         }
     };
     let assembly_name = context_choices.assembly_name;
-    let memory_index = if session_carries_memory(&session) {
-        Some(
-            crate::memory::load_memory_index(swage_root, &scope)
-                .await
-                .into_element(),
-        )
-    } else {
-        None
-    };
     let mut session_variables: std::collections::BTreeMap<String, String> =
         record_failed_turn_and_release_on_error(
             state,
@@ -496,6 +487,55 @@ pub(super) async fn process_turn_with_composition_and_focus(
         worker_placement,
     );
 
+    // The agent's configuration is settled before context is assembled: the
+    // standing text (orientation, memory) asks which tools this turn will offer.
+    let session_approval_grants = state
+        .session_approval_grants
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    append_approved_location_paths(
+        &mut allowed_paths,
+        &session_approval_grants,
+        topic_id,
+        session_id,
+        session.metadata.as_ref(),
+    );
+    let mut agent_config = build_agent_config_with_workspace(
+        session.agent_id.clone(),
+        &config,
+        output_schema_override,
+        &tool_root.path,
+        allowed_paths,
+    );
+    let output_directory = managed_scratch_workspace(&state.config_root, &scope, session.id);
+    agent_config.tool_output_directory = Some(output_directory);
+    if !task_defines_output_retries && let Some(max_retries) = max_output_retries_override {
+        agent_config.max_output_retries = max_retries;
+    }
+    agent_config.approval_prompts_enabled = attendance == TurnAttendance::Attended;
+    let offered_tools = dispatcher::turn_offered_tools(
+        state,
+        &config,
+        &agent_config,
+        session.metadata.as_ref(),
+        Some(topic_id),
+        Some(session_id),
+        &session_approval_grants,
+    )
+    .await;
+    let memory_index = if session_carries_memory(&session) {
+        Some(
+            crate::memory::load_memory_index(swage_root, &scope)
+                .await
+                .into_element(swage_context::memory::MemoryReach::with_read_tool(
+                    offered_tools.contains(crate::tool::memory::MEMORY_READ_TOOL),
+                )),
+        )
+    } else {
+        None
+    };
+
     let environment = build_session_environment(&topic, &tool_root, &session, &workspace_policy);
     let available_skills = available_skills_for_agent(&scope, &session.agent_id, Some(swage_root));
 
@@ -511,6 +551,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
         memory_index,
         environment,
         available_skills,
+        offered_tools,
         config.default_model_id(),
         context_choices.working_norms_scaffold,
         &hierarchy,
@@ -585,31 +626,6 @@ pub(super) async fn process_turn_with_composition_and_focus(
             effective_model_source,
         );
     }
-    let session_approval_grants = state
-        .session_approval_grants
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    append_approved_location_paths(
-        &mut allowed_paths,
-        &session_approval_grants,
-        topic_id,
-        session_id,
-        session.metadata.as_ref(),
-    );
-    let mut agent_config = build_agent_config_with_workspace(
-        session.agent_id.clone(),
-        &config,
-        output_schema_override,
-        &tool_root.path,
-        allowed_paths,
-    );
-    let output_directory = managed_scratch_workspace(&state.config_root, &scope, session.id);
-    agent_config.tool_output_directory = Some(output_directory);
-    if !task_defines_output_retries && let Some(max_retries) = max_output_retries_override {
-        agent_config.max_output_retries = max_retries;
-    }
-    agent_config.approval_prompts_enabled = attendance == TurnAttendance::Attended;
 
     // Step 9: Resolve tool permissions from config cascade and build the
     // ToolDispatcher with the resolved permission set. When sandboxing is

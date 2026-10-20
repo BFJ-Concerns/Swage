@@ -6,8 +6,12 @@
 //! Operator instructions layer after it by priority and extend the baseline
 //! rather than replacing it.
 //!
-//! The identity text is instruction text: it steers every session on the
-//! platform, so edits to it are drafting-tier work, not routine maintenance.
+//! The identity text and the tool preferences are instruction text: they
+//! steer every session on the platform, so edits to them are drafting-tier
+//! work, not routine maintenance. A preference names a tool, so it is stated
+//! only on a turn that offers that tool.
+
+use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
 use swage_core::{ChatMessage, Role};
@@ -94,19 +98,54 @@ calls pause for approval before running — the platform is asking your \
 operator, not reporting an error: wait for the outcome rather than \
 retrying, and continue with the approved result or work around a \
 rejection. File paths in tool calls resolve against your working \
-directory unless a tool says otherwise.
+directory unless a tool says otherwise.";
 
-Where tools overlap, prefer the specific one. Your operator's memory — what \
-they have stated about themselves and about this topic — arrives as a \
-profile and an index in this context; read an entry with `memory_read` \
-when its summary bears on the conversation, and remember nothing yourself: \
-the platform's curator records what the operator states. \
-Use `web_search` to find web sources and `url_fetch` to read a \
-URL you already have; reusable work surfaces are found with \
-`surface_library`, never on the web. Use `workflow_run` for a saved, journalled multi-step \
-job and `delegate` for a one-off child task. Prefer your native \
-file and shell tools over `python_execute` unless the task is genuinely \
-computation.";
+/// A preference between overlapping tools. It is stated only on a turn that
+/// offers the tool it names, so a session without the tool is never told to
+/// use it.
+struct ToolPreference {
+    /// The tool's wire name, as the request's tool list carries it.
+    tool: &'static str,
+    sentence: &'static str,
+}
+
+const PREFERENCES_OPENING: &str = "Where tools overlap, prefer the specific one.";
+
+/// The preferences in reading order, one tool each. The gateway holds every
+/// name here to a registered tool, so a renamed tool fails that test rather
+/// than silently losing its sentence.
+const TOOL_PREFERENCES: &[ToolPreference] = &[
+    ToolPreference {
+        tool: "web_search",
+        sentence: "Use `web_search` to find web sources.",
+    },
+    ToolPreference {
+        tool: "url_fetch",
+        sentence: "Use `url_fetch` to read a URL you already have.",
+    },
+    ToolPreference {
+        tool: "surface_library",
+        sentence: "Reusable work surfaces are found with `surface_library`, never on the web.",
+    },
+    ToolPreference {
+        tool: "workflow_run",
+        sentence: "Use `workflow_run` for a saved, journalled multi-step job.",
+    },
+    ToolPreference {
+        tool: "delegate",
+        sentence: "Use `delegate` for a one-off child task.",
+    },
+    ToolPreference {
+        tool: "python_execute",
+        sentence: "Prefer your native file and shell tools over `python_execute` unless the task is \
+genuinely computation.",
+    },
+];
+
+/// The wire names the tool preferences depend on.
+pub fn tools_named_in_preferences() -> impl Iterator<Item = &'static str> {
+    TOOL_PREFERENCES.iter().map(|preference| preference.tool)
+}
 
 /// The context element carrying baseline orientation.
 ///
@@ -117,18 +156,35 @@ computation.";
 pub struct OrientationElement {
     environment: SessionEnvironment,
     available_skills: Vec<AvailableSkill>,
+    /// The tools this turn offers the model, by wire name — the request's
+    /// own tool list, so a preference never names a tool the model lacks.
+    offered_tools: BTreeSet<String>,
 }
 
 impl OrientationElement {
-    pub fn new(environment: SessionEnvironment, available_skills: Vec<AvailableSkill>) -> Self {
+    pub fn new(
+        environment: SessionEnvironment,
+        available_skills: Vec<AvailableSkill>,
+        offered_tools: BTreeSet<String>,
+    ) -> Self {
         Self {
             environment,
             available_skills,
+            offered_tools,
         }
     }
 
     fn render(&self) -> String {
         let mut blocks = vec![IDENTITY.to_string()];
+
+        let mut preferences = vec![PREFERENCES_OPENING];
+        preferences.extend(
+            TOOL_PREFERENCES
+                .iter()
+                .filter(|preference| self.offered_tools.contains(preference.tool))
+                .map(|preference| preference.sentence),
+        );
+        blocks.push(preferences.join(" "));
 
         let mut place = String::from("## Where you are\n");
         if self.environment.topic_name.is_empty() {
@@ -266,7 +322,7 @@ mod tests {
     /// all still produces a system message with identity and place.
     #[test]
     fn empty_configuration_still_orients() {
-        let element = OrientationElement::new(bare_environment(), vec![]);
+        let element = OrientationElement::new(bare_environment(), vec![], BTreeSet::new());
 
         let content = element.content();
         assert_eq!(content.len(), 1);
@@ -285,9 +341,35 @@ mod tests {
     /// The session is told what the record covers and that registered
     /// secret values are redacted from it — so it neither over- nor
     /// under-shares on a guess about where secrets go.
+    /// A tool preference is stated only to a session whose turn offers the
+    /// tool: a file-only turn hears of none, and a turn offering one tool
+    /// hears that one alone. Memory guidance is the memory element's.
+    #[test]
+    fn tool_preferences_follow_the_tools_the_turn_offers() {
+        let file_only = OrientationElement::new(bare_environment(), vec![], BTreeSet::new());
+        let text = file_only.content()[0].text_content();
+        assert!(text.contains("Where tools overlap, prefer the specific one."));
+        for tool in tools_named_in_preferences() {
+            assert!(
+                !text.contains(&format!("`{tool}`")),
+                "{tool} named without being offered: {text}"
+            );
+        }
+        assert!(!text.contains("memory_read"), "{text}");
+
+        let with_search = OrientationElement::new(
+            bare_environment(),
+            vec![],
+            BTreeSet::from(["web_search".to_string()]),
+        );
+        let text = with_search.content()[0].text_content();
+        assert!(text.contains("Use `web_search` to find web sources."));
+        assert!(!text.contains("`url_fetch`"), "{text}");
+    }
+
     #[test]
     fn identity_states_record_coverage_and_secret_redaction() {
-        let element = OrientationElement::new(bare_environment(), vec![]);
+        let element = OrientationElement::new(bare_environment(), vec![], BTreeSet::new());
         let text = element.content()[0].text_content();
         assert!(text.contains("your turns, your tool calls and their results"));
         assert!(text.contains("how this context was assembled"));
@@ -297,7 +379,7 @@ mod tests {
 
     #[test]
     fn report_preview_is_a_static_excerpt_not_session_environment() {
-        let element = OrientationElement::new(bare_environment(), vec![]);
+        let element = OrientationElement::new(bare_environment(), vec![], BTreeSet::new());
         let content = element.content()[0].text_content();
         let preview = element.report_preview().expect("built-in preview");
         let opening_sentence = built_in_first_sentence_preview(&content);
@@ -309,14 +391,14 @@ mod tests {
 
     #[test]
     fn priority_places_orientation_before_operator_prompts() {
-        let element = OrientationElement::new(bare_environment(), vec![]);
+        let element = OrientationElement::new(bare_environment(), vec![], BTreeSet::new());
         // PromptsElement sits at 100; the baseline must sort ahead of it.
         assert!(element.priority() > 100);
     }
 
     #[test]
     fn channel_block_renders_only_for_channel_sessions() {
-        let plain = OrientationElement::new(bare_environment(), vec![]);
+        let plain = OrientationElement::new(bare_environment(), vec![], BTreeSet::new());
         assert!(!plain.content()[0].text_content().contains("speaking with"));
 
         let mut environment = bare_environment();
@@ -326,7 +408,7 @@ mod tests {
                           short and use no markdown tables."
                 .into(),
         });
-        let with_channel = OrientationElement::new(environment, vec![]);
+        let with_channel = OrientationElement::new(environment, vec![], BTreeSet::new());
         let text = with_channel.content()[0].text_content();
         assert!(text.contains("speaking with your operator over Telegram"));
         assert!(text.contains("plain text messages"));
@@ -340,6 +422,7 @@ mod tests {
                 name: "release-notes".into(),
                 trigger: "drafting release notes for a tagged build".into(),
             }],
+            BTreeSet::new(),
         );
 
         let text = element.content()[0].text_content();
@@ -354,6 +437,7 @@ mod tests {
                 name: "commission".into(),
                 trigger: "shape project intent".into(),
             }],
+            BTreeSet::new(),
         );
 
         let text = element.content()[0].text_content();
@@ -368,7 +452,7 @@ mod tests {
         environment.topic_description = "material science digging".into();
         environment.tool_root = ToolRoot::WorkingDirectory("/data/projects/alloys".into());
 
-        let element = OrientationElement::new(environment, vec![]);
+        let element = OrientationElement::new(environment, vec![], BTreeSet::new());
         let text = element.content()[0].text_content();
         assert!(text.contains("Topic: research — material science digging"));
         assert!(text.contains("Working directory: /data/projects/alloys"));
@@ -382,7 +466,8 @@ mod tests {
         environment.tool_root =
             ToolRoot::ManagedScratch("/scratch/topics/research/sessions/42".into());
 
-        let text = OrientationElement::new(environment, vec![]).content()[0].text_content();
+        let text = OrientationElement::new(environment, vec![], BTreeSet::new()).content()[0]
+            .text_content();
         assert!(text.contains("Topic: research"));
         assert!(text.contains("No workspace is attached."));
         assert!(text.contains("Tool paths resolve at /scratch/topics/research/sessions/42"));
@@ -401,7 +486,8 @@ mod tests {
             is_trusted: true,
         }];
 
-        let text = OrientationElement::new(environment, vec![]).content()[0].text_content();
+        let text = OrientationElement::new(environment, vec![], BTreeSet::new()).content()[0]
+            .text_content();
         assert!(!text.contains("No workspace is attached"), "{text}");
         assert!(
             text.contains("Tool paths resolve at /scratch/topics/research/sessions/42"),
@@ -415,7 +501,7 @@ mod tests {
 
     #[test]
     fn source_names_function_not_mechanism() {
-        let element = OrientationElement::new(bare_environment(), vec![]);
+        let element = OrientationElement::new(bare_environment(), vec![], BTreeSet::new());
         assert_eq!(element.source(), "built-in identity");
     }
     #[test]
@@ -433,7 +519,8 @@ mod tests {
                 is_trusted: true,
             },
         ];
-        let text = OrientationElement::new(environment, vec![]).content()[0].text_content();
+        let text = OrientationElement::new(environment, vec![], BTreeSet::new()).content()[0]
+            .text_content();
         assert!(
             text.contains("Workspace: /projects/source — writable, trusted"),
             "{text}"
@@ -451,7 +538,11 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         let elements: Vec<Box<dyn ContextElement>> = vec![
-            Box::new(OrientationElement::new(environment, vec![])),
+            Box::new(OrientationElement::new(
+                environment,
+                vec![],
+                BTreeSet::new(),
+            )),
             Box::new(crate::current_time::CurrentTimeElement::new(now)),
         ];
         let output = crate::assembly::assemble(

@@ -1835,6 +1835,7 @@ async fn execute_external_delegate_message(
             silent_ws_tx,
             crate::turn::effective_tool_permissions_record(&effective_target_resolved),
             composition,
+            dispatcher_build.dispatcher.offered_tools(),
         ),
         snapshot_recorder: Some(crate::turn::delegation_snapshot_recorder_for_state(
             state.clone(),

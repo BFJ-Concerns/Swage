@@ -391,8 +391,11 @@ pub async fn load_memory_index(root: &Path, session_scope: &ScopeLocation) -> Me
 
 impl MemoryIndex {
     /// The element the assembly carries: the same lines, spelled for the
-    /// model.
-    pub fn into_element(self) -> swage_context::memory::MemoryIndexElement {
+    /// model, with the reach the turn's tools give it.
+    pub fn into_element(
+        self,
+        reach: swage_context::memory::MemoryReach,
+    ) -> swage_context::memory::MemoryIndexElement {
         swage_context::memory::MemoryIndexElement::new(
             self.profile,
             self.lines
@@ -402,6 +405,7 @@ impl MemoryIndex {
                     summary: line.summary,
                 })
                 .collect(),
+            reach,
         )
     }
 }

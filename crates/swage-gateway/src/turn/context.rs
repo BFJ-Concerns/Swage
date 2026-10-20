@@ -18,8 +18,10 @@ use swage_config::RESERVED_WORKFLOW_AGENT_ID;
 /// Build the context assembly elements for a turn.
 ///
 /// Constructs typed elements from the resolved turn inputs:
-/// - `OrientationElement` — baseline identity, place, and capability; always
-///   produces content, so an empty configuration still orients the session
+/// - `OrientationElement` — baseline identity, place, and capability, its tool
+///   preferences following `offered_tools`, the tools the turn offers the
+///   model; always produces content, so an empty configuration still orients
+///   the session
 /// - `PromptsElement` — from the merged instruction string, followed by the
 ///   operator-guidance rules (the standard agent-guidance files, resolved by
 ///   `operator_guidance_rules` from the config root and trusted workspaces)
@@ -44,13 +46,18 @@ pub(crate) fn build_assembly_elements(
     memory: Option<MemoryIndexElement>,
     environment: SessionEnvironment,
     available_skills: Vec<AvailableSkill>,
+    offered_tools: std::collections::BTreeSet<String>,
     model_id: &str,
     working_norms_scaffold: WorkingNormsScaffold,
     hierarchy: &[(HierarchyLevel, PathBuf)],
     requested_elements: Option<&[String]>,
 ) -> Vec<Box<dyn ContextElement>> {
     let mut elements: Vec<Box<dyn ContextElement>> = vec![
-        Box::new(OrientationElement::new(environment, available_skills)),
+        Box::new(OrientationElement::new(
+            environment,
+            available_skills,
+            offered_tools,
+        )),
         Box::new(swage_context::current_time::CurrentTimeElement::new(
             chrono::Utc::now(),
         )),

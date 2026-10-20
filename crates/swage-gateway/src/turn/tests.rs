@@ -8782,6 +8782,350 @@ pub(crate) async fn make_state_with_capturing_tools(
     (state, session_id, captured)
 }
 
+/// A state registering file tools and `memory_read`, filtered by the chosen
+/// allow and deny lists, with the given session metadata and origin. The
+/// provider captures its one request.
+async fn make_state_offering_memory_read(
+    allow: &[&str],
+    deny: &[&str],
+    session_metadata: Option<serde_json::Value>,
+    origin: Option<swage_storage::SessionOrigin>,
+) -> (
+    AppState,
+    Uuid,
+    Arc<std::sync::Mutex<Option<CompletionRequest>>>,
+) {
+    let storage = Arc::new(MockStorage::new());
+    let topic = storage.general_scope().await.expect("create default topic");
+    let session = storage
+        .create_session(NewSession {
+            metadata: session_metadata,
+            origin: origin.unwrap_or(swage_storage::SessionOrigin::Direct),
+            ..new_session(topic.id)
+        })
+        .await
+        .expect("create session");
+    let session_id = session.id;
+    ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id,
+            agent_id: "gateway".to_string(),
+        },
+    )
+    .await
+    .expect("create default thread");
+
+    let (provider, captured) = CapturingProvider::new(vec![
+        StreamChunk::Delta {
+            content: "noted".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]);
+    let mut config = swage_config::ResolvedConfig::default();
+    config.tools.permissions.allow = allow.iter().map(|tool| tool.to_string()).collect();
+    config.tools.permissions.deny = deny.iter().map(|tool| tool.to_string()).collect();
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        config,
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(crate::tool::memory::MemoryReadTool) as Arc<dyn crate::tool::Tool>,
+            Arc::new(crate::tool::file_read::FileReadTool {
+                max_output_bytes: 64 * 1024,
+            }),
+            Arc::new(crate::tool::file_list::FileListTool),
+            Arc::new(crate::tool::file_write::FileWriteTool),
+            Arc::new(crate::tool::file_edit::FileEditTool),
+        ]),
+        None,
+    );
+    (state, session_id, captured)
+}
+
+/// All system text of the one captured provider request, and whether it
+/// offered `memory_read`, so guidance in any system message is checked
+/// against the tools the model was actually given.
+fn memory_text_and_offer_of(
+    captured: &Arc<std::sync::Mutex<Option<CompletionRequest>>>,
+) -> (String, bool) {
+    let request = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the provider saw one request");
+    let offered = request
+        .tool_definitions
+        .iter()
+        .any(|definition| definition["name"] == crate::tool::memory::MEMORY_READ_TOOL);
+    let memory = request
+        .messages
+        .iter()
+        .filter(|message| message.role() == Role::System)
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    assert!(memory.contains("## Memory index"), "{memory}");
+    (memory, offered)
+}
+
+/// A scheduled turn reaches the same context assembly as a direct turn,
+/// with real entries indexed from the session's retained configuration root.
+async fn scheduled_memory_request(with_read_tool: bool) -> (String, bool) {
+    let allow = if with_read_tool {
+        vec![
+            "file_read",
+            "file_list",
+            "file_write",
+            "file_edit",
+            "memory_read",
+        ]
+    } else {
+        vec!["file_read", "file_list", "file_write", "file_edit"]
+    };
+    let (mut state, session_id, captured) = make_state_offering_memory_read(
+        &allow,
+        &[],
+        None,
+        Some(swage_storage::SessionOrigin::ScheduleRun {
+            schedule_id: Uuid::new_v4(),
+        }),
+    )
+    .await;
+    let root = tempfile::Builder::new()
+        .prefix("scheduled-memory-")
+        .tempdir_in(&state.config_root)
+        .expect("isolated memory root inside the test home");
+    state.config_root = root.path().to_path_buf();
+    crate::memory::write_entry(
+        root.path(),
+        &ScopeLocation::General,
+        &crate::memory::MemoryReference::parse("general/planning").unwrap(),
+        "The operator plans the following week on Friday.",
+        "Private entry detail beyond the summary.",
+    )
+    .await
+    .expect("populate the on-disk memory index");
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Review my weekly planning preference.".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("scheduled turn should complete");
+    {
+        let request = captured.lock().unwrap();
+        let request = request.as_ref().expect("provider received the turn");
+        let mut offered = request
+            .tool_definitions
+            .iter()
+            .map(|definition| definition["name"].as_str().expect("named tool"))
+            .collect::<Vec<_>>();
+        offered.sort_unstable();
+        let mut expected = allow;
+        expected.sort_unstable();
+        assert_eq!(offered, expected, "the scheduled request's exact tool list");
+    }
+    let (system, offered) = memory_text_and_offer_of(&captured);
+    assert!(
+        system.contains("general/planning — The operator plans the following week on Friday."),
+        "real index summary: {system}"
+    );
+    assert!(
+        !system.contains("Private entry detail beyond the summary."),
+        "entry bodies require a read: {system}"
+    );
+    println!(
+        "scheduled memory controls: populated summary present; body absent; exact tool list matches; memory_read offered={offered}"
+    );
+    (system, offered)
+}
+
+#[tokio::test]
+async fn memory_scheduled_file_only_receives_summaries_as_all_readable_memory() {
+    let (system, offered) = scheduled_memory_request(false).await;
+    assert!(!offered);
+    assert!(
+        !system.contains("memory_read"),
+        "no system message may direct an unavailable memory read: {system}"
+    );
+    assert!(
+        system.contains("the summaries are all of memory you can read"),
+        "summary-only guidance: {system}"
+    );
+}
+
+#[tokio::test]
+async fn memory_scheduled_with_read_tool_receives_entry_read_guidance() {
+    let (system, offered) = scheduled_memory_request(true).await;
+    assert!(offered);
+    assert!(
+        system.contains("read the entry with `memory_read`"),
+        "entry-read guidance: {system}"
+    );
+}
+
+/// The memory text names `memory_read` only in a session whose tools offer
+/// it: a file-only agent is told the index is all it can read, while a
+/// session with the tool is told to read an entry by its reference.
+#[tokio::test]
+async fn memory_guidance_names_the_read_tool_only_when_the_session_has_it() {
+    for (allow, deny, offered) in [
+        (&["file_read"][..], &[][..], false),
+        (&["*"][..], &["memory_read"][..], false),
+        (&["*"][..], &[][..], true),
+    ] {
+        let (state, session_id, captured) =
+            make_state_offering_memory_read(allow, deny, None, None).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "Hello".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete");
+
+        let (memory, offered_to_model) = memory_text_and_offer_of(&captured);
+        assert_eq!(
+            offered_to_model, offered,
+            "allow {allow:?} deny {deny:?}: the request's tool list"
+        );
+        assert_eq!(
+            memory.contains("`memory_read`"),
+            offered_to_model,
+            "allow {allow:?} deny {deny:?}: {memory}"
+        );
+        if !offered {
+            assert!(
+                memory.contains("the summaries are all of memory you can read"),
+                "a session without the tool is told what it can read: {memory}"
+            );
+        }
+    }
+}
+
+/// A session hosted on a remote device is offered only the tools the device
+/// advertises, so a granted `memory_read` the device does not carry is
+/// withheld from the text as the dispatcher withholds it from the model.
+#[tokio::test]
+async fn memory_guidance_follows_the_device_hosts_advertised_tools() {
+    let (state, session_id, captured) = make_state_offering_memory_read(
+        &["*"],
+        &[],
+        Some(serde_json::json!({ "device_id": "bench" })),
+        None,
+    )
+    .await;
+    state.devices.lock().await.devices.insert(
+        "bench".into(),
+        crate::device::RegisteredDevice {
+            device_id: "bench".into(),
+            label: None,
+            kind: crate::device::DeviceKind::AttachedDevice,
+            shared_token_secret_ref: Some("secret://bench".into()),
+            workspace_root: std::path::PathBuf::from("/"),
+            workspace_roots: vec![std::path::PathBuf::from("/")],
+            capabilities: vec!["shell".into(), "file_read".into()],
+            registered_at: chrono::Utc::now(),
+        },
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Hello".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("turn should complete");
+
+    let (memory, offered_to_model) = memory_text_and_offer_of(&captured);
+    assert!(
+        !offered_to_model,
+        "the device host withholds memory_read from the request's tool list"
+    );
+    assert!(
+        !memory.contains("`memory_read`"),
+        "a tool the device does not advertise is not named: {memory}"
+    );
+    assert!(memory.contains("the summaries are all of memory you can read"));
+}
+
+/// The offering answer follows the runtime that will run the turn: a granted
+/// tool that still needs approval is offered by the agent runtime, which
+/// pauses for the approval, and withheld by the Codex runtime until a grant
+/// lifts the gate.
+#[tokio::test]
+async fn an_approval_gated_tool_is_offered_only_where_the_runtime_offers_it() {
+    use crate::tool::memory::MEMORY_READ_TOOL;
+    use crate::turn::dispatcher::turn_offered_tools;
+
+    let (state, _session_id, _captured) =
+        make_state_offering_memory_read(&["*"], &[], None, None).await;
+    let agent_config = swage_agent::AgentConfig::new("gateway");
+    let mut gated = swage_config::ResolvedConfig::default();
+    gated.tools.permissions.allow = vec!["*".into()];
+    gated.tools.permissions.require_approval =
+        vec![swage_config::model::RequireApprovalEntry::Simple(
+            MEMORY_READ_TOOL.into(),
+        )];
+    let no_grants = std::collections::HashSet::new();
+    assert!(
+        turn_offered_tools(&state, &gated, &agent_config, None, None, None, &no_grants,)
+            .await
+            .contains(MEMORY_READ_TOOL),
+        "the agent runtime offers a gated tool and pauses for the approval"
+    );
+
+    let mut codex = codex_turn_config();
+    codex.tools.permissions = gated.tools.permissions.clone();
+    assert!(
+        !turn_offered_tools(&state, &codex, &agent_config, None, None, None, &no_grants,)
+            .await
+            .contains(MEMORY_READ_TOOL),
+        "the Codex runtime withholds a gated tool"
+    );
+
+    let session_id = Uuid::new_v4();
+    let granted = std::collections::HashSet::from([crate::state::ApprovalGrantKey {
+        session_id: Some(session_id),
+        topic_id: None,
+        kind: swage_storage::model::ApprovalKind::Tool,
+        name: MEMORY_READ_TOOL.into(),
+        access: None,
+    }]);
+    assert!(
+        turn_offered_tools(
+            &state,
+            &codex,
+            &agent_config,
+            None,
+            None,
+            Some(session_id),
+            &granted,
+        )
+        .await
+        .contains(MEMORY_READ_TOOL),
+        "a session's grant lifts the gate and the Codex runtime offers the tool"
+    );
+}
+
 pub(crate) async fn make_state_with_approval_gated_echo(
     rounds: Vec<Vec<StreamChunk>>,
 ) -> (AppState, Uuid) {
@@ -16770,9 +17114,13 @@ async fn placed_worker_orientation_keeps_its_working_directory() {
         worker_placement_path(session.metadata.as_ref()),
     );
     let environment = build_session_environment(&topic, &tool_root, &session, &policy);
-    let text = swage_context::orientation::OrientationElement::new(environment, vec![]).content()
-        [0]
-    .text_content();
+    let text = swage_context::orientation::OrientationElement::new(
+        environment,
+        vec![],
+        std::collections::BTreeSet::new(),
+    )
+    .content()[0]
+        .text_content();
     assert!(text.contains(&format!("Working directory: {}", placed.display())));
     assert!(!text.contains("No workspace is attached"));
     assert_eq!(tool_root.source, ToolRootSource::WorkerPlacement);
@@ -16999,9 +17347,14 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
         vec![],
         vec![],
         history,
-        Some(MemoryIndexElement::new(None, Vec::new())),
+        Some(MemoryIndexElement::new(
+            None,
+            Vec::new(),
+            swage_context::memory::MemoryReach::EntriesByReference,
+        )),
         test_environment(),
         vec![],
+        std::collections::BTreeSet::new(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
@@ -17038,6 +17391,7 @@ fn elements_built_without_memory_omit_the_memory_element() {
         None,
         test_environment(),
         vec![],
+        std::collections::BTreeSet::new(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
@@ -17083,7 +17437,11 @@ fn a_workflow_worker_session_does_not_carry_memory_but_every_other_does() {
 
 #[tokio::test]
 async fn named_assembly_composes_the_memory_element_like_any_other() {
-    let memory = MemoryIndexElement::new(Some("Important topic context".to_string()), Vec::new());
+    let memory = MemoryIndexElement::new(
+        Some("Important topic context".to_string()),
+        Vec::new(),
+        swage_context::memory::MemoryReach::EntriesByReference,
+    );
     let elements = build_assembly_elements(
         "Be helpful.",
         &[],
@@ -17093,6 +17451,7 @@ async fn named_assembly_composes_the_memory_element_like_any_other() {
         Some(memory),
         test_environment(),
         vec![],
+        std::collections::BTreeSet::new(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
@@ -17229,6 +17588,7 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
             assembly: Some("briefing".into()),
             skills: None,
         },
+        session_value_dispatcher.offered_tools(),
     );
 
     let output = assembler
@@ -17307,9 +17667,11 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
         Some(MemoryIndexElement::new(
             Some("Important topic context".to_string()),
             Vec::new(),
+            swage_context::memory::MemoryReach::EntriesByReference,
         )),
         test_environment(),
         vec![],
+        std::collections::BTreeSet::new(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
@@ -17613,6 +17975,7 @@ fn instruction_provenance_counts_configured_files_at_their_own_levels() {
             None,
             test_environment(),
             vec![],
+            std::collections::BTreeSet::new(),
             "gpt-test-model",
             swage_context::working_norms::WorkingNormsScaffold::Native,
             &[],
@@ -17665,6 +18028,7 @@ fn assembly_elements_layer_operator_guidance_after_instructions() {
         None,
         test_environment(),
         vec![],
+        std::collections::BTreeSet::new(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
