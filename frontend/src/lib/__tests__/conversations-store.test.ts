@@ -575,7 +575,9 @@ describe("durable local updates", () => {
     expect.soft(store.conversations.find(conversation => conversation.id === "conv-1")!.last_activity).toBe(lastActivity);
     expect.soft(store.conversations.map(conversation => conversation.id)).toEqual(["conv-2", "conv-1"]);
     expect.soft(store.activeConversation!.last_activity).toBe(lastActivity);
-    expect.soft(store.conversations).toEqual(summaries);
+    expect.soft(store.conversations).toEqual(summaries.map(summary =>
+      summary.id === "conv-1" ? { ...summary, latest_turn_state: "refused" } : summary,
+    ));
   });
 
   it("preserves the existing preview for a tool-only assistant message", async () => {
@@ -620,6 +622,44 @@ describe("durable local updates", () => {
       "conv-1",
       "conv-2",
     ]);
+  });
+
+  it("replaces the latest recorded outcome while retaining interruption history", async () => {
+    const store = createConversationStore();
+    vi.mocked(api.listConversations).mockResolvedValueOnce([makeSummary("conv-1")]);
+    await store.loadConversations("proj-1");
+    vi.mocked(api.getConversation).mockResolvedValueOnce(makeDetail("conv-1"));
+    await store.selectConversation("conv-1");
+    for (const turn_state of ["failed", "interrupted", "completed"] as const) {
+      store.appendAssistantMessage({ content: "Reply", timestamp: "2026-10-01T00:00:00Z", turn_state });
+      expect(store.conversations[0].latest_turn_state).toBe(turn_state);
+    }
+    expect(store.conversations[0].has_interrupted_turn).toBe(true);
+  });
+
+  it("updates the session summary when approval times out before assistant text", async () => {
+    const store = createConversationStore();
+    vi.mocked(api.listConversations).mockResolvedValueOnce([makeSummary("conv-1")]);
+    await store.loadConversations("proj-1");
+    vi.mocked(api.getConversation).mockResolvedValueOnce(makeDetail("conv-1"));
+    await store.selectConversation("conv-1");
+    store.appendOptimisticUserMessage({
+      content: "Use echo", timestamp: "2026-01-01T00:02:00Z",
+    });
+    expect(store.conversations[0].latest_turn_state).toBe("pending");
+    const stream = createStreamingStore({ conversationStore: store });
+
+    stream.handleServerEvent({
+      type: "error", code: "approval_timeout",
+      message: "approval timed out before tool execution; turn interrupted",
+    });
+
+    expect(store.conversations[0].latest_turn_state).toBe("interrupted");
+    expect(store.conversations[0].has_interrupted_turn).toBe(true);
+    expect(store.conversations[0].message_preview).toBe("Use echo");
+    expect(store.conversations[0].last_activity).toBe("2026-01-01T00:02:00Z");
+    expect(store.activeConversation!.messages).toHaveLength(1);
+    expect(store.activeConversation!.messages[0].turn_state).toBe("interrupted");
   });
 
   it("marks the summary as interrupted when an interrupted assistant message is appended", async () => {

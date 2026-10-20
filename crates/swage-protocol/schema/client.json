@@ -1551,6 +1551,16 @@
           "type": "string",
           "format": "date-time"
         },
+        "latest_turn_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "message_preview": {
           "type": [
             "string",
@@ -4021,6 +4031,16 @@
           "description": "When the latest user or assistant message landed — the list's order.",
           "type": "string",
           "format": "date-time"
+        },
+        "latest_turn_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnState"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "message_preview": {
           "type": [

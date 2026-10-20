@@ -377,6 +377,8 @@ pub struct SessionActivity {
     /// The latest user or assistant message's text.
     pub latest_message: Option<String>,
     pub has_interrupted_turn: bool,
+    /// The newest recorded turn across the session's threads, including live states.
+    pub latest_turn_state: Option<TurnState>,
 }
 
 /// Which sessions the recent-sessions listing returns.

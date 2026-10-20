@@ -148,6 +148,7 @@ pub struct ConversationSummary {
     pub last_activity: DateTime<Utc>,
     pub message_preview: Option<String>,
     pub has_interrupted_turn: bool,
+    pub latest_turn_state: Option<TurnState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -405,6 +406,7 @@ pub struct RecentSession {
     pub last_activity: DateTime<Utc>,
     pub message_preview: Option<String>,
     pub has_interrupted_turn: bool,
+    pub latest_turn_state: Option<TurnState>,
     /// A turn is executing on the session right now.
     pub has_running_turn: bool,
     /// Set while the inactivity sweep has the session hidden from the

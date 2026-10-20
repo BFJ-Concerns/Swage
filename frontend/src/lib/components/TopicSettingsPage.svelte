@@ -3,6 +3,7 @@
      attached workspaces (including relinking a folder that has moved), its
      default surfaces and tags, and its sessions. -->
 <script lang="ts">
+  import { sessionOutcomeLabel } from "../session-outcome";
   import { onMount } from "svelte";
   import WorkspaceAccessOptions from "./WorkspaceAccessOptions.svelte";
   import {
@@ -476,8 +477,10 @@
         <h2 class="shell-section-title">Sessions</h2>
         <div class="record-list">
           {#each sessions as session (session.id)}
+            {@const outcome = sessionOutcomeLabel(session.latest_turn_state)}
             <article class="record-row">
               <strong>{session.message_preview || "Untitled session"}</strong>
+              {#if outcome}<span title={outcome} aria-label={outcome}>⚠</span>{/if}
               <span>{session.agent_id} · {new Date(session.last_activity).toLocaleString()}</span>
               {#if onNavigate}
                 <button type="button" onclick={() => onNavigate?.(`/conversations/${encodeURIComponent(session.id)}`)}>Open</button>

@@ -76,6 +76,25 @@ describe("RecentSessions", () => {
     document.body.replaceChildren();
   });
 
+  it("labels the latest failed and interrupted responses and clears markers after recovery", async () => {
+    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValue([
+      conversationEntry(makeSession({ id: "failed", latest_turn_state: "failed" })),
+      conversationEntry(makeSession({ id: "interrupted", latest_turn_state: "interrupted" })),
+      conversationEntry(makeSession({ id: "recovered", has_interrupted_turn: true, latest_turn_state: "completed" })),
+      { source: { kind: "schedule", id: "schedule", message: "Nightly" }, last_activity: "2026-10-01T00:00:00Z",
+        automated: [makeSession({ id: "scheduled-failure", latest_turn_state: "failed", origin: { kind: "schedule_run", schedule_id: "schedule" } })] },
+    ]);
+    component = mount(RecentSessions, { target: document.body });
+    await settle();
+    expect(document.querySelectorAll('.row.source [aria-label="Last response failed"]')).toHaveLength(1);
+    expect(document.querySelectorAll('.row.source [aria-label="Interrupted"]')).toHaveLength(1);
+    const rows = document.querySelectorAll('.row.source');
+    expect(rows[2].querySelector('.interrupted')).toBeNull();
+    (rows[3] as HTMLButtonElement).click();
+    flushSync();
+    expect(document.querySelector('.row.nested [aria-label="Last response failed"]')).not.toBeNull();
+  });
+
   it("lists every scope's sessions in the order the gateway gave, automated ones nested beneath their source", async () => {
     const worker = makeSession({
       id: "worker-1",

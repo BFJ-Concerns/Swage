@@ -5,6 +5,7 @@
 <script lang="ts">
   import type { ConversationStore } from "../stores/conversations";
   import { relativeTime } from "../utils/relative-time";
+  import { sessionOutcomeLabel } from "../session-outcome";
   import { messagePreview } from "../message-preview";
 
   interface Props {
@@ -65,6 +66,7 @@
           {@const isActive = store.activeConversation?.id === conversation.id}
           {@const isPendingDelete = pendingDelete === conversation.id}
           {@const preview = messagePreview(conversation.message_preview ?? "New conversation")}
+          {@const outcome = sessionOutcomeLabel(conversation.latest_turn_state)}
 
           <li
             class="conversation-item"
@@ -80,9 +82,8 @@
                   {preview}
                 </span>
 
-                <!-- Warn when a turn was interrupted (e.g. by disconnection). -->
-                {#if conversation.has_interrupted_turn}
-                  <span class="interrupted" title="A previous response was interrupted">
+                {#if outcome}
+                  <span class="interrupted" title={outcome} aria-label={outcome}>
                     ⚠
                   </span>
                 {/if}

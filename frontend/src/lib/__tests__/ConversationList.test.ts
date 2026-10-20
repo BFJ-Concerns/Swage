@@ -60,6 +60,19 @@ describe("ConversationList", () => {
     }
   });
 
+  it("labels failed and interrupted latest responses without marking recovered conversations", () => {
+    const store = makeStore([
+      makeConversationSummary({ id: "failed", latest_turn_state: "failed" }),
+      makeConversationSummary({ id: "interrupted", latest_turn_state: "interrupted" }),
+      makeConversationSummary({ id: "recovered", latest_turn_state: "completed", has_interrupted_turn: true }),
+    ]);
+    component = mount(ConversationList, { target: document.body, props: { store } });
+    flushSync();
+    expect(document.querySelector('[aria-label="Last response failed"]')).not.toBeNull();
+    expect(document.querySelector('[aria-label="Interrupted"]')).not.toBeNull();
+    expect(document.querySelectorAll('.conversation-item')[2].querySelector('.interrupted')).toBeNull();
+  });
+
   // --- Empty state ---
 
   it("shows empty state message when there are no conversations", () => {
@@ -138,22 +151,6 @@ describe("ConversationList", () => {
   });
 
   // --- Interrupted turn indicator ---
-
-  it("shows an interrupted turn indicator when has_interrupted_turn is true", () => {
-    const store = makeStore([
-      makeConversationSummary({ has_interrupted_turn: true }),
-    ]);
-    component = mount(ConversationList, {
-      target: document.body,
-      props: { store },
-    });
-
-    const entry = document.querySelector(".conversation-item");
-    const hasIndicator =
-      entry!.querySelector(".interrupted") !== null ||
-      entry!.classList.contains("interrupted");
-    expect(hasIndicator).toBe(true);
-  });
 
   it("does not show the interrupted indicator for normal conversations", () => {
     const store = makeStore([

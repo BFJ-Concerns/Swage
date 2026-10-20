@@ -77,6 +77,19 @@ describe("TopicSettingsPage", () => {
     vi.clearAllMocks();
   });
 
+  it("labels latest failures and interruptions in topic sessions and leaves recovery unmarked", async () => {
+    vi.mocked(topicsApi.listTopicSessions).mockResolvedValue([
+      { id: "failed", agent_id: "gateway", created_at: "2026-10-01T00:00:00Z", last_activity: "2026-10-01T00:00:00Z", message_preview: "Failed reply", has_interrupted_turn: false, latest_turn_state: "failed" },
+      { id: "interrupted", agent_id: "gateway", created_at: "2026-10-01T00:00:00Z", last_activity: "2026-10-01T00:00:00Z", message_preview: "Interrupted reply", has_interrupted_turn: true, latest_turn_state: "interrupted" },
+      { id: "recovered", agent_id: "gateway", created_at: "2026-10-01T00:00:00Z", last_activity: "2026-10-01T00:00:00Z", message_preview: "Recovered reply", has_interrupted_turn: true, latest_turn_state: "completed" },
+    ]);
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "sessions" } });
+    await flushUi();
+    expect(document.querySelector('[aria-label="Last response failed"]')).not.toBeNull();
+    expect(document.querySelector('[aria-label="Interrupted"]')).not.toBeNull();
+    expect(document.querySelectorAll('.record-row')[2].querySelector('[aria-label]')).toBeNull();
+  });
+
   it("waits for the workspace load before showing an empty list", async () => {
     let finish!: (value: Awaited<ReturnType<typeof topicsApi.listTopicWorkspaces>>) => void;
     vi.mocked(topicsApi.listTopicWorkspaces).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));

@@ -15,6 +15,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listRecentSessions } from "../api/sessions";
+  import { sessionOutcomeLabel } from "../session-outcome";
   import { messagePreview } from "../message-preview";
   import { relativeTime } from "../utils/relative-time";
   import type { RecentSession } from "../protocol/RecentSession";
@@ -215,6 +216,7 @@
     <ul class="entries">
       {#each entries as entry (entryKey(entry))}
         {@const session = sourceSession(entry)}
+        {@const outcome = sessionOutcomeLabel(session?.latest_turn_state)}
         <li class="entry" class:archived={session?.archived_at != null}>
           <button
             type="button"
@@ -230,7 +232,7 @@
               {#if session}
                 {session.topic_name}
                 {#if session.has_running_turn}<span class="running">running</span>{/if}
-                {#if session.has_interrupted_turn}<span class="interrupted" title="A previous response was interrupted">⚠</span>{/if}
+                {#if outcome}<span class="interrupted" title={outcome} aria-label={outcome}>⚠</span>{/if}
               {:else if entry.source.kind === "schedule"}
                 schedule
               {:else}
@@ -255,11 +257,13 @@
           {#if entry.automated.length > 0 && isExpanded(entry)}
             <ul class="automated" aria-label="Automated sessions">
               {#each entry.automated as automated (automated.id)}
+                {@const outcome = sessionOutcomeLabel(automated.latest_turn_state)}
                 <li>
                   <button type="button" class="row nested" onclick={() => onSelectSession?.(automated.id)}>
                     <span class="preview">{messagePreview(automated.message_preview ?? originLabel(automated))}</span>
                     <span class="meta">
                       {originLabel(automated)} · {automated.agent_id}
+                      {#if outcome}<span class="interrupted" title={outcome} aria-label={outcome}>⚠</span>{/if}
                       {#if automated.has_running_turn}<span class="running">running</span>{/if}
                     </span>
                     <span class="timestamp">{relativeTime(automated.last_activity)}</span>
