@@ -649,7 +649,10 @@ fn source_tracker_tag_locations(contents: &str, syntax: SourceSyntax) -> Vec<(us
                         index += 4;
                         continue;
                     }
-                    if bytes[index] == b'<' {
+                    let tag_name = tail.strip_prefix(b"</").or_else(|| tail.strip_prefix(b"<"));
+                    if tag_name.and_then(|name| name.first()).is_some_and(|byte| {
+                        byte.is_ascii_alphabetic() || matches!(byte, b'_' | b':')
+                    }) {
                         let script = tail.strip_prefix(b"<script").is_some_and(tag_name_ends);
                         region = Region::MarkupTag {
                             script,
@@ -2295,6 +2298,13 @@ mod tests {
         assert_eq!(
             super::source_tracker_tag_locations(
                 "<p>It's ready</p>\n<!-- [a1b2] seeded -->",
+                super::SourceSyntax::Svelte
+            ),
+            vec![(2, 6)]
+        );
+        assert_eq!(
+            super::source_tracker_tag_locations(
+                "<p>1 < 2 and it's ready</p>\n<!-- [a1b2] seeded -->",
                 super::SourceSyntax::Svelte
             ),
             vec![(2, 6)]
