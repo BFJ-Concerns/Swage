@@ -1,14 +1,39 @@
 use std::{env, fs, process::Command};
 
+struct TestRepository(std::path::PathBuf);
+
+impl TestRepository {
+    fn new(name: &str) -> Self {
+        let root = env::var_os("SWAGE_TEST_SCRATCH_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(env::temp_dir)
+            .join(format!(
+                "tracker-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        fs::create_dir(&root).unwrap();
+        Self(root)
+    }
+}
+
+impl Drop for TestRepository {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
 #[test]
 fn tracker_tags_ignore_deleted_tracked_files() {
-    let root =
-        std::path::PathBuf::from(env::var_os("SWAGE_HOME").unwrap()).join("deleted-repository");
-    fs::create_dir(&root).unwrap();
+    let repository = TestRepository::new("deleted");
+    let root = &repository.0;
     assert!(
         Command::new("git")
             .arg("init")
-            .arg(&root)
+            .arg(root)
             .status()
             .unwrap()
             .success()
@@ -16,7 +41,7 @@ fn tracker_tags_ignore_deleted_tracked_files() {
     fs::write(root.join("tracked.rs"), "// useful explanation\n").unwrap();
     assert!(
         Command::new("git")
-            .current_dir(&root)
+            .current_dir(root)
             .args(["add", "tracked.rs"])
             .status()
             .unwrap()
@@ -24,7 +49,7 @@ fn tracker_tags_ignore_deleted_tracked_files() {
     );
     fs::remove_file(root.join("tracked.rs")).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
-        .current_dir(&root)
+        .current_dir(root)
         .arg("check-tracker-tags")
         .output()
         .unwrap();
@@ -33,18 +58,16 @@ fn tracker_tags_ignore_deleted_tracked_files() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn tracker_tags_ignore_developer_local_files() {
-    let root =
-        std::path::PathBuf::from(env::var_os("SWAGE_HOME").unwrap()).join("tracker-repository");
-    fs::create_dir(&root).unwrap();
+    let repository = TestRepository::new("tracker");
+    let root = &repository.0;
     assert!(
         Command::new("git")
             .arg("init")
-            .arg(&root)
+            .arg(root)
             .status()
             .unwrap()
             .success()
@@ -53,7 +76,7 @@ fn tracker_tags_ignore_developer_local_files() {
     fs::write(root.join("tracked.rs"), "// useful explanation\n").unwrap();
     assert!(
         Command::new("git")
-            .current_dir(&root)
+            .current_dir(root)
             .args(["add", ".gitignore", "tracked.rs"])
             .status()
             .unwrap()
@@ -66,7 +89,7 @@ fn tracker_tags_ignore_developer_local_files() {
     }
     let scan = || {
         Command::new(env!("CARGO_BIN_EXE_xtask"))
-            .current_dir(&root)
+            .current_dir(root)
             .arg("check-tracker-tags")
             .output()
             .unwrap()
@@ -86,5 +109,4 @@ fn tracker_tags_ignore_developer_local_files() {
     let output = scan();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("tracked.rs:1:4"));
-    fs::remove_dir_all(root).unwrap();
 }
