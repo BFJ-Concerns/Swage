@@ -34,7 +34,7 @@ describe("OperatorHistoryPane", () => {
     component = mount(OperatorHistoryPane, { target: document.body });
     await vi.waitFor(() => expect(document.querySelectorAll(".audit-entry")).toHaveLength(4));
     for (const kind of kinds) expect(document.querySelector(".audit-record")?.textContent).toContain(kind);
-    expect(document.querySelector(".history-pane h2")?.textContent).toBe("Recorded activity");
+    expect(document.querySelector(".history-pane h2")?.textContent).toBe("Audit events and saved turn context");
   });
 
   it("reads the audit record by the filters the operator sets and pages older events", async () => {

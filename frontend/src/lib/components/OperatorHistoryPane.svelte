@@ -127,7 +127,7 @@
 <aside class="history-pane" aria-label="Operator history">
   <header>
     <p class="eyebrow">Recorded history</p>
-    <h2>Recorded activity</h2>
+    <h2>Audit events and saved turn context</h2>
     <p>Read-only records from the local audit trail and saved turn context.</p>
   </header>
 
