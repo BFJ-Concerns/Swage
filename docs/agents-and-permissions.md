@@ -1,5 +1,5 @@
 ---
-description: How Swage defines agents (including creating them through the API), reads operator guidance from AGENTS.md, resolves tool permissions, enforces approval, isolates tool execution, handles delegated grant inheritance, resolves effort per model, configures context assembly and compaction, controls experimentation and variant selection, handles wall-triggered succession, and configures voice transcription and synthesis
+description: How Swage defines agents (including conversational authoring and the API), reads operator guidance from AGENTS.md, resolves tool permissions, enforces approval, isolates tool execution, handles delegated grant inheritance, resolves effort per model, configures context assembly and compaction, controls experimentation and variant selection, handles wall-triggered succession, and configures voice transcription and synthesis
 ---
 
 # Agents and permissions
@@ -11,8 +11,8 @@ approval for configured tool calls.
 
 ## Agent definitions
 
-An agent definition is a durable record stored in the database that gives a
-session its character — its instructions, model preference, tool permissions,
+An agent definition is a reusable configuration that gives a session its
+character — its instructions, model preference, tool permissions,
 skills, and optional output schema. Each definition carries a stable `id`
 that sessions reference.
 
@@ -28,9 +28,6 @@ overlays the agent definition on top. The overlay:
 
 - **Instructions** are appended after operator instructions, preserving the
   operator's ambient guidance while letting the definition extend it.
-- **Model preference** takes effect only when the named model id exists in
-  the configured model entries — an unconfigured model is logged as a warning
-  and ignored, so the session falls back to the resolved default.
 - **Tool permissions** are intersected with the config's grants. This can
   only narrow what the config allows, never widen it: the effective allow set
   is the intersection of both sides, and denies from either side stand.
@@ -44,6 +41,58 @@ permission set.
 ### Creating and editing definitions
 
 Definitions can be created and edited through two surfaces.
+
+**In conversation.** Ask an agent to create a named agent you can choose for
+future sessions. For example:
+
+> Create a global agent called Reader, id reader, that searches and reads
+> files without changing them. Give it standing instructions to avoid
+> modifications and allow only file_read, file_list and file_search.
+
+To edit it, ask: “Change Reader's instructions to cite file paths in answers,
+keeping its other settings.” The agent can list definitions to find the id
+behind a display name. Creating refuses an id that already exists at that
+scope; editing changes only the fields supplied and refuses a missing
+definition. Supplied instructions replace the whole text, so a revision
+must retain any instructions you want to keep. Optional fields can be
+cleared; the name, description and instructions cannot be cleared with
+`null`.
+
+The agent needs the `agent_definition` tool. Its shipped bundle,
+`definition-authoring`, also includes `task_definition` for delegated work
+contracts. In **Settings → Automation**, add `definition-authoring` to
+**Tool allow rules** if you use restricted rules; the default `*` already
+allows it. If you have overridden the shipped bundle mapping, **Tool bundles**
+must map `definition-authoring` to `["agent_definition", "task_definition"]`.
+Denies and narrower agent or delegation grants still apply. An agent that
+lacks this tool cannot grant itself access.
+
+Definitions are global by default. Ask for a topic-specific definition to
+limit it to the conversation's topic; the tool cannot target another topic.
+In a conversation without a topic, this option limits it to the general
+scope. A topic-specific definition hides a global definition with the same id
+there. Say which scope you mean when editing or deleting one. Deleting is
+permanent, though the definition can be recreated.
+
+Tool permissions can only narrow what the configuration grants. The shipped
+**Swage default** and **Memory curator** cannot be changed or deleted through
+this tool. Invalid ids, blank display names, empty or duplicate skill names,
+malformed permission overlays and invalid output schemas are refused.
+Ids use lowercase ASCII letters, digits and hyphens. A model preference
+outside the configured catalogue is refused with the available ids; choose
+the model when starting a session.
+Approval requirements belong in configuration files, not in a definition.
+
+After creating or editing, reload the page. Open **Settings → Agents** to
+read the definition's instructions, model preference, tool permissions,
+skills and output contract. Its name is also available under **Agent** in
+the new-session picker for the scope where it is visible. Creating a
+definition does not switch the conversation you are in to that agent.
+
+Every creation, edit and deletion records the whole definition before and
+afterwards. In the operator view, choose **View history** and find
+**Configuration changes**. Expand **Whole prior and new state** to see
+**Prior state** and **New state**.
 
 **Through the API.** `POST /api/operator/agent-definitions` creates a
 definition; `PUT /api/operator/agent-definitions/{agent_id}` replaces one.
@@ -73,9 +122,6 @@ An explicit `require_approval` field is refused before saving, including
 an empty list. Set approval requirements in the config files.
 Optional fields not shown above include `model_id`, `skills`,
 `output_schema`, and `output_max_retries`.
-
-Conversational authoring of agent definitions is not yet available. The
-API routes above are the supported surface.
 
 ## Effort
 
@@ -165,17 +211,16 @@ does not yet render it.
 
 ## What agents are available
 
-A fresh installation's agent registry holds one entry: the shipped default
-agent (`"gateway"`, display name **Swage default**). No other agent
-definitions ship with the gateway — a shipped workflow's internal roles (the
-research sweep's researcher, organiser, and synthesist) are bare dispatches
-inside the workflow script, not standalone definitions.
+A fresh installation includes **Swage default** (`gateway`) and **Memory
+curator** (`memory-curator`). The curator is visible in agent settings but
+cannot be selected for a new session. A shipped workflow's internal roles
+are not standalone agent definitions.
 
-The start-conversation picker in the web UI lists this default plus any
-operator-authored definitions visible to the topic. The `agent_id` field of
-`CreateConversationRequest` selects one of these — `"gateway"` or an
-operator-authored definition visible to the target topic; the gateway
-rejects anything else with a validation error.
+After a reload, the new-session picker lists the default plus authored
+definitions visible in the selected scope. Without a topic, it offers global
+definitions; a topic also sees its own definitions, which hide global ones
+with the same id. The `agent_id` field when creating a conversation selects
+the default or a visible authored definition; other choices are refused.
 
 ## Operator guidance (`AGENTS.md`)
 
