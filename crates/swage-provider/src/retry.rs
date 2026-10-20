@@ -178,6 +178,10 @@ impl LlmProvider for RetryProvider {
         self.inner.effort_capability(model)
     }
 
+    fn output_limit(&self, model: &str) -> Option<u32> {
+        self.inner.output_limit(model)
+    }
+
     async fn count_tokens(
         &self,
         request: &CompletionRequest,
@@ -1522,6 +1526,10 @@ mod tests {
             })
         }
 
+        fn output_limit(&self, _: &str) -> Option<u32> {
+            Some(4321)
+        }
+
         async fn count_tokens(&self, _: &CompletionRequest) -> Result<Option<u64>, ProviderError> {
             Ok(Some(42))
         }
@@ -1570,6 +1578,12 @@ mod tests {
     fn effort_capability_delegates_to_the_wrapped_provider() {
         let provider = RetryProvider::with_defaults(CountingProbe);
         assert!(provider.effort_capability("any").is_some());
+    }
+
+    #[test]
+    fn output_limit_delegates_to_the_wrapped_provider() {
+        let provider = RetryProvider::with_defaults(CountingProbe);
+        assert_eq!(provider.output_limit("any"), Some(4321));
     }
 
     #[test]

@@ -335,9 +335,14 @@
   let notFound = $state(false);
   let activeSurface = $state<Surface>("conversation");
   let currentRoute = $state<Route>(router.currentRoute);
-  let modelOptions = $state<string[]>([]);
+  let globalModelOptions = $state<string[]>([]);
   let modelCatalogueReady = $state(false);
-  let defaultModelId = $state<string | null>(null);
+  let globalDefaultModelId = $state<string | null>(null);
+  const defaultModelId = $derived(topicStore.currentTopic
+    ? topicStore.currentTopic.effective_default_model ?? null : globalDefaultModelId);
+  const modelOptions = $derived(topicStore.currentTopic && !defaultModelId ? []
+    : defaultModelId && !globalModelOptions.includes(defaultModelId)
+      ? [...globalModelOptions, defaultModelId] : globalModelOptions);
   // The definitions offered by the scope in view: the composer's agent list.
   let agentDefinitions = $state<EffectiveAgentDefinitionResponse[]>([]);
   // The definitions offered by the scope chosen on the front door's start
@@ -350,14 +355,15 @@
 
   async function refreshModelCatalogue(): Promise<void> {
     const settings = await fetchSettings();
-    modelOptions = Object.keys(settings.models);
-    defaultModelId = settings.default_model;
+    globalModelOptions = Object.keys(settings.models);
+    globalDefaultModelId = settings.default_model;
     modelCatalogueReady = true;
   }
 
   async function refreshModelCatalogueAfterSave(): Promise<void> {
     try {
       await refreshModelCatalogue();
+      await topicStore.loadTopics();
     } catch (error) {
       console.error("Failed to refresh model settings after saving:", error);
     }

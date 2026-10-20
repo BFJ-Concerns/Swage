@@ -281,6 +281,35 @@ describe("MessageInput", () => {
     input.$destroy();
   });
 
+  it("follows a changed session default while retaining a manual choice within that session", () => {
+    const store = makeStreamingStore();
+    const input = createClassComponent({
+      component: MessageInput, target: document.body, props: {
+        store, modelOptions: ["global", "topic-a", "topic-b"], selectedModelId: "global",
+        modelCatalogueReady: false, sessionId: null as string | null,
+      },
+    });
+    try {
+      flushSync();
+      input.$set({ selectedModelId: "topic-a" });
+      flushSync();
+      const picker = document.querySelector('[aria-label="Model"]') as HTMLSelectElement;
+      expect(picker.value).toBe("topic-a");
+      flushSync(() => { picker.value = "topic-b"; picker.dispatchEvent(new Event("change", { bubbles: true })); });
+      input.$set({ modelCatalogueReady: true });
+      flushSync();
+      expect(picker.value).toBe("topic-b");
+      input.$set({ selectedModelId: "global", sessionId: "new-session" });
+      flushSync();
+      expect(picker.value).toBe("global");
+      setTextareaValue("New default");
+      flushSync(() => (document.querySelector(".action.send") as HTMLButtonElement).click());
+      expect(store.startTurn).toHaveBeenCalledWith("New default", "global", null, null);
+    } finally {
+      input.$destroy();
+    }
+  });
+
   it("clears the draft and re-focuses the textarea after send", () => {
     mountComponent();
 

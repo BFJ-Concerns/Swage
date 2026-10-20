@@ -66,7 +66,7 @@ impl LlmProvider for MockProvider {
 }
 
 fn test_state(storage: Arc<SqliteStorage>) -> AppState {
-    AppState::new(
+    AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(MockProvider),

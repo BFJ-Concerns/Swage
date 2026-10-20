@@ -68,6 +68,9 @@
   let tagsDraft = $state("");
   let tagsNotice = $state<string | null>(null);
   let surfacesLoaded = $state(false);
+  let isLoadingSurfaces = $state(false);
+  let surfaceError = $state<string | null>(null);
+  const displayedError = $derived(error ?? surfaceError);
   // The description as edited here; saved explicitly.
   let aboutDraft = $state("");
   let aboutNotice = $state<string | null>(null);
@@ -90,6 +93,8 @@
 
   async function loadSurfaceSettings(): Promise<void> {
     if (!topic) return;
+    isLoadingSurfaces = true;
+    surfaceError = null;
     try {
       const [catalogue, defaults] = await Promise.all([
         listLibrary(),
@@ -99,9 +104,10 @@
       defaultSurfaces = defaults.entries;
       tagsDraft = (topic.tags ?? []).join(", ");
       surfacesLoaded = true;
-      error = null;
     } catch (err) {
-      error = err instanceof Error ? err.message : "Failed to load the surface library.";
+      surfaceError = err instanceof Error ? err.message : "Failed to load the surface library.";
+    } finally {
+      isLoadingSurfaces = false;
     }
   }
 
@@ -149,6 +155,7 @@
   async function loadTopicSettings(): Promise<void> {
     if (!topic) return;
     isLoading = true;
+    error = null;
     try {
       const [workspaceList, sessionList] = await Promise.all([
         listTopicWorkspaces(topic.id),
@@ -293,8 +300,11 @@
       {/if}
     </div>
 
-    {#if error}
-      <div class="notice error" role="alert">{error}</div>
+    {#if displayedError}
+      <div class="notice error" role="alert">
+        {displayedError}
+        <button type="button" disabled={isLoading || isLoadingSurfaces} onclick={() => void (error ? loadTopicSettings() : loadSurfaceSettings())}>Retry</button>
+      </div>
     {:else if isLoading}
       <div class="notice">Loading topic settings…</div>
     {/if}
@@ -306,6 +316,10 @@
           <div class="shell-row">
             <span class="shell-label">Slug</span>
             <span class="shell-value">{topic.slug}</span>
+          </div>
+          <div class="shell-row">
+            <span class="shell-label">Default model</span>
+            <span class="shell-value">{topic.effective_default_model ?? "No model configured"}</span>
           </div>
           <div class="shell-row">
             <span class="shell-label">Workspaces</span>
@@ -401,7 +415,9 @@
               </div>
             </article>
           {:else}
-            <p class="shell-empty">No workspace folders are attached to this topic.</p>
+            {#if worktopicsLoaded && !isLoading}
+              <p class="shell-empty">No workspace folders are attached to this topic.</p>
+            {/if}
           {/each}
         </div>
       </section>
@@ -506,12 +522,22 @@
     color: var(--ink-soft);
   }
 
+  .head > div {
+    min-width: 0;
+  }
+
   .title {
     margin: 4px 0 6px;
     font-family: var(--font-display);
     font-weight: 400;
-    font-size: clamp(42px, 8vw, 76px);
-    line-height: 0.9;
+    font-size: 28px;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
     letter-spacing: 0.02em;
     text-transform: uppercase;
   }

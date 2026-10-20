@@ -1,13 +1,12 @@
 use super::{
     AgentError, AppState, Arc, CancellationToken, DELEGATED_CHILDREN_METADATA_KEY,
     DelegationExecutor, DelegationHandler, DispatchContextComposition, GatewayDispatcherRequest,
-    MessageRouter, NewAgentMessage, ResolvedToolRoot, Uuid,
-    WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY, WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY,
-    WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY, WORKER_PLACEMENT_CWD_METADATA_KEY,
-    WORKFLOW_CALL_TOOLS_METADATA_KEY, add_dispatch_bound_task_definition_ids,
-    apply_agent_definition, apply_dispatch_bounds, apply_dispatch_task_bounds,
-    apply_workflow_call_tools, available_skills_for_agent, build_agent_config_for_topic_workspace,
-    build_approval_registrar, build_assembly_elements,
+    NewAgentMessage, ResolvedToolRoot, Uuid, WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY,
+    WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY, WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY,
+    WORKER_PLACEMENT_CWD_METADATA_KEY, WORKFLOW_CALL_TOOLS_METADATA_KEY,
+    add_dispatch_bound_task_definition_ids, apply_agent_definition, apply_dispatch_bounds,
+    apply_dispatch_task_bounds, apply_workflow_call_tools, available_skills_for_agent,
+    build_agent_config_for_topic_workspace, build_approval_registrar, build_assembly_elements,
     build_gateway_dispatcher_for_unattended_execution, build_session_environment,
     configuration_hierarchy, dispatch_bound_agent_ids_for_turn, dispatch_bound_metadata,
     dispatch_bound_task_definition_ids_for_turn, effective_tool_permissions_record,
@@ -29,6 +28,25 @@ pub(super) const DELEGATED_CHILD_SKILLS_METADATA_KEY: &str = "delegated_child_sk
 pub(super) const DELEGATED_CHILD_COMPOSITION_METADATA_KEY: &str = "delegated_child_composition";
 pub(super) const DELEGATED_CHILD_REQUESTED_CWD_METADATA_KEY: &str = "delegated_child_requested_cwd";
 const DELEGATED_CHILD_ISOLATION_METADATA_KEY: &str = "delegated_child_isolation";
+const DELEGATION_BOUND_METADATA_KEY: &str = "delegation_bound";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DelegationBound {
+    depth: u64,
+    limit: u64,
+}
+
+const DELEGATED_CHILD_SELECTION_METADATA_KEY: &str = "delegated_child_selection";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DelegatedSelection {
+    model_key: String,
+    model_id: String,
+    model: Option<swage_config::ModelEndpointConfig>,
+    preset: Option<swage_config::GenerationPresetConfig>,
+    effort: Option<swage_core::ResolvedEffort>,
+    prompt: Option<crate::experimentation::VariantDecision>,
+}
 
 struct ResolvedNamedChild {
     continuation: DelegatedChildContinuation,
@@ -245,6 +263,44 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         turn_id: Uuid,
         delegated_history: Vec<swage_core::ChatMessage>,
     ) -> Result<DelegatedAssembly, AgentError> {
+        // This seam runs only after the executor has created a real child
+        // turn. Selection records must never make its parent look active here.
+        if let Some(value) = session
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get(DELEGATED_CHILD_SELECTION_METADATA_KEY))
+        {
+            let selection: DelegatedSelection =
+                serde_json::from_value(value.clone()).map_err(|error| {
+                    AgentError::InvalidConfig(format!("invalid child selection: {error}"))
+                })?;
+            let events = self
+                .state
+                .storage
+                .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                    session_id: Some(session.id),
+                    entity_kind: Some("experiment_location".into()),
+                    entity_id: Some(crate::experimentation::LOCATION_TASK_PROMPT.into()),
+                    event_kind: Some("variant_selected".into()),
+                    limit: 1,
+                    ..Default::default()
+                })
+                .await?;
+            if events.is_empty()
+                && let Some(prompt) = selection.prompt
+                && let Err(error) = crate::experimentation::record_selection(
+                    &self.state,
+                    crate::experimentation::LOCATION_TASK_PROMPT,
+                    &prompt,
+                    Some(session.id),
+                    Some(turn_id),
+                )
+                .await
+            {
+                tracing::warn!(%error, session_id = %session.id,
+                    "task prompt variant record unavailable; serving the definition default");
+            }
+        }
         let active_skills = load_active_skills_for_agent(
             &self.state,
             session.id,
@@ -293,7 +349,8 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             session.active_workspace_attachment_id,
         )
         .await;
-        let environment = build_session_environment(&self.topic, &self.tool_root, session);
+        let environment =
+            build_session_environment(&self.topic, &self.tool_root, session, &workspace_policy);
         let available_skills = available_skills_for_agent(
             &self.topic.location(),
             &self.agent_id,
@@ -333,10 +390,17 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         let mut assembly_report = output.report;
         super::redact_element_texts(&self.state, &mut assembly_report).await;
         assembly_report.effective_tool_permissions = Some(self.effective_tool_permissions.clone());
-        let report = serde_json::to_value(&assembly_report).unwrap_or_else(|error| {
+        let mut report = serde_json::to_value(&assembly_report).unwrap_or_else(|error| {
             tracing::warn!(%error, "failed to serialise delegated assembly report");
             serde_json::json!({ "error": "serialisation failed" })
         });
+        if let Some(selection) = session
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get(DELEGATED_CHILD_SELECTION_METADATA_KEY))
+        {
+            report["selection"] = selection.clone();
+        }
         let _ = self
             .context_event_tx
             .send(crate::websocket::ServerEvent::ContextAssembled {
@@ -505,6 +569,8 @@ impl DelegationSnapshotRecorder for SnapshotOnlyDelegationRecorder {
 pub(crate) struct GatewayDelegationHandler {
     state: AppState,
     pub(super) active_delegations: swage_agent::ActiveDelegations,
+    depth: u64,
+    depth_limit: Option<u64>,
 }
 
 impl GatewayDelegationHandler {
@@ -512,6 +578,127 @@ impl GatewayDelegationHandler {
         Self {
             state,
             active_delegations: swage_agent::active_delegations(),
+            depth: 0,
+            depth_limit: None,
+        }
+    }
+
+    pub(crate) async fn for_external_child(
+        state: AppState,
+        location: &swage_core::ScopeLocation,
+        sender_agent_id: &str,
+        sender_turn_id: Option<Uuid>,
+    ) -> Result<Self, AgentError> {
+        let mut handler = Self::new(state);
+        if let Some(turn_id) = sender_turn_id {
+            handler = handler.for_turn(turn_id).await?;
+        }
+        if handler.depth_limit.is_none() {
+            handler.depth_limit = Some(
+                load_session_config(&handler.state, location, sender_agent_id)
+                    .map_err(|error| AgentError::InvalidConfig(error.to_string()))?
+                    .sessions
+                    .max_delegation_depth,
+            );
+        }
+        handler.depth = handler.depth.saturating_add(1);
+        Ok(handler)
+    }
+
+    fn restore_bound(&mut self, metadata: Option<&serde_json::Value>) -> Result<(), AgentError> {
+        if let Some(bound) =
+            metadata.and_then(|metadata| metadata.get(DELEGATION_BOUND_METADATA_KEY))
+        {
+            let bound: DelegationBound =
+                serde_json::from_value(bound.clone()).map_err(|error| {
+                    AgentError::InvalidConfig(format!("invalid delegation bound: {error}"))
+                })?;
+            self.depth = bound.depth;
+            self.depth_limit = Some(bound.limit);
+        }
+        Ok(())
+    }
+
+    async fn for_turn(&self, turn_id: Uuid) -> Result<Self, AgentError> {
+        let turn = self.state.storage.get_turn(turn_id).await?.ok_or_else(|| {
+            swage_core::StorageError::NotFound {
+                entity: "turn".into(),
+                id: turn_id.to_string(),
+            }
+        })?;
+        let thread =
+            swage_storage::store::ThreadStore::get(self.state.storage.as_ref(), turn.thread_id)
+                .await?
+                .ok_or(AgentError::ThreadNotFound(turn.thread_id))?;
+        let session = self
+            .state
+            .storage
+            .get_session(thread.session_id)
+            .await?
+            .ok_or(AgentError::SessionNotFound(thread.session_id))?;
+        let mut handler = Self {
+            state: self.state.clone(),
+            active_delegations: self.active_delegations.clone(),
+            depth: self.depth,
+            depth_limit: self.depth_limit,
+        };
+        handler.restore_bound(session.metadata.as_ref())?;
+        Ok(handler)
+    }
+
+    async fn check_depth(
+        &self,
+        depth: u64,
+        limit: u64,
+        target_agent_id: &str,
+        delegate_call_id: &str,
+        sender_turn_id: Option<Uuid>,
+    ) -> Result<(), AgentError> {
+        if depth <= limit {
+            return Ok(());
+        }
+        let reason = format!("delegation depth {depth} exceeds the limit {limit}");
+        let sender_session_id = match sender_turn_id {
+            Some(turn_id) => Some(
+                self.filesystem_authority_for_turn(turn_id)
+                    .await?
+                    .session_id,
+            ),
+            None => None,
+        };
+        self.state.storage.create_audit_event(swage_storage::NewAuditEvent {
+            id: Uuid::new_v4().to_string(), session_id: sender_session_id,
+            entity_kind: "delegation".into(), entity_id: delegate_call_id.to_owned(),
+            event_kind: "delegation_refused".into(), summary: reason.clone(),
+            metadata: serde_json::json!({"turn_id": sender_turn_id, "target_agent_id": target_agent_id,
+                "depth": depth, "limit": limit, "reason": reason}),
+        }).await?;
+        Err(AgentError::InvalidConfig(reason))
+    }
+
+    pub(crate) async fn check_external_depth(
+        &self,
+        target_agent_id: &str,
+        delegate_call_id: &str,
+        sender_turn_id: Option<Uuid>,
+    ) -> Result<(), AgentError> {
+        self.check_depth(
+            self.depth,
+            self.depth_limit
+                .expect("external child has a settled limit"),
+            target_agent_id,
+            delegate_call_id,
+            sender_turn_id,
+        )
+        .await
+    }
+
+    pub(crate) fn record_bound(&self, metadata: &mut serde_json::Value) {
+        if let Some(limit) = self.depth_limit {
+            metadata[DELEGATION_BOUND_METADATA_KEY] = serde_json::json!(DelegationBound {
+                depth: self.depth,
+                limit,
+            });
         }
     }
 }
@@ -559,12 +746,59 @@ impl DelegationHandler for GatewayDelegationHandler {
         let active_workspace_attachment_id =
             sender_filesystem_authority.active_workspace_attachment_id;
         let sender_session_id = sender_filesystem_authority.session_id;
+        let handler = self.for_turn(sender_turn_id).await?;
+        let depth_limit =
+            match handler.depth_limit {
+                Some(limit) => limit,
+                None => load_session_config(&self.state, &topic.location(), sender_agent_id)
+                    .map_err(|error| {
+                        AgentError::InvalidConfig(format!(
+                            "failed to load dispatch bound for agent {sender_agent_id:?}: {error}"
+                        ))
+                    })?
+                    .sessions
+                    .max_delegation_depth,
+            };
+        let child_depth = handler.depth.saturating_add(1);
+        let mut child_handler = Self {
+            state: self.state.clone(),
+            active_delegations: self.active_delegations.clone(),
+            depth: child_depth,
+            depth_limit: Some(depth_limit),
+        };
         let existing_named_child = match child {
             Some(name) => {
                 resolve_named_child(&self.state, sender_session_id, name, target_agent_id).await?
             }
             None => None,
         };
+        if let Some(child) = &existing_named_child {
+            child_handler.restore_bound(Some(&child.metadata))?;
+        }
+        self.check_depth(
+            child_handler.depth,
+            child_handler
+                .depth_limit
+                .expect("child has a settled limit"),
+            target_agent_id,
+            delegate_call_id,
+            Some(sender_turn_id),
+        )
+        .await?;
+        let fixed_selection: Option<DelegatedSelection> = existing_named_child
+            .as_ref()
+            .map(|child| {
+                let value = child
+                    .metadata
+                    .get(DELEGATED_CHILD_SELECTION_METADATA_KEY)
+                    .ok_or_else(|| {
+                        AgentError::InvalidConfig("named child has no creation selection".into())
+                    })?;
+                serde_json::from_value(value.clone()).map_err(|error| {
+                    AgentError::InvalidConfig(format!("invalid child selection: {error}"))
+                })
+            })
+            .transpose()?;
         let read_child_option = |key: &str| -> Result<Option<serde_json::Value>, AgentError> {
             existing_named_child
                 .as_ref()
@@ -639,38 +873,88 @@ impl DelegationHandler for GatewayDelegationHandler {
                 target_resolved
             }
         };
-        let target_resolved = match task_definition.as_deref() {
+        let mut prompt_decision = None;
+        let mut target_resolved = match task_definition.as_deref() {
             Some(id) => {
-                let definition =
+                let mut definition =
                     crate::service::resolve_task_definition(self.state.storage.as_ref(), id)
                         .await
                         .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
-                let decision = crate::experimentation::select_variant(
-                    &target_resolved.experimentation,
-                    crate::experimentation::LOCATION_TASK_PROMPT,
-                    &[],
-                    "definition",
-                    sender_turn_id,
-                )
-                .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
-                if let Err(error) = crate::experimentation::record_selection(
-                    &self.state,
-                    crate::experimentation::LOCATION_TASK_PROMPT,
-                    &decision,
-                    existing_named_child
-                        .as_ref()
-                        .map(|child| child.continuation.session_id),
-                    Some(sender_turn_id),
-                )
-                .await
-                {
-                    tracing::warn!(%error, task_id = id, "task prompt variant record unavailable; serving the definition default");
+                if fixed_selection.is_some() {
+                    // The permissions still resolve on every call; the child's
+                    // model and prompt choice belong to its creation record.
+                    definition.model_id = None;
+                } else {
+                    let decision = crate::experimentation::select_variant(
+                        &target_resolved.experimentation,
+                        crate::experimentation::LOCATION_TASK_PROMPT,
+                        &[],
+                        "definition",
+                        sender_turn_id,
+                    )
+                    .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
+                    prompt_decision = Some(decision);
                 }
                 super::apply_task_definition(target_resolved, &definition)
                     .map_err(|error| AgentError::InvalidConfig(error.to_string()))?
             }
             None => target_resolved,
         };
+        let retain_effort = fixed_selection.is_some();
+        let mut selection = match fixed_selection {
+            Some(selection) => selection,
+            None => {
+                let model = target_resolved.models.default_model().cloned();
+                DelegatedSelection {
+                    model_key: target_resolved.models.default.clone(),
+                    model_id: if target_resolved.default_model_id().is_empty() {
+                        self.state.active_provider().model_id().to_owned()
+                    } else {
+                        target_resolved.default_model_id().to_owned()
+                    },
+                    preset: model
+                        .as_ref()
+                        .and_then(|model| model.generation_preset.as_ref())
+                        .and_then(|id| target_resolved.generation.presets.get(id))
+                        .cloned(),
+                    model,
+                    effort: None,
+                    prompt: prompt_decision,
+                }
+            }
+        };
+        target_resolved.models.default = selection.model_key.clone();
+        if let Some(model) = &selection.model {
+            target_resolved
+                .models
+                .entries
+                .insert(selection.model_key.clone(), model.clone());
+            if let Some(id) = &model.generation_preset {
+                target_resolved.generation.presets.remove(id);
+                if let Some(preset) = &selection.preset {
+                    target_resolved
+                        .generation
+                        .presets
+                        .insert(id.clone(), preset.clone());
+                }
+            }
+        }
+        let child_provider =
+            crate::startup::selected_model_provider(&self.state, &target_resolved).await;
+        if !retain_effort {
+            selection.effort = selection
+                .model
+                .as_ref()
+                .and_then(|model| model.default_effort)
+                .map(|requested| {
+                    let capability = super::runtime_launch::effort_capability_for_model(
+                        &target_resolved,
+                        &selection.model_key,
+                        child_provider.as_ref(),
+                    );
+                    swage_core::resolve_effort(requested, &capability)
+                });
+        }
         resolve_requested_skills_for_agent(
             &topic.location(),
             target_agent_id,
@@ -690,6 +974,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         let mut session_metadata = dispatch_bound_metadata(&bound_agent_ids)
             .expect("a delegated session always has at least its sender bound");
         add_dispatch_bound_task_definition_ids(&mut session_metadata, &bound_task_definition_ids);
+        child_handler.record_bound(&mut session_metadata);
         if let Some(workflow_call_tools) = &sender_filesystem_authority.workflow_call_tools {
             session_metadata[WORKFLOW_CALL_TOOLS_METADATA_KEY] = workflow_call_tools.clone();
         }
@@ -706,6 +991,9 @@ impl DelegationHandler for GatewayDelegationHandler {
                     "failed to record named child context composition: {error}"
                 ))
             })?;
+        session_metadata[DELEGATED_CHILD_SELECTION_METADATA_KEY] = serde_json::to_value(&selection)
+            .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
+        let child_effort = selection.effort;
         let effective_target_resolved = apply_dispatch_bounds(
             &self.state,
             &topic.location(),
@@ -742,6 +1030,7 @@ impl DelegationHandler for GatewayDelegationHandler {
             active_workspace_attachment_id,
         )
         .await;
+        target_agent_config.model_id = Some(selection.model_id);
         let mut worktree_owner_id = None;
         let placement = if existing_child.is_some() {
             reauthorise_named_child_placement(
@@ -852,16 +1141,16 @@ impl DelegationHandler for GatewayDelegationHandler {
         let target_sandbox_guard = target_dispatcher_build.sandbox_guard;
         let target_dispatcher = target_dispatcher_build.dispatcher;
 
-        let router = Arc::new(MessageRouter::new(self.state.storage.clone(), None));
+        let router = Arc::new(self.state.message_router());
         let executor = DelegationExecutor {
             storage: self.state.storage.clone(),
-            provider: self.state.active_provider(),
+            provider: child_provider,
             hook_registry: self.state.hook_registry.clone(),
             leak_detector: None,
             approval_registrar: Some(build_approval_registrar(
                 self.state.approval_channels.clone(),
             )),
-            delegation_handler: Some(Arc::new(self.clone())),
+            delegation_handler: Some(Arc::new(child_handler)),
             router: router.clone(),
             active_delegations: self.active_delegations.clone(),
             context_assembler: delegated_context_assembler(
@@ -889,6 +1178,11 @@ impl DelegationHandler for GatewayDelegationHandler {
         if let Some(context) = context {
             payload["context"] = context;
         }
+        // The parent's own tool call for this delegation, so a reader of
+        // the record — recovery after a restart — can tell whether the
+        // child's result reached the parent's thread as that call's
+        // result, not only its mailbox.
+        payload["_call_id"] = serde_json::json!(delegate_call_id);
 
         let delegate_msg = match router
             .send_message(NewAgentMessage {
@@ -939,6 +1233,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                         placement
                             .as_ref()
                             .map(|placement| placement.path.to_string_lossy().into_owned()),
+                        child_effort,
                     )
                     .await
                 {
@@ -1030,6 +1325,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                             placement
                                 .as_ref()
                                 .map(|placement| placement.path.to_string_lossy().into_owned()),
+                            child_effort,
                         )
                         .await;
 
