@@ -578,9 +578,30 @@ fn verify() -> Result<()> {
 const TRACKER_TAG_ALLOWED_WORDS: &[&str] = &["utf8"];
 
 fn check_tracker_tags() -> Result<()> {
-    let mut files = Vec::new();
-    collect_files(Path::new("."), &mut files)?;
+    let output = Command::new("git")
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    let listing = String::from_utf8(output.stdout)?;
+    let mut files: Vec<_> = listing
+        .split('\0')
+        .filter(|file| !file.is_empty())
+        .map(PathBuf::from)
+        .collect();
     files.sort();
+    files.dedup();
     let mut violations = Vec::new();
     for file in files {
         let syntax = match file.extension().and_then(|extension| extension.to_str()) {
@@ -589,8 +610,7 @@ fn check_tracker_tags() -> Result<()> {
             Some("svelte") => SourceSyntax::Svelte,
             _ => continue,
         };
-        let file = file.strip_prefix(".")?;
-        let contents = fs::read_to_string(file)?;
+        let contents = fs::read_to_string(&file)?;
         for (line, column) in source_tracker_tag_locations(&contents, syntax) {
             violations.push(format!("{}:{line}:{column}", file.display()));
         }
