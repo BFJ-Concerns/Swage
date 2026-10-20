@@ -251,15 +251,22 @@ export function createStreamingStore(
     return options?.conversationStore?.activeConversation?.id ?? null;
   }
 
+  function hasProcessingRequest(conversationId: string | null): boolean {
+    const conversation = options?.conversationStore?.activeConversation;
+    if (!conversationId || conversation?.id !== conversationId) return false;
+    const latest = conversation.messages.at(-1);
+    return ["processing", "delegating", "awaiting_approval"].includes(latest?.turn_state ?? "");
+  }
+
   function currentStreamState(): InternalStreamState | undefined {
     return streams.get(currentConversationId());
   }
 
-  function streamView(stream: InternalStreamState | undefined): ConversationStreamState {
+  function streamView(stream: InternalStreamState | undefined, conversationId: string | null = currentConversationId()): ConversationStreamState {
     if (!stream) return emptyStream;
     return {
       get threadId() { return stream.threadId; },
-      get isStreaming() { return stream.isStreamingState.current; },
+      get isStreaming() { return stream.isStreamingState.current || hasProcessingRequest(conversationId); },
       get activeTurnGeneration() { return stream.activeTurnGeneration; },
       get streamedContent() { return stream.streamedContentState.current; },
       get turnError() { return stream.turnErrorState.current; },
@@ -325,7 +332,7 @@ export function createStreamingStore(
     streamFor(conversationId: string | null): ConversationStreamState {
       // Create the projection when a surface first reads it, so the Svelte
       // derivation subscribes before a later turn starts for that conversation.
-      return streamView(streamStateFor(conversationId));
+      return streamView(streamStateFor(conversationId), conversationId);
     },
     get activeTurnGeneration(): number {
       return currentStreamState()?.activeTurnGeneration ?? 0;
@@ -685,7 +692,7 @@ export function createStreamingStore(
       const conversationId = currentConversationId();
       const stream = streamStateFor(conversationId);
       const clientId = newClientId();
-      if (stream.isStreamingState.current) {
+      if (stream.isStreamingState.current || hasProcessingRequest(conversationId)) {
         // A turn is running: the message is sent and the gateway holds it
         // for the next turn, announcing it as queued. The live stream and
         // the message list are left as they are.
@@ -725,7 +732,7 @@ export function createStreamingStore(
 
     cancelTurn(): void {
       const conversationId = currentConversationId();
-      if (conversationId && streams.get(conversationId)?.isStreamingState.current) {
+      if (conversationId && (streams.get(conversationId)?.isStreamingState.current || hasProcessingRequest(conversationId))) {
         options?.connectionStore?.cancelTurn(conversationId);
       }
     },

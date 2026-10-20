@@ -739,3 +739,56 @@ async fn operator_uses_the_run_accounts_failed_and_cut_short_partition() {
         assert_eq!(row["has_interrupted_turn"], false, "{body}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn operator_lists_live_runs_and_attributes_children() {
+    let state = test_state();
+    let router = build_router(state.clone());
+    let parent = create_conversation(&router).await;
+    let running = operator_run(&state, Some(parent)).await;
+    let parked = operator_run(&state, Some(parent)).await;
+    state
+        .storage
+        .update_workflow_run_state(parked.id, "parked", None, None, None)
+        .await
+        .unwrap();
+    let terminal = operator_run(&state, Some(parent)).await;
+    state
+        .storage
+        .update_workflow_run_state(terminal.id, "completed", None, None, None)
+        .await
+        .unwrap();
+    let child = operator_child(
+        &state,
+        swage_storage::SessionOrigin::Delegation {
+            parent_session_id: parent,
+        },
+        TurnState::Processing,
+    )
+    .await;
+    let child_id = state
+        .storage
+        .get(child.thread_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .session_id;
+    let (_, body) = get_json(&router, "/api/operator/overview").await;
+    let runs = body["workflow_runs"]
+        .as_array()
+        .expect("live workflow runs belong on the fleet");
+    assert_eq!(runs.len(), 2, "{body}");
+    for id in [running.id, parked.id] {
+        let row = runs.iter().find(|row| row["id"] == id.to_string()).unwrap();
+        assert_eq!(row["parent_session_id"], parent.to_string());
+        assert_eq!(row["agent_id"], "gateway");
+    }
+    let row = body["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == child_id.to_string())
+        .unwrap();
+    assert_eq!(row["parent_session_id"], parent.to_string(), "{row}");
+    assert_eq!(row["agent_id"], "gateway");
+}

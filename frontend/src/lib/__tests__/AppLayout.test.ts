@@ -301,6 +301,7 @@ describe("AppLayout shell navigation", () => {
         active_turn_count: 0,
         active_connection_count: 0,
       },
+      workflow_runs: [],
       sessions: [],
       approvals: [],
       schedules: { schedules: [] },

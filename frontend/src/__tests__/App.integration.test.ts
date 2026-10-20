@@ -274,6 +274,7 @@ function makeOperatorOverview(
       active_turn_count: 1,
       active_connection_count: 1,
     },
+    workflow_runs: [],
     sessions: [
       {
         id: "conv-ops",
@@ -285,6 +286,8 @@ function makeOperatorOverview(
         has_interrupted_turn: false,
         has_active_connection: true,
         has_running_turn: true,
+        agent_id: "gateway",
+        activity: "processing",
       },
     ],
     approvals: [],

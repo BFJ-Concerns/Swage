@@ -4,7 +4,13 @@ import { flushSync, mount, unmount } from "svelte";
 import { createClassComponent } from "svelte/legacy";
 
 import MessageInput from "../components/MessageInput.svelte";
+import { createStreamingStore } from "../stores/streaming";
+import { createConversationStore } from "../stores/conversations";
+import * as conversationsApi from "../api/conversations";
+import type { ConversationDetail } from "../types";
 import type { StreamingStore } from "../stores/streaming";
+
+vi.mock("../api/conversations");
 
 type MountedComponent = ReturnType<typeof mount>;
 
@@ -81,6 +87,27 @@ describe("MessageInput", () => {
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
   }
+
+  it.each(["delegation", "schedule"])("offers Stop for an opened processing %s turn and settles its cancellation", async (origin) => {
+    vi.mocked(conversationsApi.getConversation).mockResolvedValue({
+      id: "external", topic_id: null, created_at: "2026-10-20T00:00:00Z", last_activity: "2026-10-20T00:00:00Z",
+      messages: [{ role: "user", origin, content: "Work in progress", timestamp: "2026-10-20T00:00:00Z", turn_state: "processing" }],
+    } as ConversationDetail);
+    const conversations = createConversationStore();
+    await conversations.selectConversation("external");
+    const cancelTurn = vi.fn();
+    const store = createStreamingStore({ conversationStore: conversations, connectionStore: { sendMessage: vi.fn(), cancelTurn } });
+    component = mount(MessageInput, { target: document.body, props: { store, sessionId: "external" } });
+    flushSync();
+    const stop = document.querySelector<HTMLButtonElement>(".action.stop");
+    expect(stop?.textContent?.trim()).toBe("Stop");
+    flushSync(() => stop!.click());
+    expect(cancelTurn).toHaveBeenCalledWith("external");
+    flushSync(() => store.handleServerEvent({ type: "cancelled" }, "external"));
+    expect(conversations.activeConversation?.messages[0].turn_state).toBe("cancelled");
+    expect(document.querySelector(".action.stop")).toBeNull();
+    expect(document.querySelector(".action.send")).not.toBeNull();
+  });
 
   it("trims whitespace before sending", () => {
     const store = mountComponent();

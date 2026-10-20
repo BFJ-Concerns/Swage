@@ -126,6 +126,12 @@ pub struct OperatorSessionSummary {
     pub has_active_connection: bool,
     pub has_running_turn: bool,
     pub ending: Option<OperatorSessionEnding>,
+    pub agent_id: String,
+    pub parent_session_id: Option<Uuid>,
+    /// The schedule or workflow run that opened this session, when applicable.
+    pub source: Option<String>,
+    pub workflow_run_id: Option<Uuid>,
+    pub activity: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -144,9 +150,22 @@ pub struct OperatorDeviceSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
+pub struct OperatorWorkflowRunSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub state: String,
+    pub agent_id: Option<String>,
+    pub parent_session_id: Option<Uuid>,
+    pub parent_run_id: Option<Uuid>,
+    pub activity: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[ts(optional_fields = nullable)]
 pub struct OperatorOverviewResponse {
     pub gateway: OperatorGatewaySummary,
     pub sessions: Vec<OperatorSessionSummary>,
+    pub workflow_runs: Vec<OperatorWorkflowRunSummary>,
     pub approvals: Vec<ApprovalSummary>,
     pub schedules: schedule::ScheduleListResponse,
     pub channels: ChannelStatusListResponse,

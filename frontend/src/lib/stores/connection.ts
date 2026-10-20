@@ -176,7 +176,10 @@ export function createConnectionStore(
     },
 
     cancelTurn(conversationId: string): void {
-      clientFor(conversationId).send({ type: "cancel" });
+      const client = clientFor(conversationId);
+      const status = statuses.get(conversationId);
+      if (status !== "connected" && status !== "reconnecting") client.connect(conversationId);
+      client.send({ type: "cancel" });
     },
 
     onServerEvent(handler: (event: ServerEvent, conversationId: string) => void): void {

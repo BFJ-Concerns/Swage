@@ -16,7 +16,8 @@ use crate::{
 };
 
 pub use swage_protocol::hosting::{
-    OperatorDeviceSummary, OperatorGatewaySummary, OperatorOverviewResponse, OperatorSessionSummary,
+    OperatorDeviceSummary, OperatorGatewaySummary, OperatorOverviewResponse,
+    OperatorSessionSummary, OperatorWorkflowRunSummary,
 };
 
 pub async fn operator_overview(state: &AppState) -> Result<OperatorOverviewResponse, GatewayError> {
@@ -26,6 +27,7 @@ pub async fn operator_overview(state: &AppState) -> Result<OperatorOverviewRespo
     let schedules = list_schedules(state).await?;
     let devices = list_devices(state).await;
     let sessions = list_operator_sessions(state).await?;
+    let workflow_runs = list_operator_runs(state).await?;
 
     let devices: Vec<OperatorDeviceSummary> = devices
         .devices
@@ -72,6 +74,7 @@ pub async fn operator_overview(state: &AppState) -> Result<OperatorOverviewRespo
     Ok(OperatorOverviewResponse {
         gateway,
         sessions,
+        workflow_runs,
         approvals: approvals.approvals,
         schedules,
         channels,
@@ -121,6 +124,16 @@ async fn list_operator_sessions(
             ..SessionListing::default()
         })
         .await?;
+    let mut scheduled_turns = HashMap::new();
+    for schedule in state.storage.list_schedules().await? {
+        for run in state.storage.list_schedule_runs(schedule.id).await? {
+            if run.state == swage_protocol::client::schedule::ScheduleRunState::Running
+                && let Some(turn_id) = run.turn_id
+            {
+                scheduled_turns.insert(turn_id, schedule.id);
+            }
+        }
+    }
     let mut sessions = Vec::with_capacity(activities.len());
     let mut worker_endings = HashMap::new();
     let mut read_runs = HashSet::new();
@@ -146,8 +159,15 @@ async fn list_operator_sessions(
                     }
                 }
             }
+            let origin = latest_turn
+                .as_ref()
+                .and_then(|turn| scheduled_turns.get(&turn.id))
+                .map(|schedule_id| SessionOrigin::ScheduleRun {
+                    schedule_id: *schedule_id,
+                })
+                .unwrap_or_else(|| session.origin.clone());
             let running_detected = active_turns.contains_key(&session.id) || has_processing_turn;
-            if let SessionOrigin::WorkflowWorker { run_id } = session.origin
+            if let SessionOrigin::WorkflowWorker { run_id } = origin
                 && read_runs.insert(run_id)
                 && let Some(run) = state.storage.get_workflow_run(run_id).await?
                 && let Some(account) = run.terminal_account
@@ -176,22 +196,27 @@ async fn list_operator_sessions(
                     (cancelled_workers, OperatorSessionEnding::Cancelled),
                 ] {
                     for worker in workers {
-                        if let Some(child_id) = journal
+                        if let Some(worker_turn_id) = journal
                             .iter()
                             .find(|entry| entry.id == worker.journal_entry_id)
                             .and_then(|entry| entry.agent_call.as_ref())
-                            .and_then(|call| call.session_id)
+                            .and_then(|call| call.turn_id)
                         {
-                            worker_endings.insert(child_id, ending);
+                            worker_endings.insert(worker_turn_id, ending);
                         }
                     }
                 }
             }
-            let has_running_turn = running_detected && !worker_endings.contains_key(&session.id);
+            // A held worker can serve several calls in the same session.
+            let worker_ending = latest_turn
+                .as_ref()
+                .and_then(|turn| worker_endings.get(&turn.id))
+                .copied();
+            let has_running_turn = running_detected && worker_ending.is_none();
             let ending = if has_running_turn {
                 None
             } else {
-                worker_endings.get(&session.id).copied().or_else(|| {
+                worker_ending.or_else(|| {
                     latest_turn.as_ref().and_then(|turn| match turn.state {
                         TurnState::Cancelled => Some(OperatorSessionEnding::Cancelled),
                         TurnState::Failed => Some(OperatorSessionEnding::Failed),
@@ -215,12 +240,147 @@ async fn list_operator_sessions(
                 has_active_connection: active_connections.contains(&session.id),
                 has_running_turn,
                 ending,
+                agent_id: session.agent_id.clone(),
+                parent_session_id: parent_session(state, &origin).await?,
+                activity: if has_running_turn {
+                    latest_turn
+                        .as_ref()
+                        .map(|turn| turn.state.to_string())
+                        .unwrap_or_else(|| "processing".into())
+                } else {
+                    "idle".into()
+                },
+                workflow_run_id: match origin {
+                    SessionOrigin::WorkflowWorker { run_id } => Some(run_id),
+                    _ => None,
+                },
+                source: match origin {
+                    SessionOrigin::ScheduleRun { schedule_id } => {
+                        Some(format!("Schedule {schedule_id}"))
+                    }
+                    SessionOrigin::WorkflowWorker { run_id } => {
+                        Some(format!("Workflow run {run_id}"))
+                    }
+                    _ => None,
+                },
             });
         }
     }
 
-    sessions.sort_by_key(|session| std::cmp::Reverse(session.last_activity));
+    sessions.sort_by_key(|session| {
+        (
+            !session.has_running_turn,
+            std::cmp::Reverse(session.last_activity),
+        )
+    });
     Ok(sessions)
+}
+
+async fn parent_session(
+    state: &AppState,
+    origin: &SessionOrigin,
+) -> Result<Option<uuid::Uuid>, GatewayError> {
+    match origin {
+        SessionOrigin::Delegation { parent_session_id } => Ok(Some(*parent_session_id)),
+        SessionOrigin::WorkflowWorker { run_id } => {
+            match state.storage.get_workflow_run(*run_id).await? {
+                Some(run) => run_parent_session(state, &run).await,
+                None => Ok(None),
+            }
+        }
+        SessionOrigin::ScheduleRun { schedule_id } => {
+            // Creation provenance lives in the unified audit trail. Schedules
+            // made by a person have no spawning session.
+            let events = state
+                .storage
+                .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                    entity_kind: Some("schedule".into()),
+                    entity_id: Some(schedule_id.to_string()),
+                    event_kind: Some("configuration_change".into()),
+                    limit: usize::MAX,
+                    ..Default::default()
+                })
+                .await?;
+            Ok(events
+                .into_iter()
+                .find(|event| {
+                    event
+                        .metadata
+                        .get("action")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("create_schedule")
+                })
+                .and_then(|event| event.session_id))
+        }
+        SessionOrigin::MemoryCuration {
+            attended_session_id,
+        } => Ok(*attended_session_id),
+        SessionOrigin::Direct => Ok(None),
+    }
+}
+
+async fn run_parent_session(
+    state: &AppState,
+    run: &swage_storage::WorkflowRunRecord,
+) -> Result<Option<uuid::Uuid>, GatewayError> {
+    if run.dispatching_session_id.is_some() {
+        return Ok(run.dispatching_session_id);
+    }
+    let mut parent = run.parent_run_id;
+    let mut visited = HashSet::new();
+    while let Some(id) = parent {
+        if !visited.insert(id) {
+            return Err(GatewayError::ConfigError(
+                "cycle in workflow run parents".into(),
+            ));
+        }
+        let Some(record) = state.storage.get_workflow_run(id).await? else {
+            return Ok(None);
+        };
+        if record.dispatching_session_id.is_some() {
+            return Ok(record.dispatching_session_id);
+        }
+        parent = record.parent_run_id;
+    }
+    Ok(None)
+}
+
+async fn list_operator_runs(
+    state: &AppState,
+) -> Result<Vec<OperatorWorkflowRunSummary>, GatewayError> {
+    let mut runs = Vec::new();
+    for topic in state.topic_store.list_scopes().await? {
+        for run in state.storage.list_workflow_runs(topic.id).await? {
+            if !matches!(run.state.as_str(), "running" | "parked") {
+                continue;
+            }
+            let parent_session_id = run_parent_session(state, &run).await?;
+            let agent_id = if let Some(parent_id) = parent_session_id {
+                state
+                    .storage
+                    .get_session(parent_id)
+                    .await?
+                    .map(|session| session.agent_id)
+            } else {
+                run.dispatch_bound_agent_ids.last().cloned()
+            };
+            runs.push(OperatorWorkflowRunSummary {
+                id: run.id,
+                name: run.script_name.unwrap_or_else(|| "Inline workflow".into()),
+                activity: if run.state == "parked" {
+                    "Waiting"
+                } else {
+                    "Executing"
+                }
+                .into(),
+                state: run.state,
+                agent_id,
+                parent_session_id,
+                parent_run_id: run.parent_run_id,
+            });
+        }
+    }
+    Ok(runs)
 }
 
 async fn list_pending_approvals(state: &AppState) -> Result<ApprovalListResponse, GatewayError> {

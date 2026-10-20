@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { cancelWorkflowRun } from "../api/workflow-runs";
+  import { conversationPath } from "../router";
   import { messagePreview } from "../message-preview";
   import { onMount } from "svelte";
   import {
@@ -17,6 +19,12 @@
   import type { ScheduleRun } from "../protocol/ScheduleRun";
   import { passedOneShot, runUnsettled, UNSETTLED_RUN_REFRESH_MS } from "../one-shot-runs";
 
+  let { onStopSession, stopErrorFor, onNavigate }: {
+    onStopSession?: (sessionId: string) => void;
+    stopErrorFor?: (sessionId: string) => string | null;
+    onNavigate?: (path: string) => void;
+  } = $props();
+
   let overview = $state<OperatorOverview | null>(null);
   let isLoading = $state(true);
   let errorMessage = $state<string | null>(null);
@@ -24,6 +32,8 @@
   let openScheduleId = $state<string | null>(null);
   let scheduleRuns = $state<Record<string, ScheduleRun[]>>({});
   let showHistory = $state(false);
+  let runAccountId = $state<string | null>(null);
+  let overviewVersion = 0;
   const approvalsIdle = $derived((overview?.approvals.length ?? 0) === 0);
 
   function describeSpec(schedule: Schedule): string {
@@ -113,6 +123,7 @@
   }
 
   async function loadOverview(): Promise<void> {
+    overviewVersion += 1;
     isLoading = true;
     errorMessage = null;
 
@@ -150,6 +161,20 @@
     return activeActionKey === actionKey;
   }
 
+  async function cancelRun(runId: string): Promise<void> {
+    await cancelWorkflowRun(runId);
+    runAccountId = runId;
+  }
+
+  function navigate(event: MouseEvent): void {
+    if (!onNavigate || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button !== 0) return;
+    const path = (event.currentTarget as HTMLAnchorElement).getAttribute("href");
+    if (path) {
+      event.preventDefault();
+      onNavigate(path);
+    }
+  }
+
   function toneForHealth(health: string): string {
     switch (health) {
       case "degraded":
@@ -161,8 +186,33 @@
     }
   }
 
-  onMount(async () => {
-    await loadOverview();
+  onMount(() => {
+    void loadOverview();
+    let disposed = false;
+    let refreshing = false;
+    const timer = setInterval(async () => {
+      if (isLoading || activeActionKey || refreshing) return;
+      const version = overviewVersion;
+      refreshing = true;
+      try {
+        const refreshed = await fetchOperatorOverview();
+        if (disposed || version !== overviewVersion) return;
+        if (!overview) overview = refreshed;
+        else {
+          overview.gateway = refreshed.gateway;
+          overview.sessions = refreshed.sessions;
+          overview.workflow_runs = refreshed.workflow_runs;
+        }
+      }
+      catch (error) {
+        if (!disposed && version === overviewVersion) {
+          errorMessage = error instanceof Error ? error.message : "Failed to refresh fleet";
+        }
+      } finally {
+        refreshing = false;
+      }
+    }, UNSETTLED_RUN_REFRESH_MS);
+    return () => { disposed = true; clearInterval(timer); };
   });
 </script>
 
@@ -222,17 +272,38 @@
       <article class="panel panel-wide">
         <div class="panel-head">
           <div>
-            <p class="panel-kicker">Sessions</p>
-            <h2>Live and recent sessions</h2>
+            <p class="panel-kicker">Fleet</p>
+            <h2>Live work and recent sessions</h2>
           </div>
-          <span class="panel-count">{overview.sessions.length}</span>
+          <span class="panel-count">{overview.sessions.length + overview.workflow_runs.length}</span>
         </div>
+        {#if runAccountId}
+          <p class="detail-copy"><a onclick={navigate} href={`/workflow-runs/${encodeURIComponent(runAccountId)}`}>View run account</a></p>
+        {/if}
         <div class="ledger">
+          {#each overview.workflow_runs as run (run.id)}
+            <div class="ledger-row">
+              <div class="session-summary">
+                <div class="primary-line">
+                  <a onclick={navigate} href={`/workflow-runs/${encodeURIComponent(run.id)}`}>{run.name}</a>
+                  <span>Agent {run.agent_id ?? "not recorded"}</span>
+                  <StatusBadge register={run.state === "running" ? "in-motion" : "not-yet"} label={run.state} />
+                </div>
+                <div class="secondary-line">
+                  {#if run.parent_session_id}<a onclick={navigate} href={conversationPath(run.parent_session_id)}>Parent {run.parent_session_id}</a>{:else}No spawning session recorded{/if}
+                  {#if run.parent_run_id} · <a onclick={navigate} href={`/workflow-runs/${encodeURIComponent(run.parent_run_id)}`}>Parent run {run.parent_run_id}</a>{/if}
+                  · {run.activity}
+                </div>
+              </div>
+              <button class="action-btn" disabled={actionBusy(`cancel-${run.id}`)} onclick={() => runAction(`cancel-${run.id}`, () => cancelRun(run.id))}>Cancel</button>
+            </div>
+          {/each}
           {#each overview.sessions as session (session.id)}
             <div class="ledger-row">
               <div class="session-summary">
                 <div class="primary-line">
-                  <span class="mono">{session.id}</span>
+                  <a onclick={navigate} class="mono" href={conversationPath(session.id)}>{session.id}</a>
+                  <span>Agent {session.agent_id}</span>
                   {#if session.has_active_connection}
                     <StatusBadge register="calm" label="connected" />
                   {/if}
@@ -247,10 +318,25 @@
                   {session.topic_name} ·
                   {messagePreview(session.message_preview ?? "No messages yet")}
                 </div>
+                <div class="secondary-line">
+                  {#if session.parent_session_id}<a onclick={navigate} href={conversationPath(session.parent_session_id)}>Parent {session.parent_session_id}</a>{:else}No spawning session recorded{/if}
+                  {#if session.source} · {session.source}{/if} · {session.activity}
+                </div>
+                {#if stopErrorFor?.(session.id)}<p role="alert">{stopErrorFor(session.id)}</p>{/if}
               </div>
-              <span class="timestamp">{new Date(session.last_activity).toLocaleString()}</span>
+              <div class="action-row">
+                {#if session.has_running_turn}
+                  {#if session.workflow_run_id}
+                    <button class="action-btn" disabled={actionBusy(`cancel-${session.workflow_run_id}`)} onclick={() => runAction(`cancel-${session.workflow_run_id}`, () => cancelRun(session.workflow_run_id!))}>Cancel run</button>
+                  {:else}
+                    <button class="action-btn" disabled={!onStopSession || actionBusy(`stop-${session.id}`)} onclick={() => runAction(`stop-${session.id}`, async () => onStopSession?.(session.id))}>Stop</button>
+                  {/if}
+                {/if}
+                <span class="timestamp">{new Date(session.last_activity).toLocaleString()}</span>
+              </div>
             </div>
           {/each}
+
         </div>
       </article>
 
@@ -719,6 +805,11 @@
     display: flex;
     flex-direction: column;
     gap: 0;
+  }
+
+  .ledger {
+    max-height: min(42vh, 420px);
+    overflow-y: auto;
   }
 
   .ledger-row {

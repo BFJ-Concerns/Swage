@@ -396,7 +396,7 @@ export function createConversationStore(): ConversationStore {
       const activeConversation = get(activeConversationStore);
       if (!activeConversation || (conversationId && activeConversation.id !== conversationId)) return;
       const index = activeConversation.messages.findLastIndex(
-        (message) => message.role === "user" && message.turn_state === "pending",
+        (message) => message.role === "user" && ["pending", "processing", "delegating", "awaiting_approval"].includes(message.turn_state ?? ""),
       );
       if (index < 0) return;
       const messages = [...activeConversation.messages];

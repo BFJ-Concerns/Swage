@@ -9,4 +9,8 @@ topic_id?: string | null,
 /**
  * The topic's name, or "General" for a session without one.
  */
-topic_name: string, created_at: string, last_activity: string, message_preview?: string | null, has_interrupted_turn: boolean, has_active_connection: boolean, has_running_turn: boolean, ending?: OperatorSessionEnding | null, };
+topic_name: string, created_at: string, last_activity: string, message_preview?: string | null, has_interrupted_turn: boolean, has_active_connection: boolean, has_running_turn: boolean, ending?: OperatorSessionEnding | null, agent_id: string, parent_session_id?: string | null,
+/**
+ * The schedule or workflow run that opened this session, when applicable.
+ */
+source?: string | null, workflow_run_id?: string | null, activity: string, };

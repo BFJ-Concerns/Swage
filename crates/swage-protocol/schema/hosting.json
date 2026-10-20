@@ -1135,11 +1135,18 @@
           "items": {
             "$ref": "#/$defs/OperatorSessionSummary"
           }
+        },
+        "workflow_runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OperatorWorkflowRunSummary"
+          }
         }
       },
       "required": [
         "gateway",
         "sessions",
+        "workflow_runs",
         "approvals",
         "schedules",
         "channels",
@@ -1158,6 +1165,12 @@
     "OperatorSessionSummary": {
       "type": "object",
       "properties": {
+        "activity": {
+          "type": "string"
+        },
+        "agent_id": {
+          "type": "string"
+        },
         "created_at": {
           "type": "string",
           "format": "date-time"
@@ -1195,6 +1208,20 @@
             "null"
           ]
         },
+        "parent_session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "source": {
+          "description": "The schedule or workflow run that opened this session, when applicable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "topic_id": {
           "description": "Absent for a session in the general scope.",
           "type": [
@@ -1206,6 +1233,13 @@
         "topic_name": {
           "description": "The topic's name, or \"General\" for a session without one.",
           "type": "string"
+        },
+        "workflow_run_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
         }
       },
       "required": [
@@ -1215,7 +1249,53 @@
         "last_activity",
         "has_interrupted_turn",
         "has_active_connection",
-        "has_running_turn"
+        "has_running_turn",
+        "agent_id",
+        "activity"
+      ]
+    },
+    "OperatorWorkflowRunSummary": {
+      "type": "object",
+      "properties": {
+        "activity": {
+          "type": "string"
+        },
+        "agent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parent_run_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "parent_session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "state",
+        "activity"
       ]
     },
     "PresenceGatewayResponse": {

@@ -575,6 +575,42 @@ impl DelegationSnapshotRecorder for SnapshotOnlyDelegationRecorder {
     }
 }
 
+// Both completion modes publish their child session through the same stop
+// registry; the executor owns the token and its lifetime remains the turn's.
+async fn track_delegated_session(
+    state: &AppState,
+    token: CancellationToken,
+    mut started_rx: tokio::sync::oneshot::Receiver<swage_agent::DetachedDelegation>,
+    forward_started: Option<tokio::sync::oneshot::Sender<swage_agent::DetachedDelegation>>,
+    execution: impl std::future::Future<Output = Result<swage_storage::AgentMessage, AgentError>>,
+) -> Result<swage_storage::AgentMessage, AgentError> {
+    tokio::pin!(execution);
+    tokio::select! {
+        biased;
+        started = &mut started_rx => {
+            match started {
+                Ok(started) => {
+                    let session_id = started.child_session_id;
+                    state.active_turns.lock().await.insert(session_id, token);
+                    if let Some(sender) = forward_started { let _ = sender.send(started); }
+                    let result = execution.await;
+                    state.active_turns.lock().await.remove(&session_id);
+                    result
+                }
+                Err(_) => execution.await,
+            }
+        }
+        result = &mut execution => {
+            // Completion can win the same poll that published the address.
+            if let Ok(started) = started_rx.try_recv()
+                && let Some(sender) = forward_started {
+                let _ = sender.send(started);
+            }
+            result
+        },
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct GatewayDelegationHandler {
     state: AppState,
@@ -1228,25 +1264,32 @@ impl DelegationHandler for GatewayDelegationHandler {
         match completion_mode {
             DelegateCompletionMode::Wait => {
                 let child_cancel_token = cancel_token.child_token();
-                let result_msg = match executor
-                    .execute_delegation(
-                        &delegate_msg,
-                        Some(sender_turn_id),
-                        Some(sender_session_id),
-                        topic_id,
-                        target_agent_config,
-                        target_context_transfer_config,
-                        Some(target_dispatcher),
-                        session_metadata,
-                        child_cancel_token,
-                        None,
-                        existing_child,
-                        placement
-                            .as_ref()
-                            .map(|placement| placement.path.to_string_lossy().into_owned()),
-                        child_effort,
-                    )
-                    .await
+                let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+                let execution = executor.execute_delegation(
+                    &delegate_msg,
+                    Some(sender_turn_id),
+                    Some(sender_session_id),
+                    topic_id,
+                    target_agent_config,
+                    target_context_transfer_config,
+                    Some(target_dispatcher),
+                    session_metadata,
+                    child_cancel_token.clone(),
+                    Some(started_tx),
+                    existing_child,
+                    placement
+                        .as_ref()
+                        .map(|placement| placement.path.to_string_lossy().into_owned()),
+                    child_effort,
+                );
+                let result_msg = match Box::pin(track_delegated_session(
+                    &self.state,
+                    child_cancel_token,
+                    started_rx,
+                    None,
+                    execution,
+                ))
+                .await
                 {
                     Ok(result_msg) => result_msg,
                     Err(error) => {
@@ -1314,31 +1357,39 @@ impl DelegationHandler for GatewayDelegationHandler {
                 let child_cancel_token = cancel_token.child_token();
                 let delegate_message_id = delegate_msg.id;
                 let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+                let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
+                let tracking_state = self.state.clone();
                 let detached_router = router.clone();
                 let worktree_host = Arc::clone(&self.state.worktree_host);
                 let placement = placement.clone();
                 let retain_worktree = child.is_some();
 
                 tokio::spawn(async move {
-                    let result = executor
-                        .execute_delegation(
-                            &delegate_msg,
-                            Some(sender_turn_id),
-                            Some(sender_session_id),
-                            topic_id,
-                            target_agent_config,
-                            target_context_transfer_config,
-                            Some(target_dispatcher),
-                            session_metadata,
-                            child_cancel_token,
-                            Some(started_tx),
-                            existing_child,
-                            placement
-                                .as_ref()
-                                .map(|placement| placement.path.to_string_lossy().into_owned()),
-                            child_effort,
-                        )
-                        .await;
+                    let execution = executor.execute_delegation(
+                        &delegate_msg,
+                        Some(sender_turn_id),
+                        Some(sender_session_id),
+                        topic_id,
+                        target_agent_config,
+                        target_context_transfer_config,
+                        Some(target_dispatcher),
+                        session_metadata,
+                        child_cancel_token.clone(),
+                        Some(started_tx),
+                        existing_child,
+                        placement
+                            .as_ref()
+                            .map(|placement| placement.path.to_string_lossy().into_owned()),
+                        child_effort,
+                    );
+                    let result = Box::pin(track_delegated_session(
+                        &tracking_state,
+                        child_cancel_token,
+                        started_rx,
+                        Some(registered_tx),
+                        execution,
+                    ))
+                    .await;
 
                     shutdown_sandbox_guard(
                         &target_sandbox_guard,
@@ -1371,7 +1422,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                     }
                 });
 
-                let mut detached = started_rx.await.map_err(|_| {
+                let mut detached = registered_rx.await.map_err(|_| {
                     AgentError::InvalidConfig(
                         "detached delegation stopped before child turn startup".to_string(),
                     )

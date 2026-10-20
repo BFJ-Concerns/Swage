@@ -7,6 +7,9 @@ import { compile } from "svelte/compiler";
 import { chromium } from "@playwright/test";
 import appCss from "../../app.css?raw";
 
+import { createConnectionStore } from "../stores/connection";
+import risoCss from "../styles/riso.css?raw";
+
 import OperatorDashboard from "../components/OperatorDashboard.svelte";
 import operatorDashboardSource from "../components/OperatorDashboard.svelte?raw";
 import * as operatorApi from "../api/operator";
@@ -39,6 +42,7 @@ function makeOverview(overrides: Partial<OperatorOverview> = {}): OperatorOvervi
       active_turn_count: 2,
       active_connection_count: 1,
     },
+    workflow_runs: [],
     sessions: [
       {
         id: "conv-1",
@@ -50,6 +54,8 @@ function makeOverview(overrides: Partial<OperatorOverview> = {}): OperatorOvervi
         has_interrupted_turn: false,
         has_active_connection: true,
         has_running_turn: true,
+        agent_id: "gateway",
+        activity: "processing",
       },
     ],
     approvals: [
@@ -131,7 +137,11 @@ describe("OperatorDashboard", () => {
   });
 
   it("keeps the heading within 80px and supervision panels in the first viewport at 1440x1000", async () => {
-    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOverview());
+    const overview = makeOverview();
+    overview.sessions = Array.from({ length: 8 }, (_, index) => ({
+      ...overview.sessions[0], id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    }));
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(overview);
     component = mount(OperatorDashboard, { target: document.body });
     await settleUi();
     const scope = Array.from(document.querySelector(".ops-deck")!.classList)
@@ -140,8 +150,9 @@ describe("OperatorDashboard", () => {
     const browser = await chromium.launch({ headless: true });
     try {
       const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
-      await page.setContent(`<style>${appCss}\n${(css?.code ?? "").replace(/svelte-[a-z0-9]+/g, scope)}</style>${document.body.innerHTML}`);
+      await page.setContent(`<style>${risoCss}\n${appCss.replace(/@import[^;]+;/g, "")}\n${(css?.code ?? "").replace(/svelte-[a-z0-9]+/g, scope)}</style>${document.body.innerHTML}`);
       const header = await page.locator(".ops-header").boundingBox();
+      expect(header).not.toBeNull();
       expect(header!.height).toBeLessThanOrEqual(80);
       for (const selector of [".ledger-row", ".control-card", ".panel:nth-child(3) .control-card"]) {
         const box = await page.locator(selector).first().boundingBox();
@@ -162,6 +173,58 @@ describe("OperatorDashboard", () => {
     const labels = Array.from(document.querySelectorAll(".session-summary .badge")).map((badge) => badge.textContent?.trim());
     expect(labels).toContain(ending === "cancelled" ? "cancelled (cut short)" : ending);
     if (ending !== "interrupted") expect(labels).not.toContain("interrupted");
+  });
+
+  it("attributes live runs and child sessions and sends their wind-down commands", async () => {
+    vi.useFakeTimers();
+    const overview = makeOverview();
+    overview.sessions[0] = { ...overview.sessions[0], id: "child-1", agent_id: "researcher", parent_session_id: "parent-1" };
+    overview.workflow_runs = [{ id: "run-1", name: "Research sweep", state: "running", agent_id: "researcher", parent_session_id: "parent-1", activity: "Executing" }];
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(overview);
+    const onNavigate = vi.fn();
+    const client = { connect: vi.fn(), send: vi.fn(), disconnect: vi.fn(), onEvent: vi.fn(), onStatusChange: vi.fn() };
+    const connections = createConnectionStore({ wsClientFactory: () => client });
+    const fetch = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    try {
+      component = mount(OperatorDashboard, { target: document.body, props: { onNavigate, onStopSession: (id) => connections.cancelTurn(id) } });
+      await vi.advanceTimersByTimeAsync(0);
+      const rows = Array.from(document.querySelectorAll<HTMLElement>(".ledger-row"));
+      const run = rows.find((row) => row.textContent?.includes("Research sweep"));
+      expect(run, "workflow run is rendered on the fleet").toBeDefined();
+      expect(run!.textContent).toContain("Agent researcher");
+      expect(run?.textContent).toContain("Parent parent-1");
+      expect(run?.textContent).toContain("Executing");
+      expect(run?.querySelector("a")?.getAttribute("href")).toBe("/workflow-runs/run-1");
+      const child = rows.find((row) => row.textContent?.includes("child-1"))!;
+      expect(child, "processing child is rendered on the fleet").toBeDefined();
+      expect(child.textContent).toContain("Agent researcher");
+      expect(child.textContent).toContain("Parent parent-1");
+      expect(child.querySelector("a")?.getAttribute("href")).toBe("/conversations/child-1");
+      const stop = child.querySelector<HTMLButtonElement>("button");
+      expect(stop?.textContent).toBe("Stop");
+      flushSync(() => stop!.click());
+      expect(client.connect).toHaveBeenCalledWith("child-1");
+      expect(client.send).toHaveBeenCalledWith({ type: "cancel" });
+      await vi.advanceTimersByTimeAsync(0);
+      const cancel = run!.querySelector<HTMLButtonElement>("button");
+      expect(cancel?.textContent).toBe("Cancel");
+      flushSync(() => cancel!.click());
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/workflow-runs/run-1/cancel", { method: "POST" }));
+      await vi.advanceTimersByTimeAsync(0);
+      vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue({ ...overview, sessions: [], workflow_runs: [] });
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS);
+      expect(document.querySelector('.ledger a[href="/workflow-runs/run-1"]')).toBeNull();
+      const accountLink = Array.from(document.querySelectorAll("a"))
+        .find((link) => link.textContent?.trim() === "View run account");
+      expect(accountLink?.getAttribute("href")).toBe("/workflow-runs/run-1");
+      flushSync(() => accountLink!.click());
+      expect(onNavigate).toHaveBeenCalledWith("/workflow-runs/run-1");
+      expect(document.querySelector('a[href="/conversations/child-1"]')).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
   });
 
   it.each([false, true])("hides a paused schedule's next run while retaining an active schedule's (gated: %s)", async (gated) => {
