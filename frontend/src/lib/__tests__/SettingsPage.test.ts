@@ -692,6 +692,77 @@ describe("SettingsPage", () => {
     expect(editor.value).toBe("{");
   });
 
+  it.each(["begin", "clear"])("retains a search draft %s while another save finishes", async (action) => {
+    const initial = emptySettings();
+    if (action === "clear") initial.tool_runtime.search = { provider_type: "searxng", base_url: "https://search.example.org" };
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(initial);
+    const save = vi.mocked(settingsApi.saveSettings).getMockImplementation()!;
+    let finish!: () => void;
+    vi.mocked(settingsApi.saveSettings).mockImplementationOnce(async (payload) => {
+      await new Promise<void>((resolve) => { finish = resolve; });
+      return save(payload);
+    });
+    component = mount(SettingsPage, { target: document.body, props: { tab: "automation" } });
+    await flushUi();
+    buttonNamed("Disabled").click();
+    await waitForSaveCall();
+    if (action === "begin") document.querySelector<HTMLInputElement>('[aria-label="Enable web search"]')!.click();
+    await flushUi();
+    const url = document.querySelector<HTMLInputElement>('[aria-label="Search base URL"]')!;
+    url.value = "";
+    url.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
+    finish();
+    await flushUi();
+    expect(document.querySelector<HTMLInputElement>('[aria-label="Enable web search"]')!.checked).toBe(true);
+    expect(document.querySelector<HTMLInputElement>('[aria-label="Search base URL"]')?.value).toBe("");
+  });
+
+  it.each(["restore", "display", "generation"])("clears the obsolete archive notice on %s", async (action) => {
+    const tab = writable<"automation" | "display" | "generation">("automation");
+    const currentTab = fromStore(tab);
+    component = mount(SettingsPage, { target: document.body, props: { get tab() { return currentTab.current; } } });
+    await flushUi();
+    const delay = document.querySelector<HTMLInputElement>('[aria-label="Archive sessions after days"]')!;
+    delay.value = "0";
+    delay.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    await flushUi();
+    expect(document.querySelector(".notice.error")?.textContent).toContain("Fix the archive delay");
+    if (action === "restore") {
+      delay.value = "7";
+      delay.dispatchEvent(new Event("input", { bubbles: true }));
+    } else tab.set(action as "display" | "generation");
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    await flushUi();
+    expect(document.querySelector(".notice.error")).toBeNull();
+    expect(settingsApi.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("allows saving after a tab switch discards an invalid bundle editor", async () => {
+    const tab = writable<"automation" | "generation">("automation");
+    const currentTab = fromStore(tab);
+    component = mount(SettingsPage, { target: document.body, props: { get tab() { return currentTab.current; } } });
+    await flushUi();
+    const editor = document.querySelector<HTMLTextAreaElement>('[aria-label="Tool bundles"]')!;
+    editor.value = "{";
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushUi();
+    expect(editor.getAttribute("aria-invalid")).toBe("true");
+    tab.set("generation");
+    await flushUi();
+    tab.set("automation");
+    await flushUi();
+    const restored = document.querySelector<HTMLTextAreaElement>('[aria-label="Tool bundles"]')!;
+    expect(restored.getAttribute("aria-invalid")).toBeNull();
+    expect(JSON.parse(restored.value)).toEqual(emptySettings().tool_permissions.bundles);
+    buttonNamed("Disabled").click();
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    await flushUi();
+    expect(settingsApi.saveSettings).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls[0][0].sandbox?.enabled).toBe(false);
+  });
+
   it("waits for the required search fields before autosaving", async () => {
     component = mount(SettingsPage, {
       target: document.body,

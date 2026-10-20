@@ -28,8 +28,8 @@
       let suffix = "";
       if (location) {
         suffix = ` at line ${location[1]}, column ${location[2]}`;
-      } else if (position) {
-        const prefix = value.slice(0, Number(position[1]));
+      } else if (position || !value.trim()) {
+        const prefix = value.slice(0, position ? Number(position[1]) : value.length);
         const lines = prefix.split("\n");
         suffix = ` at line ${lines.length}, column ${lines.at(-1)!.length + 1}`;
       }
