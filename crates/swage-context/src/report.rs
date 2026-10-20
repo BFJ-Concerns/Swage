@@ -201,6 +201,7 @@ mod tests {
             failure_reason: None,
             focus: None,
             diagnosis: None,
+            calls: Vec::new(),
         };
         let json = serde_json::to_string(&record).unwrap();
         let decoded: CompactionRecord = serde_json::from_str(&json).unwrap();
@@ -245,6 +246,7 @@ mod tests {
             failure_reason: Some("LLM timeout".to_string()),
             focus: None,
             diagnosis: None,
+            calls: Vec::new(),
         };
         let json = serde_json::to_string(&record).unwrap();
         let decoded: CompactionRecord = serde_json::from_str(&json).unwrap();
@@ -271,6 +273,7 @@ mod tests {
             failure_reason: None,
             focus: None,
             diagnosis: None,
+            calls: Vec::new(),
         };
         let json = serde_json::to_string(&record).unwrap();
         let decoded: CompactionRecord = serde_json::from_str(&json).unwrap();
@@ -293,6 +296,7 @@ mod tests {
             failure_reason: None,
             focus: Some("Preserve dates and named decisions".to_string()),
             diagnosis: None,
+            calls: Vec::new(),
         };
 
         let persisted = serde_json::to_string(&record).expect("record should serialise");

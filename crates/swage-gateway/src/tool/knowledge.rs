@@ -1178,6 +1178,7 @@ mod tests {
         let relative = artifact.reported;
         storage
             .create_tool_call(NewToolCall {
+                execution: None,
                 turn_id: fetch_turn.id,
                 agent_id: "gateway".into(),
                 call_id: "fetch-1".into(),

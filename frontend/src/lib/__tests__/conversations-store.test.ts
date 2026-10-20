@@ -931,6 +931,29 @@ describe("threads and branches", () => {
 });
 
 
+describe("scope list isolation", () => {
+  it("clears the old list immediately and ignores its late response", async () => {
+    const store = createConversationStore();
+    vi.mocked(api.listConversations).mockResolvedValueOnce([makeSummary("old")]);
+    await store.loadConversations("old-topic");
+    let releaseOld!: (rows: ReturnType<typeof makeSummary>[]) => void;
+    vi.mocked(api.listConversations).mockImplementationOnce(() => new Promise(resolve => { releaseOld = resolve; }));
+    const oldLoad = store.loadConversations("old-topic");
+    let releaseNew!: (rows: ReturnType<typeof makeSummary>[]) => void;
+    vi.mocked(api.listConversations).mockImplementationOnce(() => new Promise(resolve => { releaseNew = resolve; }));
+    const newLoad = store.loadConversations("empty-topic");
+    expect(store.conversations).toEqual([]);
+    releaseOld([makeSummary("stale")]);
+    await oldLoad;
+    expect(store.conversations).toEqual([]);
+    expect(store.isLoading).toBe(true);
+    releaseNew([]);
+    await newLoad;
+    expect(store.conversations).toEqual([]);
+    expect(store.isLoading).toBe(false);
+  });
+});
+
 describe("queued thread replies", () => {
   it("keeps queued branch replies out of Main and resets the destination for the following turn", async () => {
     vi.mocked(api.getConversation).mockResolvedValue({ ...makeDetail("conv-queue"), root_thread_id: "main-thread" });

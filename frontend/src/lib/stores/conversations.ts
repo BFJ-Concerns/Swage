@@ -49,7 +49,7 @@ export interface ConversationStore {
     timestamp: string;
     turn_state: Extract<
       MessageView["turn_state"],
-      "completed" | "refused" | "incomplete" | "failed" | "interrupted"
+      "completed" | "refused" | "incomplete" | "failed" | "interrupted" | "cancelled"
     >;
     /** The thread the reply belongs to; absent means the thread in view. */
     thread_id?: string;
@@ -73,7 +73,7 @@ export interface ConversationStore {
    */
   settleUnansweredRequest?(
     settlement: {
-      turn_state: Extract<MessageView["turn_state"], "failed" | "interrupted">;
+      turn_state: Extract<MessageView["turn_state"], "failed" | "interrupted" | "cancelled">;
       tool_calls: MessageView["tool_calls"];
     },
     conversationId?: string | null,
@@ -252,6 +252,8 @@ export function createConversationStore(): ConversationStore {
     updateConversationSummary(ownerId, message);
   }
 
+  let listGeneration = 0;
+
   return {
     // ---------------------------------------------------------------------------
     // Reactive state (read-only to callers via readonly interface)
@@ -282,13 +284,15 @@ export function createConversationStore(): ConversationStore {
     // ---------------------------------------------------------------------------
 
     async loadConversations(topicId) {
+      const generation = ++listGeneration;
+      conversationsStore.set([]);
       isLoadingStore.set(true);
       try {
         const list = await api.listConversations(topicId);
+        if (generation !== listGeneration) return;
         conversationsStore.set(sortByRecency(list));
       } finally {
-        // Always clear loading — even on error, so the UI isn't stuck.
-        isLoadingStore.set(false);
+        if (generation === listGeneration) isLoadingStore.set(false);
       }
     },
 

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use axum::{
@@ -1319,12 +1319,14 @@ pub async fn get_turn_context(
 
 /// `POST /api/shutdown` — initiate a graceful server shutdown.
 ///
-/// # Localhost restriction
+/// # Local-machine restriction
 ///
-/// Only requests from `127.0.0.1` or `::1` are accepted. All other source
-/// addresses receive `403 Forbidden`. When `ConnectInfo` is absent (e.g. in
-/// unit tests that use `Router::oneshot` without a real TCP connection) the
-/// restriction is bypassed — this is intentional test-environment behaviour.
+/// The TCP peer must be loopback or an address currently assigned to this
+/// machine. IPv4-mapped IPv6 peers are compared as IPv4. Interface enumeration
+/// failure denies non-loopback peers; forwarded headers are never trusted.
+/// Other source addresses receive `403 Forbidden`. When `ConnectInfo` is absent
+/// (e.g. in unit tests using `Router::oneshot` without a real TCP connection),
+/// the restriction is bypassed — this is intentional test-environment behaviour.
 ///
 /// # Behaviour
 ///
@@ -1339,13 +1341,14 @@ pub async fn shutdown(
 ) -> impl IntoResponse {
     use crate::websocket::ServerEvent;
 
-    // Enforce localhost-only access when a real TCP connection provides the
-    // peer address. Without ConnectInfo (unit tests / same-process calls),
-    // the restriction is not enforced.
+    // Read interfaces for this request: DHCP and interface changes must not
+    // leave a stale allow-list. Same-process calls without ConnectInfo retain
+    // the router's existing test behaviour.
     if let Some(Extension(ConnectInfo(addr))) = connect_info
-        && !addr.ip().is_loopback()
+        && !shutdown_peer_is_local(addr.ip(), local_interface_addresses)
     {
-        return ApiError::forbidden("shutdown is only accessible from localhost").into_response();
+        return ApiError::forbidden("shutdown is only accessible from this machine")
+            .into_response();
     }
 
     let reason = "admin shutdown request".to_string();
@@ -1369,6 +1372,80 @@ pub async fn shutdown(
         })),
     )
         .into_response()
+}
+
+/// Both the peer and interface addresses use their canonical IP form so a
+/// dual-stack listener applies the same rule as an IPv4 listener.
+fn shutdown_peer_is_local(
+    peer: IpAddr,
+    read_addresses: impl FnOnce() -> std::io::Result<Vec<IpAddr>>,
+) -> bool {
+    let peer = peer.to_canonical();
+    if peer.is_loopback() {
+        return true;
+    }
+    match read_addresses() {
+        Ok(addresses) => addresses
+            .into_iter()
+            .any(|address| address.to_canonical() == peer),
+        Err(error) => {
+            tracing::warn!(%error, "Cannot verify shutdown peer against local interfaces");
+            false
+        }
+    }
+}
+
+#[cfg(unix)]
+fn local_interface_addresses() -> std::io::Result<Vec<IpAddr>> {
+    struct Interfaces(*mut libc::ifaddrs);
+    impl Drop for Interfaces {
+        fn drop(&mut self) {
+            // SAFETY: this list was returned by getifaddrs and is freed once.
+            unsafe { libc::freeifaddrs(self.0) };
+        }
+    }
+
+    let mut head = std::ptr::null_mut();
+    // SAFETY: head points to writable storage for getifaddrs' list pointer.
+    if unsafe { libc::getifaddrs(&raw mut head) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let interfaces = Interfaces(head);
+    let mut cursor = interfaces.0;
+    let mut addresses = Vec::new();
+    // SAFETY: getifaddrs returned this linked list. The guard keeps it alive
+    // throughout traversal; each address cast is checked against sa_family.
+    unsafe {
+        while let Some(entry) = cursor.as_ref() {
+            if !entry.ifa_addr.is_null() {
+                match (*entry.ifa_addr).sa_family as i32 {
+                    libc::AF_INET => {
+                        let address = &*entry.ifa_addr.cast::<libc::sockaddr_in>();
+                        addresses.push(IpAddr::V4(std::net::Ipv4Addr::from(
+                            address.sin_addr.s_addr.to_ne_bytes(),
+                        )));
+                    }
+                    libc::AF_INET6 => {
+                        let address = &*entry.ifa_addr.cast::<libc::sockaddr_in6>();
+                        addresses.push(IpAddr::V6(std::net::Ipv6Addr::from(
+                            address.sin6_addr.s6_addr,
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+            cursor = entry.ifa_next;
+        }
+    }
+    Ok(addresses)
+}
+
+#[cfg(not(unix))]
+fn local_interface_addresses() -> std::io::Result<Vec<IpAddr>> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "local interface enumeration is unavailable",
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1595,6 +1672,7 @@ pub async fn get_turn(
 
     Ok(Json(TurnPollResponse {
         turn_id: turn.id,
+        failure_message: turn.failure_message,
         state: turn.state.to_string(),
         assistant_response: turn.assistant_response,
         structured_output: turn.structured_output,
@@ -1835,6 +1913,7 @@ async fn execute_external_delegate_message(
             silent_ws_tx,
             crate::turn::effective_tool_permissions_record(&effective_target_resolved),
             composition,
+            dispatcher_build.dispatcher.offered_tools(),
         ),
         snapshot_recorder: Some(crate::turn::delegation_snapshot_recorder_for_state(
             state.clone(),
@@ -2116,6 +2195,7 @@ pub async fn list_turns(
         .into_iter()
         .map(|t| TurnPollResponse {
             turn_id: t.id,
+            failure_message: t.failure_message,
             state: t.state.to_string(),
             assistant_response: t.assistant_response,
             structured_output: t.structured_output,
@@ -2271,6 +2351,7 @@ mod tests {
         assert_eq!(
             body_json(response).await,
             serde_json::json!([{
+                "integration": "telegram",
                 "link_code": issued.link_code,
                 "expires_at": issued.expires_at,
             }]),
@@ -5581,15 +5662,18 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_from_non_localhost_returns_403() {
-        let (router, _, _, _) = make_shutdown_router();
+        let (router, _, signal, mut events) = make_shutdown_router();
 
         let resp = router
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/api/shutdown")
-                    // Simulate a request from a remote IP.
-                    .extension(ConnectInfo(SocketAddr::from(([192, 168, 1, 100], 54321))))
+                    .header("X-Forwarded-For", "127.0.0.1")
+                    .header("Forwarded", "for=127.0.0.1")
+                    // TEST-NET-3 is reserved for documentation, not a host interface.
+                    .extension(ConnectInfo(SocketAddr::from(([203, 0, 113, 42], 54321))))
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -5599,6 +5683,58 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         let body = body_json(resp).await;
         assert_eq!(body["code"].as_str().unwrap(), "forbidden");
+        assert!(!signal.is_cancelled(), "refused shutdown must not cancel");
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ),
+            "refused shutdown must not broadcast"
+        );
+    }
+
+    #[test]
+    fn shutdown_peer_check_accepts_mapped_interface_address() {
+        let local = "10.20.30.40".parse::<IpAddr>().unwrap();
+        let peer = "::ffff:10.20.30.40".parse::<IpAddr>().unwrap();
+        assert!(shutdown_peer_is_local(peer, || Ok(vec![local])));
+    }
+
+    #[test]
+    fn shutdown_peer_check_denies_failed_interface_read() {
+        let read_failure = || Err(std::io::Error::other("interface enumeration failed"));
+        assert!(
+            !shutdown_peer_is_local("10.20.30.40".parse().unwrap(), read_failure),
+            "interface enumeration failure must deny non-loopback peers"
+        );
+        assert!(
+            shutdown_peer_is_local("::1".parse().unwrap(), read_failure),
+            "loopback does not depend on interface enumeration"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_from_ipv4_mapped_loopback_returns_200() {
+        let (router, _, signal, mut events) = make_shutdown_router();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/shutdown")
+                    .extension(ConnectInfo(
+                        "[::ffff:127.0.0.1]:8080".parse::<SocketAddr>().unwrap(),
+                    ))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "mapped loopback is local");
+        assert!(signal.is_cancelled());
+        assert!(matches!(
+            events.try_recv(),
+            Ok(ServerEvent::Shutdown { .. })
+        ));
     }
 
     #[tokio::test]

@@ -6,6 +6,8 @@ use thiserror::Error;
 /// Errors produced by the agent runtime.
 #[derive(Debug, Error)]
 pub enum AgentError {
+    #[error("{0}")]
+    RepeatedToolFailure(String),
     #[error("LLM provider failed: {0}")]
     ProviderFailed(#[from] ProviderError),
 
@@ -46,6 +48,10 @@ pub enum AgentError {
     #[error("output schema validation failed after {attempts} attempt(s)")]
     OutputSchemaFailed { attempts: u32 },
 
+    /// Approval expired before execution under the interrupt policy.
+    #[error("approval timed out before tool execution; turn interrupted")]
+    ApprovalTimedOut,
+
     /// The turn was cancelled by the caller via the cancellation token.
     #[error("turn cancelled")]
     Cancelled,
@@ -69,12 +75,14 @@ impl AgentError {
             AgentError::SessionNotFound(_) => false,
             AgentError::SessionAccessDenied { .. } => false,
             AgentError::ThreadNotFound(_) => false,
-            AgentError::InvalidConfig(_) => false,
+            AgentError::InvalidConfig(_) | AgentError::RepeatedToolFailure(_) => false,
             AgentError::ContextTooLong => false,
             // Schema validation exhausted all retries — not transient.
             AgentError::OutputSchemaFailed { .. } => false,
             // Cancellation is not a transient failure — the caller chose to stop.
-            AgentError::Cancelled | AgentError::ProviderRefused => false,
+            AgentError::Cancelled | AgentError::ProviderRefused | AgentError::ApprovalTimedOut => {
+                false
+            }
         }
     }
 }

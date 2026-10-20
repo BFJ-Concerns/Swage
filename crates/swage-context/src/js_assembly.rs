@@ -923,6 +923,7 @@ mod tests {
                     channel: None,
                 },
                 vec![],
+                std::collections::BTreeSet::new(),
             )),
             Box::new(PromptsElement::new(vec![PromptRule {
                 priority: 0,
@@ -1057,6 +1058,7 @@ mod tests {
                     channel: None,
                 },
                 vec![],
+                std::collections::BTreeSet::new(),
             )),
             Box::new(WorkingNormsElement::for_model(
                 "claude-opus-5",
@@ -1718,6 +1720,7 @@ mod tests {
         elements.push(Box::new(crate::memory::MemoryIndexElement::new(
             Some("remembered material".into()),
             Vec::new(),
+            crate::memory::MemoryReach::EntriesByReference,
         )));
         let output = assemble_source(HISTORY_AND_PROMPTS_ONLY, &elements);
 

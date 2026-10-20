@@ -161,14 +161,22 @@ pub(super) async fn settle_turn_dispatcher(
                         "sandbox setup failed and unsandboxed execution was not approved: {error}"
                     )));
                 }
-                SandboxDegradationApproval::Interrupted => {
+                outcome @ (SandboxDegradationApproval::Interrupted
+                | SandboxDegradationApproval::Cancelled) => {
                     record_failed_turn_and_release_on_error(
                         state,
                         session_id,
                         prepared_turn_id,
                         state
                             .storage
-                            .update_turn_state(prepared_turn_id, TurnState::Interrupted)
+                            .update_turn_state(
+                                prepared_turn_id,
+                                if matches!(outcome, SandboxDegradationApproval::Cancelled) {
+                                    TurnState::Cancelled
+                                } else {
+                                    TurnState::Interrupted
+                                },
+                            )
                             .await
                             .map_err(GatewayError::from),
                     )

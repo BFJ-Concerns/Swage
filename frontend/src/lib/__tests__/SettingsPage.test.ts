@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mount, unmount } from "svelte";
+import { flushSync, mount, unmount } from "svelte";
 import { compile } from "svelte/compiler";
 import defaultModelSource from "../components/settings/ProviderDefaultModel.svelte?raw";
 import modelManagementSource from "../components/settings/ProviderModelManagement.svelte?raw";
 import { createClassComponent } from "svelte/legacy";
 import { fromStore, writable } from "svelte/store";
 
+import { emptySettings } from "./fixtures/settings";
 import SettingsPage from "../components/SettingsPage.svelte";
 import type { Schedule } from "../protocol/Schedule";
 import type { SettingsPayload, SettingsResponse } from "../types";
@@ -96,73 +97,6 @@ function clickDiscoveredModel(name: string): void {
   (button as HTMLButtonElement).click();
 }
 
-function emptySettings(): SettingsResponse {
-  return {
-    providers: {},
-    default_provider: "",
-    models: {},
-    default_model: "",
-    generation_presets: {},
-    tool_runtime: {
-      shell_timeout_secs: 30,
-      python_execute: {
-        enabled: true,
-        timeout_secs: 30,
-        startup_timeout_secs: 10,
-        idle_ttl_secs: 60,
-        warm_target: 1,
-        max_workers: 1,
-        runtime_policy: "bundled_then_system",
-        runtime_path: null,
-        require_sandbox: true,
-      },
-      max_output_bytes: 100_000,
-      plugin_directory: null,
-      search: null,
-    },
-    tool_permissions: {
-      allow: ["*"],
-      deny: [],
-      bundles: {},
-      require_approval: ["shell", "file_edit", "file_write", "python_execute"],
-    },
-    hitl: {
-      timeout: 300,
-      timeout_policy: "reject",
-    },
-    sandbox: {
-      enabled: true,
-      allow_degraded_execution: false,
-    },
-    context: {
-      assembly: "default",
-      timeout: 5,
-      budget: null,
-    },
-    pricing: {
-      models: {},
-    },
-    observability: {
-      force_on: false,
-    },
-    communication: {
-      context_transfer: {
-        mode: "none",
-        allowed_fields: [],
-        summary_budget: null,
-        targets: {},
-      },
-      message_ttl_secs: 86_400,
-      expiry_interval_secs: 60,
-    },
-    sessions: { archive_after_days: 7, max_delegation_depth: 4 },
-    memory: { curator_idle_minutes: 10 },
-    attachments: { accepted_schemes: ["https", "data"] },
-    voice: {},
-    restart_required: false,
-    can_restart: false,
-  };
-}
 
 function createdSchedule(topicId: string): Schedule {
   return makeSchedule({
@@ -218,7 +152,51 @@ describe("SettingsPage", () => {
     component = undefined;
     document.body.innerHTML = "";
     vi.clearAllMocks();
+    vi.useRealTimers();
   });
+
+  it.each(["providers", "generation", "automation", "voice"] as const)(
+    "shows quiet transient new-turn feedback after saving %s", async (tab) => {
+      vi.mocked(settingsApi.fetchSettings).mockResolvedValue(configuredProvider());
+      const save = vi.mocked(settingsApi.saveSettings).getMockImplementation()!;
+      vi.mocked(settingsApi.saveSettings).mockImplementation(async (payload) => ({
+        ...await save(payload), restart_required: false, can_restart: true,
+      }));
+      component = mount(SettingsPage, { target: document.body, props: { tab } });
+      await flushUi();
+      vi.useFakeTimers();
+      flushSync(() => {
+        if (tab === "providers") {
+          const input = document.querySelector<HTMLInputElement>('input[placeholder="model-id"]')!;
+          input.value = "added-model";
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        } else if (tab === "automation") {
+          const input = document.querySelector<HTMLInputElement>('input[placeholder="300"]')!;
+          input.value = "301";
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        } else if (tab === "voice") {
+          const input = document.querySelector<HTMLInputElement>('input[aria-label="Transcription model"]')!;
+          input.value = "transcribe";
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      });
+      if (tab === "providers") flushSync(() => buttonNamed("+Add model").click());
+      if (tab === "generation") flushSync(() => buttonNamed("+ New").click());
+      await vi.advanceTimersByTimeAsync(700);
+      expect(settingsApi.saveSettings).toHaveBeenCalledTimes(1);
+      const notice = document.querySelector(".notice");
+      expect.soft(notice?.textContent?.trim()).toBe("Saved automatically. Changes apply to new turns.");
+      expect.soft(notice?.getAttribute("role")).toBe("status");
+      expect.soft(notice?.querySelector("button")).toBeNull();
+      if (tab === "automation") {
+        const sandbox = [...document.querySelectorAll(".field")].find((field) => field.querySelector(".key")?.textContent?.startsWith("Sandbox"));
+        expect.soft(sandbox?.textContent).toContain("Saved changes apply to new turns.");
+        expect.soft(sandbox?.textContent).not.toContain("require a gateway restart");
+      }
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(document.querySelector(".notice")).toBeNull();
+    },
+  );
 
   function configuredProvider(source: "environment" | "stored" | "none" = "none"): SettingsResponse {
     const settings = emptySettings();

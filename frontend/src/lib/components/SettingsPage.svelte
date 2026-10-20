@@ -115,6 +115,15 @@
       : null,
   );
   let status = $state("");
+  let saveSucceeded = $state(false);
+  $effect(() => {
+    if (!saveSucceeded || !status) return;
+    const timer = window.setTimeout(() => {
+      status = "";
+      saveSucceeded = false;
+    }, 4000);
+    return () => window.clearTimeout(timer);
+  });
   let error = $state<string | null>(null);
   const HOT_AUTOSAVE_TABS: ReadonlySet<SettingsTabId> = new Set([
     "providers",
@@ -200,6 +209,7 @@
     saveFailed = false;
     error = null;
     status = "";
+    saveSucceeded = false;
     if (archiveDelayError) {
       error = "Fix the archive delay in Automation before saving. It must be at least 1 day.";
       return false;
@@ -265,8 +275,9 @@
       status = hasInvalidBundlesJson
         ? ""
         : archiveDelayChanged
-          ? `Archive delay saved as ${saved.sessions.archive_after_days} ${saved.sessions.archive_after_days === 1 ? "day" : "days"}.`
-          : options.message ?? "Saved. New turns will use the updated runtime.";
+          ? `Archive delay saved as ${saved.sessions.archive_after_days} ${saved.sessions.archive_after_days === 1 ? "day" : "days"}. Changes apply to new turns.`
+          : options.message ?? "Saved. Changes apply to new turns.";
+      saveSucceeded = Boolean(status);
       return true;
     } catch (err) {
       lastRejectedSettingsFingerprint = submittedFingerprint;
@@ -283,6 +294,7 @@
   async function restart(): Promise<void> {
     try {
       const response = await restartGateway();
+      saveSucceeded = false;
       status = response.guidance;
     } catch (err) {
       error = err instanceof Error ? err.message : "Failed to restart gateway.";
@@ -379,7 +391,7 @@
     if (!fingerprint || fingerprint === lastPersistedSettingsFingerprint || fingerprint === lastRejectedSettingsFingerprint) return;
 
     const timer = window.setTimeout(() => {
-      void persist({ message: "Saved automatically. New turns will use the updated runtime." });
+      void persist({ message: "Saved automatically. Changes apply to new turns." });
     }, 650);
 
     return () => window.clearTimeout(timer);
@@ -424,47 +436,49 @@
     {/if}
 
     {#if status && !archiveDelayError}
-      <div class="notice">
+      <div class="notice" class:success={saveSucceeded} role={saveSucceeded ? "status" : undefined}>
         <span>{status}</span>
       </div>
     {/if}
 
-    {#if tab === "agents"}
-      <AgentDefinitionsPanel {topicId} />
-    {:else if tab === "commands"}
-      <CommandsPanel {topicId} />
-    {:else if tab === "skills"}
-      <SkillsPanel {topicId} />
-    {:else if tab === "memory"}
-      <MemoryPanel {topics} page={memoryPage} />
-    {:else if tab === "plugins"}
-      <!--
-        Swage has no plugin registry yet, so this page only describes the capability.
-      -->
-      <InformationalSettingsPanel {tab} />
-    {:else if tab === "channels"}
-      <ChannelsPanel />
-    {:else if tab === "devices"}
-      <!--
-        Devices register and pair through the API; this page has no view of them
-        yet.
-      -->
-      <InformationalSettingsPanel {tab} />
-    {:else if tab === "voice"}
-      {#if settings}
-        <VoiceSettingsPanel bind:settings onsave={() => persist()} saving={isPersisting} />
+    <div class="settings-content">
+      {#if tab === "agents"}
+        <AgentDefinitionsPanel {topicId} />
+      {:else if tab === "commands"}
+        <CommandsPanel {topicId} />
+      {:else if tab === "skills"}
+        <SkillsPanel {topicId} />
+      {:else if tab === "memory"}
+        <MemoryPanel {topics} page={memoryPage} />
+      {:else if tab === "plugins"}
+        <!--
+          Swage has no plugin registry yet, so this page only describes the capability.
+        -->
+        <InformationalSettingsPanel {tab} />
+      {:else if tab === "channels"}
+        <ChannelsPanel {topicId} {topics} />
+      {:else if tab === "devices"}
+        <!--
+          Devices register and pair through the API; this page has no view of them
+          yet.
+        -->
+        <InformationalSettingsPanel {tab} />
+      {:else if tab === "voice"}
+        {#if settings}
+          <VoiceSettingsPanel bind:settings onsave={() => persist()} saving={isPersisting} />
+        {/if}
+      {:else if tab === "recovery"}
+        <RecoverySettingsPanel />
+      {:else if tab === "display"}
+        <DisplayPreferencesSettingsPanel />
+      {:else if tab === "account"}
+        <!--
+          Swage is single-operator and has no identity model, so there is no
+          account to manage; the page keeps the settings route resolving.
+        -->
+        <InformationalSettingsPanel {tab} />
       {/if}
-    {:else if tab === "recovery"}
-      <RecoverySettingsPanel />
-    {:else if tab === "display"}
-      <DisplayPreferencesSettingsPanel />
-    {:else if tab === "account"}
-      <!--
-        Swage is single-operator and has no identity model, so there is no
-        account to manage; the page keeps the settings route resolving.
-      -->
-      <InformationalSettingsPanel {tab} />
-    {/if}
+    </div>
   {:else if !settings}
     <p class="loading">Loading settings…</p>
   {:else}
@@ -496,9 +510,9 @@
     {/if}
 
     {#if status && !archiveDelayError}
-      <div class="notice">
+      <div class="notice" class:success={saveSucceeded} role={saveSucceeded ? "status" : undefined}>
         <span>{status}</span>
-        {#if settings.can_restart}
+        {#if settings.can_restart && !saveSucceeded}
           <button type="button" class="notice-action" onclick={restart}>Restart</button>
         {/if}
       </div>
@@ -511,36 +525,38 @@
       </div>
     {/if}
 
-    {#if tab === "providers"}
-      <ProviderSettingsPanel
-        bind:settings
-        {savedProviderIds}
-        {isPersisting}
-        bind:error
-      />
-    {:else if tab === "generation"}
-      <GenerationSettingsPanel bind:settings />
-    {:else if tab === "automation"}
-      <ScheduleAutomationPanel {topicId} {topics} sessionId={null} />
-      <section aria-label="Automation settings">
-        <div class="head">
-          <h3>Automation settings</h3>
-          <span class="autosave-state" class:saving={isPersisting}>
-            {isPersisting ? "Autosaving" : "Autosave"}
-          </span>
-        </div>
-        <AutomationSettingsPanel
+    <div class="settings-content">
+      {#if tab === "providers"}
+        <ProviderSettingsPanel
           bind:settings
-          {archiveDelayError}
-          onValidation={(bundlesInvalid, approvalsInvalid, message) => {
-            hasInvalidBundlesJson = bundlesInvalid;
-            if (bundlesInvalid) status = "";
-            hasInvalidApprovalJson = approvalsInvalid;
-            error = message;
-          }}
+          {savedProviderIds}
+          {isPersisting}
+          bind:error
         />
-      </section>
-    {/if}
+      {:else if tab === "generation"}
+        <GenerationSettingsPanel bind:settings />
+      {:else if tab === "automation"}
+        <ScheduleAutomationPanel {topicId} {topics} sessionId={null} />
+        <section aria-label="Automation settings">
+          <div class="head">
+            <h3>Automation settings</h3>
+            <span class="autosave-state" class:saving={isPersisting}>
+              {isPersisting ? "Autosaving" : "Autosave"}
+            </span>
+          </div>
+          <AutomationSettingsPanel
+            bind:settings
+            {archiveDelayError}
+            onValidation={(bundlesInvalid, approvalsInvalid, message) => {
+              hasInvalidBundlesJson = bundlesInvalid;
+              if (bundlesInvalid) status = "";
+              hasInvalidApprovalJson = approvalsInvalid;
+              error = message;
+            }}
+          />
+        </section>
+      {/if}
+    </div>
   {/if}
 </div>
 
@@ -550,7 +566,8 @@
      --------------------------------------------------------------------------- */
 
   .settings-pane {
-    height: 100%;
+    flex: 1;
+    min-height: 0;
     padding: 28px 36px;
     display: flex;
     flex-direction: column;
@@ -558,8 +575,19 @@
     background: var(--paper);
     color: var(--ink);
     font-family: var(--font-body);
-    overflow: auto;
+    overflow: hidden;
     isolation: isolate;
+  }
+
+  .settings-content {
+    min-height: 0;
+    overflow: auto;
+  }
+
+  .settings-pane > .head,
+  .settings-pane > .notice,
+  .settings-pane > .shell-banner {
+    flex-shrink: 0;
   }
 
   /* ---------------------------------------------------------------------------
@@ -693,6 +721,17 @@
     line-height: 1.4;
     letter-spacing: 0.12em;
     text-transform: uppercase;
+  }
+
+  .notice.success {
+    background: var(--paper);
+    color: var(--ink-soft);
+    border: 1px solid var(--rule-soft);
+    font-family: var(--font-body);
+    font-weight: 400;
+    font-size: 13px;
+    letter-spacing: normal;
+    text-transform: none;
   }
 
   .notice.error {

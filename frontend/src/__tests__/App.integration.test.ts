@@ -660,6 +660,25 @@ describe("App", () => {
     expect(websocketHarness.client.connect).toHaveBeenCalledWith(first.id);
   });
 
+  it("connects the shown deep link even when its scope list fails", async () => {
+    vi.mocked(topicsApi.listTopics).mockResolvedValueOnce([makeTopic()]);
+    vi.mocked(conversationsApi.getConversation).mockResolvedValue(
+      makeConversationDetail({ id: "conv-linked", messages: [{
+        role: "assistant", content: "Visible linked conversation",
+        timestamp: "2026-04-07T12:01:00Z", turn_state: "completed",
+      }] }),
+    );
+    vi.mocked(conversationsApi.listConversations).mockRejectedValueOnce(new Error("Scope list unavailable"));
+    setPath("/conversations/conv-linked");
+    component = mount(App, { target: document.body });
+    await settleUi();
+
+    expect(document.querySelector(".message-display")?.textContent).toContain("Visible linked conversation");
+    expect(websocketHarness.clientFor("conv-linked")).toBeDefined();
+    expect(websocketHarness.clientFor("conv-linked")!.connect).toHaveBeenCalledWith("conv-linked");
+    expect(document.body.textContent).toContain("Scope list unavailable");
+  });
+
   it("restores a deep-linked conversation on startup and opens its WebSocket", async () => {
     const defaultTopic = makeTopic();
     const linkedConversation = makeConversationSummary({
@@ -1286,7 +1305,7 @@ describe("App", () => {
     await settleUi();
     const model = Array.from(document.querySelectorAll("button")).find(b => b.textContent?.trim().startsWith("new-model"));
     flushSync(() => model!.click());
-    await waitForText("Saved automatically. New turns will use the updated runtime.");
+    await expect.poll(() => document.body.textContent, { timeout: 2000 }).toContain("Saved automatically. Changes apply to new turns.");
     flushSync(() => document.querySelector<HTMLButtonElement>('button[aria-label="Close settings"]')!.click());
     await settleUi();
     const textarea = document.querySelector("textarea")!;
@@ -2148,8 +2167,8 @@ describe("App", () => {
       (button) => button.textContent?.trim() === "new-model · local",
     );
     flushSync(() => newModelButton!.click());
-    await waitForText(
-      "Saved automatically. New turns will use the updated runtime.",
+    await expect.poll(() => document.body.textContent, { timeout: 2000 }).toContain(
+      "Saved automatically. Changes apply to new turns.",
     );
 
     const closeButton = document.querySelector<HTMLButtonElement>(
@@ -2191,8 +2210,8 @@ describe("App", () => {
       button.textContent?.trim() === "existing-model · local",
     );
     flushSync(() => existingModelButton!.click());
-    await waitForText(
-      "Saved automatically. New turns will use the updated runtime.",
+    await expect.poll(() => document.body.textContent, { timeout: 2000 }).toContain(
+      "Saved automatically. Changes apply to new turns.",
     );
     expect(document.body.textContent).not.toContain(
       "transient catalogue failure",

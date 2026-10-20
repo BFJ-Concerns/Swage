@@ -206,8 +206,8 @@ pub(crate) mod test_support {
     pub(crate) struct SwageHomeGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
         _temp_dir: Option<tempfile::TempDir>,
-        root: PathBuf,
         previous: Option<OsString>,
+        root: PathBuf,
     }
 
     impl SwageHomeGuard {
@@ -220,10 +220,10 @@ pub(crate) mod test_support {
             let previous = std::env::var_os("SWAGE_HOME");
             unsafe { std::env::set_var("SWAGE_HOME", &root) };
             Self {
+                previous,
                 _lock: lock,
                 _temp_dir: Some(temp_dir),
                 root,
-                previous,
             }
         }
 
@@ -235,10 +235,10 @@ pub(crate) mod test_support {
             let previous = std::env::var_os("SWAGE_HOME");
             unsafe { std::env::set_var("SWAGE_HOME", &root) };
             Self {
+                previous,
                 _lock: lock,
                 _temp_dir: None,
                 root,
-                previous,
             }
         }
 
@@ -253,8 +253,8 @@ pub(crate) mod test_support {
 
     impl Drop for SwageHomeGuard {
         fn drop(&mut self) {
-            match &self.previous {
-                Some(value) => unsafe { std::env::set_var("SWAGE_HOME", value) },
+            match self.previous.take() {
+                Some(previous) => unsafe { std::env::set_var("SWAGE_HOME", previous) },
                 None => unsafe { std::env::remove_var("SWAGE_HOME") },
             }
         }

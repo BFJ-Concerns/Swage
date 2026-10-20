@@ -766,11 +766,15 @@
           "type": "string",
           "format": "date-time"
         },
+        "integration": {
+          "type": "string"
+        },
         "link_code": {
           "type": "string"
         }
       },
       "required": [
+        "integration",
         "link_code",
         "expires_at"
       ]
@@ -1095,8 +1099,15 @@
           "format": "uint",
           "minimum": 0
         },
+        "calls": {
+          "description": "Every model call this succession pass made, in order: readers,\nsynthesis, then summary. A reused diagnosis adds no reader or\nsynthesis calls. Ordinary succession records its summary here too.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SuccessionCall"
+          }
+        },
         "diagnosis": {
-          "description": "How a successor built for a stalled session got its summary: the\nwalls it answers and the model calls that diagnosed them.",
+          "description": "The walls a successor built for a stalled session answers and the\ndiagnosis it carries.",
           "anyOf": [
             {
               "$ref": "#/$defs/DiagnosisRecord"
@@ -1166,7 +1177,8 @@
         "actual_strategy",
         "messages_removed",
         "tokens_before",
-        "tokens_after"
+        "tokens_after",
+        "calls"
       ]
     },
     "CompactionThresholdConfig": {
@@ -2150,67 +2162,10 @@
         }
       ]
     },
-    "DiagnosisCall": {
-      "description": "One model call a diagnosis made.",
-      "type": "object",
-      "properties": {
-        "cost": {
-          "type": [
-            "number",
-            "null"
-          ],
-          "format": "double"
-        },
-        "failure_reason": {
-          "description": "Why the call failed, when it did.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "input_tokens": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "model": {
-          "description": "The provider-facing model id the call was sent to.",
-          "type": "string"
-        },
-        "output_tokens": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "report": {
-          "description": "What a reader reported. A synthesis's output is the record's\n`synthesis`.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "stage": {
-          "$ref": "#/$defs/DiagnosisStage"
-        }
-      },
-      "required": [
-        "stage",
-        "model",
-        "input_tokens",
-        "output_tokens"
-      ]
-    },
     "DiagnosisRecord": {
       "description": "The diagnosis behind a degradation-triggered successor, recorded so the\nassembly report alone reconstructs the pass.",
       "type": "object",
       "properties": {
-        "calls": {
-          "description": "The model calls this turn made for the diagnosis, readers first and\nthe synthesis last; empty when an earlier turn's diagnosis was reused.",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/DiagnosisCall"
-          }
-        },
         "reused_from_turn": {
           "description": "The turn whose recorded diagnosis this successor carries again,\nwhen the walls had not changed since.",
           "type": [
@@ -2240,23 +2195,7 @@
       },
       "required": [
         "signal",
-        "walls",
-        "calls"
-      ]
-    },
-    "DiagnosisStage": {
-      "description": "Which part of a diagnosis a model call was.",
-      "oneOf": [
-        {
-          "description": "A blind reader locating where one slice of the history went wrong.",
-          "type": "string",
-          "const": "reader"
-        },
-        {
-          "description": "The synthesis naming the problems from the readers' reports.",
-          "type": "string",
-          "const": "synthesis"
-        }
+        "walls"
       ]
     },
     "DiscoveredModel": {
@@ -5273,6 +5212,16 @@
               "format": "uint64",
               "minimum": 0
             },
+            "execution": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ToolExecution"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "parent_call_id": {
               "description": "call_id of the enclosing tool if this is a sub-tool invocation.\n\nOmitted from the serialised JSON when None.",
               "type": [
@@ -5665,6 +5614,9 @@
                 "$ref": "#/$defs/SchemaValidationError"
               }
             },
+            "failure_message": {
+              "type": "string"
+            },
             "turn_id": {
               "type": "string",
               "format": "uuid"
@@ -5676,6 +5628,7 @@
           },
           "required": [
             "type",
+            "failure_message",
             "turn_id",
             "attempts",
             "errors"
@@ -6617,6 +6570,76 @@
         "status"
       ]
     },
+    "SuccessionCall": {
+      "description": "One model call a succession pass made.",
+      "type": "object",
+      "properties": {
+        "cost": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "failure_reason": {
+          "description": "Why the call failed, when it did.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "input_tokens": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "model": {
+          "description": "The provider-facing model id the call was sent to.",
+          "type": "string"
+        },
+        "output_tokens": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "report": {
+          "description": "What a reader reported. A synthesis's output is in\n`CompactionRecord.diagnosis.synthesis`; summaries are carried in the\nsuccessor's conversation context.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stage": {
+          "$ref": "#/$defs/SuccessionStage"
+        }
+      },
+      "required": [
+        "stage",
+        "model",
+        "input_tokens",
+        "output_tokens"
+      ]
+    },
+    "SuccessionStage": {
+      "description": "Which part of succession a model call was.",
+      "oneOf": [
+        {
+          "description": "A blind reader locating where one slice of the history went wrong.",
+          "type": "string",
+          "const": "reader"
+        },
+        {
+          "description": "The synthesis naming the problems from the readers' reports.",
+          "type": "string",
+          "const": "synthesis"
+        },
+        {
+          "description": "The summary of established conversation state.",
+          "type": "string",
+          "const": "summary"
+        }
+      ]
+    },
     "SurfaceAnnotationView": {
       "description": "A note left on one of a surface's modules. `body` and `tags` are the author's\nown words: other parties' work product, to be read as data.",
       "type": "object",
@@ -6894,6 +6917,16 @@
           "format": "uint64",
           "minimum": 0
         },
+        "execution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolExecution"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "parent_call_id": {
           "type": [
             "string",
@@ -6934,6 +6967,53 @@
         "tool",
         "arguments",
         "truncated"
+      ]
+    },
+    "ToolCompletion": {
+      "type": "string",
+      "enum": [
+        "not_run",
+        "confirmed",
+        "unknown"
+      ]
+    },
+    "ToolExecution": {
+      "type": "object",
+      "properties": {
+        "completion": {
+          "$ref": "#/$defs/ToolCompletion"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ToolOutcome"
+        },
+        "stage": {
+          "$ref": "#/$defs/ToolExecutionStage"
+        }
+      },
+      "required": [
+        "outcome",
+        "stage",
+        "completion"
+      ]
+    },
+    "ToolExecutionStage": {
+      "type": "string",
+      "enum": [
+        "not_started",
+        "started",
+        "finished",
+        "unknown"
+      ]
+    },
+    "ToolOutcome": {
+      "description": "What the dispatcher established about a call, independently of its payload.",
+      "type": "string",
+      "enum": [
+        "succeeded",
+        "failed",
+        "refused",
+        "rejected",
+        "cancelled"
       ]
     },
     "ToolPermissionConfig": {
@@ -7230,6 +7310,12 @@
             }
           ]
         },
+        "failure_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "input_tokens": {
           "type": [
             "integer",
@@ -7275,6 +7361,7 @@
         "incomplete",
         "failed",
         "interrupted",
+        "cancelled",
         "awaiting_approval",
         "delegating"
       ]

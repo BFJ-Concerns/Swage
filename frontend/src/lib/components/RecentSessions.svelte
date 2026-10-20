@@ -35,6 +35,10 @@
   let { topics = [], onSelectSession, onOpenWorkflowRun }: Props = $props();
 
   let topicFilter = $state<string | null>(null);
+  let topicSearch = $state("");
+  const matchingTopics = $derived(topics.filter(topic =>
+    topic.id === topicFilter || topic.name.toLocaleLowerCase().includes(topicSearch.trim().toLocaleLowerCase()),
+  ));
   let showArchived = $state(false);
   let entries = $state<RecentSessionsEntry[]>([]);
   let loadState = $state<"loading" | "loaded" | "error">("loading");
@@ -173,6 +177,7 @@
 <section class="recent-sessions" aria-label={showArchived ? "Archived sessions" : "Recent sessions"}>
   <header class="recent-head">
     <p class="eyebrow">{showArchived ? "Archived sessions" : "Recent sessions"}</p>
+    <input class="topic-search" type="search" aria-label="Search topic filters" placeholder="Search topics…" bind:value={topicSearch} />
     <div class="filters" role="group" aria-label="Topic filter">
       <button
         type="button"
@@ -183,7 +188,7 @@
       >
         All sessions
       </button>
-      {#each topics as topic (topic.id)}
+      {#each matchingTopics as topic (topic.id)}
         <button
           type="button"
           class="filter"
@@ -270,6 +275,15 @@
 </section>
 
 <style>
+  .topic-search {
+    min-width: 0;
+    background: var(--paper);
+    color: var(--ink);
+    border: 1px solid var(--rule-soft);
+    font: inherit;
+    padding: 6px 8px;
+  }
+
   .recent-sessions {
     display: flex;
     flex-direction: column;
