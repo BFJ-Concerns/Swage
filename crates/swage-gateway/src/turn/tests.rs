@@ -10000,68 +10000,7 @@ async fn second_tool_round_request_replays_reasoning_when_model_capability_opts_
 
 #[tokio::test(flavor = "multi_thread")]
 async fn later_turn_rebuilds_tool_replay_from_persisted_compact_rows() {
-    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let topic = storage.general_scope().await.expect("create default topic");
-    let session = storage
-        .create_session(new_session(topic.id))
-        .await
-        .expect("create session");
-    let session_id = session.id;
-
-    ThreadStore::create(
-        &*storage,
-        NewThread {
-            session_id,
-            agent_id: "gateway".to_string(),
-        },
-    )
-    .await
-    .expect("create default thread");
-
-    let first_provider = Arc::new(MultiRoundMockProvider::new(vec![
-        vec![
-            StreamChunk::ToolUse {
-                call_id: "c1".into(),
-                name: "echo".into(),
-                arguments: serde_json::json!({ "text": "first" }),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ],
-        vec![
-            StreamChunk::Delta {
-                content: "first complete".into(),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ],
-    ]));
-
-    let state = AppState::for_test(
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
-        first_provider as Arc<dyn LlmProvider>,
-        swage_config::ResolvedConfig::default(),
-        crate::tool::ToolDispatcher::allow_all(vec![
-            Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>
-        ]),
-        None,
-    );
-
-    let (tx, _rx) = mpsc::unbounded_channel();
-    process_turn(
-        &state,
-        session_id,
-        None,
-        "Use echo".to_string(),
-        tx,
-        Arc::new(Mutex::new(SubscriptionState::new(true))),
-        None,
-    )
-    .await
-    .expect("first turn should complete");
+    let (state, session_id) = start_result_turn("first".into(), Arc::new(EchoMockTool)).await;
 
     let (second_provider, captured) = CapturingProvider::new(vec![
         StreamChunk::Delta {
@@ -24812,8 +24751,7 @@ async fn a_readdressed_result_is_delivered_only_in_the_parents_session() {
     );
 }
 
-async fn start_long_result_turn(tool: Arc<dyn crate::tool::Tool>) -> (AppState, Uuid) {
-    let long = "x".repeat(6500) + "READ-MARKER";
+async fn start_result_turn(text: String, tool: Arc<dyn crate::tool::Tool>) -> (AppState, Uuid) {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let topic = storage.general_scope().await.expect("create default topic");
     let session = storage
@@ -24837,7 +24775,7 @@ async fn start_long_result_turn(tool: Arc<dyn crate::tool::Tool>) -> (AppState, 
             StreamChunk::ToolUse {
                 call_id: "c1".into(),
                 name: "echo".into(),
-                arguments: serde_json::json!({ "text": long }),
+                arguments: serde_json::json!({ "text": text }),
             },
             StreamChunk::Done {
                 finish_reason: None,
@@ -24876,6 +24814,10 @@ async fn start_long_result_turn(tool: Arc<dyn crate::tool::Tool>) -> (AppState, 
     .expect("first turn should complete");
 
     (state, session_id)
+}
+
+async fn start_long_result_turn(tool: Arc<dyn crate::tool::Tool>) -> (AppState, Uuid) {
+    start_result_turn("x".repeat(6500) + "READ-MARKER", tool).await
 }
 
 async fn assert_later_replay_accounts_for_reads(offered: bool) {
@@ -25115,9 +25057,13 @@ async fn later_replay_keeps_recovered_content() {
             _ => None,
         })
         .expect("the recovered read is replayed");
-    assert!(
-        recovered.contains("READ-MARKER"),
-        "later provider requests must keep the recovered tail: {recovered}"
+    assert_eq!(
+        recovered,
+        rows[0]
+            .result
+            .as_ref()
+            .expect("the settled recovered delivery"),
+        "later provider requests must keep the complete recovered delivery"
     );
     let service =
         crate::service::ConversationService::new(state.storage.clone(), state.topic_store.clone());
