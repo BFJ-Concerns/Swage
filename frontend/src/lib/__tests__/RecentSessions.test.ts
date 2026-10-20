@@ -109,20 +109,20 @@ describe("RecentSessions", () => {
     ]) {
       const row = rows.find(row => row.querySelector('.preview')?.textContent?.trim() === preview);
       expect(row).toBeDefined();
-      expect(row!.querySelector(`[aria-label="${label}"]`)).not.toBeNull();
-      expect(row!.querySelector(`[aria-label="${opposite}"]`)).toBeNull();
+      const marker = row!.querySelector<HTMLElement>(".interrupted");
+      expect(marker?.textContent?.replace("⚠", "").trim()).toBe(label);
+      expect(marker?.textContent).not.toContain(opposite);
     }
     const recovered = rows.find(row => row.querySelector('.preview')?.textContent?.trim() === "Recovered direct reply");
     expect(recovered).toBeDefined();
-    expect(recovered!.querySelector('[aria-label="Last response failed"], [aria-label="Interrupted"]')).toBeNull();
+    expect(recovered!.querySelector(".interrupted")).toBeNull();
     const schedule = rows.find(row => row.querySelector('.preview')?.textContent?.trim() === "Nightly");
     expect(schedule).toBeDefined();
     schedule!.click();
     flushSync();
     const scheduled = Array.from(document.querySelectorAll('.row.nested')).find(row => row.querySelector('.preview')?.textContent?.trim() === "Failed scheduled reply");
     expect(scheduled).toBeDefined();
-    expect(scheduled!.querySelector('[aria-label="Last response failed"]')).not.toBeNull();
-    expect(scheduled!.querySelector('[aria-label="Interrupted"]')).toBeNull();
+    expect(scheduled!.querySelector(".interrupted")?.textContent?.replace("⚠", "").trim()).toBe("Last response failed");
   });
 
   it("lists every scope's sessions in the order the gateway gave, automated ones nested beneath their source", async () => {
@@ -497,7 +497,8 @@ describe("RecentSessions row layout", () => {
       const group = topic!.closest('.session-text')!;
       expect(group.querySelector('.preview')?.textContent).toBe("Visible preview");
       expect(group.querySelector('.timestamp')?.textContent?.trim()).toBeTruthy();
-      expect(getComputedStyle(group).display).toBe("flex");
+      expect(getComputedStyle(group).display).toBe("grid");
+      expect(getComputedStyle(group).gridTemplateColumns).toBe("minmax(0, 1fr) auto auto");
       expect(getComputedStyle(group.querySelector('.preview')!).minWidth).toBe("0px");
       expect(getComputedStyle(group.querySelector('.timestamp')!).flexShrink).toBe("0");
     }

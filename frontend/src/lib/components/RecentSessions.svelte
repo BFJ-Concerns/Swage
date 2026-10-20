@@ -239,7 +239,7 @@
                 {#if session}
                   <span class="topic-label" title={session.topic_name}>{session.topic_name}</span>
                   {#if session.has_running_turn}<span class="running">running</span>{/if}
-                  {#if outcome}<span class="interrupted" title={outcome} aria-label={outcome}>⚠</span>{/if}
+                  {#if outcome}<span class="interrupted"><span aria-hidden="true">⚠</span> {outcome}</span>{/if}
                 {:else if entry.source.kind === "schedule"}
                   schedule
                 {:else}
@@ -273,7 +273,7 @@
                       <span class="preview">{messagePreview(automated.message_preview ?? originLabel(automated))}</span>
                       <span class="meta">
                         {originLabel(automated)} · {automated.agent_id}
-                        {#if outcome}<span class="interrupted" title={outcome} aria-label={outcome}>⚠</span>{/if}
+                        {#if outcome}<span class="interrupted"><span aria-hidden="true">⚠</span> {outcome}</span>{/if}
                         {#if automated.has_running_turn}<span class="running">running</span>{/if}
                       </span>
                       <span class="timestamp">{relativeTime(automated.last_activity)}</span>
@@ -399,11 +399,12 @@
   }
 
   .session-text {
-    display: flex;
+    flex: 1;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
     align-items: baseline;
     gap: 12px;
     min-width: 0;
-    max-width: 100%;
   }
 
   .meta {
