@@ -579,9 +579,7 @@ const TRACKER_TAG_ALLOWED_WORDS: &[&str] = &["utf8"];
 
 fn check_tracker_tags() -> Result<()> {
     let mut files = Vec::new();
-    for root in ["crates", "frontend", "xtask"] {
-        collect_files(Path::new(root), &mut files)?;
-    }
+    collect_files(Path::new("."), &mut files)?;
     files.sort();
     let mut violations = Vec::new();
     for file in files {
@@ -590,7 +588,8 @@ fn check_tracker_tags() -> Result<()> {
             Some("ts" | "svelte") => true,
             _ => continue,
         };
-        let contents = fs::read_to_string(&file)?;
+        let file = file.strip_prefix(".")?;
+        let contents = fs::read_to_string(file)?;
         for (line, column) in source_tracker_tag_locations(&contents, html_comments) {
             violations.push(format!("{}:{line}:{column}", file.display()));
         }
@@ -1276,7 +1275,7 @@ fn collect_files(path: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("");
-            if name != "node_modules" && name != "dist" {
+            if !matches!(name, ".git" | "target" | "node_modules" | "dist") {
                 collect_files(&path, files)?;
             }
         } else if path.is_file() {
