@@ -212,7 +212,6 @@
     </button>
   </header>
 
-  {#if loadState === "loaded" && errorMessage}<p class="state error" role="alert">Could not refresh sessions: {errorMessage}</p>{/if}
   {#if loadState === "loading"}
     <p class="state">Loading sessions…</p>
   {:else if loadState === "error"}
