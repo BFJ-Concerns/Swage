@@ -169,11 +169,8 @@ async fn validate_context_assembly(state: &AppState, name: &str) -> Result<(), A
         if resolves(&scope, None) {
             return Ok(());
         }
-        let definitions = crate::service::effective_agent_definitions(
-            state.storage.as_ref(),
-            topic.id,
-        )
-        .await?;
+        let definitions =
+            crate::service::effective_agent_definitions(state.storage.as_ref(), topic.id).await?;
         if definitions
             .iter()
             .any(|definition| resolves(&scope, Some(&definition.definition.id)))

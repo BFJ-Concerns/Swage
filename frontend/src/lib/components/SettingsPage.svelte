@@ -441,42 +441,44 @@
       </div>
     {/if}
 
-    {#if tab === "agents"}
-      <AgentDefinitionsPanel {topicId} />
-    {:else if tab === "commands"}
-      <CommandsPanel {topicId} />
-    {:else if tab === "skills"}
-      <SkillsPanel {topicId} />
-    {:else if tab === "memory"}
-      <MemoryPanel {topics} page={memoryPage} />
-    {:else if tab === "plugins"}
-      <!--
-        Swage has no plugin registry yet, so this page only describes the capability.
-      -->
-      <InformationalSettingsPanel {tab} />
-    {:else if tab === "channels"}
-      <ChannelsPanel />
-    {:else if tab === "devices"}
-      <!--
-        Devices register and pair through the API; this page has no view of them
-        yet.
-      -->
-      <InformationalSettingsPanel {tab} />
-    {:else if tab === "voice"}
-      {#if settings}
-        <VoiceSettingsPanel bind:settings onsave={() => persist()} saving={isPersisting} />
+    <div class="settings-content">
+      {#if tab === "agents"}
+        <AgentDefinitionsPanel {topicId} />
+      {:else if tab === "commands"}
+        <CommandsPanel {topicId} />
+      {:else if tab === "skills"}
+        <SkillsPanel {topicId} />
+      {:else if tab === "memory"}
+        <MemoryPanel {topics} page={memoryPage} />
+      {:else if tab === "plugins"}
+        <!--
+          Swage has no plugin registry yet, so this page only describes the capability.
+        -->
+        <InformationalSettingsPanel {tab} />
+      {:else if tab === "channels"}
+        <ChannelsPanel />
+      {:else if tab === "devices"}
+        <!--
+          Devices register and pair through the API; this page has no view of them
+          yet.
+        -->
+        <InformationalSettingsPanel {tab} />
+      {:else if tab === "voice"}
+        {#if settings}
+          <VoiceSettingsPanel bind:settings onsave={() => persist()} saving={isPersisting} />
+        {/if}
+      {:else if tab === "recovery"}
+        <RecoverySettingsPanel />
+      {:else if tab === "display"}
+        <DisplayPreferencesSettingsPanel />
+      {:else if tab === "account"}
+        <!--
+          Swage is single-operator and has no identity model, so there is no
+          account to manage; the page keeps the settings route resolving.
+        -->
+        <InformationalSettingsPanel {tab} />
       {/if}
-    {:else if tab === "recovery"}
-      <RecoverySettingsPanel />
-    {:else if tab === "display"}
-      <DisplayPreferencesSettingsPanel />
-    {:else if tab === "account"}
-      <!--
-        Swage is single-operator and has no identity model, so there is no
-        account to manage; the page keeps the settings route resolving.
-      -->
-      <InformationalSettingsPanel {tab} />
-    {/if}
+    </div>
   {:else if !settings}
     <p class="loading">Loading settings…</p>
   {:else}
@@ -523,36 +525,38 @@
       </div>
     {/if}
 
-    {#if tab === "providers"}
-      <ProviderSettingsPanel
-        bind:settings
-        {savedProviderIds}
-        {isPersisting}
-        bind:error
-      />
-    {:else if tab === "generation"}
-      <GenerationSettingsPanel bind:settings />
-    {:else if tab === "automation"}
-      <ScheduleAutomationPanel {topicId} {topics} sessionId={null} />
-      <section aria-label="Automation settings">
-        <div class="head">
-          <h3>Automation settings</h3>
-          <span class="autosave-state" class:saving={isPersisting}>
-            {isPersisting ? "Autosaving" : "Autosave"}
-          </span>
-        </div>
-        <AutomationSettingsPanel
+    <div class="settings-content">
+      {#if tab === "providers"}
+        <ProviderSettingsPanel
           bind:settings
-          {archiveDelayError}
-          onValidation={(bundlesInvalid, approvalsInvalid, message) => {
-            hasInvalidBundlesJson = bundlesInvalid;
-            if (bundlesInvalid) status = "";
-            hasInvalidApprovalJson = approvalsInvalid;
-            error = message;
-          }}
+          {savedProviderIds}
+          {isPersisting}
+          bind:error
         />
-      </section>
-    {/if}
+      {:else if tab === "generation"}
+        <GenerationSettingsPanel bind:settings />
+      {:else if tab === "automation"}
+        <ScheduleAutomationPanel {topicId} {topics} sessionId={null} />
+        <section aria-label="Automation settings">
+          <div class="head">
+            <h3>Automation settings</h3>
+            <span class="autosave-state" class:saving={isPersisting}>
+              {isPersisting ? "Autosaving" : "Autosave"}
+            </span>
+          </div>
+          <AutomationSettingsPanel
+            bind:settings
+            {archiveDelayError}
+            onValidation={(bundlesInvalid, approvalsInvalid, message) => {
+              hasInvalidBundlesJson = bundlesInvalid;
+              if (bundlesInvalid) status = "";
+              hasInvalidApprovalJson = approvalsInvalid;
+              error = message;
+            }}
+          />
+        </section>
+      {/if}
+    </div>
   {/if}
 </div>
 
@@ -562,7 +566,8 @@
      --------------------------------------------------------------------------- */
 
   .settings-pane {
-    height: 100%;
+    flex: 1;
+    min-height: 0;
     padding: 28px 36px;
     display: flex;
     flex-direction: column;
@@ -570,8 +575,19 @@
     background: var(--paper);
     color: var(--ink);
     font-family: var(--font-body);
-    overflow: auto;
+    overflow: hidden;
     isolation: isolate;
+  }
+
+  .settings-content {
+    min-height: 0;
+    overflow: auto;
+  }
+
+  .settings-pane > .head,
+  .settings-pane > .notice,
+  .settings-pane > .shell-banner {
+    flex-shrink: 0;
   }
 
   /* ---------------------------------------------------------------------------

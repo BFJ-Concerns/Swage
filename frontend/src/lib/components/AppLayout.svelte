@@ -304,11 +304,13 @@
       </nav>
       <button class="close" onclick={closeSettings} aria-label="Close settings">×</button>
     </header>
-    {#if settingsTopicSlug}
-      <TopicSettingsPage topic={settingsTopic} tab={settingsTopicTab ?? undefined} {onNavigate} onTopicsChanged={() => topicStore?.loadTopics()} />
-    {:else}
-      <SettingsPage tab={settingsTab ?? undefined} topicId={currentTopic?.id ?? null} topics={topicStore?.topics ?? []} memoryPage={route?.settingsMemoryPage ?? null} {onSettingsSaved} />
-    {/if}
+    <div class="settings-body">
+      {#if settingsTopicSlug}
+        <TopicSettingsPage topic={settingsTopic} tab={settingsTopicTab ?? undefined} {onNavigate} onTopicsChanged={() => topicStore?.loadTopics()} />
+      {:else}
+        <SettingsPage tab={settingsTab ?? undefined} topicId={currentTopic?.id ?? null} topics={topicStore?.topics ?? []} memoryPage={route?.settingsMemoryPage ?? null} {onSettingsSaved} />
+      {/if}
+    </div>
   </div>
 {:else if libraryMode}
   <!-- The shared library's catalogue: what is saved, described and tagged,
@@ -419,8 +421,9 @@
   .library { height: 100vh; overflow: auto; }
   .back-btn { margin: .75rem; }
   nav { display: flex; gap: .5rem; flex-wrap: wrap; }
-  .settings-window { height: calc(100vh - 4rem); overflow: auto; }
-  .settings-chrome { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; padding: .75rem; border-bottom: 1px solid var(--ink); }
+  .settings-window { height: calc(100vh - 4rem); display: flex; flex-direction: column; overflow: hidden; }
+  .settings-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
+  .settings-chrome { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; padding: .75rem; border-bottom: 1px solid var(--ink); }
   .settings-chrome h2 { margin: 0; font-size: 1rem; }
   .settings-chrome .topic-tab { border-left: 1px dotted var(--rule-soft); padding-left: .5rem; }
   .settings-chrome .topic-tab ~ .topic-tab { border-left: none; padding-left: 0; }
