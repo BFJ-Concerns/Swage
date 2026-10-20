@@ -1388,7 +1388,13 @@ describe("message link navigation", () => {
 
   const childId = "18315217-1234-4567-89ab-0123456789ab";
 
-  it.each([`/sessions/${childId}`, `swage://session/${childId}`])(
+  it.each([
+    `/sessions/${childId}`,
+    `swage://session/${childId}`,
+    `/sessions/${childId}?view=reply`,
+    `swage://session/${childId}?view=reply`,
+    `${window.location.origin}/sessions/${childId}?view=reply`,
+  ])(
     "opens a child conversation from a reply: %s", (href) => {
       const onNavigate = vi.fn();
       const component = mount(MessageDisplay, {
@@ -1398,6 +1404,8 @@ describe("message link navigation", () => {
       onTestFinished(() => unmount(component));
       flushSync();
       const link = document.querySelector<HTMLAnchorElement>(".markdown-body a")!;
+      const expectedPath = `/conversations/${childId}${new URL(href, window.location.origin).search}`;
+      expect(link.getAttribute("href")).toBe(expectedPath);
       const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
       let intercepted: boolean | undefined;
       // Observe the handler before suppressing jsdom's unsupported navigation.
@@ -1406,7 +1414,7 @@ describe("message link navigation", () => {
         event.preventDefault();
       }, { once: true });
       link.dispatchEvent(click);
-      expect(onNavigate).toHaveBeenCalledExactlyOnceWith(`/conversations/${childId}`);
+      expect(onNavigate).toHaveBeenCalledExactlyOnceWith(expectedPath);
       expect(intercepted).toBe(true);
     },
   );
@@ -1415,7 +1423,6 @@ describe("message link navigation", () => {
     "swage://settings/providers",
     "swage://session/not-a-conversation-id",
     `swage://session/${childId}/extra`,
-    `swage://session/${childId}?extra=1`,
     `swage://session/${childId}#extra`,
     ` swage://session/${childId}`,
     `swage://session/${childId} `,
@@ -1475,6 +1482,10 @@ describe("message link navigation", () => {
 
   it.each([
     { href: "https://elsewhere.example/page", ctrlKey: false },
+    { href: `https://elsewhere.example/sessions/${childId}`, ctrlKey: false },
+    { href: `/sessions/${childId}#details`, ctrlKey: false },
+    { href: `/sessions/${childId}?view=reply`, ctrlKey: true },
+    { href: `swage://session/${childId}`, ctrlKey: true },
     { href: "/settings/memory", ctrlKey: true },
     { href: "/api/memory/pages", ctrlKey: false },
   ])("leaves ordinary browser navigation intact: $href ($ctrlKey)", ({ href, ctrlKey }) => {
@@ -1486,6 +1497,9 @@ describe("message link navigation", () => {
     onTestFinished(() => unmount(component));
     flushSync();
     const link = document.querySelector<HTMLAnchorElement>(".markdown-body a")!;
+    if (href.includes("#") || href.startsWith("https://elsewhere.example")) {
+      expect(link.getAttribute("href")).toBe(href);
+    }
     const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, ctrlKey });
     let intercepted: boolean | undefined;
     // Observe the component's decision, then suppress jsdom's unsupported document navigation.

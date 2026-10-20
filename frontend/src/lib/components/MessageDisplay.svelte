@@ -5,6 +5,7 @@
 <script module lang="ts">
   import { marked, Tokenizer } from "marked";
   import DOMPurify from "dompurify";
+  import { conversationPath, parseRoute } from "../router";
 
   import { markedHighlight } from "marked-highlight";
   import hljs from "highlight.js/lib/core";
@@ -24,15 +25,25 @@
   import yaml from "highlight.js/lib/languages/yaml";
 
   const childSessionAddress = /^(?:swage:\/\/session|\/sessions)\/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
-  // Keep DOMPurify's URI policy for everything except a complete child-session
-  // URI. This instance owns the hook so other rendered surfaces are unaffected.
+  // Canonicalise child-session addresses before DOMPurify checks the URI.
+  // This instance owns the hook so other rendered surfaces are unaffected.
   const markdownSanitiser = DOMPurify();
   markdownSanitiser.addHook("uponSanitizeAttribute", (node, attribute) => {
-    if (node.nodeName === "A" && attribute.attrName === "href" &&
-        node.getAttribute("href") === attribute.attrValue &&
-        attribute.attrValue.startsWith("swage:") && childSessionAddress.test(attribute.attrValue)) {
-      attribute.forceKeepAttr = true;
+    if (node.nodeName !== "A" || attribute.attrName !== "href" ||
+        node.getAttribute("href") !== attribute.attrValue) return;
+    let url: URL;
+    try {
+      url = new URL(attribute.attrValue, window.location.href);
+    } catch {
+      return;
     }
+    // Fragments keep browser scrolling, including on child-session paths.
+    if (url.hash) return;
+    const childAddress = url.protocol === "swage:"
+      ? attribute.attrValue.split("?")[0]
+      : url.origin === window.location.origin ? url.pathname : "";
+    const childId = childSessionAddress.exec(childAddress)?.[1];
+    if (childId) attribute.attrValue = conversationPath(childId) + url.search;
   });
 
   // ---- Markdown configuration -----------------------------------------------
@@ -95,7 +106,6 @@
 
 <script lang="ts">
   import { on } from "svelte/events";
-  import { conversationPath, parseRoute } from "../router";
 
   import type { ConversationStore } from "../stores/conversations";
   import type { StreamingStore } from "../stores/streaming";
@@ -159,15 +169,6 @@
         const url = new URL(link.href);
         // Fragments keep browser scrolling, including on child-session paths.
         if (url.hash) return;
-        const childAddress = url.protocol === "swage:"
-          ? link.getAttribute("href") ?? ""
-          : url.origin === window.location.origin ? url.pathname : "";
-        const childId = childSessionAddress.exec(childAddress)?.[1];
-        if (childId) {
-          event.preventDefault();
-          onNavigate(conversationPath(childId) + url.search);
-          return;
-        }
         if (url.origin !== window.location.origin) return;
         // Unknown paths are gateway resources.
         try {
