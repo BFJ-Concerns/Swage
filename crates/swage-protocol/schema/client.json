@@ -3597,6 +3597,15 @@
         "guidance"
       ]
     },
+    "PlaintextCredentialPolicy": {
+      "description": "What a provider does with a request that would carry its credential over\nplain `http://` to an address that is not loopback: refuse every request,\nsend after one recorded warning, or send silently.",
+      "type": "string",
+      "enum": [
+        "refuse",
+        "warn",
+        "allow"
+      ]
+    },
     "PostWorkflowRunEventRequest": {
       "type": "object",
       "properties": {
@@ -3815,6 +3824,18 @@
         },
         "has_credential": {
           "type": "boolean"
+        },
+        "plaintext_credentials": {
+          "description": "The provider's plaintext-credential policy; `warn` when unset.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlaintextCredentialPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "protocol": {
           "$ref": "#/$defs/ProviderProtocol"
@@ -4378,6 +4399,18 @@
           "type": [
             "string",
             "null"
+          ],
+          "default": null
+        },
+        "plaintext_credentials": {
+          "description": "The provider's plaintext-credential policy; left out, the running\nvalue stands (`warn` for a new provider).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlaintextCredentialPolicy"
+            },
+            {
+              "type": "null"
+            }
           ],
           "default": null
         },

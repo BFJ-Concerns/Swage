@@ -1199,6 +1199,7 @@ mod tests {
                         command: None,
                         state_dir: None,
                         worker_staleness_threshold_ms: None,
+                        plaintext_credentials: Default::default(),
                     },
                 )])),
             }),

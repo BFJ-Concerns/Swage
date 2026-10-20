@@ -20797,6 +20797,7 @@ async fn selected_responses_entry_sharing_an_upstream_id_is_served_by_its_own_pr
                 base_url: Some(base_url.clone()),
                 command: None,
                 state_dir: None,
+                plaintext_credentials: Default::default(),
             },
         );
     }
@@ -20821,7 +20822,8 @@ async fn selected_responses_entry_sharing_an_upstream_id_is_served_by_its_own_pr
     let secret_manager = crate::secret::SecretManager::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
     );
-    let runtime_provider = crate::startup::create_provider(&config, &secret_manager).await;
+    let runtime_provider =
+        crate::startup::create_provider(&config, &secret_manager, storage.as_ref()).await;
     let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
@@ -20950,7 +20952,8 @@ async fn assert_topic_provider_route(override_kind: &str) {
     let scope = topic.location();
     let config = swage_config::load_resolved_config_from(root.path(), &scope, "gateway").unwrap();
     let secret_manager = crate::secret::SecretManager::new(storage.clone());
-    let runtime_provider = crate::startup::create_provider(&config, &secret_manager).await;
+    let runtime_provider =
+        crate::startup::create_provider(&config, &secret_manager, storage.as_ref()).await;
     let state = AppState::new_with_config_root(
         storage.clone(),
         storage.clone(),
@@ -21119,6 +21122,7 @@ async fn turn_against_single_provider(
             base_url: Some(base_url.to_string()),
             command: None,
             state_dir: None,
+            plaintext_credentials: Default::default(),
         },
     );
     config.providers.default = "configured-endpoint".into();
@@ -21134,7 +21138,8 @@ async fn turn_against_single_provider(
     let secret_manager = crate::secret::SecretManager::new(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
     );
-    let runtime_provider = crate::startup::create_provider(&config, &secret_manager).await;
+    let runtime_provider =
+        crate::startup::create_provider(&config, &secret_manager, storage.as_ref()).await;
     let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,

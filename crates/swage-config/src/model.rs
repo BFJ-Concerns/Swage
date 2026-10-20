@@ -41,6 +41,22 @@ pub enum Protocol {
     Codex,
 }
 
+/// What a provider does with a request that would carry its credential over
+/// plain `http://` to an address that is not loopback. Loopback endpoints —
+/// a local model server on this machine — are never plaintext in this sense:
+/// the bytes do not leave the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlaintextCredentialPolicy {
+    /// No request is sent: the provider refuses every call with the reason.
+    Refuse,
+    /// Requests are sent after one warning per provider in the audit record.
+    #[default]
+    Warn,
+    /// Requests are sent and nothing is recorded.
+    Allow,
+}
+
 /// Connection settings for one configured LLM provider.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderEndpointConfig {
@@ -65,6 +81,10 @@ pub struct ProviderEndpointConfig {
     /// unknown rather than guessing one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_staleness_threshold_ms: Option<u64>,
+    /// What happens when a request would carry this provider's credential in
+    /// plaintext to a remote address; `warn` unless the entry says otherwise.
+    #[serde(default)]
+    pub plaintext_credentials: PlaintextCredentialPolicy,
 }
 
 impl Default for ProviderEndpointConfig {
@@ -78,6 +98,7 @@ impl Default for ProviderEndpointConfig {
             command: None,
             state_dir: None,
             worker_staleness_threshold_ms: None,
+            plaintext_credentials: PlaintextCredentialPolicy::Warn,
         }
     }
 }

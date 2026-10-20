@@ -4399,6 +4399,7 @@ fn held_worker_route_config(threshold_ms: Option<u64>) -> swage_config::Resolved
             api_key_env: None,
             command: None,
             state_dir: None,
+            plaintext_credentials: Default::default(),
         },
     );
     config.models.default = "steady".to_string();

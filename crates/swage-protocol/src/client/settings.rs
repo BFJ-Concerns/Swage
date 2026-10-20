@@ -126,6 +126,17 @@ impl EffortCapability {
     }
 }
 
+/// What a provider does with a request that would carry its credential over
+/// plain `http://` to an address that is not loopback: refuse every request,
+/// send after one recorded warning, or send silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum PlaintextCredentialPolicy {
+    Refuse,
+    Warn,
+    Allow,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderProtocol {
@@ -156,6 +167,10 @@ pub struct ProviderSettings {
     pub has_credential: bool,
     pub command: Option<String>,
     pub state_dir: Option<PathBuf>,
+    /// The provider's plaintext-credential policy; `warn` when unset.
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub plaintext_credentials: Option<PlaintextCredentialPolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
@@ -180,6 +195,11 @@ pub struct SaveProviderSettings {
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
     pub state_dir: Option<PathBuf>,
+    /// The provider's plaintext-credential policy; left out, the running
+    /// value stands (`warn` for a new provider).
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub plaintext_credentials: Option<PlaintextCredentialPolicy>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
