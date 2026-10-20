@@ -4837,9 +4837,9 @@ mod judge_seam_tests {
         }
         if expected == "refused" {
             assert_eq!(
-            result.execution,
-            swage_protocol::client::conversation::ToolExecution::refused()
-        );
+                result.execution,
+                swage_protocol::client::conversation::ToolExecution::refused()
+            );
             assert!(result.content.contains("a recorded decision"));
         }
         assert!(
