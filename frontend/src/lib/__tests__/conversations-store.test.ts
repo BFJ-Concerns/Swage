@@ -1044,3 +1044,20 @@ describe("queued thread replies", () => {
     expect(conversations.activeConversation?.messages.map(message => message.content)).toEqual(["main reply"]);
   });
 });
+
+describe("empty provider failure", () => {
+  it("marks the session summary failed when a send fails before any output", async () => {
+    vi.mocked(api.listConversations).mockResolvedValue([makeSummary("empty-failure")]);
+    vi.mocked(api.getConversation).mockResolvedValue(makeDetail("empty-failure"));
+    const conversations = createConversationStore();
+    await conversations.loadConversations(null);
+    await conversations.selectConversation("empty-failure");
+    const streaming = createStreamingStore({ conversationStore: conversations });
+    streaming.startTurn("Answer this");
+    expect(conversations.conversations[0].latest_turn_state).toBe("pending");
+    streaming.handleServerEvent({ type: "error", code: "provider_error", message: "Provider unavailable" });
+    expect(conversations.conversations[0].latest_turn_state).toBe("failed");
+    expect(conversations.activeConversation?.messages).toHaveLength(1);
+    expect(streaming.isStreaming).toBe(false);
+  });
+});
