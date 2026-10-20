@@ -472,10 +472,10 @@ describe("RecentSessions row layout", () => {
     document.body.replaceChildren();
   });
 
-  it("truncates long topic labels beside the preview and age in both list filters", async () => {
+  it("declares preview minimum and metadata truncation with long topics in both filters", async () => {
     const label = "A".repeat(217);
     vi.mocked(sessionsApi.listRecentSessions).mockReset().mockResolvedValue([
-      conversationEntry(makeSession({ topic_name: label, topic_id: "long-topic", message_preview: "Visible preview" })),
+      conversationEntry(makeSession({ topic_name: label, topic_id: "long-topic", message_preview: "Visible preview", latest_turn_state: "failed" })),
     ]);
     component = mount(RecentSessions, { target: document.body, props: {
       topics: [{ id: "long-topic", name: label, slug: "long-topic", description: "", created_at: "" }],
@@ -498,7 +498,12 @@ describe("RecentSessions row layout", () => {
       expect(group.querySelector('.preview')?.textContent).toBe("Visible preview");
       expect(group.querySelector('.timestamp')?.textContent?.trim()).toBeTruthy();
       expect(getComputedStyle(group).display).toBe("grid");
-      expect(getComputedStyle(group).gridTemplateColumns).toBe("minmax(0, 1fr) auto auto");
+      expect(getComputedStyle(group).gridTemplateColumns).toBe("minmax(8ch, 1fr) minmax(0, 1fr) auto");
+      const metaStyle = getComputedStyle(group.querySelector('.meta')!);
+      expect(metaStyle.minWidth).toBe("0px");
+      expect(metaStyle.overflow).toBe("hidden");
+      expect(metaStyle.flexWrap).toBe("wrap");
+      expect(group.querySelector('.interrupted')?.textContent).toContain("Last response failed");
       expect(getComputedStyle(group.querySelector('.preview')!).minWidth).toBe("0px");
       expect(getComputedStyle(group.querySelector('.timestamp')!).flexShrink).toBe("0");
     }
