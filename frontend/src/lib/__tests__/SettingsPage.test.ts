@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mount, unmount } from "svelte";
+import { flushSync, mount, unmount } from "svelte";
 import { compile } from "svelte/compiler";
 import defaultModelSource from "../components/settings/ProviderDefaultModel.svelte?raw";
 import modelManagementSource from "../components/settings/ProviderModelManagement.svelte?raw";
@@ -152,7 +152,51 @@ describe("SettingsPage", () => {
     component = undefined;
     document.body.innerHTML = "";
     vi.clearAllMocks();
+    vi.useRealTimers();
   });
+
+  it.each(["providers", "generation", "automation", "voice"] as const)(
+    "shows quiet transient new-turn feedback after saving %s", async (tab) => {
+      vi.mocked(settingsApi.fetchSettings).mockResolvedValue(configuredProvider());
+      const save = vi.mocked(settingsApi.saveSettings).getMockImplementation()!;
+      vi.mocked(settingsApi.saveSettings).mockImplementation(async (payload) => ({
+        ...await save(payload), restart_required: false, can_restart: true,
+      }));
+      component = mount(SettingsPage, { target: document.body, props: { tab } });
+      await flushUi();
+      vi.useFakeTimers();
+      flushSync(() => {
+        if (tab === "providers") {
+          const input = document.querySelector<HTMLInputElement>('input[placeholder="model-id"]')!;
+          input.value = "added-model";
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        } else if (tab === "automation") {
+          const input = document.querySelector<HTMLInputElement>('input[placeholder="300"]')!;
+          input.value = "301";
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        } else if (tab === "voice") {
+          const input = document.querySelector<HTMLInputElement>('input[aria-label="Transcription model"]')!;
+          input.value = "transcribe";
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      });
+      if (tab === "providers") flushSync(() => buttonNamed("+Add model").click());
+      if (tab === "generation") flushSync(() => buttonNamed("+ New").click());
+      await vi.advanceTimersByTimeAsync(700);
+      expect(settingsApi.saveSettings).toHaveBeenCalledTimes(1);
+      const notice = document.querySelector(".notice");
+      expect.soft(notice?.textContent?.trim()).toBe("Saved automatically. Changes apply to new turns.");
+      expect.soft(notice?.getAttribute("role")).toBe("status");
+      expect.soft(notice?.querySelector("button")).toBeNull();
+      if (tab === "automation") {
+        const sandbox = [...document.querySelectorAll(".field")].find((field) => field.querySelector(".key")?.textContent?.startsWith("Sandbox"));
+        expect.soft(sandbox?.textContent).toContain("Saved changes apply to new turns.");
+        expect.soft(sandbox?.textContent).not.toContain("require a gateway restart");
+      }
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(document.querySelector(".notice")).toBeNull();
+    },
+  );
 
   function configuredProvider(source: "environment" | "stored" | "none" = "none"): SettingsResponse {
     const settings = emptySettings();

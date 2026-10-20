@@ -115,6 +115,15 @@
       : null,
   );
   let status = $state("");
+  let saveSucceeded = $state(false);
+  $effect(() => {
+    if (!saveSucceeded || !status) return;
+    const timer = window.setTimeout(() => {
+      status = "";
+      saveSucceeded = false;
+    }, 4000);
+    return () => window.clearTimeout(timer);
+  });
   let error = $state<string | null>(null);
   const HOT_AUTOSAVE_TABS: ReadonlySet<SettingsTabId> = new Set([
     "providers",
@@ -200,6 +209,7 @@
     saveFailed = false;
     error = null;
     status = "";
+    saveSucceeded = false;
     if (archiveDelayError) {
       error = "Fix the archive delay in Automation before saving. It must be at least 1 day.";
       return false;
@@ -265,8 +275,9 @@
       status = hasInvalidBundlesJson
         ? ""
         : archiveDelayChanged
-          ? `Archive delay saved as ${saved.sessions.archive_after_days} ${saved.sessions.archive_after_days === 1 ? "day" : "days"}.`
-          : options.message ?? "Saved. New turns will use the updated runtime.";
+          ? `Archive delay saved as ${saved.sessions.archive_after_days} ${saved.sessions.archive_after_days === 1 ? "day" : "days"}. Changes apply to new turns.`
+          : options.message ?? "Saved. Changes apply to new turns.";
+      saveSucceeded = Boolean(status);
       return true;
     } catch (err) {
       lastRejectedSettingsFingerprint = submittedFingerprint;
@@ -283,6 +294,7 @@
   async function restart(): Promise<void> {
     try {
       const response = await restartGateway();
+      saveSucceeded = false;
       status = response.guidance;
     } catch (err) {
       error = err instanceof Error ? err.message : "Failed to restart gateway.";
@@ -379,7 +391,7 @@
     if (!fingerprint || fingerprint === lastPersistedSettingsFingerprint || fingerprint === lastRejectedSettingsFingerprint) return;
 
     const timer = window.setTimeout(() => {
-      void persist({ message: "Saved automatically. New turns will use the updated runtime." });
+      void persist({ message: "Saved automatically. Changes apply to new turns." });
     }, 650);
 
     return () => window.clearTimeout(timer);
@@ -424,7 +436,7 @@
     {/if}
 
     {#if status && !archiveDelayError}
-      <div class="notice">
+      <div class="notice" class:success={saveSucceeded} role={saveSucceeded ? "status" : undefined}>
         <span>{status}</span>
       </div>
     {/if}
@@ -496,9 +508,9 @@
     {/if}
 
     {#if status && !archiveDelayError}
-      <div class="notice">
+      <div class="notice" class:success={saveSucceeded} role={saveSucceeded ? "status" : undefined}>
         <span>{status}</span>
-        {#if settings.can_restart}
+        {#if settings.can_restart && !saveSucceeded}
           <button type="button" class="notice-action" onclick={restart}>Restart</button>
         {/if}
       </div>
@@ -693,6 +705,17 @@
     line-height: 1.4;
     letter-spacing: 0.12em;
     text-transform: uppercase;
+  }
+
+  .notice.success {
+    background: var(--paper);
+    color: var(--ink-soft);
+    border: 1px solid var(--rule-soft);
+    font-family: var(--font-body);
+    font-weight: 400;
+    font-size: 13px;
+    letter-spacing: normal;
+    text-transform: none;
   }
 
   .notice.error {

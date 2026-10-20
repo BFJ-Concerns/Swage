@@ -1286,7 +1286,7 @@ describe("App", () => {
     await settleUi();
     const model = Array.from(document.querySelectorAll("button")).find(b => b.textContent?.trim().startsWith("new-model"));
     flushSync(() => model!.click());
-    await waitForText("Saved automatically. New turns will use the updated runtime.");
+    await expect.poll(() => document.body.textContent, { timeout: 2000 }).toContain("Saved automatically. Changes apply to new turns.");
     flushSync(() => document.querySelector<HTMLButtonElement>('button[aria-label="Close settings"]')!.click());
     await settleUi();
     const textarea = document.querySelector("textarea")!;
@@ -2148,8 +2148,8 @@ describe("App", () => {
       (button) => button.textContent?.trim() === "new-model · local",
     );
     flushSync(() => newModelButton!.click());
-    await waitForText(
-      "Saved automatically. New turns will use the updated runtime.",
+    await expect.poll(() => document.body.textContent, { timeout: 2000 }).toContain(
+      "Saved automatically. Changes apply to new turns.",
     );
 
     const closeButton = document.querySelector<HTMLButtonElement>(
@@ -2191,8 +2191,8 @@ describe("App", () => {
       button.textContent?.trim() === "existing-model · local",
     );
     flushSync(() => existingModelButton!.click());
-    await waitForText(
-      "Saved automatically. New turns will use the updated runtime.",
+    await expect.poll(() => document.body.textContent, { timeout: 2000 }).toContain(
+      "Saved automatically. Changes apply to new turns.",
     );
     expect(document.body.textContent).not.toContain(
       "transient catalogue failure",
