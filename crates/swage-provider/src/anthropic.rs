@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 use swage_core::ToolResult;
 use swage_core::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, Effort, EffortCapability,
-    EffortControl, FinishReason, LlmRequest, LlmResponse, ProviderContentBlockWitness,
-    ProviderError, ProviderResponseWitness, Role, StreamChunk, TokenUsage, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse, ToolReplayPart,
+    EffortControl, FinishReason, ProviderContentBlockWitness, ProviderError,
+    ProviderResponseWitness, Role, StreamChunk, TokenUsage, ToolCall, ToolCompletionRequest,
+    ToolCompletionResponse, ToolReplayPart,
 };
 
 use crate::http::{HttpClient, SseEvent, StreamResponseMetadata};
@@ -730,44 +730,6 @@ impl AnthropicProvider {
         vec![assistant_message, user_message]
     }
 
-    fn build_messages_request(&self, request: &LlmRequest, stream: bool) -> MessagesRequest {
-        // Convert regular conversation messages (skip system — it goes in the top-level field).
-        let messages: Vec<AnthropicMessage> = request
-            .messages
-            .iter()
-            .filter(|m| m.role() != swage_core::Role::System)
-            .map(|m| {
-                let content = Self::message_content_for_anthropic(m);
-                AnthropicMessage {
-                    role: m.role().to_string(),
-                    content,
-                }
-            })
-            .collect();
-
-        let tools = request
-            .tools
-            .iter()
-            .map(|t| AnthropicTool {
-                name: t.name.clone(),
-                description: t.description.clone(),
-                input_schema: crate::tool_schema::provider_tool_schema(&t.input_schema),
-            })
-            .collect();
-
-        MessagesRequest {
-            model: self.config.model.clone(),
-            // The legacy LlmRequest surface has no per-call effort option.
-            output_config: None,
-            thinking: None,
-            messages,
-            max_tokens: Self::max_tokens_for(request.max_tokens, &self.config.model),
-            system: request.system_prompt.clone(),
-            stream: if stream { Some(true) } else { None },
-            tools,
-        }
-    }
-
     /// Parse an Anthropic SSE event into a `StreamChunk`.
     ///
     /// Returns `None` for event types that don't map to visible stream output
@@ -825,73 +787,6 @@ impl AnthropicProvider {
             // Unrecognised or informational events (message_start, content_block_start…).
             _ => None,
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Legacy trait impl (preserved for task to adapt)
-// ---------------------------------------------------------------------------
-
-// The old send_message/stream_message implementations are preserved below as
-// private methods. Task will adapt them to the new four-method API.
-
-impl AnthropicProvider {
-    /// Legacy send_message logic — kept for task to adapt into `complete`.
-    #[allow(dead_code)]
-    async fn legacy_send_message(
-        &self,
-        request: &LlmRequest,
-    ) -> Result<LlmResponse, ProviderError> {
-        let body = self.build_messages_request(request, false);
-        let client = self.make_http_client();
-
-        let response: MessagesResponse = client.post_json(ANTHROPIC_MESSAGES_PATH, &body).await?;
-
-        let text = response
-            .content
-            .into_iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text { text } => Some(text),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("");
-
-        Ok(LlmResponse {
-            message: ChatMessage::new(Role::Assistant, text),
-            usage: TokenUsage {
-                input_tokens: response.usage.input_tokens,
-                output_tokens: response.usage.output_tokens,
-            },
-            model: response.model,
-        })
-    }
-
-    /// Legacy stream_message logic — kept for task to adapt into `stream`.
-    #[allow(dead_code)]
-    fn legacy_stream_message(
-        &self,
-        request: &LlmRequest,
-    ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
-        let body = self.build_messages_request(request, true);
-        let client = self.make_http_client();
-
-        spawn_stream_forwarder(move |tx| async move {
-            let (metadata, sse_stream) = match client
-                .post_stream(ANTHROPIC_MESSAGES_PATH, &body, HeaderMap::new())
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = tx.send(StreamChunk::Error {
-                        message: e.to_string(),
-                    });
-                    return;
-                }
-            };
-
-            forward_anthropic_stream(metadata, sse_stream, tx).await;
-        })
     }
 }
 
@@ -1761,78 +1656,13 @@ mod tests {
 
     // --- request building ---
 
-    #[test]
-    fn build_request_extracts_system_prompt() {
-        let provider = AnthropicProvider::new("key", "model");
-        let req = LlmRequest::builder("model")
-            .system_prompt("be helpful")
-            .build();
-
-        let body = provider.build_messages_request(&req, false);
-        assert_eq!(body.system.as_deref(), Some("be helpful"));
-    }
-
-    #[test]
-    fn build_request_excludes_system_role_messages() {
-        // Anthropic uses a top-level system field; system-role messages must not
-        // appear in the messages array.
-        use swage_core::{ChatMessage, Role};
-        let provider = AnthropicProvider::new("key", "model");
-        let req = LlmRequest::builder("model")
-            .messages(vec![
-                ChatMessage::new(Role::System, "instructions"),
-                ChatMessage::new(Role::User, "hello"),
-            ])
-            .build();
-
-        let body = provider.build_messages_request(&req, false);
-        assert_eq!(body.messages.len(), 1);
-        assert_eq!(body.messages[0].role, "user");
-    }
-
-    #[test]
-    fn build_streaming_request_sets_stream_true() {
-        let provider = AnthropicProvider::new("key", "model");
-        let req = LlmRequest::builder("model").build();
-        let body = provider.build_messages_request(&req, true);
-        assert_eq!(body.stream, Some(true));
-    }
-
-    #[test]
-    fn build_non_streaming_request_omits_stream_field() {
-        let provider = AnthropicProvider::new("key", "model");
-        let req = LlmRequest::builder("model").build();
-        let body = provider.build_messages_request(&req, false);
-        assert!(body.stream.is_none());
-    }
-
-    /// Each of the three request builders sends the caller's own limit as
+    /// Each of the two request builders sends the caller's own limit as
     /// it is, fills an absent one with the documented limit of the model the
     /// request names, and falls to the floor only for a model the adapter
     /// cannot vouch for.
     #[test]
     fn request_paths_preserve_explicit_and_default_token_limits() {
         let provider = AnthropicProvider::new("key", "claude-opus-5-5");
-        let legacy_default = LlmRequest {
-            max_tokens: None,
-            ..LlmRequest::builder("claude-opus-5-5").build()
-        };
-        let legacy_explicit = LlmRequest::builder("claude-opus-5-5")
-            .max_tokens(73)
-            .build();
-        assert_eq!(
-            provider
-                .build_messages_request(&legacy_default, false)
-                .max_tokens,
-            128_000
-        );
-        assert_eq!(
-            provider
-                .build_messages_request(&legacy_explicit, false)
-                .max_tokens,
-            73
-        );
-
         let completion = |max_tokens| CompletionRequest {
             effort: None,
             messages: vec![],
@@ -2141,45 +1971,6 @@ mod tests {
     // --- tool definitions in wire request ---
 
     #[test]
-    fn build_request_with_tools_includes_tools_array() {
-        use swage_core::ToolDefinition;
-
-        let provider = AnthropicProvider::new("key", "model");
-        let tool = ToolDefinition {
-            name: "bash".into(),
-            description: "Run a shell command".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": { "command": { "type": "string" } },
-                "required": ["command"]
-            }),
-        };
-        let req = LlmRequest::builder("model").tools(vec![tool]).build();
-
-        let body = provider.build_messages_request(&req, false);
-        let json = serde_json::to_value(&body).unwrap();
-
-        // tools array must be present with one entry.
-        let tools = json["tools"].as_array().expect("tools should be an array");
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0]["name"], "bash");
-        assert_eq!(tools[0]["description"], "Run a shell command");
-        assert!(tools[0]["input_schema"]["properties"]["command"].is_object());
-    }
-
-    #[test]
-    fn build_request_without_tools_omits_tools_field() {
-        let provider = AnthropicProvider::new("key", "model");
-        let req = LlmRequest::builder("model").build();
-        let body = provider.build_messages_request(&req, false);
-        let json = serde_json::to_value(&body).unwrap();
-
-        // When no tools provided, the tools field must be omitted entirely
-        // (not serialised as an empty array).
-        assert!(json.get("tools").is_none());
-    }
-
-    #[test]
     fn anthropic_tool_serialises_with_correct_field_names() {
         let tool = AnthropicTool {
             name: "read_file".into(),
@@ -2190,33 +1981,6 @@ mod tests {
         assert_eq!(json["name"], "read_file");
         assert_eq!(json["description"], "Read file contents");
         assert_eq!(json["input_schema"]["type"], "object");
-    }
-
-    #[test]
-    fn build_request_maps_multiple_tools() {
-        use swage_core::ToolDefinition;
-
-        let provider = AnthropicProvider::new("key", "model");
-        let tools = vec![
-            ToolDefinition {
-                name: "bash".into(),
-                description: "Execute shell commands".into(),
-                input_schema: serde_json::json!({"type": "object"}),
-            },
-            ToolDefinition {
-                name: "read_file".into(),
-                description: "Read a file".into(),
-                input_schema: serde_json::json!({"type": "object"}),
-            },
-        ];
-        let req = LlmRequest::builder("model").tools(tools).build();
-        let body = provider.build_messages_request(&req, false);
-
-        let json = serde_json::to_value(&body).unwrap();
-        let wire_tools = json["tools"].as_array().unwrap();
-        assert_eq!(wire_tools.len(), 2);
-        assert_eq!(wire_tools[0]["name"], "bash");
-        assert_eq!(wire_tools[1]["name"], "read_file");
     }
 
     // --- build_tool_result_messages ---

@@ -23,9 +23,6 @@ pub enum FailureMode {
 /// to respond via `HookOutcome`.
 #[derive(Debug, Clone)]
 pub enum HookEvent {
-    /// A new session has been initialised.
-    SessionStart { session_id: String },
-
     /// A session is ending (logout, clear, etc.).
     SessionEnd { session_id: String },
 
@@ -44,9 +41,6 @@ pub enum HookEvent {
 
     /// A response has been generated before delivery. Hooks can modify it.
     AfterResponse { content: String },
-
-    /// Context compaction is about to occur. Hooks can preserve data.
-    PreCompact { context: Value },
 
     /// An agent has stopped execution.
     AgentStop { agent_id: String },
@@ -96,13 +90,11 @@ impl HookEvent {
     /// in the registry's event filter.
     pub fn event_name(&self) -> &str {
         match self {
-            HookEvent::SessionStart { .. } => "SessionStart",
             HookEvent::SessionEnd { .. } => "SessionEnd",
             HookEvent::PreToolUse { .. } => "PreToolUse",
             HookEvent::PostToolUse { .. } => "PostToolUse",
             HookEvent::BeforeInbound { .. } => "BeforeInbound",
             HookEvent::AfterResponse { .. } => "AfterResponse",
-            HookEvent::PreCompact { .. } => "PreCompact",
             HookEvent::AgentStop { .. } => "AgentStop",
             HookEvent::MessageSend { .. } => "MessageSend",
             HookEvent::MessageDeliver { .. } => "MessageDeliver",
