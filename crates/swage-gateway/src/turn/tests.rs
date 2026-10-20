@@ -779,6 +779,7 @@ async fn seed_finished_turn(
     for (position, (tool, arguments, status)) in calls.iter().enumerate() {
         let call = storage
             .create_tool_call(swage_storage::NewToolCall {
+                execution: None,
                 turn_id: turn.id,
                 agent_id: "gateway".to_string(),
                 call_id: format!("call-{position}"),
@@ -1274,6 +1275,7 @@ async fn continuity_degradation_successor_keeps_established_facts_beside_the_dia
             "success",
             1,
             false,
+            None,
             None,
         )
         .await
@@ -2388,6 +2390,7 @@ pub(crate) struct MockStorage {
     fail_workflow_attempt_writes: AtomicBool,
     last_snapshot_list_limit: AtomicUsize,
     approval_read_barrier: std::sync::Mutex<Option<(Arc<tokio::sync::Barrier>, usize)>>,
+    fail_next_approval_write: AtomicBool,
     pause_approved_writes: AtomicBool,
     approved_write_release: Notify,
     approved_write_started: Notify,
@@ -2922,6 +2925,7 @@ impl MockStorage {
             fail_workflow_attempt_writes: AtomicBool::new(false),
             last_snapshot_list_limit: AtomicUsize::new(0),
             approval_read_barrier: std::sync::Mutex::new(None),
+            fail_next_approval_write: AtomicBool::new(false),
             pause_approved_writes: AtomicBool::new(false),
             approved_write_release: Notify::new(),
             approved_write_started: Notify::new(),
@@ -4862,6 +4866,7 @@ impl TurnStore for MockStorage {
         stored.duration_ms = call.duration_ms;
         stored.truncated = call.truncated;
         stored.total_bytes = call.total_bytes;
+        stored.execution = call.execution;
         db.turns.get_mut(&call.turn_id).unwrap().state = TurnState::Processing;
         Ok(())
     }
@@ -5236,6 +5241,7 @@ impl ToolCallStore for MockStorage {
             ));
         }
         let record = ToolCallRecord {
+            execution: tool_call.execution,
             id: Uuid::new_v4(),
             turn_id: tool_call.turn_id,
             agent_id: tool_call.agent_id,
@@ -5286,6 +5292,7 @@ impl ToolCallStore for MockStorage {
         duration_ms: i64,
         truncated: bool,
         total_bytes: Option<i64>,
+        execution: Option<swage_protocol::client::conversation::ToolExecution>,
     ) -> Result<(), StorageError> {
         if self.fail_tool_call_settlement.load(Ordering::SeqCst) {
             return Err(StorageError::QueryFailed(
@@ -5300,6 +5307,7 @@ impl ToolCallStore for MockStorage {
             tc.duration_ms = Some(duration_ms);
             tc.truncated = truncated;
             tc.total_bytes = total_bytes;
+            tc.execution = execution;
         }
         Ok(())
     }
@@ -5446,6 +5454,11 @@ impl ApprovalStore for MockStorage {
         state: ApprovalState,
         reason: Option<&str>,
     ) -> Result<bool, StorageError> {
+        if self.fail_next_approval_write.swap(false, Ordering::SeqCst) {
+            return Err(StorageError::QueryFailed(
+                "transient approval write failure".into(),
+            ));
+        }
         if state == ApprovalState::Approved && self.pause_approved_writes.load(Ordering::SeqCst) {
             self.approved_write_started.notify_one();
             self.approved_write_release.notified().await;
@@ -7223,7 +7236,7 @@ async fn a_turn_on_an_archived_session_returns_it_to_the_recent_list() {
 }
 
 #[tokio::test]
-async fn cancelled_turn_stores_partial_and_marks_interrupted() {
+async fn cancelled_turn_stores_partial_and_marks_cancelled() {
     let storage = Arc::new(MockStorage::new());
 
     let topic = storage.general_scope().await.expect("create default topic");
@@ -7300,7 +7313,7 @@ async fn cancelled_turn_stores_partial_and_marks_interrupted() {
     let threads = state.storage.list_by_session(session_id).await.unwrap();
     let thread_id = threads[0].id;
     let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
-    assert_eq!(turns[0].state, TurnState::Interrupted);
+    assert_eq!(turns[0].state, TurnState::Cancelled);
     assert_eq!(
         turns[0].assistant_response.as_deref(),
         Some(INTERRUPTED_PARTIAL)
@@ -7318,7 +7331,7 @@ async fn cancelled_turn_stores_partial_and_marks_interrupted() {
     assert_eq!(conversation.messages[1].content, INTERRUPTED_PARTIAL);
     assert_eq!(
         conversation.messages[1].turn_state,
-        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+        Some(swage_protocol::client::conversation::TurnState::Cancelled)
     );
 }
 
@@ -7383,7 +7396,7 @@ async fn cancelled_turn_without_partial_stores_no_assistant_response() {
         .list_turns_by_thread(threads[0].id)
         .await
         .unwrap();
-    assert_eq!(turns[0].state, TurnState::Interrupted);
+    assert_eq!(turns[0].state, TurnState::Cancelled);
     assert_eq!(turns[0].assistant_response, None);
 
     let conversation = crate::service::ConversationService::new(
@@ -7468,7 +7481,7 @@ async fn cancelled_before_next_tool_persists_completed_round_text() {
     assert_eq!(conversation.messages[1].content, COMPLETED_ROUND_PARTIAL);
     assert_eq!(
         conversation.messages[1].turn_state,
-        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+        Some(swage_protocol::client::conversation::TurnState::Cancelled)
     );
 }
 
@@ -7535,7 +7548,7 @@ async fn cancelled_before_next_round_persists_completed_round_text() {
     assert_eq!(conversation.messages[1].content, COMPLETED_ROUND_PARTIAL);
     assert_eq!(
         conversation.messages[1].turn_state,
-        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+        Some(swage_protocol::client::conversation::TurnState::Cancelled)
     );
 }
 
@@ -7599,7 +7612,7 @@ async fn cancelled_during_later_stream_persists_all_accumulated_text() {
         .list_turns_by_thread(threads[0].id)
         .await
         .unwrap();
-    assert_eq!(turns[0].state, TurnState::Interrupted);
+    assert_eq!(turns[0].state, TurnState::Cancelled);
     assert_eq!(
         turns[0].assistant_response.as_deref(),
         Some(expected.as_str())
@@ -7617,7 +7630,7 @@ async fn cancelled_during_later_stream_persists_all_accumulated_text() {
     assert_eq!(conversation.messages[1].content, expected);
     assert_eq!(
         conversation.messages[1].turn_state,
-        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+        Some(swage_protocol::client::conversation::TurnState::Cancelled)
     );
     let thread = ThreadStore::get(&*state.storage, threads[0].id)
         .await
@@ -7690,7 +7703,7 @@ async fn cancelled_hook_approval_persists_completed_round_text() {
     assert_eq!(conversation.messages[1].content, COMPLETED_ROUND_PARTIAL);
     assert_eq!(
         conversation.messages[1].turn_state,
-        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+        Some(swage_protocol::client::conversation::TurnState::Cancelled)
     );
 }
 
@@ -9442,7 +9455,46 @@ async fn cancelled_during_tool_dispatch_persists_partial_without_waiting() {
     let threads = state.storage.list_by_session(session_id).await.unwrap();
     let thread_id = threads[0].id;
     let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
-    assert_eq!(turns[0].state, TurnState::Interrupted);
+    let calls = state
+        .storage
+        .list_tool_calls_by_turn(turns[0].id)
+        .await
+        .unwrap();
+    assert_eq!(
+        calls[0].status.as_deref(),
+        Some("cancelled"),
+        "stored call status"
+    );
+    let replay = super::history::rebuild_thread_history_messages(&*state.storage, thread_id)
+        .await
+        .unwrap();
+    assert!(replay.iter().filter_map(ChatMessage::tool_replay).flatten().any(|part| matches!(part, swage_core::ToolReplayPart::ToolResult { content, .. } if content.contains("cancelled") && !content.contains("did not report"))), "next context must retain cancellation: {replay:?}");
+    let readback = crate::service::ConversationService::new(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.topic_store),
+    )
+    .get_conversation(session_id)
+    .await
+    .unwrap();
+    assert!(
+        readback
+            .messages
+            .iter()
+            .flat_map(|m| &m.tool_calls)
+            .any(|c| c.status.as_deref() == Some("cancelled")),
+        "conversation must retain cancelled status: {readback:?}"
+    );
+    println!("storage, conversation call readback and next-context cancellation assertions passed");
+    assert_eq!(
+        turns[0].state.to_string(),
+        "cancelled",
+        "Stop must cancel the turn"
+    );
+    let recorded = serde_json::to_value(&calls[0]).unwrap();
+    assert_eq!(recorded["execution"]["outcome"], "cancelled");
+    assert_eq!(recorded["execution"]["stage"], "started");
+    assert_eq!(recorded["execution"]["completion"], "unknown");
+
     assert_eq!(
         turns[0].assistant_response.as_deref(),
         Some(COMPLETED_ROUND_PARTIAL)
@@ -9459,8 +9511,8 @@ async fn cancelled_during_tool_dispatch_persists_partial_without_waiting() {
     assert_eq!(conversation.messages[1].role, "assistant");
     assert_eq!(conversation.messages[1].content, COMPLETED_ROUND_PARTIAL);
     assert_eq!(
-        conversation.messages[1].turn_state,
-        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+        serde_json::to_value(conversation.messages[1].turn_state).unwrap(),
+        serde_json::json!("cancelled")
     );
 
     let thread = ThreadStore::get(&*state.storage, thread_id)
@@ -9473,7 +9525,7 @@ async fn cancelled_during_tool_dispatch_persists_partial_without_waiting() {
 }
 
 #[tokio::test]
-async fn cancelled_dispatch_with_failed_record_remains_cancelled_and_marks_turn_failed() {
+async fn cancelled_dispatch_with_failed_record_remains_cancelled_and_keeps_cause() {
     let round_1 = vec![
         StreamChunk::Delta {
             content: COMPLETED_ROUND_PARTIAL.into(),
@@ -9569,10 +9621,20 @@ async fn cancelled_dispatch_with_failed_record_remains_cancelled_and_marks_turn_
     let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
     assert_eq!(
         turns[0].state,
-        TurnState::Failed,
-        "record failure must remain visible on a cancelled turn"
+        TurnState::Cancelled,
+        "record failure must not replace the stopped turn state"
     );
     assert!(events.iter().any(|event| matches!(event, ServerEvent::Error { message, .. } if message.contains("tool-call settlement refused"))), "record failure must reach the client: {events:?}");
+    assert!(
+        turns[0]
+            .failure_message
+            .as_ref()
+            .is_some_and(|reason| events.iter().any(
+                |event| matches!(event, ServerEvent::Error { message, .. } if message == reason)
+            )),
+        "the stored failure cause must be one the client actually received: {:?}",
+        turns[0].failure_message
+    );
     release.notify_waiters();
 }
 
@@ -10313,6 +10375,7 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
         .expect("create parent assistant message");
     storage
         .create_tool_call(NewToolCall {
+            execution: None,
             turn_id: parent_turn.id,
             agent_id: "gateway".to_string(),
             call_id: "call_1".to_string(),
@@ -10498,6 +10561,7 @@ async fn later_turn_rebuilds_failed_tool_replay_as_error() {
         .expect("create assistant message");
     storage
         .create_tool_call(NewToolCall {
+            execution: None,
             turn_id: failed_turn.id,
             agent_id: "gateway".to_string(),
             call_id: "call_fail".to_string(),
@@ -10595,6 +10659,7 @@ fn compact_tool_replay_messages_includes_nested_compact_rows() {
     let top_level_call_id = "python_parent".to_string();
     let records = vec![
         ToolCallRecord {
+            execution: None,
             id: Uuid::new_v4(),
             turn_id,
             agent_id: "gateway".to_string(),
@@ -10620,6 +10685,7 @@ fn compact_tool_replay_messages_includes_nested_compact_rows() {
             display_summary: None,
         },
         ToolCallRecord {
+            execution: None,
             id: Uuid::new_v4(),
             turn_id,
             agent_id: "gateway".to_string(),
@@ -10690,6 +10756,7 @@ fn compact_tool_replay_messages_includes_nested_compact_rows() {
 
 fn complete_replay_record(call_id: &str) -> ToolCallRecord {
     ToolCallRecord {
+        execution: None,
         id: Uuid::new_v4(),
         turn_id: Uuid::new_v4(),
         agent_id: "gateway".into(),
@@ -14087,7 +14154,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
             .expect("list child turns");
         if child_turns
             .iter()
-            .any(|turn| turn.state == TurnState::Interrupted)
+            .any(|turn| turn.state == TurnState::Cancelled)
         {
             break;
         }
@@ -14095,7 +14162,7 @@ async fn detached_delegate_can_be_cancelled_through_active_registry() {
     }
 
     assert_eq!(child_turns.len(), 1, "expected one child turn");
-    assert_eq!(child_turns[0].state, TurnState::Interrupted);
+    assert_eq!(child_turns[0].state, TurnState::Cancelled);
 
     let delegate = state
         .storage
@@ -19302,7 +19369,7 @@ async fn sandbox_degradation_approval_preserves_cancelled_wait() {
         .await
         .expect("approval task should finish")
         .expect("approval should complete as cancelled");
-    assert_eq!(outcome, SandboxDegradationApproval::Interrupted);
+    assert_eq!(outcome, SandboxDegradationApproval::Cancelled);
 
     let stored_turn = state
         .storage
@@ -20106,6 +20173,7 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
     for (position, call_id, tool) in [(0, "call-append", "file_edit"), (1, "call-long", "shell")] {
         let created = storage
             .create_tool_call(NewToolCall {
+                execution: None,
                 turn_id: turn.id,
                 agent_id: "gateway".into(),
                 call_id: call_id.into(),
@@ -20139,6 +20207,7 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
             "success",
             3,
             false,
+            None,
             None,
         )
         .await
@@ -20225,6 +20294,7 @@ async fn assistantless_delegated_round_follows_the_delegated_task() {
     }
     storage
         .create_tool_call(NewToolCall {
+            execution: None,
             turn_id,
             agent_id: "child".into(),
             call_id: "child-call".into(),
@@ -20473,6 +20543,26 @@ async fn operation_outcome_turn(
     Vec<ServerEvent>,
     Vec<CompletionRequest>,
 ) {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.tools.permissions.require_approval.clear();
+    Box::pin(operation_outcome_turn_with_config(
+        calls,
+        config,
+        TurnAttendance::Attended,
+    ))
+    .await
+}
+
+async fn operation_outcome_turn_with_config(
+    calls: Vec<(&str, &str, serde_json::Value)>,
+    config: swage_config::ResolvedConfig,
+    attendance: TurnAttendance,
+) -> (
+    Arc<swage_storage::SqliteStorage>,
+    Uuid,
+    Vec<ServerEvent>,
+    Vec<CompletionRequest>,
+) {
     let root = SwageHomeGuard::new();
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
     let topic = storage.general_scope().await.unwrap();
@@ -20508,10 +20598,6 @@ async fn operation_outcome_turn(
             },
         ],
     ]);
-    // Record operation outcomes without pausing the attended turn on the
-    // default shell approval.
-    let mut config = swage_config::ResolvedConfig::default();
-    config.tools.permissions.require_approval.clear();
     let mut state = AppState::new_with_config_root(
         storage.clone(),
         storage.clone(),
@@ -20523,6 +20609,9 @@ async fn operation_outcome_turn(
                 max_output_bytes: 4096,
             }) as Arc<dyn crate::tool::Tool>,
             Arc::new(crate::tool::workflow_run::WorkflowRunTool),
+            Arc::new(crate::tool::file_read::FileReadTool {
+                max_output_bytes: 4096,
+            }),
         ]),
         None,
         root.path().to_path_buf(),
@@ -20530,13 +20619,20 @@ async fn operation_outcome_turn(
     // Exercise host tools without depending on an installed sandbox backend.
     state.declared_execution_boundary = Some("container".into());
     let (tx, mut rx) = mpsc::unbounded_channel();
-    process_turn(
+    process_turn_with_composition(
         &state,
         session.id,
         None,
         "Run the operations".to_string(),
         tx,
         Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+        None,
+        None,
+        None,
+        None,
+        attendance,
+        DispatchContextComposition::default(),
         None,
     )
     .await
@@ -20585,7 +20681,10 @@ async fn operation_outcome_shell_failure_is_recorded_and_streamed_without_losing
             _ => None,
         })
         .unwrap();
-    assert!(!model_result.1);
+    assert!(
+        *model_result.1,
+        "the model must receive the operation failure flag"
+    );
     assert!(model_result.0.contains("INTENTIONAL_FAILURE"));
     assert!(model_result.0.contains("23"));
     assert_eq!(failure.status.as_deref(), Some("error"));
@@ -21480,7 +21579,7 @@ async fn approval_scope_deadline_race_refuses_websocket_global_file_grant() {
     .unwrap();
 }
 
-async fn expired_live_waiter(check_turn: bool) {
+async fn expired_live_waiter(check_turn: bool, websocket: bool) {
     use crate::error::{Json, Path};
     use axum::extract::State;
     let storage = Arc::new(MockStorage::new());
@@ -21546,23 +21645,33 @@ async fn expired_live_waiter(check_turn: bool) {
         .get_mut(&approval_id)
         .unwrap()
         .timeout_at = chrono::Utc::now() - chrono::Duration::seconds(1);
-    let response = crate::handlers::decide_approval(
-        State(state),
-        Path(approval_id),
-        Json(crate::handlers::ApprovalDecisionRequest {
-            decision: swage_agent::approval::ApprovalDecisionValue::Approved,
-            scope: swage_agent::approval::ApprovalDecisionScope::Permanent,
-            reason: None,
-        }),
-    )
-    .await;
-    assert!(response.is_err());
+    let response_failed = if websocket {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        crate::websocket::dispatch_client_message(&serde_json::json!({"type":"approval_decision", "approval_id":approval_id, "decision":"approved", "scope":"permanent"}).to_string(), &state, session_id, tx, Arc::new(Mutex::new(SubscriptionState::new(true)))).await;
+        matches!(
+            rx.recv().await,
+            Some(ServerEvent::ApprovalDecisionError { .. })
+        )
+    } else {
+        crate::handlers::decide_approval(
+            State(state),
+            Path(approval_id),
+            Json(crate::handlers::ApprovalDecisionRequest {
+                decision: swage_agent::approval::ApprovalDecisionValue::Approved,
+                scope: swage_agent::approval::ApprovalDecisionScope::Permanent,
+                reason: None,
+            }),
+        )
+        .await
+        .is_err()
+    };
+    assert!(response_failed);
     let _ = task.await.unwrap();
     if check_turn {
         assert_eq!(
             storage.get_turn(turn_id).await.unwrap().unwrap().state,
-            TurnState::Interrupted,
-            "expiring a live Reject-policy waiter must interrupt its turn"
+            TurnState::Completed,
+            "expiring a live Reject-policy waiter must continue its turn"
         );
     } else {
         let calls = storage.list_tool_calls_by_turn(turn_id).await.unwrap();
@@ -21582,12 +21691,756 @@ async fn expired_live_waiter(check_turn: bool) {
 }
 
 #[tokio::test]
-async fn approval_scope_expired_live_waiter_interrupts_turn() {
-    expired_live_waiter(true).await;
+async fn approval_scope_expired_live_waiter_continues_turn() {
+    expired_live_waiter(true, false).await;
 }
 #[tokio::test]
 async fn approval_scope_expired_live_waiter_records_expired_feedback() {
-    expired_live_waiter(false).await;
+    expired_live_waiter(false, false).await;
+}
+
+#[tokio::test]
+async fn settlement_schema_exhaustion_keeps_reason_in_poll_and_history() {
+    let (state, session_id) = make_state_with_session(vec![
+        StreamChunk::Delta {
+            content: "not json".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ])
+    .await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Return JSON",
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        Some(serde_json::json!({"type":"object", "required":["answer"]})),
+    )
+    .await
+    .unwrap();
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ServerEvent::OutputSchemaFailed { .. })),
+        "real schema exhaustion: {events:?}"
+    );
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .remove(0);
+    let turn = state
+        .storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .unwrap()
+        .remove(0);
+    let reason = turn
+        .failure_message
+        .expect("schema exhaustion must persist its reason");
+    let live = events
+        .iter()
+        .find_map(|event| {
+            let value = serde_json::to_value(event).unwrap();
+            (value["type"] == "output_schema_failed").then_some(value)
+        })
+        .unwrap();
+    assert_eq!(
+        live["failure_message"], reason,
+        "live and stored schema causes must match"
+    );
+    let poll = crate::handlers::get_turn(
+        axum::extract::State(state.clone()),
+        crate::error::Path(turn.id),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(
+        serde_json::to_value(poll).unwrap()["failure_message"],
+        reason
+    );
+    let history = crate::service::ConversationService::new(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.topic_store),
+    )
+    .get_conversation(session_id)
+    .await
+    .unwrap();
+    assert!(
+        history
+            .messages
+            .iter()
+            .any(|m| m.failure_message.as_deref() == Some(reason.as_str())),
+        "history must keep the same cause"
+    );
+}
+
+#[tokio::test]
+async fn settlement_identical_failure_bound_ends_unattended_turn_with_cause() {
+    for limit in [1, 2] {
+        let _home = SwageHomeGuard::new();
+        let rounds = (0..4)
+            .map(|n| {
+                vec![
+                    StreamChunk::ToolUse {
+                        call_id: format!("failure-{n}"),
+                        name: "unavailable_tool".into(),
+                        arguments: serde_json::json!({"same":"arguments"}),
+                    },
+                    StreamChunk::Done {
+                        finish_reason: None,
+                    },
+                ]
+            })
+            .chain(std::iter::once(vec![
+                StreamChunk::Delta {
+                    content: "finished despite failures".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ]))
+            .collect();
+        let (provider, captured) = CapturingMultiRoundProvider::new(rounds);
+        let storage = Arc::new(MockStorage::new());
+        let (state, session_id) = make_state_with_provider_and_root(
+            Arc::new(provider),
+            storage.clone(),
+            Some(_home.path().to_path_buf()),
+        )
+        .await;
+        let mut config = state.active_config();
+        config.tools.max_identical_failures = u32::try_from(limit).unwrap();
+        std::fs::write(
+            _home.path().join("config.toml"),
+            toml::to_string(&swage_config::PartialConfig::from(config)).unwrap(),
+        )
+        .unwrap();
+        let config = swage_config::load_resolved_config_from(
+            _home.path(),
+            &swage_core::ScopeLocation::General,
+            "default",
+        )
+        .unwrap();
+        state.replace_runtime(
+            config,
+            state.active_provider(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+        );
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let _ = process_turn_with_composition(
+            &state,
+            session_id,
+            None,
+            "Try the call".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+            None,
+            None,
+            None,
+            None,
+            TurnAttendance::Unattended,
+            DispatchContextComposition::default(),
+            None,
+        )
+        .await;
+        let thread = storage.list_by_session(session_id).await.unwrap().remove(0);
+        let turn = storage
+            .list_turns_by_thread(thread.id)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            turn.state,
+            TurnState::Failed,
+            "identical failures must end the turn at {limit}"
+        );
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            limit,
+            "no further provider round after the bound"
+        );
+        assert!(
+            turn.failure_message.unwrap().contains("unavailable_tool"),
+            "the underlying cause remains visible"
+        );
+        assert_eq!(
+            storage
+                .list_tool_calls_by_turn(turn.id)
+                .await
+                .unwrap()
+                .len(),
+            limit
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settlement_signal_termination_is_a_failed_operation() {
+    let (storage, turn_id, events, requests) = operation_outcome_turn(vec![(
+        "signal",
+        "shell",
+        serde_json::json!({"command": "kill -TERM $$"}),
+    )])
+    .await;
+    let calls = storage.list_tool_calls_by_turn(turn_id).await.unwrap();
+    assert_eq!(
+        calls[0].status.as_deref(),
+        Some("error"),
+        "a signalled process must fail"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ServerEvent::ToolEnd { status, .. } if status == "error"))
+    );
+    let results: Vec<_> = requests
+        .last()
+        .unwrap()
+        .messages
+        .iter()
+        .filter_map(ChatMessage::tool_replay)
+        .flatten()
+        .collect();
+    assert!(
+        results.iter().any(|part| matches!(
+            part,
+            swage_core::ToolReplayPart::ToolResult { is_error: true, .. }
+        )),
+        "the model must see failure: {results:?}"
+    );
+}
+
+#[tokio::test]
+async fn settlement_empty_optional_targets_are_validation_failures() {
+    let ctx = swage_tool::context::MockToolContext::new("agent", Uuid::new_v4().to_string());
+    let workflow = crate::tool::workflow_run::WorkflowRunTool;
+    for params in [
+        serde_json::json!({"name":""}),
+        serde_json::json!({"source":"  "}),
+    ] {
+        let error = workflow.execute(params, &ctx).await.unwrap_err();
+        assert!(
+            matches!(error, ToolError::InvalidParameters { ref message, .. } if message.contains("non-empty")),
+            "empty workflow target must be rejected before gateway access: {error}"
+        );
+    }
+    for params in [
+        serde_json::json!({"name":"saved", "source":null}),
+        serde_json::json!({"name":null, "source":"return null;"}),
+    ] {
+        let error = workflow.execute(params, &ctx).await.unwrap_err();
+        assert!(
+            matches!(error, ToolError::ExecutionFailed { .. }),
+            "an omitted optional target represented by null must reach gateway validation: {error}"
+        );
+    }
+    let host = crate::browser::BrowserHost::new(crate::browser::BrowserConfig::from_tool_config(
+        &Default::default(),
+        std::path::Path::new("/unused"),
+    ));
+    let scroll = crate::tool::browser::browser_tools(host)
+        .into_iter()
+        .find(|tool| tool.name() == "browser_scroll")
+        .unwrap();
+    let error = scroll
+        .execute(serde_json::json!({"ref":""}), &ctx)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, ToolError::InvalidParameters { ref message, .. } if message.contains("non-empty")),
+        "empty browser ref must be rejected before browser access: {error}"
+    );
+}
+
+#[tokio::test]
+async fn settlement_failed_approval_write_is_retryable_on_both_routes() {
+    use crate::error::{Json, Path};
+    use axum::extract::State;
+    use swage_agent::approval::{ApprovalDecisionScope, ApprovalDecisionValue};
+    async fn send(state: AppState, session_id: Uuid, approval_id: Uuid, websocket: bool) -> bool {
+        if websocket {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            crate::websocket::dispatch_client_message(&serde_json::json!({"type":"approval_decision","approval_id":approval_id,"decision":"approved"}).to_string(), &state, session_id, tx, Arc::new(Mutex::new(SubscriptionState::new(true)))).await;
+            matches!(
+                rx.recv().await.unwrap(),
+                ServerEvent::ApprovalConfirmed { .. }
+            )
+        } else {
+            crate::handlers::decide_approval(
+                State(state),
+                Path(approval_id),
+                Json(crate::handlers::ApprovalDecisionRequest {
+                    decision: ApprovalDecisionValue::Approved,
+                    scope: ApprovalDecisionScope::Once,
+                    reason: None,
+                }),
+            )
+            .await
+            .is_ok()
+        }
+    }
+    for websocket in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let storage = Arc::new(MockStorage::new());
+        let (state, session_id) = make_state_with_provider_and_root(
+            Arc::new(MockProvider::new(vec![])),
+            storage.clone(),
+            Some(root.path().to_path_buf()),
+        )
+        .await;
+        let thread = storage.list_by_session(session_id).await.unwrap().remove(0);
+        let turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "gateway".into(),
+                state: TurnState::AwaitingApproval,
+                user_input: None,
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let approval = storage
+            .create_approval(NewApprovalRequest {
+                turn_id: turn.id,
+                agent_id: "gateway".into(),
+                kind: swage_storage::ApprovalKind::Tool,
+                tool_name: Some("echo".into()),
+                tool_arguments: None,
+                hook_name: None,
+                prompt: "Allow echo?".into(),
+                context: None,
+                timeout_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+                timeout_policy: swage_core::ApprovalTimeoutPolicy::Reject,
+            })
+            .await
+            .unwrap();
+        let (sender, mut receiver) = tokio::sync::oneshot::channel();
+        state
+            .approval_channels
+            .lock()
+            .unwrap()
+            .insert(approval.id, sender.into());
+        storage
+            .fail_next_approval_write
+            .store(true, Ordering::SeqCst);
+        assert!(
+            !send(state.clone(), session_id, approval.id, websocket).await,
+            "failed write must not confirm"
+        );
+        assert!(
+            matches!(
+                receiver.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "failed settlement must keep the receiver open before its deadline"
+        );
+        assert!(
+            send(state.clone(), session_id, approval.id, websocket).await,
+            "retry must settle"
+        );
+        assert!(receiver.await.unwrap().is_approved());
+    }
+}
+
+#[tokio::test]
+async fn settlement_websocket_expiry_continues_a_reject_policy_turn() {
+    expired_live_waiter(true, true).await;
+}
+
+#[tokio::test]
+async fn settlement_integrity_failure_keeps_the_live_cause_on_readback() {
+    struct FailingRecordProvider {
+        storage: Arc<MockStorage>,
+        inner: MockProvider,
+    }
+    #[async_trait]
+    impl LlmProvider for FailingRecordProvider {
+        fn model_id(&self) -> &str {
+            self.inner.model_id()
+        }
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            self.inner.complete(request).await
+        }
+        async fn complete_with_tools(
+            &self,
+            request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, ProviderError> {
+            self.inner.complete_with_tools(request).await
+        }
+        fn stream(
+            &self,
+            request: CompletionRequest,
+        ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+            // Preparation is complete. Lose a reconstructive write and its
+            // degradation record during the actual provider round.
+            self.storage.fail_snapshot_writes();
+            self.storage.fail_audit_writes();
+            self.inner.stream(request)
+        }
+    }
+    let _home = SwageHomeGuard::new();
+    let storage = Arc::new(MockStorage::new());
+    let provider = FailingRecordProvider {
+        storage: storage.clone(),
+        inner: MockProvider::new(vec![
+            StreamChunk::Delta {
+                content: "reply before the recording failure".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]),
+    };
+    let (state, session_id) = make_state_with_provider_and_root(
+        Arc::new(provider),
+        storage.clone(),
+        Some(_home.path().to_path_buf()),
+    )
+    .await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Reply",
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .unwrap();
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let reason = events
+        .iter()
+        .find_map(|event| match event {
+            ServerEvent::Error { code, message } if code == "turn_record_lost" => Some(message),
+            _ => None,
+        })
+        .expect("a real recording failure must reach the client");
+    let thread = storage.list_by_session(session_id).await.unwrap().remove(0);
+    let turn = storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(turn.state, TurnState::Failed);
+    assert_eq!(
+        turn.failure_message.as_ref(),
+        Some(reason),
+        "record-integrity failure must keep its live explanation"
+    );
+    let poll = crate::handlers::get_turn(
+        axum::extract::State(state.clone()),
+        crate::error::Path(turn.id),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(
+        serde_json::to_value(poll).unwrap()["failure_message"],
+        *reason
+    );
+    let history = crate::service::ConversationService::new(
+        Arc::clone(&state.storage),
+        Arc::clone(&state.topic_store),
+    )
+    .get_conversation(session_id)
+    .await
+    .unwrap();
+    assert!(
+        history
+            .messages
+            .iter()
+            .any(|message| message.failure_message.as_ref() == Some(reason)),
+        "history must keep the recording failure cause"
+    );
+}
+
+async fn approval_settlement_round_state(root: &std::path::Path) -> (AppState, Uuid) {
+    let (provider, _) = CapturingMultiRoundProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "approval-call".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({"text":"approved output"}),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "Finished".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]);
+    let (state, session_id) = make_state_with_provider_and_root(
+        Arc::new(provider),
+        Arc::new(MockStorage::new()),
+        Some(root.to_path_buf()),
+    )
+    .await;
+    let mut config = state.active_config();
+    config.hitl.timeout = 1;
+    config.hitl.timeout_policy = swage_core::ApprovalTimeoutPolicy::Interrupt;
+    config.tools.permissions.require_approval =
+        vec![swage_config::model::RequireApprovalEntry::Simple(
+            "echo".into(),
+        )];
+    state.replace_runtime(
+        config,
+        state.active_provider(),
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>
+        ]),
+    );
+    (state, session_id)
+}
+
+#[tokio::test]
+async fn interrupt_policy_expiry_records_unexecuted_call_and_timeout_terminal_event() {
+    let home = SwageHomeGuard::new();
+    let (state, session_id) = approval_settlement_round_state(home.path()).await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Use echo",
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .unwrap();
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let thread = state
+        .storage
+        .list_by_session(session_id)
+        .await
+        .unwrap()
+        .remove(0);
+    let turn = state
+        .storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .unwrap()
+        .remove(0);
+    let calls = state
+        .storage
+        .list_tool_calls_by_turn(turn.id)
+        .await
+        .unwrap();
+    let call = serde_json::to_value(&calls[0]).unwrap();
+    let replay = super::history::rebuild_thread_history_messages(&*state.storage, thread.id)
+        .await
+        .unwrap();
+    let mut failures = vec![];
+    if turn.state.to_string() != "interrupted" {
+        failures.push("turn must remain interrupted");
+    }
+    if call["status"] != "expired"
+        || call["execution"]["stage"] != "not_started"
+        || call["execution"]["completion"] != "not_run"
+        || call["execution"]["outcome"] != "refused"
+        || !calls[0]
+            .result
+            .as_deref()
+            .unwrap_or("")
+            .contains("approval timed out")
+    {
+        failures.push("stored call must be expired and known not executed");
+    }
+    if !events.iter().any(|e| matches!(e, ServerEvent::ToolEnd { status, result, .. } if status == "expired" && result.to_string().contains("approval timed out"))) {
+        failures.push("live ToolEnd must report approval timeout expiry");
+    }
+    if events.iter().any(|e| matches!(e, ServerEvent::Cancelled {})) || !events.iter().any(|e| matches!(e, ServerEvent::Error { message, .. } if message.contains("approval timed out"))) {
+        failures.push("live terminal event must name approval timeout, never Stop");
+    }
+    if !replay.iter().filter_map(ChatMessage::tool_replay).flatten().any(|part| matches!(part,
+        swage_core::ToolReplayPart::ToolResult { content, is_error: true, .. } if content.contains("approval timed out") && !content.contains("stopped"))) {
+        failures.push("replayed result must name expiry before execution");
+    }
+    assert!(
+        failures.is_empty(),
+        "{failures:?}\nstored={call}\nevents={events:?}\nreplay={replay:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settlement_preflight_refusal_agrees_in_record_event_and_model_result() {
+    let (storage, turn, events, requests) = operation_outcome_turn(vec![(
+        "ambiguous-workflow",
+        "workflow_run",
+        serde_json::json!({"name":"saved","source":"return null"}),
+    )])
+    .await;
+    let calls = storage.list_tool_calls_by_turn(turn).await.unwrap();
+    let call = calls
+        .iter()
+        .find(|call| call.call_id == "ambiguous-workflow")
+        .unwrap();
+    let expected = swage_protocol::client::conversation::ToolExecution::refused();
+    assert_eq!(
+        call.execution,
+        Some(expected),
+        "stored refusal must not claim work ran"
+    );
+    assert!(
+        events.iter().any(|event| matches!(event,
+            ServerEvent::ToolEnd { call_id, execution: Some(execution), .. }
+            if call_id == "ambiguous-workflow" && *execution == expected
+        )),
+        "ToolEnd must carry the same refusal: {events:?}"
+    );
+    assert!(requests.last().unwrap().messages.iter()
+        .flat_map(|message| message.tool_replay().unwrap_or_default())
+        .any(|part| matches!(part, ToolReplayPart::ToolResult { call_id, content, is_error: true }
+            if call_id == "ambiguous-workflow" && content.contains("provide exactly one of name or source"))),
+        "the next provider request must carry the tool's actionable message");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settlement_post_read_rejection_agrees_in_record_event_and_model_result() {
+    let (storage, turn, events, requests) = operation_outcome_turn(vec![
+        (
+            "write-text",
+            "shell",
+            serde_json::json!({"command":"printf 'settlement text' > settlement.txt"}),
+        ),
+        (
+            "reject-offset",
+            "file_read",
+            serde_json::json!({"path":"settlement.txt","offset_bytes":100}),
+        ),
+    ])
+    .await;
+    let calls = storage.list_tool_calls_by_turn(turn).await.unwrap();
+    let call = calls
+        .iter()
+        .find(|call| call.call_id == "reject-offset")
+        .unwrap();
+    assert!(
+        call.result
+            .as_deref()
+            .unwrap()
+            .contains("valid UTF-8 byte boundary"),
+        "expected a rejection based on the file length: {call:?}"
+    );
+    let expected = swage_protocol::client::conversation::ToolExecution {
+        outcome: swage_protocol::client::conversation::ToolOutcome::Rejected,
+        ..swage_protocol::client::conversation::ToolExecution::succeeded()
+    };
+    assert_eq!(
+        call.execution,
+        Some(expected),
+        "a rejection based on file contents follows a real read"
+    );
+    assert!(
+        events.iter().any(|event| matches!(event,
+            ServerEvent::ToolEnd { call_id, execution: Some(execution), .. }
+            if call_id == "reject-offset" && *execution == expected
+        )),
+        "ToolEnd must carry the same post-read rejection: {events:?}"
+    );
+    assert!(requests.last().unwrap().messages.iter()
+        .flat_map(|message| message.tool_replay().unwrap_or_default())
+        .any(|part| matches!(part, ToolReplayPart::ToolResult { call_id, content, is_error: true }
+            if call_id == "reject-offset" && content.contains("valid UTF-8 byte boundary"))),
+        "the next provider request must carry the file reader's rejection");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settlement_unattended_approval_bypass_keeps_shell_outcomes() {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.tools.permissions.require_approval =
+        vec![swage_config::RequireApprovalEntry::Simple("shell".into())];
+    let (storage, turn, events, requests) = operation_outcome_turn_with_config(
+        vec![
+            (
+                "before",
+                "shell",
+                serde_json::json!({"command":"printf before"}),
+            ),
+            (
+                "signal",
+                "shell",
+                serde_json::json!({"command":"kill -TERM $$"}),
+            ),
+            (
+                "after",
+                "shell",
+                serde_json::json!({"command":"printf after"}),
+            ),
+        ],
+        config,
+        TurnAttendance::Unattended,
+    )
+    .await;
+    let calls = storage.list_tool_calls_by_turn(turn).await.unwrap();
+    assert_eq!(calls.len(), 3, "each requested command runs exactly once");
+    let replay: Vec<_> = requests
+        .last()
+        .unwrap()
+        .messages
+        .iter()
+        .flat_map(|message| message.tool_replay().unwrap_or_default())
+        .collect();
+    for call in calls {
+        let failed = call.call_id == "signal";
+        let payload: serde_json::Value =
+            serde_json::from_str(call.result.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["success"], !failed, "real shell result: {call:?}");
+        if failed {
+            assert!(
+                payload["exit_code"].is_null(),
+                "a signal is not an exit code: {payload}"
+            );
+        }
+        let expected = if failed {
+            swage_protocol::client::conversation::ToolExecution::failed()
+        } else {
+            swage_protocol::client::conversation::ToolExecution::succeeded()
+        };
+        let status = if failed { "error" } else { "success" };
+        assert_eq!(
+            (call.execution, call.status.as_deref()),
+            (Some(expected), Some(status)),
+            "approval bypass must preserve the operation's outcome: {call:?}"
+        );
+        assert!(events.iter().any(|event| matches!(event,
+            ServerEvent::ToolEnd { call_id, status: actual_status, execution: Some(execution), .. }
+                if call_id == &call.call_id && actual_status == status && *execution == expected
+        )), "ToolEnd must agree with storage: {events:?}");
+        assert!(
+            replay.iter().any(|part| matches!(part,
+                ToolReplayPart::ToolResult { call_id, is_error, .. }
+                    if call_id == &call.call_id && *is_error == failed
+            )),
+            "the next provider request must preserve failure: {replay:?}"
+        );
+    }
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ServerEvent::ApprovalRequired { .. })),
+        "unattended execution must not ask for approval"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

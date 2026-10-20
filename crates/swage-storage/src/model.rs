@@ -51,7 +51,9 @@ pub enum TurnState {
     Incomplete,
     /// Turn ended with an error.
     Failed,
-    /// Turn was cut short (e.g. by a stop signal).
+    /// Turn was stopped by cancellation.
+    Cancelled,
+    /// Turn was interrupted without a cancellation decision.
     Interrupted,
     /// Turn is suspended, waiting for human review of a tool call or
     /// hook-triggered approval request.
@@ -87,7 +89,8 @@ impl TurnState {
             | Self::Refused
             | Self::Incomplete
             | Self::Failed
-            | Self::Interrupted => true,
+            | Self::Interrupted
+            | Self::Cancelled => true,
             Self::Pending | Self::Processing | Self::AwaitingApproval | Self::Delegating => false,
         }
     }
@@ -103,6 +106,7 @@ impl std::fmt::Display for TurnState {
             TurnState::Incomplete => "incomplete",
             TurnState::Failed => "failed",
             TurnState::Interrupted => "interrupted",
+            TurnState::Cancelled => "cancelled",
             TurnState::AwaitingApproval => "awaiting_approval",
             TurnState::Delegating => "delegating",
         };
@@ -122,6 +126,7 @@ impl FromStr for TurnState {
             "incomplete" => Ok(TurnState::Incomplete),
             "failed" => Ok(TurnState::Failed),
             "interrupted" => Ok(TurnState::Interrupted),
+            "cancelled" => Ok(TurnState::Cancelled),
             "awaiting_approval" => Ok(TurnState::AwaitingApproval),
             "delegating" => Ok(TurnState::Delegating),
             other => Err(format!("unknown turn state: {other}")),
@@ -1556,6 +1561,7 @@ pub struct Message {
 /// A tool call within a turn — persisted for conversation history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallRecord {
+    pub execution: Option<swage_protocol::client::conversation::ToolExecution>,
     pub id: Uuid,
     pub turn_id: Uuid,
     /// The agent that issued this tool call, for multi-agent query scoping.
@@ -1612,6 +1618,7 @@ pub struct ToolCallRecord {
 /// `id` and `created_at` are assigned by the storage layer.
 #[derive(Debug, Clone)]
 pub struct NewToolCall {
+    pub execution: Option<swage_protocol::client::conversation::ToolExecution>,
     pub turn_id: Uuid,
     /// The agent that issued this tool call.
     pub agent_id: String,
@@ -2754,6 +2761,7 @@ mod tests {
         let turn_id = Uuid::new_v4();
         let now = Utc::now();
         let record = ToolCallRecord {
+            execution: None,
             id,
             turn_id,
             agent_id: "agent-1".to_string(),
@@ -2798,6 +2806,7 @@ mod tests {
     #[test]
     fn tool_call_record_serialises_with_none_fields() {
         let record = ToolCallRecord {
+            execution: None,
             id: Uuid::new_v4(),
             turn_id: Uuid::new_v4(),
             agent_id: "agent-2".to_string(),
@@ -2834,6 +2843,7 @@ mod tests {
     #[test]
     fn new_tool_call_is_debug_clone() {
         let original = NewToolCall {
+            execution: None,
             turn_id: Uuid::new_v4(),
             agent_id: "agent-1".to_string(),
             call_id: "toolu_03".to_string(),
@@ -2861,6 +2871,7 @@ mod tests {
     fn tool_call_record_carries_parent_call_id() {
         let parent_id = "toolu_parent".to_string();
         let record = ToolCallRecord {
+            execution: None,
             id: Uuid::new_v4(),
             turn_id: Uuid::new_v4(),
             agent_id: "agent-1".to_string(),
@@ -2891,6 +2902,7 @@ mod tests {
     #[test]
     fn new_tool_call_carries_parent_call_id() {
         let sub = NewToolCall {
+            execution: None,
             turn_id: Uuid::new_v4(),
             agent_id: "agent-1".to_string(),
             call_id: "sub_01".to_string(),

@@ -283,6 +283,34 @@ mod tests {
     }
 
     #[test]
+    fn serialised_failure_bound_loads_and_accepts_an_agent_override() {
+        let tmp = TempDir::new().unwrap();
+        let mut original = ResolvedConfig::default();
+        original.tools.max_identical_failures = 7;
+        let config_path = tmp.path().join("config.toml");
+        fs::write(
+            &config_path,
+            toml::to_string(&PartialConfig::from(original)).unwrap(),
+        )
+        .unwrap();
+        assert!(validate_files(&[&config_path]).is_empty());
+        let inherited = load_resolved_config_from(tmp.path(), &ScopeLocation::General, "bot")
+            .expect("serialised tool settings load");
+        assert_eq!(inherited.tools.max_identical_failures, 7);
+
+        let agent_dir = ScopeLocation::General.agent_dir(tmp.path(), "bot");
+        fs::create_dir_all(&agent_dir).unwrap();
+        fs::write(
+            agent_dir.join("config.toml"),
+            "[tools]\nmax_identical_failures = 1\n",
+        )
+        .unwrap();
+        let overridden = load_resolved_config_from(tmp.path(), &ScopeLocation::General, "bot")
+            .expect("agent tool settings load");
+        assert_eq!(overridden.tools.max_identical_failures, 1);
+    }
+
+    #[test]
     fn three_level_merge_applies_overrides() {
         let tmp = TempDir::new().unwrap();
         build_fixture(

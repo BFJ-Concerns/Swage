@@ -60,6 +60,59 @@ mod tests {
     }
 
     #[test]
+    fn model_error_rendering_distinguishes_post_work_rejection_from_refusal() {
+        let _root = tempfile::tempdir().unwrap();
+        for (name, detail) in [
+            (
+                "url_fetch",
+                "offset_bytes is only supported for text and JSON responses",
+            ),
+            (
+                "file_read",
+                "offset_bytes must be a valid UTF-8 byte boundary",
+            ),
+        ] {
+            let refusal = ToolError::InvalidParameters {
+                name: name.to_string(),
+                message: detail.to_string(),
+            };
+            let before = format_tool_error_for_model(&refusal);
+            assert_eq!(
+                before,
+                format!(
+                    "Tool error: invalid parameters for `{name}`: {detail}. Correct the arguments and retry."
+                )
+            );
+            let after = format_tool_error_for_model(&refusal.after_execution());
+            assert!(
+                after.contains("operation ran before its result was rejected"),
+                "{name}: {after}"
+            );
+            assert!(
+                after.contains(&before),
+                "source detail and advice lost: {after}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_error_rendering_preserves_uncertain_execution() {
+        let _root = tempfile::tempdir().unwrap();
+        let source = ToolError::Timeout {
+            name: "shell".to_string(),
+            duration: Duration::from_secs(30),
+        };
+        let detail = format_tool_error_for_model(&source);
+        let rendered = format_tool_error_for_model(&source.execution_uncertain());
+        assert!(rendered.contains("operation may have run"), "{rendered}");
+        assert!(
+            rendered.contains(&detail),
+            "source detail and advice lost: {rendered}"
+        );
+        assert!(!rendered.contains("operation ran before"), "{rendered}");
+    }
+
+    #[test]
     fn format_tool_error_for_model_labels_permission_denial() {
         let error = ToolError::PermissionDenied {
             name: "shell".to_string(),
@@ -122,6 +175,191 @@ mod approval_tests {
     use swage_storage::{SqliteStorage, Storage, TurnState};
 
     use super::*;
+
+    #[tokio::test]
+    async fn settlement_approval_feedback_keeps_post_execution_validation_truthful() {
+        use swage_tool::tool::Tool;
+        struct ReadThenReject;
+        #[async_trait::async_trait]
+        impl Tool for ReadThenReject {
+            fn name(&self) -> &str {
+                "read_then_reject"
+            }
+            fn description(&self) -> &str {
+                "Read a file."
+            }
+            fn parameters(&self) -> Value {
+                serde_json::json!({"type":"object", "properties":{"path":{"type":"string"}}, "required":["path"]})
+            }
+            async fn execute(
+                &self,
+                params: Value,
+                _ctx: &dyn swage_tool::context::ToolContext,
+            ) -> Result<Value, swage_core::ToolError> {
+                let content = std::fs::read_to_string(params["path"].as_str().unwrap()).unwrap();
+                assert_eq!(content, "read me");
+                Err(swage_core::ToolError::InvalidParameters {
+                    name: self.name().into(),
+                    message: "offset beyond the content read".into(),
+                }
+                .after_execution())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input");
+        std::fs::write(&path, "read me").unwrap();
+        let dispatcher = ToolDispatcher::allow_all(vec![Arc::new(ReadThenReject) as Arc<dyn Tool>]);
+        let ctx = AgentToolContext::new("agent", "session", dir.path());
+        let result = dispatcher
+            .dispatch(
+                "read_then_reject",
+                serde_json::json!({"path":path}),
+                &ctx,
+                "agent",
+            )
+            .await;
+        let result = tool_dispatch_result(result).unwrap();
+        let result = crate::approval::with_user_approval_note(
+            result,
+            crate::approval::ApprovalDecisionScope::Once,
+        );
+        let feedback = result.model_content(&result.content);
+        assert!(
+            !feedback.contains("did not run"),
+            "post-execution validation must not deny execution: {feedback}"
+        );
+        assert!(
+            feedback.contains("ran after approval"),
+            "execution must be confirmed: {feedback}"
+        );
+        assert!(result.is_error);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn settlement_delivered_approval_wins_an_already_ready_timer() {
+        for _ in 0..16 {
+            let registered = Arc::new(Mutex::new(None));
+            let slot = registered.clone();
+            let (agent, execution) = approval_fixture(Arc::new(move |id, sender| {
+                *slot.lock().unwrap() = Some((id, sender));
+                crate::approval::ApprovalChannelRegistration::default()
+            }))
+            .await;
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut scope = TurnApprovalScope::default();
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let gate = agent.handle_approval_gate(
+                &execution,
+                swage_storage::ApprovalKind::Tool,
+                Some("shell".into()),
+                None,
+                None,
+                "Allow shell?".into(),
+                None,
+                std::time::Duration::from_millis(250),
+                swage_core::ApprovalTimeoutPolicy::Reject,
+                &tx,
+                &cancel,
+                &mut scope,
+            );
+            tokio::pin!(gate);
+            loop {
+                tokio::select! {
+                    event = rx.recv() => if matches!(event, Some(AgentEvent::ApprovalRequired { .. })) { break; },
+                    result = &mut gate => panic!("gate completed without a decision: {result:?}"),
+                }
+            }
+            let (id, sender) = registered.lock().unwrap().take().unwrap();
+            agent
+                .storage
+                .update_approval_state(id, swage_storage::ApprovalState::Approved, None)
+                .await
+                .unwrap();
+            sender
+                .send(crate::approval::ApprovalDecision {
+                    decision: crate::approval::ApprovalDecisionValue::Approved,
+                    scope: crate::approval::ApprovalDecisionScope::Once,
+                    reason: None,
+                })
+                .unwrap();
+            // The gate itself is not polled during this wait: both its delivered
+            // decision and timer are ready when it next runs.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let outcome = gate.await.unwrap();
+            assert!(
+                matches!(
+                    outcome,
+                    crate::approval::ApprovalGateOutcome::Approved { .. }
+                ),
+                "a delivered accepted decision must beat the timer: {outcome:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn settlement_committed_approval_waits_for_delivery_after_deadline() {
+        let registered = Arc::new(Mutex::new(None));
+        let slot = registered.clone();
+        let (agent, execution) = approval_fixture(Arc::new(move |id, sender| {
+            *slot.lock().unwrap() = Some((id, sender));
+            crate::approval::ApprovalChannelRegistration::default()
+        }))
+        .await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut scope = TurnApprovalScope::default();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let gate = agent.handle_approval_gate(
+            &execution,
+            swage_storage::ApprovalKind::Tool,
+            Some("shell".into()),
+            None,
+            None,
+            "Allow shell?".into(),
+            None,
+            std::time::Duration::from_millis(250),
+            swage_core::ApprovalTimeoutPolicy::Reject,
+            &tx,
+            &cancel,
+            &mut scope,
+        );
+        tokio::pin!(gate);
+        loop {
+            tokio::select! {
+                event = rx.recv() => if matches!(event, Some(AgentEvent::ApprovalRequired { .. })) { break; },
+                result = &mut gate => panic!("gate completed without a decision: {result:?}"),
+            }
+        }
+        let (id, sender) = registered.lock().unwrap().take().unwrap();
+        agent
+            .storage
+            .update_approval_state(id, swage_storage::ApprovalState::Approved, None)
+            .await
+            .unwrap();
+        // The gate itself is not polled during this wait: both its delivered
+        // decision and timer are ready when it next runs.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut gate)
+                .await
+                .is_err(),
+            "a committed answer must wait for its pending delivery rather than expire"
+        );
+        sender
+            .send(crate::approval::ApprovalDecision {
+                decision: crate::approval::ApprovalDecisionValue::Approved,
+                scope: crate::approval::ApprovalDecisionScope::Once,
+                reason: None,
+            })
+            .unwrap();
+        let outcome = gate.await.unwrap();
+        assert!(
+            matches!(
+                outcome,
+                crate::approval::ApprovalGateOutcome::Approved { .. }
+            ),
+            "a delivered accepted decision must beat the timer: {outcome:?}"
+        );
+    }
 
     async fn approval_fixture(
         registrar: ApprovalChannelRegistrar,
@@ -908,18 +1146,25 @@ mod approval_tests {
                             );
                             assert!(call.result.as_deref().unwrap().contains("survey complete"));
                             assert!(call.model_result.is_some());
+                            assert_eq!(
+                                call.execution,
+                                Some(
+                                    swage_protocol::client::conversation::ToolExecution::succeeded(
+                                    )
+                                )
+                            );
                         }
                         return;
                     }
                 }
                 panic!("tool result was not emitted");
             };
-            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            Box::pin(tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 tokio::select! {
                     () = inspect => {},
                     result = running => panic!("turn ended before its tool result was inspected: {result:?}"),
                 }
-            }).await.unwrap();
+            })).await.unwrap();
             // Dropping the pending provider turn models a process exit at this
             // boundary without running the normal cancellation settlement.
         }
@@ -1149,12 +1394,12 @@ mod approval_tests {
                 }
                 panic!("no echo result");
             };
-            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            Box::pin(tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 tokio::select! {
                     () = inspect => {},
                     result = running => panic!("turn ended before its tool result was inspected: {result:?}"),
                 }
-            }).await.unwrap();
+            })).await.unwrap();
             // Dropping the pending provider turn models a process exit at this
             // boundary without running the normal cancellation settlement.
         }
@@ -1234,6 +1479,7 @@ mod approval_tests {
                 &event_tx,
                 &tokio_util::sync::CancellationToken::new(),
                 &mut TurnApprovalScope::default(),
+                None,
             )
             .await
             .expect("approved dispatch")
@@ -1657,6 +1903,8 @@ impl Agent {
         // zero, so a reader can tell "spent nothing" from "cannot say".
         let mut usage_reported = false;
         let mut total_tool_calls: u32 = 0;
+        let mut identical_failures: std::collections::HashMap<(String, String), u32> =
+            Default::default();
         let mut tool_position: i32 = 0;
         let mut delegation_wait_owner = None;
         let mut round = 0usize;
@@ -1672,7 +1920,7 @@ impl Agent {
                     .await;
                 let _ = self
                     .storage
-                    .update_turn_state(turn.id, TurnState::Interrupted)
+                    .update_turn_state(turn.id, TurnState::Cancelled)
                     .await;
                 let _ = self
                     .storage
@@ -1717,7 +1965,7 @@ impl Agent {
                     if cancel_token.is_cancelled() {
                         let _ = self
                             .storage
-                            .update_turn_state(turn.id, TurnState::Interrupted)
+                            .update_turn_state(turn.id, TurnState::Cancelled)
                             .await;
                         let _ = self
                             .storage
@@ -1736,6 +1984,7 @@ impl Agent {
                     let record = match self
                         .storage
                         .create_tool_call(NewToolCall {
+                            execution: None,
                             turn_id: turn.id,
                             agent_id: self.config.agent_id.clone(),
                             call_id: call.call_id.clone(),
@@ -1761,6 +2010,9 @@ impl Agent {
                                 "tool call refused: its record could not be written: {error}"
                             );
                             let _ = event_tx.send(AgentEvent::ToolEnd {
+                                execution: Some(
+                                    swage_protocol::client::conversation::ToolExecution::refused(),
+                                ),
                                 call_id: call.call_id.clone(),
                                 tool_name: call.name.clone(),
                                 result: Value::String(refusal.clone()),
@@ -1781,94 +2033,119 @@ impl Agent {
                     let start = std::time::Instant::now();
 
                     // PreToolUse hook — may block, request approval, or proceed.
-                    let dispatch_result = match self
-                        .dispatch_pre_tool_use(&call.name, &call.arguments)
-                        .await
-                    {
-                        Err(AgentError::HookBlocked { reason, .. }) => {
-                            (reason, true, "blocked".to_string()).into()
-                        }
-                        Err(e) => (format!("hook error: {e}"), true, "error".to_string()).into(),
-                        Ok(PreToolUseOutcome::RequestApproval {
-                            prompt,
-                            context,
-                            timeout,
-                        }) => {
-                            if approval_scope.should_skip_gate() {
-                                // A broader approval decision covers later gates
-                                // within this still-running turn.
-                                self.dispatch_tool_call(
-                                    call,
-                                    &execution,
-                                    &llm_request.messages,
-                                    &event_tx,
-                                    &cancel_token,
-                                    &mut approval_scope,
-                                )
-                                .await?
-                            } else {
-                                // Hook-driven approval gate.
-                                use crate::approval::{
-                                    ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS,
-                                };
-                                let gate_timeout = timeout.unwrap_or(
-                                    std::time::Duration::from_secs(DEFAULT_APPROVAL_TIMEOUT_SECS),
-                                );
-                                match self
-                                    .handle_approval_gate(
-                                        &execution,
-                                        swage_storage::model::ApprovalKind::Hook,
-                                        Some(call.name.clone()),
-                                        Some(call.arguments.clone()),
-                                        None,
-                                        prompt,
-                                        context,
-                                        gate_timeout,
-                                        swage_core::ApprovalTimeoutPolicy::default(),
-                                        &event_tx,
-                                        &cancel_token,
-                                        &mut approval_scope,
-                                    )
-                                    .await?
-                                {
-                                    ApprovalGateOutcome::Approved { scope } => {
-                                        // Approved — proceed with normal dispatch.
-                                        crate::approval::with_user_approval_note(
-                                            self.dispatch_tool_call(
-                                                call,
+                    let dispatch_result = async {
+                        Ok(
+                            match self
+                                .dispatch_pre_tool_use(&call.name, &call.arguments)
+                                .await
+                            {
+                                Err(AgentError::HookBlocked { reason, .. }) => {
+                                    (reason, true, "blocked".to_string()).into()
+                                }
+                                Err(e) => {
+                                    (format!("hook error: {e}"), true, "error".to_string()).into()
+                                }
+                                Ok(PreToolUseOutcome::RequestApproval {
+                                    prompt,
+                                    context,
+                                    timeout,
+                                }) => {
+                                    if approval_scope.should_skip_gate() {
+                                        // A broader approval decision covers later gates
+                                        // within this still-running turn.
+                                        self.dispatch_tool_call(
+                                            call,
+                                            &execution,
+                                            &llm_request.messages,
+                                            &event_tx,
+                                            &cancel_token,
+                                            &mut approval_scope,
+                                            Some(record.id),
+                                        )
+                                        .await?
+                                    } else {
+                                        // Hook-driven approval gate.
+                                        use crate::approval::{
+                                            ApprovalGateOutcome, DEFAULT_APPROVAL_TIMEOUT_SECS,
+                                        };
+                                        let gate_timeout =
+                                            timeout.unwrap_or(std::time::Duration::from_secs(
+                                                DEFAULT_APPROVAL_TIMEOUT_SECS,
+                                            ));
+                                        match self
+                                            .handle_approval_gate(
                                                 &execution,
-                                                &llm_request.messages,
+                                                swage_storage::model::ApprovalKind::Hook,
+                                                Some(call.name.clone()),
+                                                Some(call.arguments.clone()),
+                                                None,
+                                                prompt,
+                                                context,
+                                                gate_timeout,
+                                                swage_core::ApprovalTimeoutPolicy::default(),
                                                 &event_tx,
                                                 &cancel_token,
                                                 &mut approval_scope,
                                             )
-                                            .await?,
-                                            scope,
-                                        )
-                                    }
-                                    ApprovalGateOutcome::Rejected { feedback } => {
-                                        (feedback, true, "rejected".to_string()).into()
-                                    }
-                                    ApprovalGateOutcome::Expired { feedback } => {
-                                        (feedback, true, "expired".to_string()).into()
-                                    }
-                                    ApprovalGateOutcome::Interrupted => {
-                                        return Err(AgentError::Cancelled);
+                                            .await?
+                                        {
+                                            ApprovalGateOutcome::Approved { scope } => {
+                                                // Approved — proceed with normal dispatch.
+                                                crate::approval::with_user_approval_note(
+                                                    self.dispatch_tool_call(
+                                                        call,
+                                                        &execution,
+                                                        &llm_request.messages,
+                                                        &event_tx,
+                                                        &cancel_token,
+                                                        &mut approval_scope,
+                                                        Some(record.id),
+                                                    )
+                                                    .await?,
+                                                    scope,
+                                                )
+                                            }
+                                            ApprovalGateOutcome::Rejected { feedback } => {
+                                                (feedback, true, "rejected".to_string()).into()
+                                            }
+                                            ApprovalGateOutcome::Expired { feedback } => {
+                                                (feedback, true, "expired".to_string()).into()
+                                            }
+                                            ApprovalGateOutcome::TimedOut => {
+                                                return Err(AgentError::ApprovalTimedOut);
+                                            }
+                                            ApprovalGateOutcome::Interrupted => {
+                                                return Err(AgentError::Cancelled);
+                                            }
+                                        }
                                     }
                                 }
-                            }
-                        }
-                        Ok(PreToolUseOutcome::Proceed) => {
-                            self.dispatch_tool_call(
-                                call,
-                                &execution,
-                                &llm_request.messages,
-                                &event_tx,
-                                &cancel_token,
-                                &mut approval_scope,
-                            )
-                            .await?
-                        }
+                                Ok(PreToolUseOutcome::Proceed) => {
+                                    self.dispatch_tool_call(
+                                        call,
+                                        &execution,
+                                        &llm_request.messages,
+                                        &event_tx,
+                                        &cancel_token,
+                                        &mut approval_scope,
+                                        Some(record.id),
+                                    )
+                                    .await?
+                                }
+                            },
+                        )
+                    }
+                    .await;
+                    let approval_timed_out =
+                        matches!(&dispatch_result, Err(AgentError::ApprovalTimedOut));
+                    let dispatch_result = match dispatch_result {
+                        Err(AgentError::ApprovalTimedOut) => (
+                            "Tool call rejected: approval timed out before execution".to_string(),
+                            true,
+                            "expired".to_string(),
+                        )
+                            .into(),
+                        result => result?,
                     };
 
                     let duration_ms = start.elapsed().as_millis() as u64;
@@ -1880,21 +2157,7 @@ impl Agent {
                         .unwrap_or_else(|_| Value::String(result_content.clone()));
                     let result_metadata = extract_tool_result_metadata(&result_value);
 
-                    // These tools can return a structured result successfully even
-                    // when the operation failed. Keep that result and the model's
-                    // feedback intact, but record the operation's outcome.
-                    let status = if status == "success"
-                        && match call.name.as_str() {
-                            "shell" => result_value["exit_code"]
-                                .as_i64()
-                                .is_some_and(|code| code != 0),
-                            "workflow_run" => result_value["state"] == "failed",
-                            _ => false,
-                        } {
-                        "error".to_string()
-                    } else {
-                        status.clone()
-                    };
+                    let status = status.clone();
 
                     // PostToolUse hook — informational, fire-and-forget.
                     self.dispatch_post_tool_use(&call.name, &call.arguments, &result_value)
@@ -1945,6 +2208,7 @@ impl Agent {
                             settled.duration_ms = Some(duration_ms as i64);
                             settled.truncated = result_metadata.truncated;
                             settled.total_bytes = result_metadata.total_bytes;
+                            settled.execution = Some(dispatch_result.execution);
                             self.storage.settle_delegation_result(settled).await
                         } else {
                             self.storage
@@ -1956,6 +2220,7 @@ impl Agent {
                                     duration_ms as i64,
                                     result_metadata.truncated,
                                     result_metadata.total_bytes,
+                                    Some(dispatch_result.execution),
                                 )
                                 .await
                         }
@@ -1965,10 +2230,8 @@ impl Agent {
                         delegation_wait_owner = None;
                     }
                     if let Err(error) = settlement {
-                        let reason = format!(
-                            "tool '{}' ran but its record could not be settled: {error}",
-                            call.name
-                        );
+                        let reason =
+                            format!("tool '{}' record could not be settled: {error}", call.name);
                         let _ = event_tx.send(AgentEvent::RecordIntegrityLost {
                             turn_id: turn.id,
                             reason: reason.clone(),
@@ -1979,6 +2242,7 @@ impl Agent {
                         end_status = "error".to_string();
                     }
                     let _ = event_tx.send(AgentEvent::ToolEnd {
+                        execution: Some(dispatch_result.execution),
                         call_id: call.call_id.clone(),
                         tool_name: call.name.clone(),
                         result: end_result,
@@ -1987,6 +2251,30 @@ impl Agent {
                     });
                     tool_position += 1;
                     total_tool_calls += 1;
+                    if approval_timed_out {
+                        return Err(AgentError::ApprovalTimedOut);
+                    }
+
+                    if !self.config.approval_prompts_enabled && is_error {
+                        let identity = (
+                            call.name.clone(),
+                            serde_json::to_string(&call.arguments).expect("JSON arguments"),
+                        );
+                        let failures = identical_failures.entry(identity).or_default();
+                        *failures += 1;
+                        if *failures >= self.config.max_identical_tool_failures.clamp(1, 100) {
+                            let reason = format!(
+                                "Repeated failing tool call '{}': {}",
+                                call.name, safe_result
+                            );
+                            let _ = event_tx.send(AgentEvent::Error {
+                                message: reason.clone(),
+                                provider_failure: false,
+                            });
+                            self.fail_turn_and_idle(turn.id, thread_id).await;
+                            return Err(AgentError::RepeatedToolFailure(reason));
+                        }
+                    }
 
                     tool_results.push(ToolResult {
                         call_id: call.call_id.clone(),
@@ -2000,13 +2288,18 @@ impl Agent {
             .await;
             let tool_results = match tool_dispatch_result {
                 Ok(tool_results) => tool_results,
+                Err(AgentError::ApprovalTimedOut) => {
+                    self.persist_terminal_response(&execution, &accumulated)
+                        .await?;
+                    return Err(AgentError::ApprovalTimedOut);
+                }
                 Err(AgentError::Cancelled) => {
                     // This function owns the accumulated partial: no cancellation
                     // from tool dispatch may leave without persisting it here.
                     self.persist_cancelled_partial(thread_id, turn.id, &accumulated)
                         .await;
                     // Settle every started row without a recorded result as
-                    // cancelled: dropping the dispatch stopped its execution.
+                    // cancelled. Completion certainty remains separate.
                     if let Err(error) = self
                         .storage
                         .settle_started_tool_calls(
@@ -2382,7 +2675,7 @@ impl Agent {
                         execution.turn_id,
                         &accumulated_partial,
                     ).await;
-                    let _ = self.storage.update_turn_state(execution.turn_id, TurnState::Interrupted).await;
+                    let _ = self.storage.update_turn_state(execution.turn_id, TurnState::Cancelled).await;
                     let _ = self.storage.update_state(execution.thread_id, ThreadState::Idle).await;
                     let _ = event_tx.send(AgentEvent::ProviderRoundSettled {
                         turn_id: execution.turn_id,
@@ -2669,24 +2962,25 @@ fn tool_dispatch_result(
     match result {
         Ok(output) => {
             let result_str = serde_json::to_string(&output.result).unwrap_or_default();
-            Ok((result_str, false, "success".to_string()).into())
+            let is_error = output.execution.outcome
+                != swage_protocol::client::conversation::ToolOutcome::Succeeded;
+            let mut result: ToolDispatchResult = (
+                result_str,
+                is_error,
+                if is_error { "error" } else { "success" }.to_owned(),
+            )
+                .into();
+            result.execution = output.execution;
+            Ok(result)
         }
         Err(error) => {
-            let execution_prevented = matches!(
-                error,
-                swage_core::ToolError::InvalidParameters { .. }
-                    | swage_core::ToolError::NotFound { .. }
-                    | swage_core::ToolError::PermissionDenied { .. }
-                    | swage_core::ToolError::RequiresApproval { .. }
-                    | swage_core::ToolError::RequiresLocationApproval { .. }
-            );
             let mut result: ToolDispatchResult = (
                 format_tool_error_for_model(&error),
                 true,
                 "error".to_string(),
             )
                 .into();
-            result.execution_prevented = execution_prevented;
+            result.execution = error.execution();
             Ok(result)
         }
     }
@@ -2700,6 +2994,14 @@ pub fn format_tool_error_for_model(error: &swage_core::ToolError) -> String {
     use swage_core::ToolError;
 
     match error {
+        ToolError::AfterExecution { source } => format!(
+            "The operation ran before its result was rejected. {}",
+            format_tool_error_for_model(source)
+        ),
+        ToolError::ExecutionUncertain { source } => format!(
+            "The operation may have run; completion is unconfirmed. {}",
+            format_tool_error_for_model(source)
+        ),
         ToolError::NotFound { name } => format!(
             "Tool error: `{name}` is not available. Use one of the advertised tools or continue without it."
         ),
@@ -2776,6 +3078,7 @@ impl Agent {
         event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
         cancel_token: &tokio_util::sync::CancellationToken,
         dispatch_started_at: std::time::Instant,
+        ctx: &AgentToolContext,
     ) -> Result<Result<ToolOutput, swage_core::ToolError>, AgentError>
     where
         F: Future<Output = Result<ToolOutput, swage_core::ToolError>>,
@@ -2787,18 +3090,37 @@ impl Agent {
             _ = cancel_token.cancelled() => {
                 let _ = self
                     .storage
-                    .update_turn_state(execution.turn_id, TurnState::Interrupted)
+                    .update_turn_state(execution.turn_id, TurnState::Cancelled)
                     .await;
                 let _ = self
                     .storage
                     .update_state(execution.thread_id, ThreadState::Idle)
                     .await;
+                let execution_outcome = swage_protocol::client::conversation::ToolExecution::cancelled(ctx.execution_started.load(std::sync::atomic::Ordering::SeqCst));
+                let duration_ms = dispatch_started_at.elapsed().as_millis() as u64;
+                if let Some(record_id) = ctx.tool_call_record_id {
+                    let model_result = swage_core::compact_tool_result_for_model_with_reference(
+                        swage_storage::store::CANCELLED_TOOL_RESULT, true,
+                        swage_core::tool_result_reference(&execution.turn_id.to_string(), &call.call_id),
+                    );
+                    if let Err(error) = self.storage.update_tool_call_result(
+                        record_id, swage_storage::store::CANCELLED_TOOL_RESULT, &model_result,
+                        swage_storage::store::CANCELLED_TOOL_STATUS, duration_ms as i64,
+                        false, None, Some(execution_outcome),
+                    ).await {
+                        let _ = event_tx.send(AgentEvent::RecordIntegrityLost {
+                            turn_id: execution.turn_id,
+                            reason: format!("cancelled tool '{}' could not be settled: {error}", call.name),
+                        });
+                    }
+                }
                 let _ = event_tx.send(AgentEvent::ToolEnd {
+                    execution: Some(execution_outcome),
                     call_id: call.call_id.clone(),
                     tool_name: call.name.clone(),
-                    result: Value::Null,
+                    result: Value::String(swage_storage::store::CANCELLED_TOOL_RESULT.to_string()),
                     status: "cancelled".to_string(),
-                    duration_ms: Some(dispatch_started_at.elapsed().as_millis() as u64),
+                    duration_ms: Some(duration_ms),
                 });
                 Err(AgentError::Cancelled)
             }
@@ -2852,6 +3174,7 @@ impl Agent {
                     event_tx,
                     cancel_token,
                     dispatch_started_at,
+                    ctx,
                 )
                 .await?
             } else {
@@ -2867,6 +3190,7 @@ impl Agent {
                     event_tx,
                     cancel_token,
                     dispatch_started_at,
+                    ctx,
                 )
                 .await?
             };
@@ -2904,6 +3228,7 @@ impl Agent {
                         event_tx,
                         cancel_token,
                         dispatch_started_at,
+                        ctx,
                     )
                     .await?
                 } else {
@@ -2919,6 +3244,7 @@ impl Agent {
                         event_tx,
                         cancel_token,
                         dispatch_started_at,
+                        ctx,
                     )
                     .await?
                 };
@@ -2931,6 +3257,7 @@ impl Agent {
             ApprovalGateOutcome::Expired { feedback } => {
                 Ok((feedback, true, "expired".to_string()).into())
             }
+            ApprovalGateOutcome::TimedOut => Err(AgentError::ApprovalTimedOut),
             ApprovalGateOutcome::Interrupted => Err(AgentError::Cancelled),
         }
     }
@@ -2959,6 +3286,7 @@ impl Agent {
         event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
         cancel_token: &tokio_util::sync::CancellationToken,
         approval_scope: &mut TurnApprovalScope,
+        record_id: Option<Uuid>,
     ) -> Result<ToolDispatchResult, AgentError> {
         // Emit ToolStart — client can render a "running…" indicator.
         let _ = event_tx.send(AgentEvent::ToolStart {
@@ -2986,6 +3314,7 @@ impl Agent {
         .with_turn_id(execution.turn_id)
         .with_thread_id(execution.thread_id);
         let ctx = AgentToolContext {
+            tool_call_record_id: record_id,
             allowed_paths: self.config.allowed_paths.clone(),
             tool_output_directory: self.config.tool_output_directory.clone(),
             ..ctx
@@ -3004,13 +3333,11 @@ impl Agent {
                 event_tx,
                 cancel_token,
                 dispatch_started_at,
+                &ctx,
             )
             .await?
         {
-            Ok(output) => {
-                let result_str = serde_json::to_string(&output.result).unwrap_or_default();
-                Ok((result_str, false, "success".to_string()).into())
-            }
+            Ok(output) => tool_dispatch_result(Ok(output)),
             Err(swage_core::ToolError::RequiresApproval {
                 name: _,
                 timeout_secs,
@@ -3038,14 +3365,11 @@ impl Agent {
                             event_tx,
                             cancel_token,
                             dispatch_started_at,
+                            &ctx,
                         )
                         .await?
                     {
-                        Ok(output) => {
-                            let result_str =
-                                serde_json::to_string(&output.result).unwrap_or_default();
-                            return Ok((result_str, false, "success".to_string()).into());
-                        }
+                        Ok(output) => return tool_dispatch_result(Ok(output)),
                         Err(swage_core::ToolError::RequiresLocationApproval {
                             path,
                             access,
@@ -3109,14 +3433,11 @@ impl Agent {
                                 event_tx,
                                 cancel_token,
                                 dispatch_started_at,
+                                &ctx,
                             )
                             .await?
                         {
-                            Ok(output) => {
-                                let result_str =
-                                    serde_json::to_string(&output.result).unwrap_or_default();
-                                Ok((result_str, false, "success".to_string()).into())
-                            }
+                            Ok(output) => tool_dispatch_result(Ok(output)),
                             Err(swage_core::ToolError::RequiresLocationApproval {
                                 path,
                                 access,
@@ -3151,6 +3472,7 @@ impl Agent {
                     ApprovalGateOutcome::Expired { feedback } => {
                         Ok((feedback, true, "expired".to_string()).into())
                     }
+                    ApprovalGateOutcome::TimedOut => Err(AgentError::ApprovalTimedOut),
                     ApprovalGateOutcome::Interrupted => {
                         // State transitions already done by handle_approval_gate.
                         Err(AgentError::Cancelled)
@@ -3247,14 +3569,15 @@ impl Agent {
                     .update_turn_state(execution.turn_id, TurnState::Delegating)
                     .await
                 {
-                    return Ok((
-                        format!(
+                    return Ok(ToolDispatchResult {
+                        content: format!(
                             "delegation not started: the turn's wait could not be recorded ({error}); a restart could not resume it"
                         ),
-                        true,
-                        "error".to_string(),
-                    )
-                        .into());
+                        is_error: true,
+                        status: "error".to_string(),
+                        approval_note: None,
+                        execution: swage_protocol::client::conversation::ToolExecution::refused(),
+                    });
                 }
 
                 // Emit DelegationStarted event so clients can track progress.
@@ -3345,12 +3668,11 @@ impl Agent {
         {
             // The gateway settles human decisions before delivering them.
             // A timeout or conflicting decision must never resume the gate.
-            let matches_decision = state != swage_storage::ApprovalState::Expired
-                && self
-                    .storage
-                    .get_approval(approval_id)
-                    .await?
-                    .is_some_and(|approval| approval.state == state);
+            let matches_decision = self
+                .storage
+                .get_approval(approval_id)
+                .await?
+                .is_some_and(|approval| approval.state == state);
             let awaiting = self
                 .storage
                 .get_turn(turn_id)
@@ -3372,6 +3694,7 @@ impl Agent {
         turn_id: Uuid,
         thread_id: Uuid,
         reason: &str,
+        cancelled: bool,
     ) -> Result<crate::approval::ApprovalGateOutcome, AgentError> {
         self.storage
             .update_approval_state(
@@ -3381,7 +3704,14 @@ impl Agent {
             )
             .await?;
         self.storage
-            .update_turn_state(turn_id, TurnState::Interrupted)
+            .update_turn_state(
+                turn_id,
+                if cancelled {
+                    TurnState::Cancelled
+                } else {
+                    TurnState::Interrupted
+                },
+            )
             .await?;
         if self
             .storage
@@ -3393,7 +3723,11 @@ impl Agent {
                 .update_state(thread_id, ThreadState::Idle)
                 .await?;
         }
-        Ok(crate::approval::ApprovalGateOutcome::Interrupted)
+        Ok(if cancelled {
+            crate::approval::ApprovalGateOutcome::Interrupted
+        } else {
+            crate::approval::ApprovalGateOutcome::TimedOut
+        })
     }
 
     /// Execute the approval gate: create an approval request, transition the
@@ -3469,7 +3803,7 @@ impl Agent {
             });
         };
 
-        let (tx, rx) = tokio::sync::oneshot::channel::<crate::approval::ApprovalDecision>();
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<crate::approval::ApprovalDecision>();
         let _registration = registrar(approval.id, tx);
 
         // 4. Emit ApprovalRequired only once a decision can be received.
@@ -3497,7 +3831,9 @@ impl Agent {
         }
 
         let gate_result = tokio::select! {
-            result = rx => {
+            biased;
+            _ = cancel_token.cancelled() => GateResult::Cancelled,
+            result = &mut rx => {
                 match result {
                     Ok(d) => GateResult::Decision(d),
                     // Sender dropped — treat as timeout (request abandoned).
@@ -3505,7 +3841,43 @@ impl Agent {
                 }
             }
             _ = tokio::time::sleep(timeout) => GateResult::Timeout,
-            _ = cancel_token.cancelled() => GateResult::Cancelled,
+        };
+
+        // Expiry competes with the durable decision, not merely delivery on
+        // the channel. A client may commit its answer before its sender is
+        // polled again; that committed answer owns the gate.
+        let gate_result = if matches!(gate_result, GateResult::Timeout)
+            && !self
+                .storage
+                .update_approval_state(
+                    approval.id,
+                    ApprovalState::Expired,
+                    Some("approval timed out"),
+                )
+                .await?
+        {
+            match self.storage.get_approval(approval.id).await? {
+                Some(record)
+                    if matches!(
+                        record.state,
+                        ApprovalState::Approved | ApprovalState::Rejected
+                    ) =>
+                {
+                    tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => GateResult::Cancelled,
+                        decision = &mut rx => GateResult::Decision(decision.unwrap_or(crate::approval::ApprovalDecision {
+                            decision: if record.state == ApprovalState::Approved { crate::approval::ApprovalDecisionValue::Approved } else { crate::approval::ApprovalDecisionValue::Rejected },
+                            // A lost delivery cannot establish a retained grant.
+                            scope: crate::approval::ApprovalDecisionScope::Once,
+                            reason: record.decision_reason,
+                        })),
+                    }
+                }
+                _ => GateResult::Timeout,
+            }
+        } else {
+            gate_result
         };
 
         match gate_result {
@@ -3517,6 +3889,7 @@ impl Agent {
                     execution.turn_id,
                     execution.thread_id,
                     "cancelled by inter-agent message",
+                    true,
                 )
                 .await
             }
@@ -3610,6 +3983,7 @@ impl Agent {
                             execution.turn_id,
                             execution.thread_id,
                             "approval timed out",
+                            false,
                         )
                         .await
                     }

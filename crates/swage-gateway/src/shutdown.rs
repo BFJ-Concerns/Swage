@@ -82,7 +82,27 @@ pub async fn shutdown_active_turns(state: &AppState) {
     state.turn_shutdown_started.store(true, Ordering::Release);
     let turns = state.active_turns.lock().await;
     let count = turns.len();
-    for token in turns.values() {
+    for (session_id, token) in turns.iter() {
+        // Shutdown owns interruption; a person's Stop owns cancellation.
+        // Record that distinction before waking the execution token, so a
+        // cooperative cancellation cannot win the terminal-state write.
+        let interrupted: Result<(), StorageError> = async {
+            for thread in state.storage.list_by_session(*session_id).await? {
+                for turn in state.storage.list_turns_by_thread(thread.id).await? {
+                    if !turn.state.is_terminal() {
+                        state
+                            .storage
+                            .update_turn_state(turn.id, TurnState::Interrupted)
+                            .await?;
+                    }
+                }
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = interrupted {
+            warn!(%session_id, %error, "failed to record shutdown interruption");
+        }
         token.cancel();
     }
     // Drop the lock before sleeping so turn tasks can acquire it to write state.
@@ -379,6 +399,11 @@ async fn resume_delegating_parent(
                 }),
                 "failed before the restart",
                 "its failure is delivered above",
+            ),
+            TurnState::Cancelled => (
+                serde_json::json!({ "error": "the delegated turn was cancelled" }),
+                "was cancelled before the restart",
+                "its cancellation is noted above",
             ),
             TurnState::Interrupted
             | TurnState::Pending
@@ -921,6 +946,7 @@ mod tests {
                 .unwrap();
             storage
                 .create_tool_call(NewToolCall {
+                    execution: None,
                     turn_id: turn.id,
                     agent_id: "gateway".into(),
                     call_id: turn.id.to_string(),
@@ -1066,6 +1092,7 @@ mod tests {
             ("scout", TurnState::Completed, Some("Scouted.")),
             ("critic", TurnState::Refused, Some("I will not write that.")),
             ("builder", TurnState::Failed, None),
+            ("stopped", TurnState::Cancelled, None),
         ] {
             let child_session = storage
                 .create_session(NewSession {
@@ -1176,7 +1203,7 @@ mod tests {
             .collect();
         assert_eq!(
             results.len(),
-            6,
+            7,
             "one Result per child, the scout's its own: {pending:?}"
         );
         for (agent, delegate_id, child_session_id, child_thread_id) in &delegates {
@@ -1243,6 +1270,9 @@ mod tests {
                     assert_eq!(result.payload["refused"], true);
                     assert_eq!(result.payload["response"], "I will not write that.");
                     assert!(result.payload["error"].is_string());
+                }
+                "stopped" => {
+                    assert_eq!(result.payload["error"], "the delegated turn was cancelled");
                 }
                 "builder" => {
                     assert_eq!(result.payload["error"], "the build tool crashed");
@@ -1391,6 +1421,7 @@ mod tests {
                 tool: "delegate".to_string(),
                 arguments: "{}".to_string(),
                 model_arguments: "{}".to_string(),
+                execution: Some(swage_protocol::client::conversation::ToolExecution::succeeded()),
                 result: Some("the child's result".to_string()),
                 model_result: Some("the child's result".to_string()),
                 status: Some("ok".to_string()),
@@ -1925,6 +1956,7 @@ mod tests {
                 .create_tool_call(NewToolCall {
                     turn_id: parent.id,
                     agent_id: parent.agent_id.clone(),
+                    execution: None,
                     call_id: "call-scout".to_string(),
                     tool: "delegate".to_string(),
                     arguments: "{}".to_string(),
