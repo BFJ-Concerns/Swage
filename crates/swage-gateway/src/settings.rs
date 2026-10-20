@@ -60,7 +60,7 @@ fn settings_audit_snapshot(settings: &SettingsResponse) -> Result<serde_json::Va
         .map_err(|error| ApiError::validation(format!("failed to snapshot settings: {error}")))
 }
 
-fn tool_runtime_from_config(
+pub(crate) fn tool_runtime_from_config(
     config: &swage_config::ToolConfig,
 ) -> Result<ToolRuntimeSettings, ApiError> {
     Ok(ToolRuntimeSettings {

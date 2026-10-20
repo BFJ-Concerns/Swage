@@ -59,6 +59,8 @@ const ERROR_CODES = [
   "sign_in_unsupported",
   "sign_in_failed",
   "provider_runtime_unavailable",
+  "delivery_failed",
+  "runtime_error",
   "internal_error",
 ] as const satisfies readonly ErrorCode[];
 

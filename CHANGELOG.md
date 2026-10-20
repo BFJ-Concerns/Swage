@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Agents can create and edit agent definitions through conversation, making them available in Settings and the new-session picker; each change records the previous and new definition in configuration history.
 - Delegation chains stop at a configurable depth, including cycles (default: four child levels). Settings → Automation edits `sessions.max_delegation_depth`; a refused delegation records its depth reason and returns it to the delegating model.
 
 - `file_write` can append content without rewriting or replacing the existing file.
@@ -97,6 +98,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- The supplied and hosted guides explain creating and editing agent definitions in conversation, including the required tool grant, limits and configuration history, alongside the operator API.
 - Anthropic turns without an explicit output limit use the model's documented limit instead of a fixed 4,096 tokens. A limit the request sets is kept, and a model Anthropic does not document falls back to the catalogue's limit.
 - Session orientation lists every readable attached workspace with its path, access and trust. A worker placed inside one sees its placement root, the trust it inherits and its own write access.
 - Each turn tells the agent the current time to the second, separately from the session's start time.
@@ -148,6 +150,10 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Plain-text assistant replies keep an 80-character prose measure while streaming and after completion.
+- Session previews show readable HTML text instead of raw tags.
+- Conversation and surface markdown tables share consistent styling with visible cell boundaries.
+- Failed webhooks and automated turns without a reply now report delivery or runtime failures instead of validation errors. Schedule delivery messages name the failed target without repeating the reason; retry behaviour is unchanged.
 - A chat turn interrupted while it waits for a delegated agent, or while recording that agent's result, resumes after a gateway restart instead of losing its reply or stopping the gateway from starting. The resumed reply stays in its originating chat and survives further restarts when batched with a scheduled brief, and later tool results no longer clear the pending delegation. A reconstructed child result still passes the gateway's message-send hooks; if one refuses it, the parent resumes with a notice of the child's fate that carries neither the refused output nor the hook's reason, which stays in the gateway log.
 - Memory notice links open their page even when a curator instruction finishes while the page is loading.
 - Links to app pages in conversation messages navigate within the app instead of reloading it.
@@ -437,6 +443,9 @@ All notable changes to Swage are documented in this file.
 - Settings save feedback is quiet and transient, and says that saved changes, including Sandbox, apply to new turns.
 - Automation settings name every input for assistive technology, with visible labels for context, approval and permission fields and seconds stated for both timeouts.
 - Settings refuses context assembly names absent from every known global, topic and agent hierarchy, naming the unknown assembly before saving.
+- Long sessions no longer fail ordinary file and shell calls with "missing required field" after the model copies earlier tool calls from its history.
+- Interrupted sandbox IPC reads retain partial frames, so the next call can complete the frame without corrupting the connection.
+- Sandboxed shell commands honour `shell_timeout_secs` even after closing their output streams, report that limit when they time out, and leave later calls receiving their own replies.
 
 ## 0.2.0 — 2026-08-13
 
