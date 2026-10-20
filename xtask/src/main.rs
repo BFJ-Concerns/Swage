@@ -610,7 +610,11 @@ fn check_tracker_tags() -> Result<()> {
             Some("svelte") => SourceSyntax::Svelte,
             _ => continue,
         };
-        let contents = fs::read_to_string(&file)?;
+        let contents = match fs::read_to_string(&file) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
         for (line, column) in source_tracker_tag_locations(&contents, syntax) {
             violations.push(format!("{}:{line}:{column}", file.display()));
         }
