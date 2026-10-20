@@ -3219,7 +3219,9 @@ impl SessionStore for MockStorage {
                     last_activity: latest.map_or(session.created_at, |message| message.created_at),
                     latest_message: latest.map(|message| message.content.clone()),
                     has_interrupted_turn,
-                    latest_turn_state: db.turns.values()
+                    latest_turn_state: db
+                        .turns
+                        .values()
                         .filter(|turn| thread_ids.contains(&turn.thread_id))
                         .max_by_key(|turn| (turn.created_at, turn.id))
                         .map(|turn| turn.state.clone()),

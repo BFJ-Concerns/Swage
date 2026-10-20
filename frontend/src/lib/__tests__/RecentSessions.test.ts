@@ -445,3 +445,48 @@ describe("RecentSessions outcome history and empty schedules", () => {
     expect(document.querySelector('.automated')).toBeNull();
   });
 });
+
+
+describe("RecentSessions row layout", () => {
+  let component: MountedComponent | undefined;
+  let stylesheet: HTMLStyleElement | undefined;
+  afterEach(() => {
+    if (component) unmount(component);
+    component = undefined;
+    stylesheet?.remove();
+    stylesheet = undefined;
+    document.body.replaceChildren();
+  });
+
+  it("truncates long topic labels beside the preview and age in both list filters", async () => {
+    const label = "A".repeat(217);
+    vi.mocked(sessionsApi.listRecentSessions).mockReset().mockResolvedValue([
+      conversationEntry(makeSession({ topic_name: label, topic_id: "long-topic", message_preview: "Visible preview" })),
+    ]);
+    component = mount(RecentSessions, { target: document.body, props: {
+      topics: [{ id: "long-topic", name: label, slug: "long-topic", description: "", created_at: "" }],
+    } });
+    await settle();
+    stylesheet = installRecentSessionsStyles();
+    for (const filtered of [false, true]) {
+      if (filtered) {
+        buttonNamed(label).click();
+        await settle();
+      }
+      const topic = document.querySelector<HTMLElement>('.row.source .topic-label');
+      expect(topic?.title).toBe(label);
+      const style = getComputedStyle(topic!);
+      expect(style.minWidth).toBe("0px");
+      expect(style.maxWidth).toBe("24ch");
+      expect(style.overflow).toBe("hidden");
+      expect(style.textOverflow).toBe("ellipsis");
+      const group = topic!.closest('.session-text')!;
+      expect(group.querySelector('.preview')?.textContent).toBe("Visible preview");
+      expect(group.querySelector('.timestamp')?.textContent?.trim()).toBeTruthy();
+      expect(getComputedStyle(group).display).toBe("flex");
+      expect(getComputedStyle(group.querySelector('.preview')!).minWidth).toBe("0px");
+      expect(getComputedStyle(group.querySelector('.timestamp')!).flexShrink).toBe("0");
+    }
+    expect(sessionsApi.listRecentSessions).toHaveBeenLastCalledWith("long-topic", false);
+  });
+});

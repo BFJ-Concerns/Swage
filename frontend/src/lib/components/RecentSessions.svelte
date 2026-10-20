@@ -234,19 +234,21 @@
             disabled={entry.source.kind === "schedule" && entry.automated.length === 0}
             onclick={() => (entry.source.kind === "schedule" ? toggleGroup(entry) : openSource(entry))}
           >
-            <span class="preview">{sourceLabel(entry)}</span>
-            <span class="meta">
-              {#if session}
-                {session.topic_name}
-                {#if session.has_running_turn}<span class="running">running</span>{/if}
-                {#if outcome}<span class="interrupted" title={outcome} aria-label={outcome}>⚠</span>{/if}
-              {:else if entry.source.kind === "schedule"}
-                schedule
-              {:else}
-                workflow run
-              {/if}
+            <span class="session-text">
+              <span class="preview">{sourceLabel(entry)}</span>
+              <span class="meta">
+                {#if session}
+                  <span class="topic-label" title={session.topic_name}>{session.topic_name}</span>
+                  {#if session.has_running_turn}<span class="running">running</span>{/if}
+                  {#if outcome}<span class="interrupted" title={outcome} aria-label={outcome}>⚠</span>{/if}
+                {:else if entry.source.kind === "schedule"}
+                  schedule
+                {:else}
+                  workflow run
+                {/if}
+              </span>
+              <span class="timestamp">{relativeTime(entry.last_activity)}</span>
             </span>
-            <span class="timestamp">{relativeTime(entry.last_activity)}</span>
           </button>
 
           {#if entry.automated.length > 0}
@@ -268,13 +270,15 @@
                 {@const outcome = sessionOutcomeLabel(automated.latest_turn_state)}
                 <li>
                   <button type="button" class="row nested" onclick={() => onSelectSession?.(automated.id)}>
-                    <span class="preview">{messagePreview(automated.message_preview ?? originLabel(automated))}</span>
-                    <span class="meta">
-                      {originLabel(automated)} · {automated.agent_id}
-                      {#if outcome}<span class="interrupted" title={outcome} aria-label={outcome}>⚠</span>{/if}
-                      {#if automated.has_running_turn}<span class="running">running</span>{/if}
+                    <span class="session-text">
+                      <span class="preview">{messagePreview(automated.message_preview ?? originLabel(automated))}</span>
+                      <span class="meta">
+                        {originLabel(automated)} · {automated.agent_id}
+                        {#if outcome}<span class="interrupted" title={outcome} aria-label={outcome}>⚠</span>{/if}
+                        {#if automated.has_running_turn}<span class="running">running</span>{/if}
+                      </span>
+                      <span class="timestamp">{relativeTime(automated.last_activity)}</span>
                     </span>
-                    <span class="timestamp">{relativeTime(automated.last_activity)}</span>
                   </button>
                 </li>
               {/each}
@@ -383,8 +387,7 @@
 
   .row {
     width: 100%;
-    display: grid;
-    grid-template-columns: 1fr auto auto;
+    display: flex;
     gap: 12px;
     align-items: baseline;
     padding: 7px 0;
@@ -394,6 +397,33 @@
     font: inherit;
     color: inherit;
     cursor: pointer;
+  }
+
+  .session-text {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .meta {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .topic-label {
+    min-width: 0;
+    max-width: 24ch;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .timestamp {
+    flex-shrink: 0;
   }
 
   .row:disabled {

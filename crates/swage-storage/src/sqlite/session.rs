@@ -68,9 +68,18 @@ fn row_to_session_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionA
         last_activity: parse_dt(&last_activity)?,
         latest_message,
         has_interrupted_turn,
-        latest_turn_state: row.get::<_, Option<String>>(14)?.map(|state| state.parse().map_err(|error: String| {
-            rusqlite::Error::FromSqlConversionFailure(14, rusqlite::types::Type::Text, error.into())
-        })).transpose()?,
+        latest_turn_state: row
+            .get::<_, Option<String>>(14)?
+            .map(|state| {
+                state.parse().map_err(|error: String| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        14,
+                        rusqlite::types::Type::Text,
+                        error.into(),
+                    )
+                })
+            })
+            .transpose()?,
         session,
     })
 }
@@ -666,26 +675,66 @@ mod tests {
         use crate::store::{ThreadStore, TurnStore};
         let (storage, topic_id) = make_storage_with_topic().await;
         let session = storage.create_session(new_session(topic_id)).await.unwrap();
-        assert_eq!(storage.get_session_activity(session.id).await.unwrap().unwrap().latest_turn_state, None);
-        for state in [TurnState::Failed, TurnState::Interrupted, TurnState::Completed] {
+        assert_eq!(
+            storage
+                .get_session_activity(session.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .latest_turn_state,
+            None
+        );
+        for state in [
+            TurnState::Failed,
+            TurnState::Interrupted,
+            TurnState::Completed,
+        ] {
             // Different threads, identical timestamps: insertion order breaks ties.
-            let thread = ThreadStore::create(&storage, NewThread {
-                session_id: session.id, agent_id: "test-agent".into(),
-            }).await.unwrap();
-            let turn = storage.create_turn(NewTurn {
-                thread_id: thread.id, agent_id: "test-agent".into(), state: state.clone(),
-                user_input: None, parent_turn_id: None,
-            }).await.unwrap();
-            storage.with_conn(move |conn| conn.execute(
-                "UPDATE turns SET created_at = '2026-10-01T00:00:00Z' WHERE id = ?1",
-                [turn.id.to_string()],
-            )).await.unwrap();
-            let activity = storage.list_recent_sessions(SessionListing::default()).await.unwrap().remove(0);
+            let thread = ThreadStore::create(
+                &storage,
+                NewThread {
+                    session_id: session.id,
+                    agent_id: "test-agent".into(),
+                },
+            )
+            .await
+            .unwrap();
+            let turn = storage
+                .create_turn(NewTurn {
+                    thread_id: thread.id,
+                    agent_id: "test-agent".into(),
+                    state: state.clone(),
+                    user_input: None,
+                    parent_turn_id: None,
+                })
+                .await
+                .unwrap();
+            storage
+                .with_conn(move |conn| {
+                    conn.execute(
+                        "UPDATE turns SET created_at = '2026-10-01T00:00:00Z' WHERE id = ?1",
+                        [turn.id.to_string()],
+                    )
+                })
+                .await
+                .unwrap();
+            let activity = storage
+                .list_recent_sessions(SessionListing::default())
+                .await
+                .unwrap()
+                .remove(0);
             assert_eq!(activity.latest_turn_state, Some(state));
         }
-        let activity = storage.get_session_activity(session.id).await.unwrap().unwrap();
+        let activity = storage
+            .get_session_activity(session.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(activity.latest_turn_state, Some(TurnState::Completed));
-        assert!(activity.has_interrupted_turn, "history remains separate from the latest state");
+        assert!(
+            activity.has_interrupted_turn,
+            "history remains separate from the latest state"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
