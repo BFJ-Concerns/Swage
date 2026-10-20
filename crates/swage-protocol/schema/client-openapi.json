@@ -2951,6 +2951,15 @@
             ],
             "description": "The model's effort control, when the catalogue declares one; absent,\nthe provider adapter's declaration for the models it serves applies."
           },
+          "output_limit": {
+            "description": "The most output tokens one response may carry, when the catalogue\ndeclares it; absent, the provider adapter's account for the models it\nserves applies, and a model neither declares takes the adapter's\nfloor. A caller's own `max_tokens` is sent as it is either way.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "reasoning_replay": {
             "default": false,
             "type": "boolean"

@@ -4414,6 +4414,7 @@ fn held_worker_route_config(threshold_ms: Option<u64>) -> swage_config::Resolved
             capabilities: swage_config::ModelCapabilitiesConfig {
                 reasoning_replay: false,
                 effort: None,
+                output_limit: None,
             },
         },
     );

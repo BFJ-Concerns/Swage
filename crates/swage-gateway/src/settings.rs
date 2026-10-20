@@ -2210,6 +2210,7 @@ mod tests {
                 capabilities: swage_config::ModelCapabilitiesConfig {
                     reasoning_replay: true,
                     effort: None,
+                    output_limit: None,
                 },
             },
         );
@@ -2255,6 +2256,7 @@ mod tests {
                     capabilities: swage_protocol::client::settings::ModelCapabilitiesConfig {
                         reasoning_replay: true,
                         effort: None,
+                        output_limit: None,
                     },
                 },
             )]

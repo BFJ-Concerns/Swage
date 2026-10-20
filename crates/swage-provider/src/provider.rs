@@ -258,6 +258,18 @@ pub trait LlmProvider: Send + Sync {
         None
     }
 
+    /// The most output tokens one response from the named model may carry,
+    /// when the adapter knows it: its account of the provider's documented
+    /// limit for models it recognises. The catalogue's own declaration for
+    /// the model takes precedence; `None` means the adapter cannot say, and
+    /// a request carrying no limit of its own then takes the adapter's
+    /// protocol floor. Every decorating or forwarding impl delegates
+    /// explicitly — a default method is invisible to a wrapper.
+    fn output_limit(&self, model: &str) -> Option<u32> {
+        let _ = model;
+        None
+    }
+
     /// Return the provider-visible request body for a completion request.
     ///
     /// Concrete providers override this with their exact wire conversion. The
@@ -392,6 +404,10 @@ impl LlmProvider for Arc<dyn LlmProvider> {
 
     fn effort_capability(&self, model: &str) -> Option<EffortCapability> {
         (**self).effort_capability(model)
+    }
+
+    fn output_limit(&self, model: &str) -> Option<u32> {
+        (**self).output_limit(model)
     }
 
     fn provider_request_snapshot(

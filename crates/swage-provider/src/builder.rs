@@ -263,6 +263,10 @@ impl LlmProvider for ArcProvider {
         self.0.effort_capability(model)
     }
 
+    fn output_limit(&self, model: &str) -> Option<u32> {
+        self.0.output_limit(model)
+    }
+
     async fn count_tokens(
         &self,
         request: &CompletionRequest,
