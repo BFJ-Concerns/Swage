@@ -1386,6 +1386,73 @@ describe("authorship of platform-written messages", () => {
 describe("message link navigation", () => {
   afterEach(() => { document.body.replaceChildren(); });
 
+  const childId = "18315217-1234-4567-89ab-0123456789ab";
+
+  it.each([`/sessions/${childId}`, `swage://session/${childId}`])(
+    "opens a child conversation from a reply: %s", (href) => {
+      const onNavigate = vi.fn();
+      const component = mount(MessageDisplay, {
+        target: document.body,
+        props: { store: makeConversationStore([makeAssistantMessage(`[Open child session](${href})`)]), onNavigate },
+      });
+      onTestFinished(() => unmount(component));
+      flushSync();
+      const link = document.querySelector<HTMLAnchorElement>(".markdown-body a")!;
+      const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+      let intercepted: boolean | undefined;
+      // Observe the handler before suppressing jsdom's unsupported navigation.
+      document.addEventListener("click", (event) => {
+        intercepted = event.defaultPrevented;
+        event.preventDefault();
+      }, { once: true });
+      link.dispatchEvent(click);
+      expect(onNavigate).toHaveBeenCalledExactlyOnceWith(`/conversations/${childId}`);
+      expect(intercepted).toBe(true);
+    },
+  );
+
+  it.each([
+    "swage://settings/providers",
+    "swage://session/not-a-conversation-id",
+    `swage://session/${childId}/extra`,
+    `swage://session/${childId}?extra=1`,
+    `swage://session/${childId}#extra`,
+    ` swage://session/${childId}`,
+    `swage://session/${childId} `,
+    `swage://session/${childId}\n`,
+  ])("strips an unsupported swage href: %s", (href) => {
+    const component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store: makeConversationStore([makeAssistantMessage(`<a href="${href}">link</a>`)]) },
+    });
+    onTestFinished(() => unmount(component));
+    flushSync();
+    expect(document.querySelector(".markdown-body a")!.hasAttribute("href")).toBe(false);
+  });
+
+  it("keeps external and javascript links out of app navigation", () => {
+    const onNavigate = vi.fn();
+    const component = mount(MessageDisplay, {
+      target: document.body,
+      props: {
+        store: makeConversationStore([makeAssistantMessage(
+          '<a href="https://elsewhere.example/page">external</a> <a href="javascript:alert(1)">unsafe</a>',
+        )]),
+        onNavigate,
+      },
+    });
+    onTestFinished(() => unmount(component));
+    flushSync();
+    const links = document.querySelectorAll<HTMLAnchorElement>(".markdown-body a");
+    expect(links[0].getAttribute("href")).toBe("https://elsewhere.example/page");
+    expect(links[1].hasAttribute("href")).toBe(false);
+    for (const link of links) {
+      document.addEventListener("click", (event) => event.preventDefault(), { once: true });
+      link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+    }
+    expect(onNavigate).not.toHaveBeenCalled();
+  });
+
   it.each(["/settings/memory?scope=general&reference=general%2Fprofile", `${window.location.origin}/settings/memory?scope=general&reference=general%2Fprofile`])("routes a memory notice inside the app: %s", (href) => {
     const onNavigate = vi.fn();
     const component = mount(MessageDisplay, {
