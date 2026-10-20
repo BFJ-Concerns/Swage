@@ -103,6 +103,9 @@ fn settings_from_config(
                         || provider.api_key_env.is_some(),
                     command: provider.command.clone(),
                     state_dir: provider.state_dir.clone(),
+                    plaintext_credentials: Some(try_wire_from_config(
+                        provider.plaintext_credentials,
+                    )?),
                 },
             ))
         })
@@ -247,6 +250,7 @@ where
     let communication: Option<swage_config::CommunicationConfig> = config_from_wire(communication)?;
     let voice: Option<swage_config::VoiceConfig> = config_from_wire(voice)?;
 
+    let previous_config = state.active_config();
     let mut providers = HashMap::new();
     for (provider_id, provider) in &requested_providers {
         providers.insert(
@@ -260,6 +264,17 @@ where
                 base_url: provider.base_url.clone(),
                 command: provider.command.clone(),
                 state_dir: provider.state_dir.clone(),
+                // A save that does not speak of the policy leaves it as it
+                // stands; a new provider starts at the default.
+                plaintext_credentials: match provider.plaintext_credentials {
+                    Some(policy) => config_from_wire(policy)?,
+                    None => previous_config
+                        .providers
+                        .entries
+                        .get(provider_id)
+                        .map(|entry| entry.plaintext_credentials)
+                        .unwrap_or_default(),
+                },
             },
         );
     }
@@ -365,7 +380,6 @@ where
         .as_ref()
         .and_then(|providers| providers.entries.as_ref())
         .expect("settings save always writes provider entries");
-    let previous_config = state.active_config();
     let mut runtime_config = previous_config.clone();
     runtime_config.providers.default = default_provider;
     runtime_config.providers.entries = saved_providers.clone();
@@ -450,7 +464,12 @@ where
         }
         return Err(ApiError::from(swage_core::GatewayError::Storage(error)));
     }
-    let provider = crate::startup::create_provider(&runtime_config, &state.secret_manager).await;
+    let provider = crate::startup::create_provider(
+        &runtime_config,
+        &state.secret_manager,
+        state.storage.as_ref(),
+    )
+    .await;
     let tool_dispatcher = crate::startup::build_tool_dispatcher(
         &runtime_config,
         state.storage.clone(),
@@ -468,7 +487,12 @@ where
     {
         state.active_voice_provider()
     } else {
-        crate::startup::create_voice_provider(&runtime_config, &state.secret_manager).await
+        crate::startup::create_voice_provider(
+            &runtime_config,
+            &state.secret_manager,
+            state.storage.as_ref(),
+        )
+        .await
     };
     state.replace_runtime(runtime_config, provider, tool_dispatcher);
     state.replace_voice_provider(voice_provider);
@@ -701,6 +725,11 @@ fn save_provider_into_endpoint_config(
         api_key_env: provider.api_key_env,
         command: provider.command,
         state_dir: provider.state_dir,
+        plaintext_credentials: provider
+            .plaintext_credentials
+            .map(config_from_wire)
+            .transpose()?
+            .unwrap_or_default(),
     })
 }
 
@@ -734,6 +763,7 @@ fn settings_response_from_saved_config(
                         || provider.api_key_env.is_some(),
                     command: provider.command.clone(),
                     state_dir: provider.state_dir.clone(),
+                    plaintext_credentials: Some(wire_from_config(provider.plaintext_credentials)),
                 },
             )
         })
@@ -1840,6 +1870,57 @@ mod tests {
         serde_json::from_value(value).expect("settings request")
     }
 
+    /// A save that names the policy sets it; one that leaves it out keeps
+    /// what stands, so a page without the control cannot reset it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_providers_plaintext_policy_is_saved_when_spoken_of_and_kept_when_not() {
+        use swage_protocol::client::settings::PlaintextCredentialPolicy as Wire;
+
+        let home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let state = AppState::new_with_config_root(
+            storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
+            storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+
+        let first = save_settings(&state, succession_settings_request(None))
+            .await
+            .unwrap();
+        assert_eq!(
+            first.providers["local"].plaintext_credentials,
+            Some(Wire::Warn)
+        );
+
+        let mut request = succession_settings_request(None);
+        request
+            .providers
+            .get_mut("local")
+            .unwrap()
+            .plaintext_credentials = Some(Wire::Allow);
+        let allowed = save_settings(&state, request).await.unwrap();
+        assert_eq!(
+            allowed.providers["local"].plaintext_credentials,
+            Some(Wire::Allow)
+        );
+        assert_eq!(
+            state.active_config().providers.entries["local"].plaintext_credentials,
+            swage_config::PlaintextCredentialPolicy::Allow
+        );
+
+        let kept = save_settings(&state, succession_settings_request(None))
+            .await
+            .unwrap();
+        assert_eq!(
+            kept.providers["local"].plaintext_credentials,
+            Some(Wire::Allow)
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn provider_settings_rotate_the_reference_created_by_the_first_save() {
         let home = SwageHomeGuard::new();
@@ -2616,6 +2697,7 @@ mod tests {
                 api_key_env: None,
                 command: None,
                 state_dir: None,
+                plaintext_credentials: Default::default(),
             },
         );
 
@@ -2691,6 +2773,7 @@ mod tests {
                     api_key: None,
                     command: None,
                     state_dir: None,
+                    plaintext_credentials: None,
                 },
             )]
             .into_iter()
@@ -2939,6 +3022,7 @@ mod tests {
                     api_key: None,
                     command: None,
                     state_dir: None,
+                    plaintext_credentials: None,
                 },
             )]
             .into_iter()
@@ -3186,6 +3270,7 @@ mod tests {
                     api_key_env: None,
                     command: None,
                     state_dir: None,
+                    plaintext_credentials: Default::default(),
                 },
             );
         }
@@ -3227,6 +3312,7 @@ mod tests {
                         api_key: None,
                         command: provider.command.clone(),
                         state_dir: provider.state_dir.clone(),
+                        plaintext_credentials: None,
                     },
                 )
             })
@@ -3367,6 +3453,7 @@ mod tests {
                     api_key: None,
                     command: None,
                     state_dir: None,
+                    plaintext_credentials: None,
                 },
             )]
             .into_iter()
@@ -3550,6 +3637,7 @@ mod tests {
                     api_key: None,
                     command: None,
                     state_dir: None,
+                    plaintext_credentials: None,
                 },
             )]
             .into_iter()
