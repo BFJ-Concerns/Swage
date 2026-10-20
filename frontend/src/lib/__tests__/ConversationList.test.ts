@@ -83,7 +83,11 @@ describe("ConversationList", () => {
     }
     const recovered = rows.find(row => row.querySelector('.preview')?.textContent?.trim() === "Recovered reply");
     expect(recovered).toBeDefined();
-    expect(recovered!.querySelector('[aria-label="Last response failed"], [aria-label="Interrupted"]')).toBeNull();
+    expect(Array.from(recovered!.querySelectorAll('[aria-hidden="true"]'))
+      .filter(marker => marker.textContent === "⚠")).toHaveLength(0);
+    expect(recovered!.textContent).not.toContain("⚠");
+    expect(recovered!.textContent).not.toContain("Last response failed");
+    expect(recovered!.textContent).not.toContain("Interrupted");
   });
 
   // --- Empty state ---
