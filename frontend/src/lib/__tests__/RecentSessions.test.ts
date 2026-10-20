@@ -498,7 +498,7 @@ describe("RecentSessions row layout", () => {
       expect(group.querySelector('.preview')?.textContent).toBe("Visible preview");
       expect(group.querySelector('.timestamp')?.textContent?.trim()).toBeTruthy();
       expect(getComputedStyle(group).display).toBe("grid");
-      expect(getComputedStyle(group).gridTemplateColumns).toBe("minmax(8ch, 1fr) minmax(0, 1fr) auto");
+      expect(getComputedStyle(group).gridTemplateColumns).toBe("minmax(8ch, 1fr) minmax(0, auto) auto");
       const metaStyle = getComputedStyle(group.querySelector('.meta')!);
       expect(metaStyle.minWidth).toBe("0px");
       expect(metaStyle.overflow).toBe("hidden");

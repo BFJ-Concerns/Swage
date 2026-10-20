@@ -401,7 +401,7 @@
   .session-text {
     flex: 1;
     display: grid;
-    grid-template-columns: minmax(8ch, 1fr) minmax(0, 1fr) auto;
+    grid-template-columns: minmax(8ch, 1fr) minmax(0, auto) auto;
     align-items: baseline;
     gap: 12px;
     min-width: 0;
