@@ -493,7 +493,27 @@ pub trait OrientationCardStore: Send + Sync {
 }
 
 #[async_trait]
-pub trait SecretStore: Send + Sync {
+pub trait SecretStore: AuditStore + Send + Sync {
+    /// Commit managed credential creations, rotations and their audit events together.
+    /// A failure leaves all records, material and audit events unchanged.
+    async fn write_credentials_with_audit(
+        &self,
+        creations: Vec<NewSecretRecord>,
+        rotations: Vec<(Uuid, String)>,
+        events: Vec<NewAuditEvent>,
+    ) -> Result<(), StorageError> {
+        // A single audit append is already atomic. Credential changes and
+        // multiple events require a transactional implementation.
+        if !creations.is_empty() || !rotations.is_empty() || events.len() > 1 {
+            return Err(StorageError::QueryFailed(
+                "atomic credential writes are unavailable".into(),
+            ));
+        }
+        for event in events {
+            self.create_audit_event(event).await?;
+        }
+        Ok(())
+    }
     async fn create_secret(&self, secret: NewSecretRecord) -> Result<SecretRecord, StorageError>;
     async fn list_secrets(&self) -> Result<Vec<SecretRecord>, StorageError>;
     async fn get_secret(&self, id: Uuid) -> Result<Option<SecretRecord>, StorageError>;
