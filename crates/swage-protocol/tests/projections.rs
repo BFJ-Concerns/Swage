@@ -13,6 +13,9 @@ use ts_rs::TS;
 
 use swage_protocol::{channel, client, device, hosting};
 
+#[path = "support/projection_output.rs"]
+mod projection_output;
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -390,47 +393,43 @@ fn trim_generated_typescript(directory: &Path) {
 /// The OpenAPI document and the TypeScript client are projections of the
 /// route manifest; like the schema, they are rewritten in place so drift
 /// shows as a dirty tree at the gate.
-#[test]
 fn client_route_projections_are_regenerated() {
-    let document = serde_json::to_string_pretty(&client::openapi::document())
-        .expect("openapi document serialises")
-        + "\n";
-    let document_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/client-openapi.json");
-    std::fs::write(&document_path, document).expect("write openapi document");
+    write_json_projection("client-openapi.json", client::openapi::document());
 
     let client_path = repo_root().join("frontend/src/lib/protocol/client.ts");
     std::fs::write(&client_path, client::typescript_client::render())
         .expect("write generated client");
 }
 
-#[test]
 fn client_schema_is_regenerated() {
-    let schema = schemars::schema_for!(client::ClientSurface);
-    let rendered = serde_json::to_string_pretty(&schema).expect("schema serialises") + "\n";
-
-    let schema_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/client.json");
-    std::fs::create_dir_all(schema_path.parent().expect("schema dir")).expect("create schema dir");
-    std::fs::write(&schema_path, rendered).expect("write schema document");
+    write_schema::<client::ClientSurface>("client.json");
 }
 
-#[test]
 fn device_schema_is_regenerated() {
     write_schema::<device::DeviceSurface>("device.json");
 }
 
-#[test]
 fn channel_schema_is_regenerated() {
     write_schema::<channel::ChannelSurface>("channel.json");
 }
 
-#[test]
 fn hosting_schema_is_regenerated() {
     write_schema::<hosting::HostingSurface>("hosting.json");
 }
 
 fn write_schema<T: schemars::JsonSchema>(name: &str) {
     let schema = schemars::schema_for!(T);
-    let rendered = serde_json::to_string_pretty(&schema).expect("schema serialises") + "\n";
+    write_json_projection(
+        name,
+        serde_json::to_value(schema).expect("schema serialises"),
+    );
+}
+
+/// Every JSON projection has the same byte representation across feature sets.
+fn write_json_projection(name: &str, mut document: serde_json::Value) {
+    document.sort_all_objects();
+    let rendered = serde_json::to_string_pretty(&document).expect("projection serialises") + "\n";
+
     let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("schema")
         .join(name);
