@@ -240,13 +240,17 @@ export function createConversationStore(): ConversationStore {
       return;
     }
 
+    const messages = [...activeConversation.messages];
+    const recordedIndex = message.id === undefined
+      ? -1
+      : messages.findIndex((existing) => existing.id === message.id);
+    if (recordedIndex < 0) messages.push(appendedMessage);
+    else messages[recordedIndex] = appendedMessage;
+
     activeConversationStore.set({
       ...activeConversation,
       last_activity: message.origin === "platform" ? activeConversation.last_activity : message.timestamp,
-      messages: [
-        ...activeConversation.messages,
-        appendedMessage,
-      ],
+      messages,
     });
 
     updateConversationSummary(ownerId, message);

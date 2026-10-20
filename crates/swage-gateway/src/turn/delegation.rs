@@ -646,6 +646,33 @@ async fn announce_delegated_outcome(
         },
         _ => return,
     };
+    // Delegated children have no token stream for their open conversation.
+    // Deliver the recorded reply on the same channel as the terminal event
+    // so the view receives the reply, including partial output, first.
+    match crate::service::ConversationService::new(state.storage.clone(), state.topic_store.clone())
+        .get_thread_detail(turn.thread_id)
+        .await
+    {
+        Ok(detail) => {
+            for message in detail.messages.into_iter().filter(|message| {
+                message.turn_id == Some(turn_id)
+                    && message.origin == swage_storage::MessageOrigin::Assistant
+            }) {
+                state
+                    .send_to_session(
+                        session_id,
+                        &ServerEvent::MessageAppended {
+                            session_id,
+                            message,
+                        },
+                    )
+                    .await;
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%turn_id, %error, "could not read delegated reply for the open view");
+        }
+    }
     state.send_to_session(session_id, &event).await;
 }
 
@@ -1885,6 +1912,71 @@ mod settlement_tests {
                 .any(|turn| turn.user_input.as_deref() == Some("Next request")
                     && turn.state == TurnState::Completed)
         );
+    }
+
+    async fn assert_recorded_reply_before_terminal(ending: TurnState) {
+        let (state, session_id) = super::super::tests::make_state_with_session(vec![]).await;
+        let thread_id = state.storage.list_by_session(session_id).await.unwrap()[0].id;
+        let turn = state
+            .storage
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "gateway".into(),
+                state: ending.clone(),
+                user_input: Some("Delegated request".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let reply = state
+            .storage
+            .append_message(swage_storage::model::AppendMessage {
+                thread_id,
+                attachments: vec![],
+                turn_id: Some(turn.id),
+                role: swage_core::Role::Assistant,
+                origin: swage_storage::MessageOrigin::Assistant,
+                content: if ending == TurnState::Cancelled {
+                    "Partial child reply"
+                } else {
+                    "Recorded child reply"
+                }
+                .into(),
+                agent_id: "gateway".into(),
+            })
+            .await
+            .unwrap();
+        let (sender, mut events) = mpsc::unbounded_channel();
+        state.listen_to_session(session_id, sender).await;
+        announce_delegated_outcome(&state, session_id, turn.id, &Err(AgentError::Cancelled)).await;
+        let event = events
+            .try_recv()
+            .expect("recorded reply must reach the open child view");
+        assert!(
+            matches!(event, crate::websocket::ServerEvent::MessageAppended { session_id: id, ref message }
+                if id == session_id && message.id == reply.id && message.content == reply.content
+                    && message.turn_id == Some(turn.id)),
+            "recorded assistant reply must precede the terminal event: {event:?}"
+        );
+        let terminal = events
+            .try_recv()
+            .expect("child must settle after its recorded reply");
+        assert!(match ending {
+            TurnState::Cancelled => matches!(terminal, crate::websocket::ServerEvent::Cancelled {}),
+            _ =>
+                matches!(terminal, crate::websocket::ServerEvent::TurnComplete { turn_id, .. } if turn_id == turn.id),
+        });
+        assert!(events.try_recv().is_err(), "reply must be delivered once");
+    }
+
+    #[tokio::test]
+    async fn delegated_recorded_reply_precedes_completion() {
+        assert_recorded_reply_before_terminal(TurnState::Completed).await;
+    }
+
+    #[tokio::test]
+    async fn delegated_recorded_partial_reply_precedes_cancellation() {
+        assert_recorded_reply_before_terminal(TurnState::Cancelled).await;
     }
 
     #[tokio::test]
