@@ -89,6 +89,34 @@ describe("TopicSettingsPage", () => {
     expect(document.body.textContent).toContain("No workspace folders");
   });
 
+  it("hides the empty workspace message while an attachment reload is pending", async () => {
+    const attached: Awaited<ReturnType<typeof topicsApi.attachTopicWorkspace>> = {
+      id: "workspace-2", topic_id: topic.id, label: "New source", path: "/work/new",
+      canonical_path: "/work/new", is_missing: false, permissions: ["read"],
+      is_trusted: false, is_default: true, created_at: "2026-05-26T10:00:00Z",
+    };
+    let finish!: (value: Awaited<ReturnType<typeof topicsApi.listTopicWorkspaces>>) => void;
+    vi.mocked(topicsApi.listTopicWorkspaces).mockResolvedValueOnce([])
+      .mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    vi.mocked(topicsApi.attachTopicWorkspace).mockResolvedValueOnce(attached);
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "workspaces" } });
+    await flushUi();
+    expect(document.body.textContent).toContain("No workspace folders");
+    const path = document.querySelector("input") as HTMLInputElement;
+    path.value = attached.path;
+    path.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await flushUi();
+    expect(topicsApi.attachTopicWorkspace).toHaveBeenCalledOnce();
+    expect(topicsApi.listTopicWorkspaces).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).toContain("Loading topic settings");
+    expect(document.body.textContent).not.toContain("No workspace folders");
+    finish([attached]);
+    await flushUi();
+    expect(document.querySelector(".record-row")?.textContent).toContain(attached.path);
+    expect(document.body.textContent).not.toContain("No workspace folders");
+  });
+
   it("retries a failed load and shows the current working folder", async () => {
     vi.mocked(topicsApi.listTopicWorkspaces).mockRejectedValueOnce(new Error("Workspace load failed"));
     component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "workspaces" } });
@@ -301,6 +329,28 @@ describe("TopicSettingsPage", () => {
     expect(topicsApi.relinkTopicWorkspace).toHaveBeenCalledWith("topic-1", "workspace-1", "/work/moved");
     expect(topicsApi.listTopicWorkspaces).toHaveBeenCalledTimes(2);
     expect(topicsApi.detachTopicWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("retries only a failed surface-library load from the shared alert", async () => {
+    const entry = {
+      id: "entry-retry", name: "Recovered plan", description: "Planning notes",
+      tags: [], origin_topic_deleted: false, updated_at: "2026-10-19T10:00:00Z",
+    };
+    vi.mocked(surfacesApi.listLibrary).mockRejectedValueOnce(new Error("Library unavailable"))
+      .mockResolvedValueOnce({ entries: [entry] });
+    vi.mocked(surfacesApi.listTopicDefaultSurfaces).mockResolvedValue({ entries: [] });
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "surfaces" } });
+    await flushUi();
+    expect(topicsApi.listTopicWorkspaces).toHaveBeenCalledOnce();
+    expect(surfacesApi.listLibrary).toHaveBeenCalledOnce();
+    expect(document.querySelectorAll('[role="alert"]')).toHaveLength(1);
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("Library unavailable");
+    Array.from(document.querySelectorAll("button")).find((button) => button.textContent === "Retry")!.click();
+    await flushUi();
+    expect(surfacesApi.listLibrary).toHaveBeenCalledTimes(2);
+    expect(document.querySelector('[aria-label="Surface library"] .record-row')?.textContent).toContain(entry.name);
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(topicsApi.listTopicWorkspaces).toHaveBeenCalledOnce();
   });
 
   it("designates a library surface as a topic default and saves the topic's tags", async () => {

@@ -204,6 +204,15 @@ impl LlmProvider for FailoverProvider {
             .and_then(|&idx| self.providers[idx].effort_capability(model))
     }
 
+    fn output_limit(&self, model: &str) -> Option<u32> {
+        // As for the effort capability: the provider a completion would try
+        // first is the one whose limit the request will reach.
+        let order = self.compute_try_order(Some(model));
+        order
+            .first()
+            .and_then(|&idx| self.providers[idx].output_limit(model))
+    }
+
     async fn count_tokens(
         &self,
         request: &CompletionRequest,
@@ -1672,6 +1681,10 @@ mod tests {
             })
         }
 
+        fn output_limit(&self, _: &str) -> Option<u32> {
+            Some(4321)
+        }
+
         async fn count_tokens(&self, _: &CompletionRequest) -> Result<Option<u64>, ProviderError> {
             Ok(Some(42))
         }
@@ -1716,6 +1729,15 @@ mod tests {
             FailoverConfig::default(),
         );
         assert!(failover.effort_capability("probe").is_some());
+    }
+
+    #[test]
+    fn output_limit_delegates_to_the_first_provider_in_try_order() {
+        let failover = FailoverProvider::new(
+            vec![Arc::new(CountingProbe("probe"))],
+            FailoverConfig::default(),
+        );
+        assert_eq!(failover.output_limit("probe"), Some(4321));
     }
 
     #[test]

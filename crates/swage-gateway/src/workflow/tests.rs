@@ -2030,6 +2030,15 @@ async fn workflow_journal_preserves_and_recomposes_call_scoped_context() {
                 *text = text.replace(root.as_str(), "<call tool root>");
             }
         }
+        // Each call reads the clock when it is composed, so the two calls'
+        // times may differ by a second.
+        if let Some(current_time) = report["elements"].as_array_mut().and_then(|elements| {
+            elements
+                .iter_mut()
+                .find(|element| element["name"] == "current_time")
+        }) {
+            current_time["full_text"] = Value::String("<call time>".to_owned());
+        }
         reports.push(report);
     }
     assert_ne!(
@@ -4382,6 +4391,7 @@ fn held_worker_route_config(threshold_ms: Option<u64>) -> swage_config::Resolved
     config.providers.entries.insert(
         "local".to_string(),
         swage_config::ProviderEndpointConfig {
+            display_name: None,
             worker_staleness_threshold_ms: threshold_ms,
             protocol: swage_config::Protocol::OpenAi,
             base_url: Some("http://127.0.0.1:65535/v1".to_string()),
@@ -4404,6 +4414,7 @@ fn held_worker_route_config(threshold_ms: Option<u64>) -> swage_config::Resolved
             capabilities: swage_config::ModelCapabilitiesConfig {
                 reasoning_replay: false,
                 effort: None,
+                output_limit: None,
             },
         },
     );
@@ -19497,8 +19508,8 @@ async fn run_accounts_start_observes_immediate_outcomes() {
             .create_session(swage_storage::fixtures::new_session(topic.id))
             .await
             .expect("session");
-        let pause = workflow_pause_test_hook::install("start-snapshot-pending", session.id);
-        let before = chrono::Utc::now();
+        let pending = workflow_pause_test_hook::install("start-snapshot-pending", session.id);
+        let pause = workflow_pause_test_hook::install("start-snapshot-read", session.id);
         let launcher = GatewayWorkflowLauncher::new(state.clone());
         let start = tokio::spawn(async move {
             launcher
@@ -19506,11 +19517,14 @@ async fn run_accounts_start_observes_immediate_outcomes() {
                 .await
                 .expect("start")
         });
-        tokio::time::timeout(std::time::Duration::from_secs(45), pause.entered.acquire())
-            .await
-            .expect("start reaches snapshot pause")
-            .expect("snapshot pause remains open")
-            .forget();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            pending.entered.acquire(),
+        )
+        .await
+        .expect("start reaches snapshot pause")
+        .expect("snapshot pause remains open")
+        .forget();
         let run = storage
             .list_workflow_runs(topic.id)
             .await
@@ -19520,6 +19534,17 @@ async fn run_accounts_start_observes_immediate_outcomes() {
             .expect("session run");
         // Observe real settlement before letting the start path take its snapshot.
         wait_for_terminal(&state, run.id).await;
+        pending.release.add_permits(1);
+        tokio::time::timeout(std::time::Duration::from_secs(45), pause.entered.acquire())
+            .await
+            .expect("start snapshot reached")
+            .expect("pause remains open")
+            .forget();
+        let (record, following_observation) = storage
+            .get_workflow_run_observation(run.id)
+            .await
+            .expect("following observation")
+            .expect("run");
         pause.release.add_permits(1);
         let result = tokio::time::timeout(std::time::Duration::from_secs(45), start)
             .await
@@ -19533,7 +19558,17 @@ async fn run_accounts_start_observes_immediate_outcomes() {
             result["status_as_of"].as_str().expect("observation time"),
         )
         .expect("timestamp");
-        assert!(observed >= before && observed <= chrono::Utc::now());
+        assert!(
+            observed
+                >= record
+                    .completed_at
+                    .expect("settled run has completion time"),
+            "status_as_of must include the completion visible in its snapshot"
+        );
+        assert!(
+            observed <= following_observation,
+            "status_as_of must be captured with the snapshot, not later when returning it"
+        );
         if expected == "completed" {
             assert_eq!(result["final_output"], 42);
             assert_eq!(result["workers_dispatched"], 0);

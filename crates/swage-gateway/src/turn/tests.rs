@@ -1609,14 +1609,16 @@ async fn the_successor_s_briefing_carries_a_session_variable_from_the_store() {
     )
     .await;
     let mut config = state.active_config();
+    // Leave room for the baseline, briefing, summary and retained input.
+    // A six-message limit is smaller than that minimum once the clock is present.
     config.context.compaction_threshold =
-        Some(swage_protocol::client::settings::CompactionThresholdConfig::Messages(6));
+        Some(swage_protocol::client::settings::CompactionThresholdConfig::Messages(16));
     state.replace_runtime(
         config,
         state.active_provider(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
     );
-    seed_history(&storage, session_id, 12).await;
+    seed_history(&storage, session_id, 32).await;
     storage
         .db
         .lock()
@@ -9340,15 +9342,16 @@ async fn second_tool_round_request_keeps_structured_tool_messages() {
     assert_eq!(requests.len(), 2, "expected two provider requests");
 
     let second = &requests[1];
-    // Orientation, working norms and the memory index stand before the
-    // conversation; then the user's turn, the tool call, and its result.
-    assert_eq!(second.messages.len(), 6);
+    // Orientation, working norms, the clock and the memory index stand
+    // before the user's turn, the tool call, and its result.
+    assert_eq!(second.messages.len(), 7);
     assert_eq!(second.messages[0].role(), Role::System);
     assert_eq!(second.messages[1].role(), Role::System);
     assert_eq!(second.messages[2].role(), Role::System);
-    assert_eq!(second.messages[3].role(), Role::User);
-    assert_eq!(second.messages[4].role(), Role::Assistant);
-    assert_eq!(second.messages[5].role(), Role::User);
+    assert_eq!(second.messages[3].role(), Role::System);
+    assert_eq!(second.messages[4].role(), Role::User);
+    assert_eq!(second.messages[5].role(), Role::Assistant);
+    assert_eq!(second.messages[6].role(), Role::User);
     assert!(
         second.messages.iter().any(|message| {
             message.role() == Role::System
@@ -9519,6 +9522,7 @@ async fn second_tool_round_request_replays_reasoning_when_model_capability_opts_
             capabilities: swage_config::ModelCapabilitiesConfig {
                 reasoning_replay: true,
                 effort: None,
+                output_limit: None,
             },
         },
     )]
@@ -14125,6 +14129,7 @@ async fn process_turn_resolves_effort_against_the_declared_capability_and_record
                     levels: vec![swage_core::Effort::Low, swage_core::Effort::High],
                     can_disable: false,
                 }),
+                output_limit: None,
             },
             ..Default::default()
         },
@@ -14227,6 +14232,135 @@ fn effort_capability_falls_back_from_the_catalogue_to_the_adapter() {
     assert_eq!(
         super::effort_capability_for_model(&config, "unknown", &mock),
         swage_core::EffortCapability::None
+    );
+}
+
+/// The output limit resolves beside the effort: the caller's own value
+/// first, then the catalogue entry's declaration, then the adapter's account
+/// of the documented limit.
+#[test]
+fn output_limit_falls_back_from_the_caller_to_the_catalogue_to_the_adapter() {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "claude".into();
+    config.models.entries.insert(
+        "claude".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "anthropic".into(),
+            model_id: "claude-opus-5-5".into(),
+            ..Default::default()
+        },
+    );
+    let anthropic = swage_provider::anthropic::AnthropicProvider::new("key", "claude-opus-5-5");
+    assert_eq!(
+        super::output_limit_for_model(None, &config, "claude", &anthropic),
+        Some(swage_core::ResolvedOutputLimit {
+            tokens: 128_000,
+            source: swage_core::OutputLimitSource::Adapter,
+        })
+    );
+
+    config
+        .models
+        .entries
+        .get_mut("claude")
+        .unwrap()
+        .capabilities
+        .output_limit = Some(50_000);
+    assert_eq!(
+        super::output_limit_for_model(None, &config, "claude", &anthropic),
+        Some(swage_core::ResolvedOutputLimit {
+            tokens: 50_000,
+            source: swage_core::OutputLimitSource::Catalogue,
+        }),
+        "the catalogue's own declaration wins over the adapter's"
+    );
+    assert_eq!(
+        super::output_limit_for_model(Some(512), &config, "claude", &anthropic),
+        Some(swage_core::ResolvedOutputLimit {
+            tokens: 512,
+            source: swage_core::OutputLimitSource::Caller,
+        }),
+        "a caller's own limit is sent as it is"
+    );
+
+    let mock = MockProvider::new(vec![]);
+    assert_eq!(
+        super::output_limit_for_model(None, &config, "unknown", &mock),
+        None
+    );
+}
+
+/// An interactive turn with no preset limit carries the model's declared
+/// output limit to the provider, and the turn's snapshot names its source.
+#[tokio::test]
+async fn process_turn_carries_the_declared_output_limit_and_records_its_source() {
+    let chunks = vec![
+        StreamChunk::Delta {
+            content: "Hello".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ];
+    let (provider, captured_request) = CapturingProvider::new(chunks);
+    let (storage, session_id) = make_storage_with_session().await;
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "local".into();
+    config.models.entries.insert(
+        "local".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "local".into(),
+            model_id: "local-model".into(),
+            capabilities: swage_config::ModelCapabilitiesConfig {
+                output_limit: Some(50_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        crate::test_support::with_mock_provider_entries(config),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("hi"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("turn ok");
+
+    let request = captured_request
+        .lock()
+        .unwrap()
+        .take()
+        .expect("provider request");
+    assert_eq!(request.max_tokens, Some(50_000));
+
+    let snapshot = storage
+        .db
+        .lock()
+        .await
+        .snapshots
+        .values()
+        .next()
+        .map(|(report, _)| report.clone())
+        .expect("context snapshot recorded");
+    let report: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+    assert_eq!(report["provider_visible"]["output_limit"]["tokens"], 50_000);
+    assert_eq!(
+        report["provider_visible"]["output_limit"]["source"],
+        "catalogue"
     );
 }
 
@@ -16592,7 +16726,7 @@ async fn unattached_session_environment_identifies_resolved_scratch_root() {
     let (tool_root, _) =
         resolve_agent_tool_root_from_policy(root.path(), &policy, &topic.location(), session.id);
 
-    let environment = build_session_environment(&topic, &tool_root, &session);
+    let environment = build_session_environment(&topic, &tool_root, &session, &policy);
     assert_eq!(
         environment.tool_root,
         swage_context::orientation::ToolRoot::ManagedScratch(tool_root.path.display().to_string())
@@ -16628,7 +16762,7 @@ async fn placed_worker_orientation_keeps_its_working_directory() {
         session.id,
         worker_placement_path(session.metadata.as_ref()),
     );
-    let environment = build_session_environment(&topic, &tool_root, &session);
+    let environment = build_session_environment(&topic, &tool_root, &session, &policy);
     let text = swage_context::orientation::OrientationElement::new(environment, vec![]).content()
         [0]
     .text_content();
@@ -16835,6 +16969,7 @@ fn test_environment() -> swage_context::orientation::SessionEnvironment {
         topic_name: String::new(),
         topic_description: String::new(),
         tool_root: swage_context::orientation::ToolRoot::ManagedScratch("/scratch/session".into()),
+        workspaces: vec![],
         started_at: chrono::Utc::now(),
         channel: None,
     }
@@ -16866,9 +17001,8 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
         None,
     );
 
-    // Should produce six elements: orientation, working norms, prompts,
-    // skills (empty), memory, and history.
-    assert_eq!(elements.len(), 6);
+    // Baseline, clock, prompts, skills, memory, and history.
+    assert_eq!(elements.len(), 7);
     let names: Vec<&str> = elements.iter().map(|e| e.name()).collect();
     assert!(
         names.contains(&"orientation"),
@@ -16903,7 +17037,7 @@ fn elements_built_without_memory_omit_the_memory_element() {
         None,
     );
 
-    assert_eq!(elements.len(), 5);
+    assert_eq!(elements.len(), 6);
     // PromptsElement with empty rules produces no messages; the orientation
     // baseline is what keeps an unconfigured session's context non-empty.
     let orientation = elements.iter().find(|e| e.name() == "orientation").unwrap();
@@ -20179,6 +20313,7 @@ async fn selected_responses_entry_sharing_an_upstream_id_is_served_by_its_own_pr
         config.providers.entries.insert(
             provider_id.into(),
             swage_config::ProviderEndpointConfig {
+                display_name: None,
                 worker_staleness_threshold_ms: None,
                 protocol,
                 api_key_secret_ref: None,
@@ -20500,6 +20635,7 @@ async fn turn_against_single_provider(
     config.providers.entries.insert(
         "configured-endpoint".into(),
         swage_config::ProviderEndpointConfig {
+            display_name: None,
             worker_staleness_threshold_ms: None,
             protocol,
             api_key_secret_ref: None,
@@ -21075,6 +21211,194 @@ async fn approval_scope_expired_live_waiter_interrupts_turn() {
 #[tokio::test]
 async fn approval_scope_expired_live_waiter_records_expired_feedback() {
     expired_live_waiter(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn orientation_environment_carries_every_readable_workspace_from_resolved_policy() {
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage.create_session(new_session(topic.id)).await.unwrap();
+    for (path, trusted, permissions, is_default) in [
+        ("/projects/source", true, vec!["read", "write"], true),
+        ("/references/pack", true, vec!["read"], false),
+        ("/references/other", true, vec!["read"], false),
+        ("/private/untrusted", false, vec!["read"], false),
+        ("/write-only", true, vec!["write"], false),
+    ] {
+        let attachment = storage
+            .create_workspace_attachment(NewWorkspaceAttachment {
+                topic_id: topic.id,
+                label: path.into(),
+                path: path.into(),
+                permissions: permissions.into_iter().map(str::to_string).collect(),
+                is_trusted: trusted,
+            })
+            .await
+            .unwrap();
+        if is_default {
+            storage
+                .set_topic_default_workspace(topic.id, Some(attachment.id))
+                .await
+                .unwrap();
+        }
+    }
+    let policy = load_trusted_workspace_policy(
+        &(storage as Arc<dyn swage_storage::store::Storage>),
+        topic.id,
+        None,
+    )
+    .await;
+    let tool_root = ResolvedToolRoot {
+        path: "/projects/source".into(),
+        source: ToolRootSource::AttachedWorkspace,
+    };
+    let environment = build_session_environment(&topic, &tool_root, &session, &policy);
+    let mut actual = environment
+        .workspaces
+        .iter()
+        .map(|workspace| {
+            (
+                workspace.path.as_str(),
+                workspace.can_write,
+                workspace.is_trusted,
+            )
+        })
+        .collect::<Vec<_>>();
+    actual.sort_unstable();
+    assert_eq!(
+        actual,
+        vec![
+            ("/projects/source", true, true),
+            ("/references/other", false, true),
+            ("/references/pack", false, true)
+        ]
+    );
+    let mut placed_session = session.clone();
+    placed_session.metadata = Some(serde_json::json!({ "worker_placement_can_write": false }));
+    let placement = ResolvedToolRoot::worker_placement("/projects/source".into());
+    let placed = build_session_environment(&topic, &placement, &placed_session, &policy);
+    assert_eq!(
+        placed.workspaces,
+        vec![swage_context::orientation::ReadableWorkspace {
+            path: "/projects/source".into(),
+            can_write: false,
+            is_trusted: true,
+        }],
+        "a placed worker must not advertise sibling topic workspaces"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn orientation_environment_includes_subdirectory_placement_with_its_write_grant() {
+    let root = tempfile::tempdir().unwrap();
+    let parent = root.path().join("repo");
+    let placement = parent.join("task");
+    std::fs::create_dir_all(&placement).unwrap();
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let mut session = storage.create_session(new_session(topic.id)).await.unwrap();
+    let policy = TrustedWorkspacePolicy {
+        attachments: vec![TrustedWorkspacePath {
+            path: parent,
+            is_trusted: true,
+            can_read: true,
+            can_write: false,
+        }],
+        ..Default::default()
+    };
+    for can_write in [true, false] {
+        session.metadata = Some(serde_json::json!({
+            "worker_placement_can_write": can_write,
+        }));
+        let environment = build_session_environment(
+            &topic,
+            &ResolvedToolRoot::worker_placement(placement.clone()),
+            &session,
+            &policy,
+        );
+        assert_eq!(
+            environment.workspaces,
+            vec![swage_context::orientation::ReadableWorkspace {
+                path: placement.display().to_string(),
+                can_write,
+                is_trusted: true,
+            }],
+            "the placement must inherit parent trust and advertise its own write grant"
+        );
+    }
+}
+
+#[tokio::test]
+async fn orientation_each_turn_carries_current_seconds_and_keeps_orientation_identical() {
+    let reply = vec![
+        StreamChunk::Delta {
+            content: "done".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ];
+    let (provider, captured) = CapturingMultiRoundProvider::new(vec![reply.clone(), reply]);
+    let (state, session_id, _) =
+        make_state_with_tool_provider_and_storage(Arc::new(provider)).await;
+    let mut times = Vec::new();
+    let mut orientations = Vec::new();
+    for index in 0..2 {
+        if index > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        }
+        let before = chrono::Utc::now();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "What time is it?".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .unwrap();
+        let after = chrono::Utc::now();
+        let requests = captured.lock().unwrap();
+        let request = requests.last().unwrap();
+        let texts = request
+            .messages
+            .iter()
+            .map(ChatMessage::text_content)
+            .collect::<Vec<_>>();
+        let text = texts.iter().find(|text| text.starts_with("Current time: "));
+        assert!(
+            text.is_some(),
+            "provider context has no current time: {texts:?}"
+        );
+        let time = chrono::NaiveDateTime::parse_from_str(
+            text.unwrap().trim_start_matches("Current time: "),
+            "%Y-%m-%d %H:%M:%S UTC",
+        )
+        .expect("UTC time to the second")
+        .and_utc();
+        assert!(
+            time >= before && time < after + chrono::Duration::seconds(1),
+            "{time} must be at or after {before} and less than one second after {after}"
+        );
+        times.push(time);
+        orientations.push(
+            texts
+                .into_iter()
+                .find(|text| text.contains("## Where you are"))
+                .expect("orientation"),
+        );
+    }
+    assert!(
+        times[1] > times[0],
+        "a later turn must refresh the clock: {times:?}"
+    );
+    assert_eq!(
+        orientations[0], orientations[1],
+        "orientation must remain byte-identical"
+    );
 }
 
 struct DelegationBoundsFixture {
