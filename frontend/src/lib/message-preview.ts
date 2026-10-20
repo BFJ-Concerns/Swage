@@ -1,3 +1,4 @@
+import DOMPurify from "dompurify";
 import { Marked, type RendererObject, type Tokens } from "marked";
 
 /** Plain text for the session lists and selector, without link destinations. */
@@ -49,7 +50,21 @@ const previewRenderer: RendererObject = {
   text(token: Tokens.Text | Tokens.Escape): string {
     return "tokens" in token && token.tokens ? this.parser.parseInline(token.tokens) : token.text;
   },
-  html({ text }: Tokens.HTML | Tokens.Tag): string { return text; },
+  html({ text }: Tokens.HTML | Tokens.Tag): string {
+    const fragment = DOMPurify.sanitize(text, {
+      RETURN_DOM_FRAGMENT: true,
+      FORBID_TAGS: ["style"],
+    });
+    // Text content has no layout: retain the word breaks represented by
+    // block elements and explicit line breaks before flattening the fragment.
+    for (const element of fragment.querySelectorAll(
+      "address, article, aside, blockquote, br, dd, div, dl, dt, figcaption, figure, footer, h1, h2, h3, h4, h5, h6, header, hr, li, main, nav, ol, p, pre, section, table, td, th, tr, ul",
+    )) {
+      element.prepend(" ");
+      element.append(" ");
+    }
+    return fragment.textContent ?? "";
+  },
   br(): string { return " "; },
   hr(): string { return " "; },
   checkbox(): string { return ""; },
