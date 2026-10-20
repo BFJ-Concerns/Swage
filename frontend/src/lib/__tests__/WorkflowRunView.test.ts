@@ -105,6 +105,37 @@ describe("WorkflowRunView", () => {
     } finally { vi.unstubAllGlobals(); }
   });
 
+  it("keeps a second run cancelling when an earlier cancellation fails", async () => {
+    let rejectFirst!: (error: Error) => void;
+    const first = new Promise<Response>((_, reject) => { rejectFirst = reject; });
+    const fetch = vi.fn().mockReturnValueOnce(first)
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(detail(run(null, "run-2"))), { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    try {
+      const updates = writable(detail(run(null)));
+      const current = fromStore(updates);
+      component = mount(WorkflowRunView, { target: document.body, props: {
+        get detail() { return current.current; }, loadState: "loaded", errorMessage: "",
+      } });
+      flushSync(() => document.querySelector<HTMLButtonElement>("header button")!.click());
+      flushSync(() => updates.set(detail(run(null, "run-2"))));
+      expect(document.querySelector<HTMLButtonElement>("header button")?.disabled).toBe(false);
+      flushSync(() => document.querySelector<HTMLButtonElement>("header button")!.click());
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
+      rejectFirst(new Error("Earlier cancellation failed"));
+      await first.catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      flushSync();
+      expect(document.querySelector<HTMLButtonElement>("header button")?.disabled).toBe(true);
+      expect(document.body.textContent).not.toContain("Earlier cancellation failed");
+    } finally {
+      rejectFirst(new Error("Earlier cancellation failed"));
+      await first.catch(() => {});
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("renders run, interruption and cancellation times locally with exact stamps", () => {
     const start = "2026-10-01T19:28:49.393288230Z";
     const end = "2026-10-01T19:30:49.393288230Z";
