@@ -131,7 +131,7 @@ export interface StreamingStoreOptions {
      */
     settleUnansweredRequest?(
       settlement: {
-        turn_state: Extract<MessageView["turn_state"], "failed" | "interrupted" | "cancelled">;
+        turn_state: Extract<MessageView["turn_state"], "completed" | "refused" | "incomplete" | "failed" | "interrupted" | "cancelled">;
         tool_calls: ToolCallView[];
       },
       conversationId?: string | null,
@@ -319,6 +319,10 @@ export function createStreamingStore(
     const streamedContent = get(stream.streamedContentStore);
     if (streamedContent || (toolCalls?.length ?? 0) > 0) {
       pushAssistantMessage(conversationId, streamedContent, turnState, turnId, toolCalls);
+    } else {
+      options?.conversationStore?.settleUnansweredRequest?.(
+        { turn_state: turnState, tool_calls: [] }, conversationId,
+      );
     }
     stream.streamedContentStore.set("");
   }

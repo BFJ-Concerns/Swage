@@ -577,18 +577,51 @@ impl DelegationSnapshotRecorder for SnapshotOnlyDelegationRecorder {
 
 // Execution has settled before this read. A cancellation request alone must
 // never tell an open view that the turn has ended.
-async fn announce_delegated_cancellation(state: &AppState, session_id: Uuid, turn_id: Uuid) {
-    match state.storage.get_turn(turn_id).await {
-        Ok(Some(turn)) if turn.state == swage_storage::TurnState::Cancelled => {
-            state
-                .send_to_session(session_id, &crate::websocket::ServerEvent::Cancelled {})
-                .await;
-        }
+async fn announce_delegated_outcome(
+    state: &AppState,
+    session_id: Uuid,
+    turn_id: Uuid,
+    result: &Result<swage_storage::AgentMessage, AgentError>,
+) {
+    use crate::websocket::ServerEvent;
+    use swage_storage::TurnState;
+
+    let turn = match state.storage.get_turn(turn_id).await {
+        Ok(Some(turn)) => turn,
+        Ok(None) => return,
         Err(error) => {
-            tracing::warn!(%turn_id, %error, "could not read delegated cancellation for the open view")
+            tracing::warn!(%turn_id, %error, "could not read delegated outcome for the open view");
+            return;
         }
-        _ => {}
-    }
+    };
+    let event = match turn.state {
+        TurnState::Completed | TurnState::Incomplete => ServerEvent::TurnComplete {
+            turn_id,
+            incomplete_reason: (turn.state == TurnState::Incomplete).then(|| "max_tokens".into()),
+            input_tokens: None,
+            output_tokens: None,
+            cost_microcents: None,
+            structured_output: turn.structured_output,
+        },
+        TurnState::Cancelled => ServerEvent::Cancelled {},
+        TurnState::Failed | TurnState::Refused | TurnState::Interrupted => ServerEvent::Error {
+            code: match turn.state {
+                TurnState::Refused => "provider_refused",
+                TurnState::Interrupted => "approval_timeout",
+                _ => "agent_error",
+            }
+            .into(),
+            message: match result {
+                Ok(message) => message.payload["error"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| turn.state.to_string()),
+                Err(error) => error.to_string(),
+            },
+        },
+        _ => return,
+    };
+    state.send_to_session(session_id, &event).await;
 }
 
 // Both completion modes publish their child session through the same stop
@@ -612,7 +645,7 @@ async fn track_delegated_session(
                     state.active_turns.lock().await.insert(session_id, token);
                     if let Some(sender) = forward_started { let _ = sender.send(started); }
                     let result = execution.await;
-                    announce_delegated_cancellation(state, session_id, turn_id).await;
+                    announce_delegated_outcome(state, session_id, turn_id, &result).await;
                     state.active_turns.lock().await.remove(&session_id);
                     crate::turn_queue::spawn_drain(state.clone(), session_id);
                     result
@@ -624,7 +657,7 @@ async fn track_delegated_session(
             // Completion can win the same poll that published the address.
             if let Ok(started) = started_rx.try_recv() {
                 let session_id = started.child_session_id;
-                announce_delegated_cancellation(state, session_id, started.child_turn_id).await;
+                announce_delegated_outcome(state, session_id, started.child_turn_id, &result).await;
                 if let Some(sender) = forward_started { let _ = sender.send(started); }
                 crate::turn_queue::spawn_drain(state.clone(), session_id);
             }
@@ -1748,6 +1781,27 @@ mod settlement_tests {
                 .iter()
                 .any(|turn| turn.user_input.as_deref() == Some("Next request")
                     && turn.state == TurnState::Completed)
+        );
+    }
+
+    #[tokio::test]
+    async fn delegated_completion_settles_open_view() {
+        let (_, _, mut events) = tracked_child(TurnState::Completed, false).await;
+        assert!(
+            matches!(
+                events.try_recv(),
+                Ok(crate::websocket::ServerEvent::TurnComplete { .. })
+            ),
+            "completed delegation must tell the open child view"
+        );
+    }
+
+    #[tokio::test]
+    async fn delegated_failure_settles_open_view() {
+        let (_, _, mut events) = tracked_child(TurnState::Failed, false).await;
+        assert!(
+            matches!(events.try_recv(), Ok(crate::websocket::ServerEvent::Error { code, message }) if code == "agent_error" && message == "child failed"),
+            "failed delegation must tell the open child view its recorded error"
         );
     }
 }
