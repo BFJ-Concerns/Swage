@@ -844,7 +844,7 @@ describe("AppLayout shell navigation", () => {
     component = mountLayout({ activeSurface: "operator" });
 
     expect(document.querySelector("main.operator h1")?.textContent).toContain(
-      "Live control surface for the running gateway",
+      "Gateway supervision",
     );
     expect(surfaceButton("Operator").getAttribute("aria-pressed")).toBe("true");
   });

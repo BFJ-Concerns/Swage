@@ -169,11 +169,7 @@
 <section class="ops-deck">
   <header class="ops-header">
     <div>
-      <p class="eyebrow">Operator Deck</p>
-      <h1>Live control surface for the running gateway</h1>
-      <p class="lede">
-        Sessions, approvals, automations, channels, and devices in one place.
-      </p>
+      <h1>Gateway supervision</h1>
     </div>
     <div class="header-actions">
       <button class="refresh-btn history-btn" onclick={() => (showHistory = !showHistory)}>
@@ -519,13 +515,12 @@
     display: flex;
     justify-content: space-between;
     gap: 24px;
-    align-items: flex-start;
-    margin-bottom: 22px;
+    align-items: center;
+    margin-bottom: 16px;
     border-bottom: 2px solid var(--ink);
-    padding-bottom: 18px;
+    padding-bottom: 12px;
   }
 
-  .eyebrow,
   .panel-kicker,
   .metric-label {
     font-family: var(--font-mono);
@@ -541,12 +536,11 @@
   h1 {
     font-family: var(--font-display);
     font-weight: 400;
-    font-size: clamp(2rem, 3.8vw, 2.8rem);
+    font-size: 24px;
     line-height: 1;
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: var(--ink);
-    max-width: 16ch;
     margin: 0;
   }
 
@@ -561,7 +555,6 @@
     margin: 0;
   }
 
-  .lede,
   .detail-copy,
   .secondary-line,
   .metric-meta,

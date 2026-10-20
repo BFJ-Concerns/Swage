@@ -2036,7 +2036,8 @@ describe("App", () => {
       ),
     ).find((button) => button.textContent?.trim() === "Operator");
     flushSync(() => operator!.click());
-    await waitForText("Live control surface for the running gateway");
+    await settleUi();
+    expect(document.querySelector("main.operator h1")?.textContent).toBe("Gateway supervision");
 
     expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledOnce();
     expect(websocketHarness.client.disconnect).not.toHaveBeenCalled();
@@ -2269,11 +2270,12 @@ describe("App", () => {
     expect(operatorButton).toBeDefined();
 
     flushSync(() => operatorButton!.click());
-    await waitForText("Live control surface for the running gateway");
+    await settleUi();
+    expect(document.querySelector("main.operator h1")?.textContent).toBe("Gateway supervision");
 
     expect(operatorApi.fetchOperatorOverview).toHaveBeenCalled();
     expect(document.body.textContent).toContain(
-      "Live control surface for the running gateway",
+      "Gateway supervision",
     );
     expect(document.body.textContent).toContain("dev_dm");
     expect(document.body.textContent).toContain("Local device");

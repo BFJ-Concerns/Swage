@@ -4,6 +4,9 @@ import { flushSync, mount, unmount } from "svelte";
 
 import { compile } from "svelte/compiler";
 
+import { chromium } from "@playwright/test";
+import appCss from "../../app.css?raw";
+
 import OperatorDashboard from "../components/OperatorDashboard.svelte";
 import operatorDashboardSource from "../components/OperatorDashboard.svelte?raw";
 import * as operatorApi from "../api/operator";
@@ -124,6 +127,29 @@ describe("OperatorDashboard", () => {
     document.head.querySelectorAll("style").forEach((style) => style.remove());
     while (document.body.firstChild) {
       document.body.removeChild(document.body.firstChild);
+    }
+  });
+
+  it("keeps the heading within 80px and supervision panels in the first viewport at 1440x1000", async () => {
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(makeOverview());
+    component = mount(OperatorDashboard, { target: document.body });
+    await settleUi();
+    const scope = Array.from(document.querySelector(".ops-deck")!.classList)
+      .find((name) => name.startsWith("svelte-"))!;
+    const { css } = compile(operatorDashboardSource, { filename: "OperatorDashboard.svelte" });
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+      await page.setContent(`<style>${appCss}\n${(css?.code ?? "").replace(/svelte-[a-z0-9]+/g, scope)}</style>${document.body.innerHTML}`);
+      const header = await page.locator(".ops-header").boundingBox();
+      expect(header!.height).toBeLessThanOrEqual(80);
+      for (const selector of [".ledger-row", ".control-card", ".panel:nth-child(3) .control-card"]) {
+        const box = await page.locator(selector).first().boundingBox();
+        expect(box, selector).not.toBeNull();
+        expect(box!.y + box!.height, selector).toBeLessThanOrEqual(1000);
+      }
+    } finally {
+      await browser.close();
     }
   });
 
