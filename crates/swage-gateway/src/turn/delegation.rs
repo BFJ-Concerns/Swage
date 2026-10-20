@@ -615,7 +615,24 @@ async fn announce_delegated_outcome(
         TurnState::Failed | TurnState::Refused | TurnState::Interrupted => ServerEvent::Error {
             code: match turn.state {
                 TurnState::Refused => "provider_refused",
-                TurnState::Interrupted => "approval_timeout",
+                TurnState::Interrupted => {
+                    // Live children can also be interrupted by shutdown. Only
+                    // the returned approval error establishes a timeout cause;
+                    // restart recovery has no surviving executor callback here.
+                    let approval_timed_out = match result {
+                        Err(AgentError::ApprovalTimedOut) => true,
+                        Ok(message) => {
+                            message.payload["error"].as_str()
+                                == Some(AgentError::ApprovalTimedOut.to_string().as_str())
+                        }
+                        Err(_) => false,
+                    };
+                    if approval_timed_out {
+                        "approval_timeout"
+                    } else {
+                        "turn_interrupted"
+                    }
+                }
                 _ => "agent_error",
             }
             .into(),
@@ -1655,6 +1672,19 @@ mod settlement_tests {
         Uuid,
         mpsc::UnboundedReceiver<crate::websocket::ServerEvent>,
     ) {
+        tracked_child_execution(ending, queue_message, incomplete_reason, false).await
+    }
+
+    async fn tracked_child_execution(
+        ending: TurnState,
+        queue_message: bool,
+        incomplete_reason: Option<&str>,
+        shutdown: bool,
+    ) -> (
+        AppState,
+        Uuid,
+        mpsc::UnboundedReceiver<crate::websocket::ServerEvent>,
+    ) {
         let (state, session_id) = super::super::tests::make_state_with_session(vec![
             swage_core::StreamChunk::Delta {
                 content: "Queued answer".into(),
@@ -1716,11 +1746,15 @@ mod settlement_tests {
                     1
                 );
             }
-            state
-                .storage
-                .update_turn_state(turn.id, ending.clone())
-                .await
-                .unwrap();
+            if shutdown {
+                crate::shutdown::shutdown_active_turns(&state).await;
+            } else {
+                state
+                    .storage
+                    .update_turn_state(turn.id, ending.clone())
+                    .await
+                    .unwrap();
+            }
             state
                 .storage
                 .create_agent_message(swage_storage::NewAgentMessage {
@@ -1730,6 +1764,12 @@ mod settlement_tests {
                     correlation_id: Some(delegate_message_id),
                     payload: if ending == TurnState::Failed {
                         serde_json::json!({"error": "child failed"})
+                    } else if ending == TurnState::Interrupted {
+                        serde_json::json!({"error": if shutdown {
+                            AgentError::Cancelled.to_string()
+                        } else {
+                            AgentError::ApprovalTimedOut.to_string()
+                        }})
                     } else {
                         serde_json::json!({"response": "Child answer", "incomplete_reason": incomplete_reason})
                     },
@@ -1831,6 +1871,29 @@ mod settlement_tests {
     #[tokio::test]
     async fn delegated_incomplete_unknown_reason_stays_absent() {
         assert_incomplete_reason(None).await;
+    }
+
+    #[tokio::test]
+    async fn delegated_interruption_reports_recorded_cause() {
+        for (shutdown, expected_code, expected_message) in [
+            (true, "turn_interrupted", AgentError::Cancelled.to_string()),
+            (
+                false,
+                "approval_timeout",
+                AgentError::ApprovalTimedOut.to_string(),
+            ),
+        ] {
+            let (_state, _, mut events) =
+                tracked_child_execution(TurnState::Interrupted, false, None, shutdown).await;
+            let crate::websocket::ServerEvent::Error { code, message } = events
+                .try_recv()
+                .expect("interruption must settle the open child view")
+            else {
+                panic!("interrupted child must emit Error");
+            };
+            assert_eq!(code, expected_code);
+            assert_eq!(message, expected_message);
+        }
     }
 
     #[tokio::test]
