@@ -2654,7 +2654,6 @@ async fn persist_workflow_worker_liveness(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Why the run dispatches an attempt of `journal_entry_id` now: the call's
 /// first, or one following attempts an interruption cut off — the entry
 /// already carries attempts only when replay re-dispatches it, since a call
