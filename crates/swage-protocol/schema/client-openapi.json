@@ -6818,7 +6818,7 @@
         "type": "object"
       },
       "TurnIsolationView": {
-        "description": "The execution boundary a turn ran inside: sandboxed on the host, degraded\nfor a stated reason, or the boundary the install declares for every turn\n(a container image, for one) — which is neither of the other two.",
+        "description": "A turn's execution isolation: sandboxed on the host or degraded for a\nstated reason.",
         "oneOf": [
           {
             "properties": {
@@ -6845,22 +6845,6 @@
             "required": [
               "kind",
               "reason"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "boundary": {
-                "type": "string"
-              },
-              "kind": {
-                "const": "declared",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "boundary"
             ],
             "type": "object"
           }
