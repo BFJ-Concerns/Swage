@@ -94,21 +94,35 @@ describe("RecentSessions", () => {
 
   it("labels the latest failed and interrupted responses and clears markers after recovery", async () => {
     vi.mocked(sessionsApi.listRecentSessions).mockResolvedValue([
-      conversationEntry(makeSession({ id: "failed", latest_turn_state: "failed" })),
-      conversationEntry(makeSession({ id: "interrupted", latest_turn_state: "interrupted" })),
-      conversationEntry(makeSession({ id: "recovered", has_interrupted_turn: true, latest_turn_state: "completed" })),
+      conversationEntry(makeSession({ id: "failed", message_preview: "Failed direct reply", latest_turn_state: "failed" })),
+      conversationEntry(makeSession({ id: "interrupted", message_preview: "Interrupted direct reply", latest_turn_state: "interrupted" })),
+      conversationEntry(makeSession({ id: "recovered", message_preview: "Recovered direct reply", has_interrupted_turn: true, latest_turn_state: "completed" })),
       { source: { kind: "schedule", id: "schedule", message: "Nightly" }, last_activity: "2026-10-01T00:00:00Z",
-        automated: [makeSession({ id: "scheduled-failure", latest_turn_state: "failed", origin: { kind: "schedule_run", schedule_id: "schedule" } })] },
+        automated: [makeSession({ id: "scheduled-failure", message_preview: "Failed scheduled reply", latest_turn_state: "failed", origin: { kind: "schedule_run", schedule_id: "schedule" } })] },
     ]);
     component = mount(RecentSessions, { target: document.body });
     await settle();
-    expect(document.querySelectorAll('.row.source [aria-label="Last response failed"]')).toHaveLength(1);
-    expect(document.querySelectorAll('.row.source [aria-label="Interrupted"]')).toHaveLength(1);
-    const rows = document.querySelectorAll('.row.source');
-    expect(rows[2].querySelector('.interrupted')).toBeNull();
-    (rows[3] as HTMLButtonElement).click();
+    const rows = Array.from(document.querySelectorAll<HTMLButtonElement>('.row.source'));
+    for (const [preview, label, opposite] of [
+      ["Failed direct reply", "Last response failed", "Interrupted"],
+      ["Interrupted direct reply", "Interrupted", "Last response failed"],
+    ]) {
+      const row = rows.find(row => row.querySelector('.preview')?.textContent?.trim() === preview);
+      expect(row).toBeDefined();
+      expect(row!.querySelector(`[aria-label="${label}"]`)).not.toBeNull();
+      expect(row!.querySelector(`[aria-label="${opposite}"]`)).toBeNull();
+    }
+    const recovered = rows.find(row => row.querySelector('.preview')?.textContent?.trim() === "Recovered direct reply");
+    expect(recovered).toBeDefined();
+    expect(recovered!.querySelector('[aria-label="Last response failed"], [aria-label="Interrupted"]')).toBeNull();
+    const schedule = rows.find(row => row.querySelector('.preview')?.textContent?.trim() === "Nightly");
+    expect(schedule).toBeDefined();
+    schedule!.click();
     flushSync();
-    expect(document.querySelector('.row.nested [aria-label="Last response failed"]')).not.toBeNull();
+    const scheduled = Array.from(document.querySelectorAll('.row.nested')).find(row => row.querySelector('.preview')?.textContent?.trim() === "Failed scheduled reply");
+    expect(scheduled).toBeDefined();
+    expect(scheduled!.querySelector('[aria-label="Last response failed"]')).not.toBeNull();
+    expect(scheduled!.querySelector('[aria-label="Interrupted"]')).toBeNull();
   });
 
   it("lists every scope's sessions in the order the gateway gave, automated ones nested beneath their source", async () => {

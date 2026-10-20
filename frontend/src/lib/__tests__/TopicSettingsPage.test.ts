@@ -85,9 +85,19 @@ describe("TopicSettingsPage", () => {
     ]);
     component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "sessions" } });
     await flushUi();
-    expect(document.querySelector('[aria-label="Last response failed"]')).not.toBeNull();
-    expect(document.querySelector('[aria-label="Interrupted"]')).not.toBeNull();
-    expect(document.querySelectorAll('.record-row')[2].querySelector('[aria-label]')).toBeNull();
+    const rows = Array.from(document.querySelectorAll('.record-row'));
+    for (const [preview, label, opposite] of [
+      ["Failed reply", "Last response failed", "Interrupted"],
+      ["Interrupted reply", "Interrupted", "Last response failed"],
+    ]) {
+      const row = rows.find(row => row.querySelector('strong')?.textContent?.trim() === preview);
+      expect(row).toBeDefined();
+      expect(row!.querySelector(`[aria-label="${label}"]`)).not.toBeNull();
+      expect(row!.querySelector(`[aria-label="${opposite}"]`)).toBeNull();
+    }
+    const recovered = rows.find(row => row.querySelector('strong')?.textContent?.trim() === "Recovered reply");
+    expect(recovered).toBeDefined();
+    expect(recovered!.querySelector('[aria-label="Last response failed"], [aria-label="Interrupted"]')).toBeNull();
   });
 
   it("waits for the workspace load before showing an empty list", async () => {

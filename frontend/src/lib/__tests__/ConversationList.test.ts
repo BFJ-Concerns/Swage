@@ -62,15 +62,25 @@ describe("ConversationList", () => {
 
   it("labels failed and interrupted latest responses without marking recovered conversations", () => {
     const store = makeStore([
-      makeConversationSummary({ id: "failed", latest_turn_state: "failed" }),
-      makeConversationSummary({ id: "interrupted", latest_turn_state: "interrupted" }),
-      makeConversationSummary({ id: "recovered", latest_turn_state: "completed", has_interrupted_turn: true }),
+      makeConversationSummary({ id: "failed", message_preview: "Failed reply", latest_turn_state: "failed" }),
+      makeConversationSummary({ id: "interrupted", message_preview: "Interrupted reply", latest_turn_state: "interrupted" }),
+      makeConversationSummary({ id: "recovered", message_preview: "Recovered reply", latest_turn_state: "completed", has_interrupted_turn: true }),
     ]);
     component = mount(ConversationList, { target: document.body, props: { store } });
     flushSync();
-    expect(document.querySelector('[aria-label="Last response failed"]')).not.toBeNull();
-    expect(document.querySelector('[aria-label="Interrupted"]')).not.toBeNull();
-    expect(document.querySelectorAll('.conversation-item')[2].querySelector('.interrupted')).toBeNull();
+    const rows = Array.from(document.querySelectorAll('.conversation-item'));
+    for (const [preview, label, opposite] of [
+      ["Failed reply", "Last response failed", "Interrupted"],
+      ["Interrupted reply", "Interrupted", "Last response failed"],
+    ]) {
+      const row = rows.find(row => row.querySelector('.preview')?.textContent?.trim() === preview);
+      expect(row).toBeDefined();
+      expect(row!.querySelector(`[aria-label="${label}"]`)).not.toBeNull();
+      expect(row!.querySelector(`[aria-label="${opposite}"]`)).toBeNull();
+    }
+    const recovered = rows.find(row => row.querySelector('.preview')?.textContent?.trim() === "Recovered reply");
+    expect(recovered).toBeDefined();
+    expect(recovered!.querySelector('[aria-label="Last response failed"], [aria-label="Interrupted"]')).toBeNull();
   });
 
   // --- Empty state ---
