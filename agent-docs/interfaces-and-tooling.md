@@ -1062,6 +1062,13 @@ two sandbox-eligible tools.
 | `schedule` | `schedule.rs` |
 | `wake_me_later` | `schedule.rs` |
 
+### Definition authoring
+
+| Tool | Purpose |
+|---|---|
+| `agent_definition` | Create, update, list or delete named agents selectable for future sessions; see [Creating and editing definitions](agents-and-permissions.md#creating-and-editing-definitions) for the grant, fields and limits |
+| `task_definition` | Create or replace (`upsert`), list or delete reusable delegated work contracts; these do not appear in the new-session picker. An upsert replaces the whole definition, so omitted fields are cleared. |
+
 ### Session and memory
 
 | Tool | Source |
@@ -1070,7 +1077,6 @@ two sandbox-eligible tools.
 | `agent_memory` | `agent_memory.rs` |
 | `memory` | `memory.rs` — sandbox-eligible; reads and writes the shared memory files of the session's scope — the topic's memory when a topic is selected, the general memory otherwise |
 | `tool_result_read` | `tool_result_read.rs` |
-| `task_definition` | `task_definition.rs` |
 
 ### Delegation
 

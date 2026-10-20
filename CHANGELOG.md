@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- Agents can create and edit agent definitions through conversation, making them available in Settings and the new-session picker; each change records the previous and new definition in configuration history.
 - Delegation chains stop at a configurable depth, including cycles (default: four child levels). Settings → Automation edits `sessions.max_delegation_depth`; a refused delegation records its depth reason and returns it to the delegating model.
 
 - `file_write` can append content without rewriting or replacing the existing file.
@@ -97,6 +98,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- The supplied and hosted guides explain creating and editing agent definitions in conversation, including the required tool grant, limits and configuration history, alongside the operator API.
 - Anthropic turns without an explicit output limit use the model's documented limit instead of a fixed 4,096 tokens. A limit the request sets is kept, and a model Anthropic does not document falls back to the catalogue's limit.
 - Session orientation lists every readable attached workspace with its path, access and trust. A worker placed inside one sees its placement root, the trust it inherits and its own write access.
 - Each turn tells the agent the current time to the second, separately from the session's start time.
@@ -148,6 +150,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Fenced code in assistant replies stays readable and preserves its original text when conversations are reopened, without literal highlighting markup or repeated escaping.
 - Plain-text assistant replies keep an 80-character prose measure while streaming and after completion.
 - Session previews show readable HTML text instead of raw tags.
 - Conversation and surface markdown tables share consistent styling with visible cell boundaries.

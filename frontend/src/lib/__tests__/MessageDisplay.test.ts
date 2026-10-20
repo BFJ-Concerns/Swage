@@ -174,6 +174,38 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 
+describe("fenced code rendering", () => {
+  it("keeps highlighted source exact across conversation remounts", async () => {
+    const yaml = "- first\n- second\n";
+    const xml = '<root name="example">&amp;<child /></root>\n';
+    const content = `\`\`\`yaml\n${yaml}\`\`\`\n\n\`\`\`xml\n${xml}\`\`\``;
+    const store = makeConversationStore([makeAssistantMessage(content)]);
+    let firstMarkup: string[] | undefined;
+
+    for (let view = 0; view < 5; view++) {
+      component = mount(MessageDisplay, {
+        target: document.body,
+        props: { store, streamingStore: makeStreamingStore() },
+      });
+      flushSync();
+
+      const blocks = [...document.querySelectorAll(".assistant-content pre code")];
+      expect(blocks.map((block) => block.textContent)).toEqual([yaml, xml]);
+      for (const block of blocks) {
+        expect(block.textContent).not.toContain("hljs-");
+        expect(block.textContent).not.toContain("&lt;");
+        expect(block.querySelector('span[class^="hljs-"]')).not.toBeNull();
+      }
+      const markup = blocks.map((block) => block.innerHTML);
+      if (firstMarkup) expect(markup).toEqual(firstMarkup);
+      else firstMarkup = markup;
+
+      await unmount(component);
+      component = undefined;
+    }
+  });
+});
+
 describe("provider failure notice", () => {
   it("keeps diagnostics collapsed, names the selected route and offers recovery once", () => {
     const raw = '{"error":{"message":"Rejected at https://Proxy.Example/v1","request_id":"Req-AbC"}}';

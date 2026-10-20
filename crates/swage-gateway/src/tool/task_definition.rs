@@ -39,19 +39,47 @@ impl Tool for TaskDefinitionTool {
         NAME
     }
     fn description(&self) -> &str {
-        "Create, list, update, or delete durable named task definitions. Changes are whole-definition configuration mutations and are audited."
+        "Create, list, update, or delete durable task definitions: a named work contract — \
+         instructions, a preferred model, narrowed tool grants and an output contract — that a \
+         delegated child turn runs under when a delegation names it. Set `action` to `upsert` \
+         (create a definition, or replace one whole: an upsert stores exactly the fields given, \
+         so a field left out is cleared — restate every field that should remain), `list` (every \
+         stored definition), or `delete`.\n\n\
+         Reach for this when the person wants a repeatable contract for work handed to a child \
+         turn, or wants one changed. A task definition has no entry in the new-session picker and \
+         no name people choose; for an agent a person can pick when starting a session — with a \
+         display name, a description and standing instructions of its own — use \
+         `agent_definition` instead.\n\n\
+         Every upsert and delete is written to the audit trail with the definition's whole state \
+         before and after. Deleting is permanent (the definition can be recreated); a delegation \
+         that names a deleted definition is refused. `tool_permissions` can only narrow what the \
+         delegating context grants, never widen it."
     }
     fn parameters(&self) -> Value {
         let string_array = || json!({"type":"array","items":{"type":"string"}});
         json!({
             "type":"object",
             "properties":{
-                "action":{"type":"string","enum":["upsert","list","delete"]},
-                "id":{"type":"string"},
-                "instructions":{"type":"string"},
-                "model_id":{"type":["string","null"]},
+                "action":{
+                    "type":"string",
+                    "enum":["upsert","list","delete"],
+                    "description":"What to do: `upsert` stores the definition exactly as given, creating or replacing it whole; `list` returns every stored definition; `delete` removes one."
+                },
+                "id":{
+                    "type":"string",
+                    "description":"The definition's stable identifier — lowercase ASCII letters, digits and hyphens — that a delegation names to run under it. Required for upsert and delete."
+                },
+                "instructions":{
+                    "type":"string",
+                    "description":"The complete contract the child turn works to, as it will read it. Required on upsert; it replaces any stored text."
+                },
+                "model_id":{
+                    "type":["string","null"],
+                    "description":"The id of a model in the gateway's configured catalogue the child turn uses. Omit or null to keep the delegating context's model."
+                },
                 "tool_permissions":{
                     "type":["object","null"],
+                    "description":"Narrows the tools the child turn may call; the result intersects with what the delegating context grants and can only remove tools. Omit or null to leave the grants unchanged.",
                     "properties":{
                         "allow":string_array(),
                         "deny":string_array(),
@@ -81,11 +109,15 @@ impl Tool for TaskDefinitionTool {
                     "required":["allow","deny","bundles","require_approval"],
                     "additionalProperties":false
                 },
-                "output_schema":{"type":["object","null"]},
+                "output_schema":{
+                    "type":["object","null"],
+                    "description":"A JSON Schema the child's final reply must satisfy; a reply that does not is retried. Omit or null for a free-form reply."
+                },
                 "output_max_retries":{
                     "type":["integer","null"],
                     "minimum":0,
-                    "maximum":u32::MAX
+                    "maximum":u32::MAX,
+                    "description":"How many times a reply failing `output_schema` is retried before the delegation fails. Omit or null for the configured default."
                 }
             },
             "required":["action"],
