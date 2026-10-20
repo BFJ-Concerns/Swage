@@ -107,6 +107,32 @@ describe("Channels settings", () => {
 
 
 describe("Channel linking controls", () => {
+  it.each([
+    ["the selected topic", "8a8533d5-7a3a-4f99-925e-a8274c0ff306", "Witness links"],
+    ["General", null, "General"],
+  ] as const)("issues in %s and identifies that scope before submission", async (_scope, topicId, scopeName) => {
+    const fetchSpy = mockLists();
+    component = mount(SettingsPage, {
+      target: document.body,
+      props: {
+        tab: "channels", topicId,
+        topics: [{ id: "8a8533d5-7a3a-4f99-925e-a8274c0ff306", name: "Witness links", description: "", slug: "witness-links", created_at: "2030-07-09T10:00:00Z" }],
+      },
+    });
+    await vi.waitFor(() => expect(document.querySelector("select")).not.toBeNull());
+    const scopeBeforeIssue = document.querySelector('[aria-label="Link destination"]')?.textContent ?? "";
+    const issue = Array.from(document.querySelectorAll("button")).find((button) => button.textContent === "Issue link code")!;
+    fetchSpy.mockImplementationOnce(async () => Response.json({ integration: "telegram", link_code: "scoped-code", expires_at: expiry }));
+    flushSync(() => issue.click());
+    await vi.waitFor(() => expect(fetchSpy.mock.calls.some(([, options]) => options?.method === "POST")).toBe(true));
+    const [, options] = fetchSpy.mock.calls.find(([, options]) => options?.method === "POST")!;
+    expect(JSON.parse(options!.body as string)).toEqual({
+      integration: "telegram", ...(topicId ? { topic_id: topicId } : {}),
+    });
+    expect(scopeBeforeIssue).toContain(scopeName);
+    await vi.waitFor(() => expect(document.body.textContent).toContain("/link scoped-code"));
+  });
+
   it("issues a code for the chosen integration through the gateway", async () => {
     const fetchSpy = mockLists();
     openChannels();

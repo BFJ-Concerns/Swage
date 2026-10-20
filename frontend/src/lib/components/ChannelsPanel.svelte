@@ -5,6 +5,15 @@
   import type { ChannelLinkResponse } from "../protocol/ChannelLinkResponse";
   import type { ChannelLinkCodeResponse } from "../protocol/ChannelLinkCodeResponse";
   import type { ExternalChannelIntegration } from "../protocol/ExternalChannelIntegration";
+  import type { Topic } from "../types";
+
+  interface Props {
+    topicId?: string | null;
+    topics?: Topic[];
+  }
+
+  let { topicId = null, topics = [] }: Props = $props();
+  const scopeName = $derived(topicId ? topics.find((topic) => topic.id === topicId)?.name ?? topicId : "General");
 
   let channels = $state<ChannelStatusResponse[]>([]);
   let links = $state<ChannelLinkResponse[]>([]);
@@ -21,7 +30,7 @@
     issuing = true;
     issueError = null;
     try {
-      const issued = await createChannelLinkCode({ integration });
+      const issued = await createChannelLinkCode({ integration, ...(topicId ? { topic_id: topicId } : {}) });
       codes = [issued, ...codes];
     } catch (err) {
       issueError = err instanceof Error ? err.message : "Failed to issue a link code.";
@@ -86,6 +95,7 @@
     </section>
     <section aria-label="Unredeemed link codes">
       <h2>Link codes</h2>
+      <p aria-label="Link destination">New codes link chats to {scopeName}.</p>
       <form onsubmit={(event) => { event.preventDefault(); void issueCode(); }}>
         <label for="link-integration">Integration</label>
         <select id="link-integration" bind:value={integration} disabled={issuing}>
