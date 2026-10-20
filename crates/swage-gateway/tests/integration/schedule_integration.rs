@@ -2118,7 +2118,7 @@ async fn provider_failure_without_reply_keeps_its_existing_error() {
         assert!(turn.assistant_response.is_none());
         assert_eq!(
             run.error_message.as_deref(),
-            Some("validation error: automated turn completed without assistant response")
+            Some("runtime error: automated turn completed without assistant response")
         );
         let records = state.storage.list_delivery_records().await.unwrap();
         assert_eq!(records.len(), 1);
@@ -2587,11 +2587,69 @@ async fn delivery_failure_preserves_output_on_the_failed_run() {
         Some("hard-won output"),
         "output the turn produced stays on the failed run"
     );
+    assert!(run.error_message.as_deref().unwrap().starts_with(
+        "This run could not send its output: validation error: invalid webhook target URL:"
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn webhook_failure_names_its_target_without_repeating_the_reason() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/schedule-output", listener.local_addr().unwrap());
+    drop(listener);
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(
+        &dir.path().join("webhook-failure.db"),
+        MockProvider::new(vec![MockProvider::text_round("retained output")]),
+    );
+    let router = build_router(state.clone());
+    let session_id = create_conversation(&router).await;
+    let created = schedule::create_schedule(
+        &state,
+        CreateScheduleRequest {
+            routing: Some(DeliveryRoutingRequest {
+                deliver_to_origin: false,
+                home_target: None,
+                explicit_targets: vec![DeliveryTarget::Webhook { url: url.clone() }],
+                store_local_output: false,
+            }),
+            ..create_request(
+                "webhook output",
+                ScheduleSpec::Interval {
+                    every: "every 5 seconds".into(),
+                },
+                continuation(session_id),
+            )
+        },
+        ScheduleCreator::User,
+    )
+    .await
+    .unwrap();
+    let run = schedule::trigger_schedule(&state, created.id)
+        .await
+        .unwrap()
+        .run;
+    assert_eq!(run.state, ScheduleRunState::Failed);
+    assert_eq!(run.output_text.as_deref(), Some("retained output"));
+    let message = run.error_message.unwrap();
+    assert_eq!(message.matches("delivery failed").count(), 1, "{message}");
     assert!(
-        run.error_message
-            .as_deref()
-            .unwrap()
-            .contains("delivery failed")
+        message.starts_with("This run could not send its output: webhook delivery failed: "),
+        "{message}"
+    );
+    assert!(message.contains(&url), "{message}");
+    let records = state.storage.list_delivery_records().await.unwrap();
+    let delivery = records
+        .iter()
+        .find(|record| record.run_id == Some(run.id))
+        .unwrap();
+    assert_eq!(delivery.status, "failed");
+    assert_eq!(
+        message,
+        format!(
+            "This run could not send its output: {}.",
+            delivery.error.as_ref().unwrap()
+        )
     );
 }
 
@@ -3039,7 +3097,9 @@ async fn queued_schedule_failures_settle_the_run_and_preserve_completed_output()
                 settled.output_text.as_deref(),
                 Some("retained queued output")
             );
-            assert!(settled.error_message.unwrap().contains("delivery failed"));
+            assert!(settled.error_message.unwrap().starts_with(
+                "This run could not send its output: validation error: invalid webhook target URL:"
+            ));
         } else {
             assert!(
                 settled

@@ -2253,8 +2253,8 @@ impl LlmProvider for PendingProvider {
 }
 
 /// A mock provider whose stream reports its first poll, then remains open without emitting.
-struct EmptyPendingProvider {
-    stream_polled: Arc<Notify>,
+pub(crate) struct EmptyPendingProvider {
+    pub(crate) stream_polled: Arc<Notify>,
 }
 
 #[async_trait]
@@ -2370,6 +2370,7 @@ impl Hook for ApprovePreToolHook {
 /// In-memory storage for testing.
 pub(crate) struct MockStorage {
     pub(crate) db: Mutex<InMemoryDb>,
+    remove_completed_turn_on_read: AtomicBool,
     fail_turn_state_writes: AtomicBool,
     fail_turn_state_write_at: AtomicUsize,
     turn_state_write_calls: AtomicUsize,
@@ -2905,6 +2906,7 @@ impl MockStorage {
     pub(crate) fn new() -> Self {
         Self {
             db: Mutex::new(InMemoryDb::default()),
+            remove_completed_turn_on_read: AtomicBool::new(false),
             fail_turn_state_writes: AtomicBool::new(false),
             fail_turn_state_write_at: AtomicUsize::new(0),
             turn_state_write_calls: AtomicUsize::new(0),
@@ -2936,6 +2938,12 @@ impl MockStorage {
             require_result_working_directory: AtomicBool::new(false),
             result_created_without_working_directory: AtomicBool::new(false),
         }
+    }
+
+    /// Lose a real completed row when its state is reconstructed.
+    pub(crate) fn remove_completed_turn_on_read(&self) {
+        self.remove_completed_turn_on_read
+            .store(true, Ordering::SeqCst);
     }
 
     pub(crate) fn fail_skill_activations(&self) {
@@ -4887,7 +4895,18 @@ impl TurnStore for MockStorage {
     }
 
     async fn get_turn(&self, id: Uuid) -> Result<Option<Turn>, StorageError> {
-        Ok(self.db.lock().await.turns.get(&id).cloned())
+        let mut db = self.db.lock().await;
+        if db
+            .turns
+            .get(&id)
+            .is_some_and(|turn| turn.state == TurnState::Completed)
+            && self
+                .remove_completed_turn_on_read
+                .swap(false, Ordering::SeqCst)
+        {
+            db.turns.remove(&id);
+        }
+        Ok(db.turns.get(&id).cloned())
     }
 
     async fn get_turn_observation(
@@ -6760,7 +6779,7 @@ pub(crate) async fn make_state_with_storage_and_root(
     .await
 }
 
-async fn make_state_with_provider_and_root(
+pub(crate) async fn make_state_with_provider_and_root(
     provider: Arc<dyn LlmProvider>,
     storage: Arc<MockStorage>,
     config_root: Option<std::path::PathBuf>,

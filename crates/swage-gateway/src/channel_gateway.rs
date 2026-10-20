@@ -867,11 +867,11 @@ async fn deliver_to_target(
                 .send()
                 .await
                 .map_err(|error| {
-                    GatewayError::ValidationError(format!("webhook delivery failed: {error}"))
+                    GatewayError::DeliveryFailed(format!("webhook delivery failed: {error}"))
                 })?;
 
             if !response.status().is_success() {
-                return Err(GatewayError::ValidationError(format!(
+                return Err(GatewayError::DeliveryFailed(format!(
                     "webhook delivery failed with status {}",
                     response.status()
                 )));
@@ -945,6 +945,74 @@ mod tests {
         TopicStore,
     };
     use tokio::net::TcpListener;
+
+    async fn assert_webhook_delivery_failure(url: String) -> String {
+        let (mut state, _) = make_state_with_session(vec![]).await;
+        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let topic = storage.general_scope().await.unwrap();
+        let session_id = storage
+            .create_session(swage_storage::fixtures::new_session(topic.id))
+            .await
+            .unwrap()
+            .id;
+        state.storage = storage.clone();
+        state.topic_store = storage;
+        let error = deliver_to_targets(
+            &state,
+            session_id,
+            DeliveryAttribution {
+                schedule_run: None,
+                turn_id: None,
+            },
+            &[DeliveryTarget::Webhook { url }],
+            "The produced output",
+        )
+        .await
+        .expect_err("webhook delivery must fail");
+        assert_eq!(
+            serde_json::to_value(crate::error::error_code(&error)).unwrap(),
+            "delivery_failed"
+        );
+        assert!(error.to_string().contains("webhook delivery failed"));
+        assert!(!error.to_string().contains("validation error"));
+        assert!(!error.is_retriable());
+        let records = state
+            .storage
+            .list_delivery_records_by_session(session_id)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, "failed");
+        assert_eq!(
+            records[0].error.as_deref(),
+            Some(error.to_string().as_str())
+        );
+        let api_error = crate::error::ApiError::from(error);
+        assert_eq!(api_error.status(), axum::http::StatusCode::BAD_GATEWAY);
+        api_error.message().to_owned()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unreachable_webhook_reports_a_delivery_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        assert_webhook_delivery_failure(format!("http://{address}/")).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unsuccessful_webhook_status_reports_a_delivery_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::post(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let message = assert_webhook_delivery_failure(format!("http://{address}/")).await;
+        server.abort();
+        assert!(message.contains("status 503"), "{message}");
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn developer_routes_accept_busy_session_inputs_in_the_shared_queue() {

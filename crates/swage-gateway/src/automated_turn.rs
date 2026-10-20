@@ -84,12 +84,12 @@ pub async fn run_placeholder_turn(
     .await?;
 
     let turn = state.storage.get_turn(turn_id).await?.ok_or_else(|| {
-        GatewayError::ValidationError(format!(
+        GatewayError::RuntimeError(format!(
             "turn {turn_id} not found after automated execution"
         ))
     })?;
     turn.assistant_response.ok_or_else(|| {
-        GatewayError::ValidationError("automated turn completed without assistant response".into())
+        GatewayError::RuntimeError("automated turn completed without assistant response".into())
     })
 }
 
@@ -104,6 +104,94 @@ mod tests {
         make_state_with_approval_gated_echo, make_state_with_config, make_state_with_session,
         sandboxed_turn_config,
     };
+
+    #[tokio::test]
+    async fn automated_turn_without_a_response_reports_a_runtime_failure() {
+        use crate::turn::tests::{
+            EmptyPendingProvider, MockStorage, make_state_with_provider_and_root,
+        };
+        let polled = Arc::new(tokio::sync::Notify::new());
+        let (state, session_id) = make_state_with_provider_and_root(
+            Arc::new(EmptyPendingProvider {
+                stream_polled: polled.clone(),
+            }),
+            Arc::new(MockStorage::new()),
+            None,
+        )
+        .await;
+        let state = Arc::new(state);
+        let turn_id = create_placeholder_turn(&state, session_id, "gateway", "Work")
+            .await
+            .unwrap();
+        let execution = tokio::spawn({
+            let state = state.clone();
+            async move { run_placeholder_turn(&state, session_id, "Work", turn_id).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), polled.notified())
+            .await
+            .expect("automated turn reaches its provider");
+        crate::turn::cancel_turn(&state, session_id).await.unwrap();
+        let error = execution.await.unwrap().expect_err("no assistant response");
+        let turn = state.storage.get_turn(turn_id).await.unwrap().unwrap();
+        assert_eq!(turn.state, swage_storage::TurnState::Cancelled);
+        assert!(turn.assistant_response.is_none());
+        assert_eq!(
+            serde_json::to_value(crate::error::error_code(&error)).unwrap(),
+            "runtime_error"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("automated turn completed without assistant response")
+        );
+        assert!(!error.to_string().contains("validation error"));
+        assert!(!error.is_retriable());
+        let api_error = crate::error::ApiError::from(error);
+        assert_eq!(
+            api_error.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[tokio::test]
+    async fn automated_turn_with_a_missing_record_reports_a_runtime_failure() {
+        use crate::turn::tests::{MockStorage, make_state_with_storage};
+        let storage = Arc::new(MockStorage::new());
+        storage.remove_completed_turn_on_read();
+        let (state, session_id) = make_state_with_storage(
+            vec![
+                StreamChunk::Delta {
+                    content: "Completed before record loss".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::Stop),
+                },
+            ],
+            storage.clone(),
+        )
+        .await;
+        let turn_id = create_placeholder_turn(&state, session_id, "gateway", "Work")
+            .await
+            .unwrap();
+        assert!(storage.db.lock().await.turns.contains_key(&turn_id));
+        let error = run_placeholder_turn(&state, session_id, "Work", turn_id)
+            .await
+            .expect_err("the completed turn record was lost");
+        assert!(!storage.db.lock().await.turns.contains_key(&turn_id));
+        assert!(state.storage.get_snapshot(turn_id).await.unwrap().is_some());
+        assert!(
+            error.to_string().contains(&format!(
+                "turn {turn_id} not found after automated execution"
+            )),
+            "{error}"
+        );
+        assert_eq!(
+            serde_json::to_value(crate::error::error_code(&error)).unwrap(),
+            "runtime_error"
+        );
+        assert!(!error.to_string().contains("validation error"));
+        assert!(!error.is_retriable());
+    }
 
     #[test]
     fn placeholder_turn_constraint_maps_to_turn_in_progress() {
