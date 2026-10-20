@@ -2844,25 +2844,6 @@ struct StreamRoundOutcome {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Lifecycle hook helpers
-// ---------------------------------------------------------------------------
-
-impl Agent {
-    /// Spawn a fire-and-forget hook dispatch.
-    ///
-    /// Common plumbing for all non-blocking lifecycle hooks: clone the registry,
-    /// short-circuit when none is configured, then dispatch on a background task.
-    fn fire_hook(&self, event: HookEvent) {
-        let Some(registry) = self.hook_registry.clone() else {
-            return;
-        };
-        tokio::spawn(async move {
-            registry.dispatch(event).await;
-        });
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Pre/post tool hook helpers
 // ---------------------------------------------------------------------------
 
