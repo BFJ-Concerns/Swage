@@ -333,6 +333,7 @@ fn compaction_record(
         failure_reason: None,
         focus: focus.map(str::to_owned),
         diagnosis: None,
+        calls: Vec::new(),
     }
 }
 
