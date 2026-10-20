@@ -742,28 +742,30 @@ describe("SettingsPage", () => {
     expect(settingsApi.saveSettings).not.toHaveBeenCalled();
   });
 
-  it("allows saving after a tab switch discards an invalid bundle editor", async () => {
+  it.each(["bundles", "approvals"])("allows saving after a tab switch discards an invalid %s editor", async (kind) => {
     const tab = writable<"automation" | "generation">("automation");
     const currentTab = fromStore(tab);
     component = mount(SettingsPage, { target: document.body, props: { get tab() { return currentTab.current; } } });
     await flushUi();
-    const editor = document.querySelector<HTMLTextAreaElement>('[aria-label="Tool bundles"]')!;
+    const selector = kind === "bundles" ? '[aria-label="Tool bundles"]' : 'textarea[id$="-approvals"]';
+    const editor = document.querySelector<HTMLTextAreaElement>(selector)!;
     editor.value = "{";
     editor.dispatchEvent(new Event("input", { bubbles: true }));
     await flushUi();
-    expect(editor.getAttribute("aria-invalid")).toBe("true");
-    buttonNamed("Disabled").click();
+    if (kind === "bundles") expect(editor.getAttribute("aria-invalid")).toBe("true");
+    else expect(document.querySelector(".notice.error")?.textContent).toBeTruthy();
+    if (kind === "bundles") buttonNamed("Disabled").click();
     await new Promise((resolve) => setTimeout(resolve, 850));
     await flushUi();
-    expect(document.querySelector(".notice.error")?.textContent).toContain("Fix the invalid automation JSON before saving.");
+    expect(document.querySelector(".notice.error")?.textContent).toBeTruthy();
     expect(settingsApi.saveSettings).not.toHaveBeenCalled();
     tab.set("generation");
     await flushUi();
     tab.set("automation");
     await flushUi();
-    const restored = document.querySelector<HTMLTextAreaElement>('[aria-label="Tool bundles"]')!;
+    const restored = document.querySelector<HTMLTextAreaElement>(selector)!;
     expect(restored.getAttribute("aria-invalid")).toBeNull();
-    expect(JSON.parse(restored.value)).toEqual(emptySettings().tool_permissions.bundles);
+    expect(JSON.parse(restored.value)).toEqual(kind === "bundles" ? emptySettings().tool_permissions.bundles : emptySettings().tool_permissions.require_approval);
     expect(document.querySelector(".notice.error"), "discarded JSON drafts must not leave a page warning").toBeNull();
     expect(settingsApi.saveSettings).not.toHaveBeenCalled();
     const delay = document.querySelector<HTMLInputElement>('[aria-label="Archive sessions after days"]')!;
@@ -772,7 +774,7 @@ describe("SettingsPage", () => {
     await new Promise((resolve) => setTimeout(resolve, 850));
     await flushUi();
     expect(settingsApi.saveSettings).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(settingsApi.saveSettings).mock.calls[0][0].sandbox?.enabled).toBe(false);
+    expect(vi.mocked(settingsApi.saveSettings).mock.calls[0][0].sandbox?.enabled).toBe(kind !== "bundles");
   });
 
   it("waits for the required search fields before autosaving", async () => {

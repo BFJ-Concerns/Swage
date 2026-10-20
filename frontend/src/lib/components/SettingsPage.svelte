@@ -139,9 +139,9 @@
     if (tab !== "automation") {
       // The panel discards invalid editor text when it unmounts. Its guard
       // must describe the valid settings that remain, not the lost draft.
+      if (hasInvalidApprovalJson || error === AUTOMATION_JSON_SAVE_ERROR) error = null;
       hasInvalidBundlesJson = false;
       hasInvalidApprovalJson = false;
-      if (error === AUTOMATION_JSON_SAVE_ERROR) error = null;
     }
   });
   const HOT_AUTOSAVE_TABS: ReadonlySet<SettingsTabId> = new Set([
