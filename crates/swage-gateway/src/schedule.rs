@@ -1310,7 +1310,7 @@ async fn run_body(
     deliver_run_output(state, schedule, run.id, session_id, turn_id, &output)
         .await
         .map_err(|error| RunFailure {
-            message: format!("delivery failed: {error}"),
+            message: format!("This run could not send its output: {error}."),
             output: Some(output.clone()),
             delivery_attempted: true,
         })?;
@@ -1432,7 +1432,7 @@ pub(crate) async fn settle_queued_run(
                     state,
                     &schedule,
                     run_id,
-                    format!("delivery failed: {error}"),
+                    format!("This run could not send its output: {error}."),
                     Some(output),
                     true,
                 )

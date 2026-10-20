@@ -422,7 +422,7 @@ mod tests {
         let (status, body) = read_probe_failure("/delivery-failure").await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(serde_json::to_value(body.code).unwrap(), "delivery_failed");
-        assert_eq!(body.message, "delivery failed: webhook unreachable");
+        assert_eq!(body.message, "webhook unreachable");
     }
 
     #[tokio::test]

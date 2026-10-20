@@ -665,7 +665,7 @@ pub enum GatewayError {
     ValidationError(String),
 
     /// Output delivery failed at runtime (not automatically retried).
-    #[error("delivery failed: {0}")]
+    #[error("{0}")]
     DeliveryFailed(String),
 
     /// Automated execution did not produce its required result (not retried).

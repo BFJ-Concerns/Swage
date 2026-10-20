@@ -153,6 +153,46 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn automated_turn_with_a_missing_record_reports_a_runtime_failure() {
+        use crate::turn::tests::{MockStorage, make_state_with_storage};
+        let storage = Arc::new(MockStorage::new());
+        storage.remove_completed_turn_on_read();
+        let (state, session_id) = make_state_with_storage(
+            vec![
+                StreamChunk::Delta {
+                    content: "Completed before record loss".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::Stop),
+                },
+            ],
+            storage.clone(),
+        )
+        .await;
+        let turn_id = create_placeholder_turn(&state, session_id, "gateway", "Work")
+            .await
+            .unwrap();
+        assert!(storage.db.lock().await.turns.contains_key(&turn_id));
+        let error = run_placeholder_turn(&state, session_id, "Work", turn_id)
+            .await
+            .expect_err("the completed turn record was lost");
+        assert!(!storage.db.lock().await.turns.contains_key(&turn_id));
+        assert!(state.storage.get_snapshot(turn_id).await.unwrap().is_some());
+        assert!(
+            error.to_string().contains(&format!(
+                "turn {turn_id} not found after automated execution"
+            )),
+            "{error}"
+        );
+        assert_eq!(
+            serde_json::to_value(crate::error::error_code(&error)).unwrap(),
+            "runtime_error"
+        );
+        assert!(!error.to_string().contains("validation error"));
+        assert!(!error.is_retriable());
+    }
+
     #[test]
     fn placeholder_turn_constraint_maps_to_turn_in_progress() {
         // A raw turns-table uniqueness violation must never surface as such —
