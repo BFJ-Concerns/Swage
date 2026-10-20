@@ -749,6 +749,11 @@ describe("SettingsPage", () => {
     editor.dispatchEvent(new Event("input", { bubbles: true }));
     await flushUi();
     expect(editor.getAttribute("aria-invalid")).toBe("true");
+    buttonNamed("Disabled").click();
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    await flushUi();
+    expect(document.querySelector(".notice.error")?.textContent).toContain("Fix the invalid automation JSON before saving.");
+    expect(settingsApi.saveSettings).not.toHaveBeenCalled();
     tab.set("generation");
     await flushUi();
     tab.set("automation");
@@ -756,7 +761,11 @@ describe("SettingsPage", () => {
     const restored = document.querySelector<HTMLTextAreaElement>('[aria-label="Tool bundles"]')!;
     expect(restored.getAttribute("aria-invalid")).toBeNull();
     expect(JSON.parse(restored.value)).toEqual(emptySettings().tool_permissions.bundles);
-    buttonNamed("Disabled").click();
+    expect(document.querySelector(".notice.error"), "discarded JSON drafts must not leave a page warning").toBeNull();
+    expect(settingsApi.saveSettings).not.toHaveBeenCalled();
+    const delay = document.querySelector<HTMLInputElement>('[aria-label="Archive sessions after days"]')!;
+    delay.value = "14";
+    delay.dispatchEvent(new Event("input", { bubbles: true }));
     await new Promise((resolve) => setTimeout(resolve, 850));
     await flushUi();
     expect(settingsApi.saveSettings).toHaveBeenCalledTimes(1);

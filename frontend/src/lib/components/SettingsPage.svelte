@@ -125,6 +125,7 @@
     }, 4000);
     return () => window.clearTimeout(timer);
   });
+  const AUTOMATION_JSON_SAVE_ERROR = "Fix the invalid automation JSON before saving.";
   const ARCHIVE_SAVE_ERROR = "Fix the archive delay in Automation before saving. It must be at least 1 day.";
   let error = $state<string | null>(null);
   $effect(() => {
@@ -140,6 +141,7 @@
       // must describe the valid settings that remain, not the lost draft.
       hasInvalidBundlesJson = false;
       hasInvalidApprovalJson = false;
+      if (error === AUTOMATION_JSON_SAVE_ERROR) error = null;
     }
   });
   const HOT_AUTOSAVE_TABS: ReadonlySet<SettingsTabId> = new Set([
@@ -240,7 +242,7 @@
     const holdSearchDraft = searchIsIncomplete(settings.tool_runtime.search);
     const submittedSearchDraft = JSON.stringify(settings.tool_runtime.search);
     if (hasInvalidBundlesJson || hasInvalidApprovalJson) {
-      error = "Fix the invalid automation JSON before saving.";
+      error = AUTOMATION_JSON_SAVE_ERROR;
       return false;
     }
     for (const [id, preset] of Object.entries(settings.generation_presets)) {
