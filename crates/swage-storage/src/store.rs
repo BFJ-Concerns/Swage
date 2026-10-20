@@ -1221,14 +1221,6 @@ pub trait ChannelQueueStore: Send + Sync {
         origin: PendingChannelOrigin,
     ) -> Result<Vec<ChannelInboundMessage>, StorageError>;
 
-    async fn begin_channel_turn(
-        &self,
-        thread_id: Uuid,
-        agent_id: &str,
-        composed_input: &str,
-        message_ids: Vec<Uuid>,
-    ) -> Result<Turn, StorageError>;
-
     async fn discard_channel_messages(
         &self,
         message_ids: Vec<Uuid>,
@@ -2107,16 +2099,6 @@ mod tests {
             &self,
             _: PendingChannelOrigin,
         ) -> Result<Vec<ChannelInboundMessage>, StorageError> {
-            unimplemented!()
-        }
-
-        async fn begin_channel_turn(
-            &self,
-            _: Uuid,
-            _: &str,
-            _: &str,
-            _: Vec<Uuid>,
-        ) -> Result<Turn, StorageError> {
             unimplemented!()
         }
 

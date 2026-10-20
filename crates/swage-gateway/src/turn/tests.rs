@@ -5634,16 +5634,6 @@ impl swage_storage::store::ChannelQueueStore for MockStorage {
             .collect())
     }
 
-    async fn begin_channel_turn(
-        &self,
-        _thread_id: Uuid,
-        _agent_id: &str,
-        _composed_input: &str,
-        _message_ids: Vec<Uuid>,
-    ) -> Result<Turn, StorageError> {
-        unimplemented!("MockStorage does not support channel queue turn claims")
-    }
-
     async fn discard_channel_messages(
         &self,
         _message_ids: Vec<Uuid>,
