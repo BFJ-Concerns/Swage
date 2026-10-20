@@ -24,7 +24,6 @@
   let { detail, loadState, errorMessage, onNavigate }: Props = $props();
 
   let cancellingRunId = $state<string | null>(null);
-  const cancelling = $derived(cancellingRunId === run?.id && (run?.state === "running" || run?.state === "parked"));
   let cancelError = $state("");
   async function cancel() {
     if (!run || cancelling) return;
@@ -44,6 +43,7 @@
   }
 
   const run = $derived(detail?.run ?? null);
+  const cancelling = $derived(cancellingRunId === run?.id && (run?.state === "running" || run?.state === "parked"));
   const account = $derived(run?.terminal_account ?? null);
 
   // The four standings, in the order a reader wants them: what came back,
