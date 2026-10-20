@@ -20803,7 +20803,7 @@ async fn operation_outcome_turn(
 
 async fn operation_outcome_turn_with_config(
     calls: Vec<(&str, &str, serde_json::Value)>,
-    config: swage_config::ResolvedConfig,
+    mut config: swage_config::ResolvedConfig,
     attendance: TurnAttendance,
 ) -> (
     Arc<swage_storage::SqliteStorage>,
@@ -20811,6 +20811,8 @@ async fn operation_outcome_turn_with_config(
     Vec<ServerEvent>,
     Vec<CompletionRequest>,
 ) {
+    // Exercise host tools without depending on an installed sandbox backend.
+    config.sandbox.enabled = false;
     let root = SwageHomeGuard::new();
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
     let topic = storage.general_scope().await.unwrap();
@@ -20846,7 +20848,7 @@ async fn operation_outcome_turn_with_config(
             },
         ],
     ]);
-    let mut state = AppState::new_with_config_root(
+    let state = AppState::new_with_config_root(
         storage.clone(),
         storage.clone(),
         Arc::new(provider),
@@ -20864,8 +20866,6 @@ async fn operation_outcome_turn_with_config(
         None,
         root.path().to_path_buf(),
     );
-    // Exercise host tools without depending on an installed sandbox backend.
-    state.declared_execution_boundary = Some("container".into());
     let (tx, mut rx) = mpsc::unbounded_channel();
     process_turn_with_composition(
         &state,
