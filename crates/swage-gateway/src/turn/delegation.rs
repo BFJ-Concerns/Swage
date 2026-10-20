@@ -597,7 +597,15 @@ async fn announce_delegated_outcome(
     let event = match turn.state {
         TurnState::Completed | TurnState::Incomplete => ServerEvent::TurnComplete {
             turn_id,
-            incomplete_reason: (turn.state == TurnState::Incomplete).then(|| "max_tokens".into()),
+            incomplete_reason: if turn.state == TurnState::Incomplete {
+                result.as_ref().ok().and_then(|message| {
+                    message.payload["incomplete_reason"]
+                        .as_str()
+                        .map(str::to_owned)
+                })
+            } else {
+                None
+            },
             input_tokens: None,
             output_tokens: None,
             cost_microcents: None,
@@ -1641,6 +1649,7 @@ mod settlement_tests {
     async fn tracked_child(
         ending: TurnState,
         queue_message: bool,
+        incomplete_reason: Option<&str>,
     ) -> (
         AppState,
         Uuid,
@@ -1722,7 +1731,7 @@ mod settlement_tests {
                     payload: if ending == TurnState::Failed {
                         serde_json::json!({"error": "child failed"})
                     } else {
-                        serde_json::json!({"response": "Child answer"})
+                        serde_json::json!({"response": "Child answer", "incomplete_reason": incomplete_reason})
                     },
                 })
                 .await
@@ -1743,7 +1752,7 @@ mod settlement_tests {
 
     #[tokio::test]
     async fn delegated_completion_drains_queued_message_without_another_send() {
-        let (state, session_id, mut events) = tracked_child(TurnState::Completed, true).await;
+        let (state, session_id, mut events) = tracked_child(TurnState::Completed, true, None).await;
         let ended = tokio::time::timeout(std::time::Duration::from_secs(3), async {
             while let Some(event) = events.recv().await {
                 if matches!(event, crate::websocket::ServerEvent::TurnComplete { .. }) {
@@ -1786,7 +1795,7 @@ mod settlement_tests {
 
     #[tokio::test]
     async fn delegated_completion_settles_open_view() {
-        let (_, _, mut events) = tracked_child(TurnState::Completed, false).await;
+        let (_, _, mut events) = tracked_child(TurnState::Completed, false, None).await;
         assert!(
             matches!(
                 events.try_recv(),
@@ -1796,9 +1805,37 @@ mod settlement_tests {
         );
     }
 
+    async fn assert_incomplete_reason(reason: Option<&str>) {
+        let (_, _, mut events) = tracked_child(TurnState::Incomplete, false, reason).await;
+        let crate::websocket::ServerEvent::TurnComplete {
+            incomplete_reason, ..
+        } = events
+            .try_recv()
+            .expect("incomplete child must settle the open view")
+        else {
+            panic!("incomplete child must emit TurnComplete");
+        };
+        assert_eq!(incomplete_reason.as_deref(), reason);
+    }
+
+    #[tokio::test]
+    async fn delegated_incomplete_length_preserves_reason() {
+        assert_incomplete_reason(Some("length")).await;
+    }
+
+    #[tokio::test]
+    async fn delegated_incomplete_content_filter_preserves_reason() {
+        assert_incomplete_reason(Some("content_filter")).await;
+    }
+
+    #[tokio::test]
+    async fn delegated_incomplete_unknown_reason_stays_absent() {
+        assert_incomplete_reason(None).await;
+    }
+
     #[tokio::test]
     async fn delegated_failure_settles_open_view() {
-        let (_, _, mut events) = tracked_child(TurnState::Failed, false).await;
+        let (_, _, mut events) = tracked_child(TurnState::Failed, false, None).await;
         assert!(
             matches!(events.try_recv(), Ok(crate::websocket::ServerEvent::Error { code, message }) if code == "agent_error" && message == "child failed"),
             "failed delegation must tell the open child view its recorded error"
