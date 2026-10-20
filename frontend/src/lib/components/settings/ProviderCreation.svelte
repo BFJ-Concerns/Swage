@@ -88,15 +88,6 @@
 
 <style>
   .kind-guidance { display: block; max-width: 32ch; margin-top: 6px; font-family: var(--font-body); font-size: var(--font-label-sm); line-height: 1.4; text-transform: none; letter-spacing: 0; }
-  .field { display: grid; grid-template-columns: 220px 1fr; gap: 24px; border-top: 1px solid var(--rule-soft); padding: 14px 0; align-items: baseline; }
-  .key { font-family: var(--font-mono); font-weight: 500; font-size: 11px; line-height: 1.5; letter-spacing: 0.18em; text-transform: uppercase; }
-  .key small { display: block; margin-top: 4px; font-family: var(--font-body); font-weight: 400; font-size: 11px; line-height: 1.4; letter-spacing: 0; text-transform: none; color: var(--ink-soft); }
-  .val { display: flex; gap: 10px; flex-wrap: wrap; }
-  .val-stack { flex-direction: column; align-items: stretch; gap: 12px; }
-  .opt { position: relative; display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); padding: 6px 12px; font-family: var(--font-display); font-weight: 400; font-size: 14px; line-height: 1; letter-spacing: 0.04em; text-transform: uppercase; cursor: pointer; isolation: isolate; }
-  .opt:hover:not(:disabled):not(.active) { background: color-mix(in srgb, var(--ink) 8%, transparent); }
-  .opt.active { background: var(--ink); color: var(--paper); }
-  .opt.active::before { content: ""; position: absolute; inset: 0; background: var(--accent); transform: translate(2px, 2px); z-index: -1; mix-blend-mode: var(--shadow-blend); opacity: var(--shadow-opacity); pointer-events: none; }
   .opt-anchor { padding: 7px 16px 7px 7px; gap: 12px; border-width: 1.5px; }
   .opt-anchor .anchor-mark { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; margin: -1px 0; border: 1px solid currentColor; color: var(--ink-orange); font-family: var(--font-mono); font-weight: 500; font-size: 14px; line-height: 1; }
   .opt-anchor:hover:not(:disabled):not(.active) { background: var(--paper); }
@@ -114,9 +105,7 @@
   .add-row > .opt:nth-child(4) { animation-delay: 105ms; }
   .add-row > .opt:nth-child(5) { animation-delay: 140ms; }
   .add-row > .opt:nth-child(6) { animation-delay: 200ms; }
-  .text { width: 100%; max-width: 480px; padding: 9px 11px; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); font-family: var(--font-body); font-size: 13px; line-height: 1.4; }
   .text.search { max-width: 320px; }
-  .text:focus { outline: none; background: color-mix(in srgb, var(--accent) 6%, transparent); }
   .search-row, .opt-row { display: flex; gap: 8px; flex-wrap: wrap; }
   .compatible-form { flex-wrap: wrap; }
   .compatible-field { display: flex; flex-direction: column; gap: 4px; min-width: 220px; flex: 1; }
@@ -126,5 +115,4 @@
   .field-error:empty { display: none; }
   @keyframes chip-in { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: translateX(0); } }
   @media (prefers-reduced-motion: reduce) { .add-row > .opt { animation: none; } }
-  @media (max-width: 760px) { .field { grid-template-columns: 1fr; gap: 10px; } }
 </style>

@@ -6203,30 +6203,85 @@ impl swage_storage::store::OrientationCardStore for MockStorage {
     }
 }
 
+fn mock_secret_record(
+    secret: swage_storage::NewSecretRecord,
+) -> (swage_storage::SecretRecord, Option<String>) {
+    let record = swage_storage::SecretRecord {
+        id: secret.id,
+        name: secret.name,
+        material_kind: secret.material_kind,
+        owner_kind: secret.owner_kind,
+        backend_kind: secret.backend_kind.clone(),
+        scope_kind: secret.scope_kind,
+        scope_id: secret.scope_id,
+        reference: format!("secret://{}/{}", secret.backend_kind, secret.id),
+        external_reference: secret.external_reference,
+        metadata: secret.metadata,
+        status: "active".into(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        revoked_at: None,
+    };
+    (record, secret.value)
+}
+
 #[async_trait]
 impl swage_storage::store::SecretStore for MockStorage {
+    async fn write_credentials_with_audit(
+        &self,
+        creations: Vec<swage_storage::NewSecretRecord>,
+        rotations: Vec<(Uuid, String)>,
+        events: Vec<swage_storage::NewAuditEvent>,
+    ) -> Result<(), StorageError> {
+        let mut db = self.db.lock().await;
+        if self.fail_audit_writes.load(Ordering::SeqCst) {
+            return Err(StorageError::QueryFailed(
+                "injected audit write failure".into(),
+            ));
+        }
+        for (id, _) in &rotations {
+            if !db.secrets.contains_key(id) && !creations.iter().any(|secret| secret.id == *id) {
+                return Err(StorageError::NotFound {
+                    entity: "secret".into(),
+                    id: id.to_string(),
+                });
+            }
+        }
+        for secret in creations {
+            let (record, value) = mock_secret_record(secret);
+            if let Some(value) = value {
+                db.managed_secret_values.insert(record.id, value);
+            }
+            db.secrets.insert(record.id, record);
+        }
+        for (id, value) in rotations {
+            db.secrets
+                .get_mut(&id)
+                .expect("rotation was validated")
+                .updated_at = chrono::Utc::now();
+            db.managed_secret_values.insert(id, value);
+        }
+        db.audit_events
+            .extend(events.into_iter().map(|event| swage_storage::AuditEvent {
+                id: event.id,
+                session_id: event.session_id,
+                entity_kind: event.entity_kind,
+                entity_id: event.entity_id,
+                event_kind: event.event_kind,
+                summary: event.summary,
+                metadata: event.metadata,
+                created_at: chrono::Utc::now(),
+            }));
+        Ok(())
+    }
+
     async fn create_secret(
         &self,
         secret: swage_storage::NewSecretRecord,
     ) -> Result<swage_storage::SecretRecord, StorageError> {
-        let record = swage_storage::SecretRecord {
-            id: secret.id,
-            name: secret.name,
-            material_kind: secret.material_kind,
-            owner_kind: secret.owner_kind,
-            backend_kind: secret.backend_kind.clone(),
-            scope_kind: secret.scope_kind,
-            scope_id: secret.scope_id,
-            reference: format!("secret://{}/{}", secret.backend_kind, secret.id),
-            external_reference: secret.external_reference,
-            metadata: secret.metadata,
-            status: "active".into(),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            revoked_at: None,
-        };
+        let (record, value) = mock_secret_record(secret);
         let mut db = self.db.lock().await;
-        if let Some(value) = secret.value {
+        if let Some(value) = value {
             db.managed_secret_values.insert(record.id, value);
         }
         db.secrets.insert(record.id, record.clone());
