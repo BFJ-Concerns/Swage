@@ -383,7 +383,7 @@
         {:else}
           <!-- Assistant messages render as markdown. -->
           <div
-            class="message-content assistant-content markdown-body"
+            class="message-content assistant-content markdown-body riso-tables"
             class:interrupted={message.turn_state === "interrupted" || message.turn_state === "cancelled" ||
               message.turn_state === "failed" || message.turn_state === "incomplete"}
           >
@@ -481,7 +481,7 @@
     {#if isGenerating || streamedContent}
       <div class="message assistant streaming" aria-label="Assistant message">
         <span class="role-label">Assistant</span>
-        <div class="message-content assistant-content markdown-body">
+        <div class="message-content assistant-content markdown-body riso-tables">
           {#if shouldRenderMarkdown}
             <!-- Incremental markdown render — re-parses on each token. -->
             <!-- eslint-disable-next-line svelte/no-at-html-tags -->
@@ -911,31 +911,6 @@
     text-decoration: underline;
     text-decoration-thickness: 1px;
     text-underline-offset: 2px;
-  }
-
-  .markdown-body :global(table) {
-    border-collapse: collapse;
-    width: 100%;
-    margin: 0.5em 0;
-    font-size: 0.875em;
-    border: 1px solid var(--ink);
-  }
-
-  .markdown-body :global(th),
-  .markdown-body :global(td) {
-    border: 1px solid var(--rule-soft);
-    padding: 6px 10px;
-    text-align: left;
-  }
-
-  .markdown-body :global(th) {
-    background: var(--ink);
-    color: var(--paper);
-    font-family: var(--font-mono);
-    font-weight: 500;
-    font-size: 11px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
   }
 
   /* An assistant reply spans the column, so its prose carries the readable

@@ -25,6 +25,7 @@ vi.mock("../api/turns", () => ({
 
 import { fetchTurnContext } from "../api/turns";
 import MessageDisplay from "../components/MessageDisplay.svelte";
+import { renderedStyles } from "./rendered-styles";
 import messageDisplaySource from "../components/MessageDisplay.svelte?raw";
 import type { ConversationStore } from "../stores/conversations";
 import {
@@ -1207,9 +1208,7 @@ describe("assistant message width", () => {
       css: "external",
       cssHash: () => scope,
     });
-    const style = document.createElement("style");
-    style.textContent = css!.code;
-    document.head.append(style);
+    const style = renderedStyles(css!.code);
     onTestFinished(() => style.remove());
   }
 
