@@ -716,7 +716,10 @@ describe("SettingsPage", () => {
     await flushUi();
     expect(document.querySelector<HTMLInputElement>('[aria-label="Enable web search"]')!.checked).toBe(true);
     expect(document.querySelector<HTMLInputElement>('[aria-label="Search base URL"]')?.value).toBe("");
-  });
+    await new Promise((resolve) => setTimeout(resolve, 4100));
+    await flushUi();
+    expect(document.body.textContent).toContain("Saved provider/model settings require a gateway restart");
+  }, 10_000);
 
   it.each(["restore", "display", "generation"])("clears the obsolete archive notice on %s", async (action) => {
     const tab = writable<"automation" | "display" | "generation">("automation");

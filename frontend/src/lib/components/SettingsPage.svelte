@@ -290,6 +290,8 @@
             provider.has_credential = savedProvider.has_credential;
           }
         }
+        pendingSettings.restart_required = saved.restart_required;
+        pendingSettings.can_restart = saved.can_restart;
         settings = pendingSettings;
       }
       if (holdSearchDraft) settings.tool_runtime.search = searchDraft;
