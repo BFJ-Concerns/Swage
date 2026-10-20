@@ -606,7 +606,7 @@ fn check_tracker_tags() -> Result<()> {
     for file in files {
         let syntax = match file.extension().and_then(|extension| extension.to_str()) {
             Some("rs") => SourceSyntax::Rust,
-            Some("ts") => SourceSyntax::TypeScript,
+            Some("ts" | "js" | "mjs" | "cjs") => SourceSyntax::TypeScript,
             Some("svelte") => SourceSyntax::Svelte,
             _ => continue,
         };

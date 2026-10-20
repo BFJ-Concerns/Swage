@@ -110,3 +110,33 @@ fn tracker_tags_ignore_developer_local_files() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("tracked.rs:1:4"));
 }
+
+#[test]
+fn tracker_tags_report_javascript_comments() {
+    let repository = TestRepository::new("javascript");
+    let root = &repository.0;
+    assert!(
+        Command::new("git")
+            .arg("init")
+            .arg(root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    for extension in ["js", "mjs", "cjs"] {
+        fs::write(root.join(format!("source.{extension}")), "// [a1b2]\n").unwrap();
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .current_dir(root)
+        .arg("check-tracker-tags")
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "JavaScript comments were skipped");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for extension in ["js", "mjs", "cjs"] {
+        assert!(
+            stderr.contains(&format!("source.{extension}:1:4")),
+            "{stderr}"
+        );
+    }
+}
