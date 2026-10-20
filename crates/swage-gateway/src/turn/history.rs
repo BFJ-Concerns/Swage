@@ -3,11 +3,11 @@ use super::{
     ToolResult, Uuid, build_tool_round_messages,
 };
 
+#[cfg(test)]
 pub(super) async fn rebuild_thread_history_messages(
     storage: &dyn swage_storage::store::Storage,
     thread_id: Uuid,
 ) -> Result<Vec<ChatMessage>, GatewayError> {
-    // A named-child continuation is loaded before its tool offering is known.
     rebuild_thread_history_messages_with_retrieval(storage, thread_id, None).await
 }
 

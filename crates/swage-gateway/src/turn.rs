@@ -81,7 +81,6 @@ pub use entry_points::process_turn;
 pub(crate) use entry_points::*;
 #[cfg(test)]
 use history::compact_tool_replay_messages;
-use history::rebuild_thread_history_messages;
 pub(crate) use inbound_hooks::*;
 pub(crate) use operator_guidance::*;
 #[cfg(test)]

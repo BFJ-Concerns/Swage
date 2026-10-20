@@ -12796,6 +12796,185 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
     );
 }
 
+async fn assert_named_child_replay_accounts_for_reads(offered: bool) {
+    let _swage_home = SwageHomeGuard::isolate();
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage.create_session(new_session(topic.id)).await.unwrap();
+    let thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "gateway".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let parent_turn = storage
+        .create_turn(NewTurn {
+            thread_id: thread.id,
+            agent_id: "gateway".into(),
+            state: TurnState::Processing,
+            user_input: Some("delegate twice".into()),
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+    storage
+        .upsert_agent_definition(swage_storage::NewAgentDefinition {
+            id: "reader".into(),
+            topic_id: Some(topic.id),
+            display_name: "Reader".into(),
+            description: String::new(),
+            instructions: String::new(),
+            model_id: None,
+            tool_permissions: Some(serde_json::json!({
+                "allow": if offered { vec!["echo", "tool_result_read"] } else { vec!["echo"] },
+                "deny": [], "bundles": {}, "require_approval": []
+            })),
+            skills: vec![],
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .unwrap();
+    let done = || StreamChunk::Done {
+        finish_reason: None,
+    };
+    let (provider, captured) = CapturingMultiRoundProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "long-read".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({"text": "x".repeat(6500) + "READ-MARKER"}),
+            },
+            done(),
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "first complete".into(),
+            },
+            done(),
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "continued".into(),
+            },
+            done(),
+        ],
+    ]);
+    let state = AppState::for_test(
+        storage.clone() as Arc<dyn swage_storage::store::Storage>,
+        storage.clone() as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(provider),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(EchoMockTool) as Arc<dyn Tool>,
+            Arc::new(crate::tool::tool_result_read::ToolResultReadTool {
+                max_output_bytes: 65536,
+            }),
+        ]),
+        None,
+    );
+    let handler = GatewayDelegationHandler::new(state.clone());
+    for call_id in ["first", "continue"] {
+        let outcome = handler
+            .handle_delegation(
+                "reader",
+                "report what you read",
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("reader"),
+                DispatchContextComposition::default(),
+                call_id,
+                "gateway",
+                parent_turn.id,
+                topic.id,
+                CancellationToken::new(),
+                DelegateCompletionMode::Wait,
+            )
+            .await
+            .expect("named child completes");
+        assert!(matches!(outcome, DelegationOutcome::Completed(_)));
+    }
+    let captured = captured.lock().unwrap();
+    assert_eq!(
+        captured.len(),
+        3,
+        "initial call, full result, and continuation"
+    );
+    let request = &captured[2];
+    assert_eq!(
+        request
+            .tool_definitions
+            .iter()
+            .any(|tool| tool["name"] == "tool_result_read"),
+        offered
+    );
+    let replay = request
+        .messages
+        .iter()
+        .filter_map(ChatMessage::tool_replay)
+        .flatten()
+        .find_map(|part| match part {
+            swage_core::ToolReplayPart::ToolResult {
+                call_id, content, ..
+            } if call_id == "long-read" => Some(content),
+            _ => None,
+        })
+        .expect("continued child receives earlier tool result");
+    let envelope: serde_json::Value = serde_json::from_str(replay).unwrap();
+    assert_eq!(envelope["truncated"], true);
+    assert!(
+        !envelope["preview"]
+            .as_str()
+            .unwrap()
+            .contains("READ-MARKER")
+    );
+    assert!(captured[1].messages.iter().filter_map(ChatMessage::tool_replay).flatten().any(|part| matches!(
+        part, swage_core::ToolReplayPart::ToolResult { content, .. } if content.contains("READ-MARKER")
+    )), "the earlier turn received the whole result");
+    assert!(
+        envelope["note"].is_string(),
+        "continued named child must receive an elision note matching its offering: {envelope}"
+    );
+    let expected: swage_core::CompactToolReplay = serde_json::from_str(replay).unwrap();
+    assert_eq!(
+        envelope["note"],
+        serde_json::to_value(
+            expected.with_elision_note(swage_core::ReplayRetrieval::with_read_tool(offered))
+        )
+        .unwrap()["note"]
+    );
+    assert_eq!(
+        envelope["note"]
+            .as_str()
+            .unwrap()
+            .contains("call tool_result_read"),
+        offered
+    );
+    assert_eq!(
+        envelope["note"]
+            .as_str()
+            .unwrap()
+            .contains("No tool in this session"),
+        !offered
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn named_child_replay_accounts_for_reads_with_retrieval() {
+    assert_named_child_replay_accounts_for_reads(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn named_child_replay_accounts_for_reads_without_retrieval() {
+    assert_named_child_replay_accounts_for_reads(false).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before() {
     let _swage_home = SwageHomeGuard::isolate();
