@@ -396,6 +396,15 @@ export function createConversationStore(): ConversationStore {
 
     settleUnansweredRequest(settlement, conversationId) {
       const activeConversation = get(activeConversationStore);
+      const settledConversationId = conversationId ?? activeConversation?.id;
+      const summary = get(conversationsStore).find(conversation => conversation.id === settledConversationId);
+      if (summary) {
+        updateConversationSummary(summary.id, {
+          content: "",
+          timestamp: summary.last_activity,
+          turn_state: settlement.turn_state,
+        });
+      }
       if (!activeConversation || (conversationId && activeConversation.id !== conversationId)) return;
       const index = activeConversation.messages.findLastIndex(
         (message) => message.role === "user" && message.turn_state === "pending",

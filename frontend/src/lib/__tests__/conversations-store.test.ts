@@ -662,6 +662,33 @@ describe("durable local updates", () => {
     expect(store.activeConversation!.messages[0].turn_state).toBe("interrupted");
   });
 
+  it("settles approval timeout after switching conversations without changing the displayed thread", async () => {
+    const store = createConversationStore();
+    vi.mocked(api.listConversations).mockResolvedValueOnce([makeSummary("conv-1"), makeSummary("conv-2")]);
+    await store.loadConversations("proj-1");
+    vi.mocked(api.getConversation).mockResolvedValueOnce(makeDetail("conv-1"));
+    await store.selectConversation("conv-1");
+    store.appendOptimisticUserMessage({ content: "Use echo", timestamp: "2026-01-01T00:02:00Z" });
+    const stream = createStreamingStore({ conversationStore: store });
+    stream.handleServerEvent({
+      type: "approval_required", approval_id: "approval-1", turn_id: "turn-1",
+      agent_id: "gateway", kind: "tool", tool_name: "echo", prompt: "Allow echo?",
+      timeout_at: "2026-01-01T00:03:00Z", timeout_policy: "deny",
+    }, "conv-1");
+    expect(stream.streamFor!("conv-1").pendingApproval).not.toBeNull();
+    const displayed = { ...makeDetail("conv-2"), messages: [{ role: "user" as const, content: "Other request", timestamp: "2026-01-01T00:02:30Z", turn_state: "pending" as const }] };
+    vi.mocked(api.getConversation).mockResolvedValueOnce(displayed);
+    await store.selectConversation("conv-2");
+    stream.handleServerEvent({ type: "error", code: "approval_timeout", message: "approval timed out before tool execution; turn interrupted" }, "conv-1");
+    const summary = store.conversations.find(conversation => conversation.id === "conv-1")!;
+    expect(summary.latest_turn_state).toBe("interrupted");
+    expect(summary.has_interrupted_turn).toBe(true);
+    expect(summary.message_preview).toBe("Use echo");
+    expect(summary.last_activity).toBe("2026-01-01T00:02:00Z");
+    expect(store.activeConversation).toEqual(displayed);
+    expect(store.conversations.find(conversation => conversation.id === "conv-2")!.latest_turn_state).toBeUndefined();
+  });
+
   it("marks the summary as interrupted when an interrupted assistant message is appended", async () => {
     const store = createConversationStore();
     vi.mocked(api.listConversations).mockResolvedValueOnce([
