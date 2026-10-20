@@ -246,7 +246,12 @@ describe("OperatorDashboard", () => {
       await vi.waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/workflow-runs/run-1/cancel", { method: "POST" }));
       await vi.advanceTimersByTimeAsync(0);
       vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue({ ...overview, sessions: [], workflow_runs: [] });
-      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS);
+      const reads = vi.mocked(operatorApi.fetchOperatorOverview).mock.calls.length;
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS * 2);
+      expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledTimes(reads);
+      expect(document.querySelector('.ledger a[href="/workflow-runs/run-1"]')).not.toBeNull();
+      flushSync(() => [...document.querySelectorAll<HTMLButtonElement>(".header-actions button")].find((button) => button.textContent?.trim() === "Refresh")!.click());
+      await vi.advanceTimersByTimeAsync(0);
       expect(document.querySelector('.ledger a[href="/workflow-runs/run-1"]')).toBeNull();
       const accountLink = Array.from(document.querySelectorAll("a"))
         .find((link) => link.textContent?.trim() === "View run account");

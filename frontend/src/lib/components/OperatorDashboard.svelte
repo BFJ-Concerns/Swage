@@ -33,7 +33,6 @@
   let scheduleRuns = $state<Record<string, ScheduleRun[]>>({});
   let showHistory = $state(false);
   let runAccountId = $state<string | null>(null);
-  let overviewVersion = 0;
   const approvalsIdle = $derived((overview?.approvals.length ?? 0) === 0);
 
   function describeSpec(schedule: Schedule): string {
@@ -123,7 +122,6 @@
   }
 
   async function loadOverview(): Promise<void> {
-    overviewVersion += 1;
     isLoading = true;
     errorMessage = null;
 
@@ -188,31 +186,6 @@
 
   onMount(() => {
     void loadOverview();
-    let disposed = false;
-    let refreshing = false;
-    const timer = setInterval(async () => {
-      if (isLoading || activeActionKey || refreshing) return;
-      const version = overviewVersion;
-      refreshing = true;
-      try {
-        const refreshed = await fetchOperatorOverview();
-        if (disposed || version !== overviewVersion) return;
-        if (!overview) overview = refreshed;
-        else {
-          overview.gateway = refreshed.gateway;
-          overview.sessions = refreshed.sessions;
-          overview.workflow_runs = refreshed.workflow_runs;
-        }
-      }
-      catch (error) {
-        if (!disposed && version === overviewVersion) {
-          errorMessage = error instanceof Error ? error.message : "Failed to refresh fleet";
-        }
-      } finally {
-        refreshing = false;
-      }
-    }, UNSETTLED_RUN_REFRESH_MS);
-    return () => { disposed = true; clearInterval(timer); };
   });
 </script>
 
