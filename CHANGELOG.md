@@ -150,6 +150,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Fenced code in assistant replies stays readable and preserves its original text when conversations are reopened, without literal highlighting markup or repeated escaping.
 - Plain-text assistant replies keep an 80-character prose measure while streaming and after completion.
 - Session previews show readable HTML text instead of raw tags.
 - Conversation and surface markdown tables share consistent styling with visible cell boundaries.
