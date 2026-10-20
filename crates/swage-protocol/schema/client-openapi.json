@@ -346,11 +346,15 @@
             "format": "date-time",
             "type": "string"
           },
+          "integration": {
+            "type": "string"
+          },
           "link_code": {
             "type": "string"
           }
         },
         "required": [
+          "integration",
           "link_code",
           "expires_at"
         ],
@@ -10512,6 +10516,36 @@
           }
         },
         "summary": "Read unredeemed channel link codes."
+      },
+      "post": {
+        "operationId": "create_channel_link_code",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateChannelLinkCodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelLinkCodeResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Issue a single-use channel link code."
       }
     },
     "/api/secrets": {

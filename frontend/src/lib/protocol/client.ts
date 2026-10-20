@@ -3,6 +3,7 @@
 // change the manifest and regenerate.
 
 import type { ChannelLinkCodeListResponse } from "./ChannelLinkCodeListResponse";
+import type { ChannelLinkCodeResponse } from "./ChannelLinkCodeResponse";
 import type { ChannelLinkListResponse } from "./ChannelLinkListResponse";
 import type { ChannelStatusListResponse } from "./ChannelStatusListResponse";
 import type { ConversationBranchListResponse } from "./ConversationBranchListResponse";
@@ -11,6 +12,7 @@ import type { ConversationDetail } from "./ConversationDetail";
 import type { ConversationListResponse } from "./ConversationListResponse";
 import type { ConversationResponse } from "./ConversationResponse";
 import type { ConversationThreadDetail } from "./ConversationThreadDetail";
+import type { CreateChannelLinkCodeRequest } from "./CreateChannelLinkCodeRequest";
 import type { CreateConversationBranchRequest } from "./CreateConversationBranchRequest";
 import type { CreateConversationRequest } from "./CreateConversationRequest";
 import type { CreateSurfaceAnnotationRequest } from "./CreateSurfaceAnnotationRequest";
@@ -89,6 +91,11 @@ export async function listChannelStatuses(): Promise<ChannelStatusListResponse> 
 /** List linked channel conversations. */
 export async function listChannelLinks(): Promise<ChannelLinkListResponse> {
   return request<ChannelLinkListResponse>("GET", `/api/onboarding/channels`);
+}
+
+/** Issue a single-use channel link code. */
+export async function createChannelLinkCode(body: CreateChannelLinkCodeRequest): Promise<ChannelLinkCodeResponse> {
+  return request<ChannelLinkCodeResponse>("POST", `/api/onboarding/channels/link-codes`, body);
 }
 
 /** Read unredeemed channel link codes. */

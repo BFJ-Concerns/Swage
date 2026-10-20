@@ -18,7 +18,7 @@ const link = {
 };
 
 function mockLists(
-  codes: () => unknown = () => [{ link_code: code, expires_at: expiry }],
+  codes: () => unknown = () => [{ integration: "telegram", link_code: code, expires_at: expiry }],
   links: () => unknown = () => [link],
 ) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
@@ -52,10 +52,10 @@ function refresh() {
 }
 
 describe("Channels settings", () => {
-  it("reads statuses, links and verbatim codes with local expiry through GET only", async () => {
+  it("reads statuses, links and Telegram commands with local expiry", async () => {
     const fetchSpy = mockLists();
     openChannels();
-    await vi.waitFor(() => expect(document.querySelector("code")?.textContent).toBe(code));
+    await vi.waitFor(() => expect(document.querySelector("code")?.textContent).toBe(`/link ${code}`));
     expect(document.querySelector('[aria-label="Channel statuses"]')?.textContent).toContain("connected");
     expect(document.querySelector('[aria-label="Channel statuses"]')?.textContent).toContain("Deliveries7");
     const links = document.querySelector('[aria-label="Channel links"]');
@@ -65,7 +65,7 @@ describe("Channels settings", () => {
     expect(document.querySelector("time")?.getAttribute("datetime")).toBe(expiry);
     expect(document.querySelector("time")?.textContent).toBe(new Date(expiry).toLocaleString());
     expect(document.body.textContent).not.toContain("Non-functional");
-    expect(document.querySelector("form, input, textarea, select")).toBeNull();
+    expect(document.querySelector("select")).not.toBeNull();
     expect(fetchSpy.mock.calls).toEqual([
       ["/api/channels", { method: "GET" }],
       ["/api/onboarding/channels", { method: "GET" }],
@@ -74,15 +74,15 @@ describe("Channels settings", () => {
   });
 
   it("re-reads after reopening and removes a previously displayed code on refresh", async () => {
-    let listedCodes = [{ link_code: code, expires_at: expiry }];
+    let listedCodes = [{ integration: "telegram", link_code: code, expires_at: expiry }];
     const fetchSpy = mockLists(() => listedCodes);
     openChannels();
-    await vi.waitFor(() => expect(document.querySelector("code")?.textContent).toBe(code));
+    await vi.waitFor(() => expect(document.querySelector("code")?.textContent).toBe(`/link ${code}`));
     unmount(component!);
     component = undefined;
     openChannels();
     await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(6));
-    await vi.waitFor(() => expect(document.querySelector("code")?.textContent).toBe(code));
+    await vi.waitFor(() => expect(document.querySelector("code")?.textContent).toBe(`/link ${code}`));
     listedCodes = [];
     refresh();
     await vi.waitFor(() => expect(document.body.textContent).toContain("No unredeemed link codes."));
@@ -94,19 +94,55 @@ describe("Channels settings", () => {
   it("reports a listing failure and retries without showing stale codes", async () => {
     const fetchSpy = mockLists();
     openChannels();
-    await vi.waitFor(() => expect(document.querySelector("code")?.textContent).toBe(code));
+    await vi.waitFor(() => expect(document.querySelector("code")?.textContent).toBe(`/link ${code}`));
     fetchSpy.mockRejectedValueOnce(new Error("channel service unavailable"));
     refresh();
     await vi.waitFor(() => expect(document.querySelector('[aria-label="Channel inventory"] [role="alert"]')?.textContent).toBe("channel service unavailable"));
     expect(document.querySelector("code")).toBeNull();
     refresh();
-    await vi.waitFor(() => expect(document.querySelector("code")?.textContent).toBe(code));
+    await vi.waitFor(() => expect(document.querySelector("code")?.textContent).toBe(`/link ${code}`));
     expect(document.querySelector('[aria-label="Channel inventory"] [role="alert"]')).toBeNull();
   });
 });
 
 
 describe("Channel linking controls", () => {
+  it("issues a code for the chosen integration through the gateway", async () => {
+    const fetchSpy = mockLists();
+    openChannels();
+    await vi.waitFor(() => expect(document.querySelector("select")).not.toBeNull());
+    const selector = document.querySelector("select")!;
+    flushSync(() => { selector.value = "dev_thread"; selector.dispatchEvent(new Event("change", { bubbles: true })); });
+    const button = Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Issue link code");
+    expect(button, "Settings must offer code issuance").toBeDefined();
+    fetchSpy.mockImplementationOnce(async () => Response.json({ integration: "dev_thread", link_code: "new-thread-code", expires_at: expiry }));
+    flushSync(() => button!.click());
+    await vi.waitFor(() => expect(fetchSpy.mock.calls.some(([url, options]) =>
+      url === "/api/onboarding/channels/link-codes" && options?.method === "POST" &&
+      JSON.parse(options.body as string).integration === "dev_thread"
+    )).toBe(true));
+    await vi.waitFor(() => expect(document.body.textContent).toContain("new-thread-code"));
+  });
+
+  it("shows each code with instructions for its own integration", async () => {
+    mockLists(() => [
+      { integration: "telegram", link_code: "telegram-code", expires_at: expiry },
+      { integration: "dev_dm", link_code: "dm-code", expires_at: expiry },
+      { integration: "dev_thread", link_code: "thread-code", expires_at: expiry },
+    ]);
+    openChannels();
+    await vi.waitFor(() => expect(document.querySelectorAll('[aria-label="Unredeemed link codes"] article')).toHaveLength(3));
+    const articles = Array.from(document.querySelectorAll('[aria-label="Unredeemed link codes"] article'));
+    expect(articles[0].querySelector("code")?.textContent).toBe("/link telegram-code");
+    expect(articles[0].textContent).toContain("Telegram bot");
+    expect(articles[1].textContent).toContain("development direct-message integration");
+    expect(articles[2].textContent).toContain("development thread integration");
+    for (const article of articles.slice(1)) {
+      expect(article.textContent).not.toContain("/link");
+      expect(article.textContent).not.toContain("Telegram");
+    }
+  });
+
   it("updates distinct colon-containing link tuples independently", async () => {
     let links = [
       { ...link, account: "a:b", conversation: "c", agent_id: "first-agent" },

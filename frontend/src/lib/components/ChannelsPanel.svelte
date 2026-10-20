@@ -1,17 +1,34 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { listChannelStatuses, listChannelLinks, listChannelLinkCodes } from "../api/channels";
+  import { listChannelStatuses, listChannelLinks, listChannelLinkCodes, createChannelLinkCode } from "../api/channels";
   import type { ChannelStatusResponse } from "../protocol/ChannelStatusResponse";
   import type { ChannelLinkResponse } from "../protocol/ChannelLinkResponse";
   import type { ChannelLinkCodeResponse } from "../protocol/ChannelLinkCodeResponse";
+  import type { ExternalChannelIntegration } from "../protocol/ExternalChannelIntegration";
 
   let channels = $state<ChannelStatusResponse[]>([]);
   let links = $state<ChannelLinkResponse[]>([]);
   let codes = $state<ChannelLinkCodeResponse[]>([]);
+  let integration = $state<ExternalChannelIntegration>("telegram");
+  let issuing = $state(false);
+  let issueError = $state<string | null>(null);
   let loading = $state(true);
   let error = $state<string | null>(null);
 
   onMount(() => { void load(); });
+
+  async function issueCode(): Promise<void> {
+    issuing = true;
+    issueError = null;
+    try {
+      const issued = await createChannelLinkCode({ integration });
+      codes = [issued, ...codes];
+    } catch (err) {
+      issueError = err instanceof Error ? err.message : "Failed to issue a link code.";
+    } finally {
+      issuing = false;
+    }
+  }
 
   async function load(): Promise<void> {
     loading = true;
@@ -29,7 +46,7 @@
 </script>
 
 <section class="channels" aria-label="Channel inventory">
-  <button type="button" onclick={load} disabled={loading}>Refresh</button>
+  <button type="button" onclick={load} disabled={loading || issuing}>Refresh</button>
   {#if loading}
     <p>Loading channels…</p>
   {:else if error}
@@ -69,10 +86,33 @@
     </section>
     <section aria-label="Unredeemed link codes">
       <h2>Link codes</h2>
-      <p>Type the code into the bot to link your chat. Expiry times are shown in your local time.</p>
+      <form onsubmit={(event) => { event.preventDefault(); void issueCode(); }}>
+        <label for="link-integration">Integration</label>
+        <select id="link-integration" bind:value={integration} disabled={issuing}>
+          <option value="telegram">Telegram</option>
+          <option value="dev_dm">Development direct messages</option>
+          <option value="dev_thread">Development threads</option>
+        </select>
+        <button type="submit" disabled={issuing}>{issuing ? "Issuing…" : "Issue link code"}</button>
+      </form>
+      {#if issueError}<p role="alert">{issueError}</p>{/if}
+      <p>Expiry times are shown in your local time.</p>
       {#each codes as code (code.link_code)}
         <article>
-          <code>{code.link_code}</code>
+          <h3>{code.integration}</h3>
+          {#if code.integration === "telegram"}
+            <p>Send this command to your Telegram bot to link your chat.</p>
+            <code>{`/link ${code.link_code}`}</code>
+          {:else if code.integration === "dev_dm"}
+            <p>This code belongs to the development direct-message integration. Its inbound API links conversations directly; code redemption is not available.</p>
+            <code>{code.link_code}</code>
+          {:else if code.integration === "dev_thread"}
+            <p>This code belongs to the development thread integration. Its inbound API links threads directly; code redemption is not available.</p>
+            <code>{code.link_code}</code>
+          {:else}
+            <p>Redeem this code through the {code.integration} integration.</p>
+            <code>{code.link_code}</code>
+          {/if}
           <p>Expires <time datetime={code.expires_at}>{new Date(code.expires_at).toLocaleString()}</time></p>
         </article>
       {:else}
@@ -83,7 +123,7 @@
 </section>
 
 <style>
-  .channels, section { display: grid; gap: 14px; }
+  .channels, section, form { display: grid; gap: 14px; }
   article { border: 1px solid var(--rule-soft); padding: 16px; min-width: 0; }
   h2, h3, p { margin: 0; }
   h2, h3 { font-family: var(--font-display); font-weight: 400; }
@@ -92,6 +132,7 @@
   dt { color: var(--ink-soft); }
   dd { margin: 0; overflow-wrap: anywhere; }
   code { font-family: var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }
+  select { font: inherit; color: var(--ink); background: var(--paper); padding: 8px; border: 1px solid var(--rule-soft); }
   button { justify-self: start; border: 1px solid var(--ink); background: var(--paper); color: var(--ink); padding: 8px 16px; cursor: pointer; }
   [role="alert"] { color: var(--error); }
 </style>
