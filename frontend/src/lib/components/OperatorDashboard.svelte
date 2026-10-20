@@ -280,7 +280,7 @@
         {#if runAccountId}
           <p class="detail-copy"><a onclick={navigate} href={`/workflow-runs/${encodeURIComponent(runAccountId)}`}>View run account</a></p>
         {/if}
-        <div class="ledger">
+        <div class="ledger fleet-ledger">
           {#each overview.workflow_runs as run (run.id)}
             <div class="ledger-row">
               <div class="session-summary">
@@ -807,7 +807,7 @@
     gap: 0;
   }
 
-  .ledger {
+  .fleet-ledger {
     max-height: min(42vh, 420px);
     overflow-y: auto;
   }

@@ -164,6 +164,39 @@ describe("OperatorDashboard", () => {
     }
   });
 
+  it("keeps Channels and Devices lists uncapped while the fleet scrolls", async () => {
+    const overview = makeOverview();
+    overview.sessions = Array.from({ length: 20 }, (_, index) => ({ ...overview.sessions[0], id: `session-${index}` }));
+    overview.channels.channels = Array.from({ length: 20 }, (_, index) => ({ ...overview.channels.channels[0], integration: `channel-${index}` }));
+    overview.devices = Array.from({ length: 20 }, (_, index) => ({ ...overview.devices[0], device_id: `device-${index}` }));
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(overview);
+    component = mount(OperatorDashboard, { target: document.body });
+    await settleUi();
+    const scope = Array.from(document.querySelector(".ops-deck")!.classList)
+      .find((name) => name.startsWith("svelte-"))!;
+    const { css } = compile(operatorDashboardSource, { filename: "OperatorDashboard.svelte" });
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+      await page.setContent(`<style>${risoCss}\n${appCss.replace(/@import[^;]+;/g, "")}\n${(css?.code ?? "").replace(/svelte-[a-z0-9]+/g, scope)}</style>${document.body.innerHTML}`);
+      for (const heading of ["Observed delivery lanes", "Attached devices"]) {
+        const list = page.locator(".panel").filter({ has: page.getByRole("heading", { name: heading }) }).locator(".ledger");
+        const dimensions = await list.evaluate((element) => ({
+          visible: element.clientHeight, content: element.scrollHeight,
+          overflow: getComputedStyle(element).overflowY,
+        }));
+        expect.soft(dimensions.visible, `${heading} must show its full list`).toBe(dimensions.content);
+        expect.soft(dimensions.overflow, heading).toBe("visible");
+      }
+      const fleet = page.locator(".panel").first().locator(".ledger");
+      const dimensions = await fleet.evaluate((element) => ({ visible: element.clientHeight, content: element.scrollHeight }));
+      expect(dimensions.visible).toBeLessThanOrEqual(420);
+      expect(dimensions.content).toBeGreaterThan(dimensions.visible);
+    } finally {
+      await browser.close();
+    }
+  });
+
   it.each(["cancelled", "failed", "interrupted"] as const)("renders the %s session ending badge", async (ending) => {
     const overview = makeOverview();
     overview.sessions[0] = { ...overview.sessions[0], has_running_turn: false, has_interrupted_turn: false, ending };
