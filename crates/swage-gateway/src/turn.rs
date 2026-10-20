@@ -411,13 +411,6 @@ pub(super) async fn process_turn_with_composition_and_focus(
     // selected assembly.
     // Runs fail-open assembly: custom JavaScript configs when configured, built-in
     // default otherwise. The LLM provider is passed for two-phase compaction.
-    let history_messages = record_failed_turn_and_release_on_error(
-        state,
-        session_id,
-        prepared_turn_id,
-        rebuild_thread_history_messages(state.storage.as_ref(), thread_id).await,
-    )
-    .await?;
 
     let context_choices = match select_context_assembly(
         state,
@@ -524,6 +517,21 @@ pub(super) async fn process_turn_with_composition_and_focus(
         &session_approval_grants,
     )
     .await;
+    let replay_retrieval = swage_core::ReplayRetrieval::with_read_tool(
+        offered_tools.contains(crate::tool::tool_result_read::TOOL_RESULT_READ_TOOL),
+    );
+    let history_messages = record_failed_turn_and_release_on_error(
+        state,
+        session_id,
+        prepared_turn_id,
+        history::rebuild_thread_history_messages_with_retrieval(
+            state.storage.as_ref(),
+            thread_id,
+            Some(replay_retrieval),
+        )
+        .await,
+    )
+    .await?;
     let memory_index = if session_carries_memory(&session) {
         Some(
             crate::memory::load_memory_index(swage_root, &scope)

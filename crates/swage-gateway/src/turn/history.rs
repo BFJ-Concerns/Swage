@@ -7,6 +7,15 @@ pub(super) async fn rebuild_thread_history_messages(
     storage: &dyn swage_storage::store::Storage,
     thread_id: Uuid,
 ) -> Result<Vec<ChatMessage>, GatewayError> {
+    // A named-child continuation is loaded before its tool offering is known.
+    rebuild_thread_history_messages_with_retrieval(storage, thread_id, None).await
+}
+
+pub(super) async fn rebuild_thread_history_messages_with_retrieval(
+    storage: &dyn swage_storage::store::Storage,
+    thread_id: Uuid,
+    retrieval: Option<swage_core::ReplayRetrieval>,
+) -> Result<Vec<ChatMessage>, GatewayError> {
     let stored_history = storage.list_messages_by_thread(thread_id).await?;
     let mut rebuilt = Vec::new();
     let mut replay_inserted_for_turn = HashSet::new();
@@ -49,7 +58,10 @@ pub(super) async fn rebuild_thread_history_messages(
         if let Some(turn_id) = replay_before {
             replay_inserted_for_turn.insert(turn_id);
             let tool_calls = storage.list_tool_calls_by_turn(turn_id).await?;
-            rebuilt.extend(compact_tool_replay_messages(&tool_calls)?);
+            rebuilt.extend(compact_tool_replay_messages_with_retrieval(
+                &tool_calls,
+                retrieval,
+            )?);
         }
 
         match message.role {
@@ -70,15 +82,26 @@ pub(super) async fn rebuild_thread_history_messages(
         if let Some(turn_id) = replay_after {
             replay_inserted_for_turn.insert(turn_id);
             let tool_calls = storage.list_tool_calls_by_turn(turn_id).await?;
-            rebuilt.extend(compact_tool_replay_messages(&tool_calls)?);
+            rebuilt.extend(compact_tool_replay_messages_with_retrieval(
+                &tool_calls,
+                retrieval,
+            )?);
         }
     }
 
     Ok(rebuilt)
 }
 
+#[cfg(test)]
 pub(super) fn compact_tool_replay_messages(
     records: &[ToolCallRecord],
+) -> Result<Vec<ChatMessage>, swage_core::StorageError> {
+    compact_tool_replay_messages_with_retrieval(records, None)
+}
+
+fn compact_tool_replay_messages_with_retrieval(
+    records: &[ToolCallRecord],
+    retrieval: Option<swage_core::ReplayRetrieval>,
 ) -> Result<Vec<ChatMessage>, swage_core::StorageError> {
     let parent_rounds: HashMap<&str, i32> = records
         .iter()
@@ -127,6 +150,15 @@ pub(super) fn compact_tool_replay_messages(
                     swage_core::tool_result_reference(&record.turn_id.to_string(), &record.call_id),
                 )
             });
+            let model_result = match (
+                retrieval,
+                serde_json::from_str::<swage_core::CompactToolReplay>(&model_result),
+            ) {
+                (Some(retrieval), Ok(replay)) => {
+                    replay.with_elision_note(retrieval).to_stable_json()
+                }
+                _ => model_result,
+            };
             tool_calls.push(ToolCall {
                 call_id: record.call_id.clone(),
                 name: record.tool.clone(),

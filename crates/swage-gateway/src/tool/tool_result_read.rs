@@ -12,6 +12,8 @@ use swage_tool::context::ToolContext;
 use crate::tool::Tool;
 use crate::tool::workspace::truncated_output_value;
 
+pub(crate) const TOOL_RESULT_READ_TOOL: &str = "tool_result_read";
+
 pub struct ToolResultReadTool {
     pub max_output_bytes: usize,
 }
@@ -19,7 +21,7 @@ pub struct ToolResultReadTool {
 #[async_trait]
 impl Tool for ToolResultReadTool {
     fn name(&self) -> &str {
-        "tool_result_read"
+        TOOL_RESULT_READ_TOOL
     }
 
     fn description(&self) -> &str {

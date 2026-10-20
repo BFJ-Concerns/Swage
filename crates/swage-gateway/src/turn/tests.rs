@@ -24811,3 +24811,205 @@ async fn a_readdressed_result_is_delivered_only_in_the_parents_session() {
         MessageStatus::Delivered
     );
 }
+
+async fn start_long_result_turn(tool: Arc<dyn crate::tool::Tool>) -> (AppState, Uuid) {
+    let long = "x".repeat(6500) + "READ-MARKER";
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let topic = storage.general_scope().await.expect("create default topic");
+    let session = storage
+        .create_session(new_session(topic.id))
+        .await
+        .expect("create session");
+    let session_id = session.id;
+
+    ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id,
+            agent_id: "gateway".to_string(),
+        },
+    )
+    .await
+    .expect("create default thread");
+
+    let first_provider = Arc::new(MultiRoundMockProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "c1".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({ "text": long }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "first complete".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]));
+
+    let state = AppState::for_test(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        first_provider as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![tool]),
+        None,
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Use echo".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("first turn should complete");
+
+    (state, session_id)
+}
+
+async fn assert_later_replay_accounts_for_reads(offered: bool) {
+    let (state, session_id) = start_long_result_turn(Arc::new(EchoMockTool)).await;
+    let (second_provider, captured) = CapturingProvider::new(vec![
+        StreamChunk::Delta {
+            content: "second complete".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]);
+    let mut config = state.active_config();
+    config.tools.permissions.allow = if offered {
+        vec!["*".into()]
+    } else {
+        vec!["echo".into()]
+    };
+    state.replace_runtime(
+        config,
+        Arc::new(second_provider) as Arc<dyn LlmProvider>,
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>,
+            Arc::new(crate::tool::tool_result_read::ToolResultReadTool {
+                max_output_bytes: 65536,
+            }),
+        ]),
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Continue".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("second turn should complete");
+
+    let captured = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("second provider request should be captured");
+    let assistant_tool_message = captured
+        .messages
+        .iter()
+        .find(|message| {
+            message.role() == Role::Assistant
+                && message.tool_replay().is_some_and(|replay| {
+                    replay
+                        .iter()
+                        .any(|part| matches!(part, swage_core::ToolReplayPart::ToolCall { .. }))
+                })
+        })
+        .expect("later turn should include assistant tool-use replay");
+    let tool_use = assistant_tool_message
+        .tool_replay()
+        .unwrap()
+        .iter()
+        .find_map(|part| match part {
+            swage_core::ToolReplayPart::ToolCall {
+                call_id,
+                name,
+                arguments,
+            } => Some((call_id, name, arguments)),
+            _ => None,
+        })
+        .expect("tool-use replay");
+    assert_eq!(tool_use.0, "c1");
+    assert_eq!(tool_use.1, "echo");
+
+    let tool_result_message = captured
+        .messages
+        .iter()
+        .find(|message| {
+            message.role() == Role::User
+                && message.tool_replay().is_some_and(|replay| {
+                    replay
+                        .iter()
+                        .any(|part| matches!(part, swage_core::ToolReplayPart::ToolResult { .. }))
+                })
+        })
+        .expect("later turn should include user tool-result replay");
+    let tool_result = tool_result_message
+        .tool_replay()
+        .unwrap()
+        .iter()
+        .find_map(|part| match part {
+            swage_core::ToolReplayPart::ToolResult {
+                call_id, content, ..
+            } => Some((call_id, content)),
+            _ => None,
+        })
+        .expect("tool-result replay");
+    assert_eq!(tool_result.0, "c1");
+    let envelope: serde_json::Value = serde_json::from_str(tool_result.1).unwrap();
+    let note = envelope["note"]
+        .as_str()
+        .expect("later replay must account for the full earlier read");
+    assert!(note.contains("You received this result whole"));
+    assert_eq!(note.contains("call tool_result_read"), offered);
+    assert_eq!(note.contains("No tool in this session"), !offered);
+    let offered_in_request = captured
+        .tool_definitions
+        .iter()
+        .any(|tool| tool["name"] == "tool_result_read");
+    assert_eq!(offered_in_request, offered);
+    let reference = envelope["full_result_ref"].as_str().unwrap();
+    let parsed = swage_core::parse_tool_result_reference(reference).unwrap();
+    let row = state
+        .storage
+        .get_tool_call_by_turn_and_call_id(parsed.turn_id, &parsed.call_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(row.result.as_ref().unwrap().contains("READ-MARKER"));
+    let stored: serde_json::Value =
+        serde_json::from_str(row.model_result.as_ref().unwrap()).unwrap();
+    assert!(
+        stored.get("note").is_none(),
+        "the reading-time note must not be stored"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn later_replay_accounts_for_reads_with_retrieval() {
+    assert_later_replay_accounts_for_reads(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn later_replay_accounts_for_reads_without_retrieval() {
+    assert_later_replay_accounts_for_reads(false).await;
+}

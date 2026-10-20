@@ -668,6 +668,14 @@ successfully. A tool call stopped with its turn settles as cancelled. When a
 tool-call result cannot be recorded (the settlement write fails), the turn
 ends as failed — the result is not silently dropped.
 
+Later turns receive long completed results as an opening preview with a hash
+and a reference to the stored result. A note explains that the earlier turn
+received the whole result. When `tool_result_read` is offered, the note tells
+the model to pass the exact `full_result_ref` as `reference` to read it again;
+otherwise it explains that the current record omits the remaining content.
+Short results need no note. These notes describe the reading turn's available
+tools and are never stored with the result.
+
 Stopping a turn ends a shell command running inside the sandbox — in both
 bubblewrap and fallback modes — and its tool-call record settles as
 cancelled.
