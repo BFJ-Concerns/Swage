@@ -30,7 +30,7 @@ use swage_context::tokeniser::TiktokenTokeniser;
 
 use swage_agent::{
     AgentBuilder, AgentConfig, AgentError, AgentEvent, DelegationExecutor, DelegationHandler,
-    MessageRouter, TurnRequest,
+    TurnRequest,
 };
 use swage_safety::LeakDetector;
 use swage_sandbox::{Sandbox, llm_handler::HostLlmHandler};
@@ -88,9 +88,9 @@ pub(crate) use operator_guidance::*;
 pub(crate) use projection::route_approval_agent_event;
 use projection::{ProjectedTurn, TurnProjection, project_agent_events};
 pub(crate) use provider_record::*;
-#[cfg(test)]
-use runtime_launch::effort_capability_for_model;
 use runtime_launch::{RuntimeLaunch, launch_turn_runtime, requested_effort};
+#[cfg(test)]
+use runtime_launch::{effort_capability_for_model, output_limit_for_model};
 use sandbox_approval::{
     SandboxDegradationApproval, SandboxDegradationApprovalRequest,
     request_sandbox_degradation_approval,
@@ -496,7 +496,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
         worker_placement,
     );
 
-    let environment = build_session_environment(&topic, &tool_root, &session);
+    let environment = build_session_environment(&topic, &tool_root, &session, &workspace_policy);
     let available_skills = available_skills_for_agent(&scope, &session.agent_id, Some(swage_root));
 
     let operator_guidance = operator_guidance_rules(Some(swage_root), &workspace_policy);
@@ -843,15 +843,46 @@ pub(super) async fn process_turn_with_composition_and_focus(
     release_active_turn(state, session_id, prepared_turn_id).await?;
 
     // A turn that ended on its own hands the session to whatever queued
-    // behind it; a stopped turn leaves the queue standing.
-    let final_state = state
-        .storage
-        .get_turn(turn_id.unwrap_or(prepared_turn_id))
-        .await
-        .ok()
-        .flatten()
-        .map(|turn| turn.state)
-        .unwrap_or(TurnState::Completed);
+    // behind it; a stopped turn leaves the queue standing. The state is
+    // read back from the turn's row — a reconstructive read (record
+    // durability contract): a row that cannot be read is a recorded gap,
+    // and the queue drains as the safe default, since a queue held for a
+    // stop nobody recorded would wait on a person who may not be there.
+    let final_turn_id = turn_id.unwrap_or(prepared_turn_id);
+    let final_state = match state.storage.get_turn(final_turn_id).await {
+        Ok(Some(turn)) => turn.state,
+        unreadable => {
+            let reason = match unreadable {
+                Ok(_) => "the turn's row is gone at the end of the turn".to_owned(),
+                Err(error) => error.to_string(),
+            };
+            if let Err(gap_error) = crate::record_durability::record_reconstruction_gap(
+                state.storage.as_ref(),
+                Some(session_id),
+                final_turn_id,
+                "final turn state",
+                &reason,
+            )
+            .await
+            {
+                // The gap itself cannot be recorded: past the point of no
+                // return, the contract's escalation — the turn marked
+                // failed through the sanctioned override and the client
+                // told — not an error out of a turn that already answered.
+                tracing::error!(turn_id = %final_turn_id, %reason, error = %gap_error, "turn record integrity lost at the final-state read");
+                if let Err(error) = state.storage.force_turn_failure(final_turn_id).await {
+                    tracing::error!(error = %error, "failed to mark record-degraded turn as failed");
+                }
+                let _ = ws_tx.send(ServerEvent::Error {
+                    code: "turn_record_lost".to_string(),
+                    message: format!(
+                        "The turn's audit record is incomplete: the final state could not be read ({reason}) and the gap could not be recorded ({gap_error})"
+                    ),
+                });
+            }
+            TurnState::Completed
+        }
+    };
     if crate::turn_queue::drains_queue_after(final_state) {
         crate::turn_queue::spawn_drain(state.clone(), session_id);
     }

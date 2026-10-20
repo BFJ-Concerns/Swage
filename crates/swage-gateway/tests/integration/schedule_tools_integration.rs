@@ -74,7 +74,7 @@ impl LlmProvider for TextProvider {
 
 fn test_state() -> AppState {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    AppState::new(
+    AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(TextProvider),

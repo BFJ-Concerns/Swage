@@ -1124,7 +1124,9 @@ const COMPLETE_SCHEMA: &str = "
         output_tokens      INTEGER,
         state              TEXT    NOT NULL DEFAULT 'pending',
         created_at         TEXT    NOT NULL,
-        completed_at       TEXT
+        completed_at       TEXT,
+        attended           INTEGER,
+        delivery_targets   TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_turns_thread_id ON turns(thread_id);

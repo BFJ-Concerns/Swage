@@ -72,7 +72,7 @@ impl LlmProvider for StubProvider {
 async fn start_test_gateway() -> (Router, SocketAddr) {
     let config = ResolvedConfig::default();
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(StubProvider),
@@ -204,6 +204,9 @@ async fn client_library_topic_crud_against_live_gateway() {
 /// Spans: RuntimeMetadata + GatewayClient from_runtime
 #[tokio::test]
 async fn runtime_metadata_round_trip_with_client_discovery() {
+    let root = crate::support::scratch_tempdir();
+    let mut environment = crate::support::ProcessEnvGuard::new();
+    environment.set_swage_home(root.path());
     let (_router, addr) = start_test_gateway().await;
     let address = format!("http://{addr}");
 
@@ -240,6 +243,9 @@ async fn runtime_metadata_round_trip_with_client_discovery() {
 /// Spans: RuntimeMetadata is_stale
 #[tokio::test]
 async fn stale_metadata_detected_for_dead_pid() {
+    let root = crate::support::scratch_tempdir();
+    let mut environment = crate::support::ProcessEnvGuard::new();
+    environment.set_swage_home(root.path());
     // Use PID 1 as a "dead" PID proxy — it's init/systemd, not our gateway,
     // but is_stale checks whether the process matches our binary, not just alive.
     // Use an impossibly high PID that is almost certainly not running.

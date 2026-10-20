@@ -1611,14 +1611,16 @@ async fn the_successor_s_briefing_carries_a_session_variable_from_the_store() {
     )
     .await;
     let mut config = state.active_config();
+    // Leave room for the baseline, briefing, summary and retained input.
+    // A six-message limit is smaller than that minimum once the clock is present.
     config.context.compaction_threshold =
-        Some(swage_protocol::client::settings::CompactionThresholdConfig::Messages(6));
+        Some(swage_protocol::client::settings::CompactionThresholdConfig::Messages(16));
     state.replace_runtime(
         config,
         state.active_provider(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
     );
-    seed_history(&storage, session_id, 12).await;
+    seed_history(&storage, session_id, 32).await;
     storage
         .db
         .lock()
@@ -2890,6 +2892,7 @@ pub(crate) struct InMemoryDb {
     pub(crate) provider_rounds: Vec<swage_storage::ProviderRoundRecord>,
     pub(crate) session_variables: Vec<swage_storage::SessionVariable>,
     pub(crate) turn_queue: Vec<swage_storage::QueuedTurnInput>,
+    pub(crate) channel_messages: Vec<swage_storage::ChannelInboundMessage>,
 }
 
 impl MockStorage {
@@ -4817,9 +4820,49 @@ impl TurnStore for MockStorage {
             delegated_output_tokens: None,
             execution_isolation: None,
             failure_message: None,
+            attribution: None,
         };
         self.db.lock().await.turns.insert(t.id, t.clone());
         Ok(t)
+    }
+
+    async fn settle_delegation_result(&self, call: ToolCallRecord) -> Result<(), StorageError> {
+        let write = self.turn_state_write_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_tool_call_settlement.load(Ordering::SeqCst)
+            || self.fail_turn_state_writes.load(Ordering::SeqCst)
+            || self.fail_turn_state_write_at.load(Ordering::SeqCst) == write
+        {
+            return Err(StorageError::QueryFailed(
+                "delegation settlement refused by the test".into(),
+            ));
+        }
+        let mut db = self.db.lock().await;
+        let valid = call.result.is_some()
+            && call.model_result.is_some()
+            && call.status.is_some()
+            && call.duration_ms.is_some()
+            && db
+                .turns
+                .get(&call.turn_id)
+                .is_some_and(|turn| turn.state == TurnState::Delegating);
+        let index = db.tool_calls.iter().position(|stored| {
+            stored.id == call.id && stored.turn_id == call.turn_id && stored.result.is_none()
+        });
+        if !valid || index.is_none() {
+            return Err(StorageError::QueryFailed(
+                "delegation settlement has no matching wait and started call".into(),
+            ));
+        }
+        let stored = &mut db.tool_calls[index.unwrap()];
+        stored.result = call.result;
+        stored.model_result = call.model_result;
+        stored.status = call.status;
+        stored.duration_ms = call.duration_ms;
+        stored.truncated = call.truncated;
+        stored.total_bytes = call.total_bytes;
+        stored.execution = call.execution;
+        db.turns.get_mut(&call.turn_id).unwrap().state = TurnState::Processing;
+        Ok(())
     }
 
     async fn update_structured_output(
@@ -4867,6 +4910,20 @@ impl TurnStore for MockStorage {
         Ok(turns)
     }
 
+    async fn list_child_turns(&self, parent_turn_id: Uuid) -> Result<Vec<Turn>, StorageError> {
+        let mut turns: Vec<Turn> = self
+            .db
+            .lock()
+            .await
+            .turns
+            .values()
+            .filter(|t| t.parent_turn_id == Some(parent_turn_id))
+            .cloned()
+            .collect();
+        turns.sort_by_key(|t| t.created_at);
+        Ok(turns)
+    }
+
     async fn update_turn_state(&self, id: Uuid, state: TurnState) -> Result<(), StorageError> {
         if state == TurnState::Interrupted {
             self.interrupted_turn_writes.fetch_add(1, Ordering::SeqCst);
@@ -4881,6 +4938,14 @@ impl TurnStore for MockStorage {
         }
         let mut db = self.db.lock().await;
         if let Some(turn) = db.turns.get_mut(&id) {
+            if turn.state == TurnState::Delegating
+                && !state.is_terminal()
+                && state != TurnState::Delegating
+            {
+                return Err(StorageError::QueryFailed(
+                    "a delegating turn must settle its owning tool result before changing to another non-terminal state".into(),
+                ));
+            }
             if state.is_terminal() {
                 turn.completed_at = Some(chrono::Utc::now());
             }
@@ -5492,12 +5557,31 @@ impl swage_storage::store::DeliveryStore for MockStorage {
 impl swage_storage::store::ChannelQueueStore for MockStorage {
     async fn ingest_channel_inbound(
         &self,
-        _messages: Vec<swage_storage::NewChannelInboundMessage>,
+        messages: Vec<swage_storage::NewChannelInboundMessage>,
         _cursor_integration: &str,
         _cursor_account: &str,
         _cursor: &str,
     ) -> Result<usize, StorageError> {
-        Ok(0)
+        let mut db = self.db.lock().await;
+        let count = messages.len();
+        for message in messages {
+            db.channel_messages
+                .push(swage_storage::ChannelInboundMessage {
+                    id: Uuid::new_v4(),
+                    integration: message.integration,
+                    account: message.account,
+                    conversation: message.conversation,
+                    external_id: message.external_id,
+                    sender: message.sender,
+                    content: message.content,
+                    state: swage_storage::ChannelInboundMessageState::Pending,
+                    discard_reason: None,
+                    turn_id: None,
+                    received_at: chrono::Utc::now(),
+                    presented_at: None,
+                });
+        }
+        Ok(count)
     }
 
     async fn get_channel_cursor(
@@ -5511,7 +5595,13 @@ impl swage_storage::store::ChannelQueueStore for MockStorage {
     async fn list_pending_channel_messages(
         &self,
     ) -> Result<Vec<swage_storage::ChannelInboundMessage>, StorageError> {
-        Ok(Vec::new())
+        let db = self.db.lock().await;
+        Ok(db
+            .channel_messages
+            .iter()
+            .filter(|row| row.state == swage_storage::ChannelInboundMessageState::Pending)
+            .cloned()
+            .collect())
     }
 
     async fn list_pending_channel_origins(
@@ -5522,9 +5612,20 @@ impl swage_storage::store::ChannelQueueStore for MockStorage {
 
     async fn list_pending_by_origin(
         &self,
-        _origin: swage_storage::PendingChannelOrigin,
+        origin: swage_storage::PendingChannelOrigin,
     ) -> Result<Vec<swage_storage::ChannelInboundMessage>, StorageError> {
-        Ok(Vec::new())
+        let db = self.db.lock().await;
+        Ok(db
+            .channel_messages
+            .iter()
+            .filter(|row| {
+                row.state == swage_storage::ChannelInboundMessageState::Pending
+                    && row.integration == origin.integration
+                    && row.account == origin.account
+                    && row.conversation == origin.conversation
+            })
+            .cloned()
+            .collect())
     }
 
     async fn begin_channel_turn(
@@ -5543,6 +5644,19 @@ impl swage_storage::store::ChannelQueueStore for MockStorage {
         _reason: &str,
     ) -> Result<u64, StorageError> {
         Ok(0)
+    }
+
+    async fn list_channel_messages_by_turn(
+        &self,
+        turn_id: Uuid,
+    ) -> Result<Vec<swage_storage::ChannelInboundMessage>, StorageError> {
+        let db = self.db.lock().await;
+        Ok(db
+            .channel_messages
+            .iter()
+            .filter(|row| row.turn_id == Some(turn_id))
+            .cloned()
+            .collect())
     }
 
     async fn requeue_presented_for_inflight_turns(&self) -> Result<u64, StorageError> {
@@ -5646,6 +5760,36 @@ impl swage_storage::store::AuditStore for MockStorage {
     }
 }
 
+fn enqueue_mock_turn_input(
+    db: &mut InMemoryDb,
+    input: swage_storage::NewQueuedTurnInput,
+) -> swage_storage::QueuedTurnInput {
+    let seq = db
+        .turn_queue
+        .iter()
+        .filter(|queued| queued.session_id == input.session_id)
+        .map(|queued| queued.seq)
+        .max()
+        .map_or(0, |seq| seq + 1);
+    let queued = swage_storage::QueuedTurnInput {
+        delivery_targets: input.delivery_targets,
+        attended: input.attended,
+        client_id: input.client_id,
+        id: Uuid::new_v4(),
+        session_id: input.session_id,
+        thread_id: input.thread_id,
+        seq,
+        origin: input.origin,
+        content: input.content,
+        attachments: input.attachments,
+        schedule_run_id: input.schedule_run_id,
+        channel_message_ids: input.channel_message_ids,
+        created_at: chrono::Utc::now(),
+    };
+    db.turn_queue.push(queued.clone());
+    queued
+}
+
 #[async_trait]
 impl swage_storage::store::TurnQueueStore for MockStorage {
     async fn enqueue_turn_inputs(
@@ -5664,30 +5808,54 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
         input: swage_storage::NewQueuedTurnInput,
     ) -> Result<swage_storage::QueuedTurnInput, StorageError> {
         let mut db = self.db.lock().await;
-        let seq = db
-            .turn_queue
-            .iter()
-            .filter(|queued| queued.session_id == input.session_id)
-            .map(|queued| queued.seq)
-            .max()
-            .map_or(0, |seq| seq + 1);
-        let queued = swage_storage::QueuedTurnInput {
-            delivery_targets: input.delivery_targets,
-            attended: input.attended,
-            client_id: input.client_id,
-            id: Uuid::new_v4(),
-            session_id: input.session_id,
-            thread_id: input.thread_id,
-            seq,
-            origin: input.origin,
-            content: input.content,
-            attachments: input.attachments,
-            schedule_run_id: input.schedule_run_id,
-            channel_message_ids: input.channel_message_ids,
-            created_at: chrono::Utc::now(),
-        };
-        db.turn_queue.push(queued.clone());
-        Ok(queued)
+        Ok(enqueue_mock_turn_input(&mut db, input))
+    }
+
+    async fn enqueue_delegation_continuation(
+        &self,
+        parent_turn_id: Uuid,
+        input: swage_storage::NewQueuedTurnInput,
+    ) -> Result<swage_storage::QueuedTurnInput, StorageError> {
+        use swage_storage::ChannelInboundMessageState::{Pending, Presented};
+        let mut db = self.db.lock().await;
+        let parent_valid = db.turns.get(&parent_turn_id).is_some_and(|parent| {
+            parent.state == TurnState::Delegating
+                && parent.parent_turn_id.is_none()
+                && parent.thread_id == input.thread_id
+        }) && db
+            .threads
+            .get(&input.thread_id)
+            .is_some_and(|thread| thread.session_id == input.session_id);
+        let mut seen = std::collections::HashSet::new();
+        if !parent_valid
+            || input.channel_message_ids.iter().any(|id| {
+                !seen.insert(*id)
+                    || !db.channel_messages.iter().any(|row| {
+                        row.id == *id
+                            && row.state == Presented
+                            && row.turn_id == Some(parent_turn_id)
+                    })
+                    || db
+                        .turn_queue
+                        .iter()
+                        .any(|queued| queued.channel_message_ids.contains(id))
+            })
+        {
+            return Err(StorageError::QueryFailed(
+                "continuation could not claim parent or inbox rows".into(),
+            ));
+        }
+        for row in &mut db.channel_messages {
+            if seen.contains(&row.id) {
+                row.state = Pending;
+                row.turn_id = None;
+                row.presented_at = None;
+            }
+        }
+        let parent = db.turns.get_mut(&parent_turn_id).unwrap();
+        parent.state = TurnState::Interrupted;
+        parent.completed_at = Some(chrono::Utc::now());
+        Ok(enqueue_mock_turn_input(&mut db, input))
     }
 
     async fn list_queued_turn_inputs(
@@ -5729,6 +5897,24 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
                 parent_turn_id: None,
             })
             .await?;
+        // The drain records how the batch was started on the turn, as the
+        // real one does.
+        let attribution = swage_storage::model::TurnAttribution {
+            attended: queued.iter().any(|input| input.attended),
+            delivery_targets: queued
+                .iter()
+                .flat_map(|input| input.delivery_targets.clone())
+                .collect(),
+        };
+        let turn = {
+            let mut db = self.db.lock().await;
+            let stored = db
+                .turns
+                .get_mut(&turn.id)
+                .expect("the turn was just created");
+            stored.attribution = Some(attribution.clone());
+            stored.clone()
+        };
         let mut messages = Vec::new();
         for item in &queued {
             messages.push(
@@ -5745,22 +5931,45 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
             );
         }
         let queued_ids = queued.iter().map(|item| item.id).collect();
-        self.db
-            .lock()
-            .await
-            .turn_queue
-            .retain(|item| item.session_id != session_id);
+        // The inbox rows the inputs name are presented by this turn, as the
+        // real drain presents them, and their chats are the turn's
+        // destinations.
+        let mut channel_origins: Vec<swage_storage::PendingChannelOrigin> = Vec::new();
+        {
+            let mut db = self.db.lock().await;
+            for item in &queued {
+                for message_id in &item.channel_message_ids {
+                    if let Some(row) = db
+                        .channel_messages
+                        .iter_mut()
+                        .find(|row| row.id == *message_id)
+                    {
+                        let origin = swage_storage::PendingChannelOrigin {
+                            integration: row.integration.clone(),
+                            account: row.account.clone(),
+                            conversation: row.conversation.clone(),
+                        };
+                        if !channel_origins.contains(&origin) {
+                            channel_origins.push(origin);
+                        }
+                        if row.state == swage_storage::ChannelInboundMessageState::Pending {
+                            row.state = swage_storage::ChannelInboundMessageState::Presented;
+                            row.turn_id = Some(turn.id);
+                            row.presented_at = Some(chrono::Utc::now());
+                        }
+                    }
+                }
+            }
+            db.turn_queue.retain(|item| item.session_id != session_id);
+        }
         Ok(Some(swage_storage::DrainedTurnQueue {
-            delivery_targets: queued
-                .iter()
-                .flat_map(|input| input.delivery_targets.clone())
-                .collect(),
-            attended: queued.iter().any(|input| input.attended),
+            delivery_targets: attribution.delivery_targets,
+            attended: attribution.attended,
             turn,
             messages,
             queued_ids,
             schedule_run_ids: Vec::new(),
-            channel_origins: Vec::new(),
+            channel_origins,
         }))
     }
 
@@ -6179,6 +6388,48 @@ impl swage_storage::store::AgentMessageStore for MockStorage {
         message.payload = payload;
         Ok(())
     }
+    async fn reissue_agent_message(
+        &self,
+        id: Uuid,
+        payload: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let mut db = self.db.lock().await;
+        let message = db
+            .agent_messages
+            .get_mut(&id)
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "agent_message".into(),
+                id: id.to_string(),
+            })?;
+        message.payload = payload;
+        message.status = swage_core::MessageStatus::Pending;
+        message.failure_reason = None;
+        message.created_at = chrono::Utc::now();
+        Ok(())
+    }
+    async fn find_delegate_for_thread(
+        &self,
+        thread_id: Uuid,
+        started_by: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<AgentMessage>, StorageError> {
+        let thread = thread_id.to_string();
+        let mut delegates: Vec<_> = self
+            .db
+            .lock()
+            .await
+            .agent_messages
+            .values()
+            .filter(|message| {
+                message.kind == swage_core::MessageKind::Delegate
+                    && message.payload.get("_thread_id").and_then(|v| v.as_str()) == Some(&thread)
+                    && message.created_at <= started_by
+            })
+            .cloned()
+            .collect();
+        delegates.sort_by_key(|message| message.created_at);
+        Ok(delegates.pop())
+    }
+
     async fn list_by_correlation(
         &self,
         correlation_id: Uuid,
@@ -6546,7 +6797,7 @@ async fn make_state_with_provider_and_root(
             None,
             config_root,
         ),
-        None => AppState::new(
+        None => AppState::for_test(
             storage_backend,
             topic_store,
             provider,
@@ -6593,7 +6844,7 @@ async fn make_state_with_config_and_storage(
     .expect("create default thread");
 
     let provider = Arc::new(MockProvider::new(provider_chunks));
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         provider as Arc<dyn LlmProvider>,
@@ -6993,7 +7244,7 @@ async fn cancelled_turn_stores_partial_and_marks_cancelled() {
     .await
     .expect("create default thread");
 
-    let state = Arc::new(AppState::new(
+    let state = Arc::new(AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(PendingProvider) as Arc<dyn LlmProvider>,
@@ -7092,7 +7343,7 @@ async fn cancelled_turn_without_partial_stores_no_assistant_response() {
     .expect("create default thread");
 
     let stream_polled = Arc::new(Notify::new());
-    let state = Arc::new(AppState::new(
+    let state = Arc::new(AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(EmptyPendingProvider {
@@ -7478,7 +7729,7 @@ async fn provider_retry_events_name_the_requested_turn_model() {
             },
         );
     }
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
@@ -8481,7 +8732,7 @@ async fn make_state_with_tool_provider_and_storage(
     .await
     .expect("create default thread");
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         provider,
@@ -8523,7 +8774,7 @@ pub(crate) async fn make_state_with_capturing_tools(
 
     let (provider, captured) = CapturingMultiRoundProvider::new(rounds);
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -8790,7 +9041,7 @@ async fn cancelled_during_tool_dispatch_persists_partial_without_waiting() {
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MultiRoundMockProvider::new(vec![round_1])) as Arc<dyn LlmProvider>,
@@ -8953,7 +9204,7 @@ async fn cancelled_dispatch_with_failed_record_remains_cancelled_and_keeps_cause
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MultiRoundMockProvider::new(vec![round_1])) as Arc<dyn LlmProvider>,
@@ -9153,15 +9404,16 @@ async fn second_tool_round_request_keeps_structured_tool_messages() {
     assert_eq!(requests.len(), 2, "expected two provider requests");
 
     let second = &requests[1];
-    // Orientation, working norms and the memory index stand before the
-    // conversation; then the user's turn, the tool call, and its result.
-    assert_eq!(second.messages.len(), 6);
+    // Orientation, working norms, the clock and the memory index stand
+    // before the user's turn, the tool call, and its result.
+    assert_eq!(second.messages.len(), 7);
     assert_eq!(second.messages[0].role(), Role::System);
     assert_eq!(second.messages[1].role(), Role::System);
     assert_eq!(second.messages[2].role(), Role::System);
-    assert_eq!(second.messages[3].role(), Role::User);
-    assert_eq!(second.messages[4].role(), Role::Assistant);
-    assert_eq!(second.messages[5].role(), Role::User);
+    assert_eq!(second.messages[3].role(), Role::System);
+    assert_eq!(second.messages[4].role(), Role::User);
+    assert_eq!(second.messages[5].role(), Role::Assistant);
+    assert_eq!(second.messages[6].role(), Role::User);
     assert!(
         second.messages.iter().any(|message| {
             message.role() == Role::System
@@ -9332,6 +9584,7 @@ async fn second_tool_round_request_replays_reasoning_when_model_capability_opts_
             capabilities: swage_config::ModelCapabilitiesConfig {
                 reasoning_replay: true,
                 effort: None,
+                output_limit: None,
             },
         },
     )]
@@ -9429,7 +9682,7 @@ async fn later_turn_rebuilds_tool_replay_from_persisted_compact_rows() {
         ],
     ]));
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         first_provider as Arc<dyn LlmProvider>,
@@ -9606,7 +9859,7 @@ async fn later_turn_rebuilds_multi_round_tool_replay_as_separate_pairs() {
         ],
     ]));
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         first_provider as Arc<dyn LlmProvider>,
@@ -9811,7 +10064,7 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
             finish_reason: None,
         },
     ]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -9986,7 +10239,7 @@ async fn later_turn_rebuilds_failed_tool_replay_as_error() {
             finish_reason: None,
         },
     ]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -10858,7 +11111,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         Arc::new(ShellMockTool) as Arc<dyn crate::tool::Tool>,
     ]);
 
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -10889,6 +11142,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         }),
         dispatcher,
         None,
+        swage_home.path().to_path_buf(),
     );
 
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -11439,7 +11693,7 @@ async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant()
         Arc::new(ShellMockTool) as Arc<dyn crate::tool::Tool>,
         Arc::new(FileReadMockTool) as Arc<dyn crate::tool::Tool>,
     ]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -11697,7 +11951,7 @@ async fn completed_detached_result_reaches_parent_next_turn() {
         crate::tool::ToolDispatcher::allow_all(vec![
             Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn crate::tool::Tool>
         ]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -12129,7 +12383,7 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
             },
         ],
     ]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -12516,7 +12770,7 @@ async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
             },
         ],
     ]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -12652,7 +12906,7 @@ async fn delegated_skill_selection_is_carried_by_the_composition_once() {
         })
         .await
         .expect("target agent definition");
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MockProvider::new(vec![
@@ -12666,6 +12920,7 @@ async fn delegated_skill_selection_is_carried_by_the_composition_once() {
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
+        swage_home.path().to_path_buf(),
     );
 
     let outcome = GatewayDelegationHandler::new(state)
@@ -13765,7 +14020,7 @@ async fn capture_provider_effort_for_selected_model(
             .await
             .expect("select session model");
     }
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -13941,11 +14196,12 @@ async fn process_turn_resolves_effort_against_the_declared_capability_and_record
                     levels: vec![swage_core::Effort::Low, swage_core::Effort::High],
                     can_disable: false,
                 }),
+                output_limit: None,
             },
             ..Default::default()
         },
     );
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -14046,6 +14302,135 @@ fn effort_capability_falls_back_from_the_catalogue_to_the_adapter() {
     );
 }
 
+/// The output limit resolves beside the effort: the caller's own value
+/// first, then the catalogue entry's declaration, then the adapter's account
+/// of the documented limit.
+#[test]
+fn output_limit_falls_back_from_the_caller_to_the_catalogue_to_the_adapter() {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "claude".into();
+    config.models.entries.insert(
+        "claude".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "anthropic".into(),
+            model_id: "claude-opus-5-5".into(),
+            ..Default::default()
+        },
+    );
+    let anthropic = swage_provider::anthropic::AnthropicProvider::new("key", "claude-opus-5-5");
+    assert_eq!(
+        super::output_limit_for_model(None, &config, "claude", &anthropic),
+        Some(swage_core::ResolvedOutputLimit {
+            tokens: 128_000,
+            source: swage_core::OutputLimitSource::Adapter,
+        })
+    );
+
+    config
+        .models
+        .entries
+        .get_mut("claude")
+        .unwrap()
+        .capabilities
+        .output_limit = Some(50_000);
+    assert_eq!(
+        super::output_limit_for_model(None, &config, "claude", &anthropic),
+        Some(swage_core::ResolvedOutputLimit {
+            tokens: 50_000,
+            source: swage_core::OutputLimitSource::Catalogue,
+        }),
+        "the catalogue's own declaration wins over the adapter's"
+    );
+    assert_eq!(
+        super::output_limit_for_model(Some(512), &config, "claude", &anthropic),
+        Some(swage_core::ResolvedOutputLimit {
+            tokens: 512,
+            source: swage_core::OutputLimitSource::Caller,
+        }),
+        "a caller's own limit is sent as it is"
+    );
+
+    let mock = MockProvider::new(vec![]);
+    assert_eq!(
+        super::output_limit_for_model(None, &config, "unknown", &mock),
+        None
+    );
+}
+
+/// An interactive turn with no preset limit carries the model's declared
+/// output limit to the provider, and the turn's snapshot names its source.
+#[tokio::test]
+async fn process_turn_carries_the_declared_output_limit_and_records_its_source() {
+    let chunks = vec![
+        StreamChunk::Delta {
+            content: "Hello".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ];
+    let (provider, captured_request) = CapturingProvider::new(chunks);
+    let (storage, session_id) = make_storage_with_session().await;
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "local".into();
+    config.models.entries.insert(
+        "local".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "local".into(),
+            model_id: "local-model".into(),
+            capabilities: swage_config::ModelCapabilitiesConfig {
+                output_limit: Some(50_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        crate::test_support::with_mock_provider_entries(config),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("hi"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("turn ok");
+
+    let request = captured_request
+        .lock()
+        .unwrap()
+        .take()
+        .expect("provider request");
+    assert_eq!(request.max_tokens, Some(50_000));
+
+    let snapshot = storage
+        .db
+        .lock()
+        .await
+        .snapshots
+        .values()
+        .next()
+        .map(|(report, _)| report.clone())
+        .expect("context snapshot recorded");
+    let report: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+    assert_eq!(report["provider_visible"]["output_limit"]["tokens"], 50_000);
+    assert_eq!(
+        report["provider_visible"]["output_limit"]["source"],
+        "catalogue"
+    );
+}
+
 #[tokio::test]
 async fn process_turn_passes_tool_context_to_tools() {
     let captured = Arc::new(std::sync::Mutex::new(None));
@@ -14076,7 +14461,7 @@ async fn process_turn_passes_tool_context_to_tools() {
 
     let provider = Arc::new(MultiRoundMockProvider::new(vec![round_1, round_2]));
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         provider as Arc<dyn LlmProvider>,
@@ -14147,7 +14532,7 @@ async fn process_turn_resolves_config_per_topic_and_completes_turn() {
     .await
     .expect("thread");
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -14193,7 +14578,7 @@ async fn process_turn_uses_hot_swapped_runtime_config_for_next_turn() {
     let (provider, captured_request) = CapturingProvider::new(chunks);
     let (storage, session_id) = make_storage_with_session().await;
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
@@ -14282,7 +14667,7 @@ async fn invalid_call_scoped_assembly_is_rejected_before_provider_dispatch() {
     let _guard = SwageHomeGuard::isolate();
     let (provider, captured_request) = CapturingProvider::new(vec![]);
     let (storage, session_id) = make_storage_with_session().await;
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -14334,7 +14719,7 @@ async fn unknown_forced_context_assembly_rejects_call_scoped_override() {
             forced_variant: Some("missing".to_owned()),
         },
     );
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -14440,7 +14825,7 @@ async fn forced_default_context_assembly_runs_and_records_forced_reason() {
             forced_variant: Some("default".to_owned()),
         },
     );
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -14790,7 +15175,7 @@ async fn process_turn_uses_hot_swapped_runtime_tool_policy_for_next_turn() {
     let (provider, captured_request) = CapturingProvider::new(chunks);
     let (storage, session_id) = make_storage_with_session().await;
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
@@ -14846,7 +15231,7 @@ async fn process_turn_stream_request_includes_registered_tool_definitions() {
     let (provider, captured_request) = CapturingProvider::new(chunks);
     let (storage, session_id) = make_storage_with_session().await;
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -14979,7 +15364,7 @@ async fn turn_model_snapshot_records_the_effective_model_and_its_source() {
             ..Default::default()
         },
     );
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -15158,7 +15543,7 @@ async fn process_turn_stream_request_inherits_global_permissions_without_workspa
     let (provider, captured_request) = CapturingProvider::new(chunks);
     let (storage, session_id) = make_storage_with_session().await;
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -15389,7 +15774,7 @@ async fn tool_context_working_directory_is_passed_during_tool_execution() {
 
     let provider = Arc::new(MultiRoundMockProvider::new(vec![round_1, round_2]));
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         provider as Arc<dyn LlmProvider>,
@@ -16408,7 +16793,7 @@ async fn unattached_session_environment_identifies_resolved_scratch_root() {
     let (tool_root, _) =
         resolve_agent_tool_root_from_policy(root.path(), &policy, &topic.location(), session.id);
 
-    let environment = build_session_environment(&topic, &tool_root, &session);
+    let environment = build_session_environment(&topic, &tool_root, &session, &policy);
     assert_eq!(
         environment.tool_root,
         swage_context::orientation::ToolRoot::ManagedScratch(tool_root.path.display().to_string())
@@ -16444,7 +16829,7 @@ async fn placed_worker_orientation_keeps_its_working_directory() {
         session.id,
         worker_placement_path(session.metadata.as_ref()),
     );
-    let environment = build_session_environment(&topic, &tool_root, &session);
+    let environment = build_session_environment(&topic, &tool_root, &session, &policy);
     let text = swage_context::orientation::OrientationElement::new(environment, vec![]).content()
         [0]
     .text_content();
@@ -16651,6 +17036,7 @@ fn test_environment() -> swage_context::orientation::SessionEnvironment {
         topic_name: String::new(),
         topic_description: String::new(),
         tool_root: swage_context::orientation::ToolRoot::ManagedScratch("/scratch/session".into()),
+        workspaces: vec![],
         started_at: chrono::Utc::now(),
         channel: None,
     }
@@ -16682,9 +17068,8 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
         None,
     );
 
-    // Should produce six elements: orientation, working norms, prompts,
-    // skills (empty), memory, and history.
-    assert_eq!(elements.len(), 6);
+    // Baseline, clock, prompts, skills, memory, and history.
+    assert_eq!(elements.len(), 7);
     let names: Vec<&str> = elements.iter().map(|e| e.name()).collect();
     assert!(
         names.contains(&"orientation"),
@@ -16719,7 +17104,7 @@ fn elements_built_without_memory_omit_the_memory_element() {
         None,
     );
 
-    assert_eq!(elements.len(), 5);
+    assert_eq!(elements.len(), 6);
     // PromptsElement with empty rules produces no messages; the orientation
     // baseline is what keeps an unconfigured session's context non-empty.
     let orientation = elements.iter().find(|e| e.name() == "orientation").unwrap();
@@ -16861,13 +17246,14 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
     let mut config = swage_config::ResolvedConfig::default();
     config.context.assembly = "default".into();
     config.instructions = "Task: {{task}}; owner: {{owner}}".into();
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::TopicStore>,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
         config.clone(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
+        swage_home.path().to_path_buf(),
     );
     let host_context =
         swage_tool::context::MockToolContext::new("delegate", session.id.to_string());
@@ -18942,7 +19328,7 @@ async fn an_image_attachment_is_recorded_and_reaches_the_provider_as_a_content_p
     )
     .await
     .expect("thread");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -19363,7 +19749,7 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
     };
     use swage_storage::{NewSession, NewThread, NewToolCall, NewTurn, TurnState};
 
-    let storage = SqliteStorage::in_memory().expect("sqlite");
+    let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite"));
     let topic = storage.general_scope().await.unwrap();
     let session = storage
         .create_session(NewSession {
@@ -19376,7 +19762,7 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
         .await
         .unwrap();
     let thread = ThreadStore::create(
-        &storage,
+        &*storage,
         NewThread {
             session_id: session.id,
             agent_id: "gateway".into(),
@@ -19450,9 +19836,13 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
         .await
         .unwrap();
 
-    crate::shutdown::recover_orphaned_turns(&storage, &storage)
-        .await
-        .expect("recovery");
+    crate::shutdown::recover_orphaned_turns(
+        &*storage,
+        &*storage,
+        &swage_agent::MessageRouter::new(storage.clone(), None),
+    )
+    .await
+    .expect("recovery");
 
     let calls = storage.list_tool_calls_by_turn(turn.id).await.unwrap();
     assert_eq!(calls[0].status.as_deref(), Some("success"));
@@ -19463,7 +19853,7 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
         Some(swage_storage::store::INTERRUPTED_TOOL_RESULT)
     );
 
-    let rebuilt = super::history::rebuild_thread_history_messages(&storage, thread.id)
+    let rebuilt = super::history::rebuild_thread_history_messages(&*storage, thread.id)
         .await
         .unwrap();
     let replay_parts: Vec<&swage_core::ToolReplayPart> = rebuilt
@@ -19778,7 +20168,12 @@ async fn operation_outcome_turn(
 ) {
     let mut config = swage_config::ResolvedConfig::default();
     config.tools.permissions.require_approval.clear();
-    operation_outcome_turn_with_config(calls, config, TurnAttendance::Attended).await
+    Box::pin(operation_outcome_turn_with_config(
+        calls,
+        config,
+        TurnAttendance::Attended,
+    ))
+    .await
 }
 
 async fn operation_outcome_turn_with_config(
@@ -20017,6 +20412,7 @@ async fn selected_responses_entry_sharing_an_upstream_id_is_served_by_its_own_pr
         config.providers.entries.insert(
             provider_id.into(),
             swage_config::ProviderEndpointConfig {
+                display_name: None,
                 worker_staleness_threshold_ms: None,
                 protocol,
                 api_key_secret_ref: None,
@@ -20049,7 +20445,7 @@ async fn selected_responses_entry_sharing_an_upstream_id_is_served_by_its_own_pr
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
     );
     let runtime_provider = crate::startup::create_provider(&config, &secret_manager).await;
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         runtime_provider,
@@ -20338,6 +20734,7 @@ async fn turn_against_single_provider(
     config.providers.entries.insert(
         "configured-endpoint".into(),
         swage_config::ProviderEndpointConfig {
+            display_name: None,
             worker_staleness_threshold_ms: None,
             protocol,
             api_key_secret_ref: None,
@@ -20361,7 +20758,7 @@ async fn turn_against_single_provider(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
     );
     let runtime_provider = crate::startup::create_provider(&config, &secret_manager).await;
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         runtime_provider,
@@ -21666,6 +22063,194 @@ async fn settlement_unattended_approval_bypass_keeps_shell_outcomes() {
             .iter()
             .any(|event| matches!(event, ServerEvent::ApprovalRequired { .. })),
         "unattended execution must not ask for approval"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn orientation_environment_carries_every_readable_workspace_from_resolved_policy() {
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage.create_session(new_session(topic.id)).await.unwrap();
+    for (path, trusted, permissions, is_default) in [
+        ("/projects/source", true, vec!["read", "write"], true),
+        ("/references/pack", true, vec!["read"], false),
+        ("/references/other", true, vec!["read"], false),
+        ("/private/untrusted", false, vec!["read"], false),
+        ("/write-only", true, vec!["write"], false),
+    ] {
+        let attachment = storage
+            .create_workspace_attachment(NewWorkspaceAttachment {
+                topic_id: topic.id,
+                label: path.into(),
+                path: path.into(),
+                permissions: permissions.into_iter().map(str::to_string).collect(),
+                is_trusted: trusted,
+            })
+            .await
+            .unwrap();
+        if is_default {
+            storage
+                .set_topic_default_workspace(topic.id, Some(attachment.id))
+                .await
+                .unwrap();
+        }
+    }
+    let policy = load_trusted_workspace_policy(
+        &(storage as Arc<dyn swage_storage::store::Storage>),
+        topic.id,
+        None,
+    )
+    .await;
+    let tool_root = ResolvedToolRoot {
+        path: "/projects/source".into(),
+        source: ToolRootSource::AttachedWorkspace,
+    };
+    let environment = build_session_environment(&topic, &tool_root, &session, &policy);
+    let mut actual = environment
+        .workspaces
+        .iter()
+        .map(|workspace| {
+            (
+                workspace.path.as_str(),
+                workspace.can_write,
+                workspace.is_trusted,
+            )
+        })
+        .collect::<Vec<_>>();
+    actual.sort_unstable();
+    assert_eq!(
+        actual,
+        vec![
+            ("/projects/source", true, true),
+            ("/references/other", false, true),
+            ("/references/pack", false, true)
+        ]
+    );
+    let mut placed_session = session.clone();
+    placed_session.metadata = Some(serde_json::json!({ "worker_placement_can_write": false }));
+    let placement = ResolvedToolRoot::worker_placement("/projects/source".into());
+    let placed = build_session_environment(&topic, &placement, &placed_session, &policy);
+    assert_eq!(
+        placed.workspaces,
+        vec![swage_context::orientation::ReadableWorkspace {
+            path: "/projects/source".into(),
+            can_write: false,
+            is_trusted: true,
+        }],
+        "a placed worker must not advertise sibling topic workspaces"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn orientation_environment_includes_subdirectory_placement_with_its_write_grant() {
+    let root = tempfile::tempdir().unwrap();
+    let parent = root.path().join("repo");
+    let placement = parent.join("task");
+    std::fs::create_dir_all(&placement).unwrap();
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let mut session = storage.create_session(new_session(topic.id)).await.unwrap();
+    let policy = TrustedWorkspacePolicy {
+        attachments: vec![TrustedWorkspacePath {
+            path: parent,
+            is_trusted: true,
+            can_read: true,
+            can_write: false,
+        }],
+        ..Default::default()
+    };
+    for can_write in [true, false] {
+        session.metadata = Some(serde_json::json!({
+            "worker_placement_can_write": can_write,
+        }));
+        let environment = build_session_environment(
+            &topic,
+            &ResolvedToolRoot::worker_placement(placement.clone()),
+            &session,
+            &policy,
+        );
+        assert_eq!(
+            environment.workspaces,
+            vec![swage_context::orientation::ReadableWorkspace {
+                path: placement.display().to_string(),
+                can_write,
+                is_trusted: true,
+            }],
+            "the placement must inherit parent trust and advertise its own write grant"
+        );
+    }
+}
+
+#[tokio::test]
+async fn orientation_each_turn_carries_current_seconds_and_keeps_orientation_identical() {
+    let reply = vec![
+        StreamChunk::Delta {
+            content: "done".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ];
+    let (provider, captured) = CapturingMultiRoundProvider::new(vec![reply.clone(), reply]);
+    let (state, session_id, _) =
+        make_state_with_tool_provider_and_storage(Arc::new(provider)).await;
+    let mut times = Vec::new();
+    let mut orientations = Vec::new();
+    for index in 0..2 {
+        if index > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        }
+        let before = chrono::Utc::now();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "What time is it?".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .unwrap();
+        let after = chrono::Utc::now();
+        let requests = captured.lock().unwrap();
+        let request = requests.last().unwrap();
+        let texts = request
+            .messages
+            .iter()
+            .map(ChatMessage::text_content)
+            .collect::<Vec<_>>();
+        let text = texts.iter().find(|text| text.starts_with("Current time: "));
+        assert!(
+            text.is_some(),
+            "provider context has no current time: {texts:?}"
+        );
+        let time = chrono::NaiveDateTime::parse_from_str(
+            text.unwrap().trim_start_matches("Current time: "),
+            "%Y-%m-%d %H:%M:%S UTC",
+        )
+        .expect("UTC time to the second")
+        .and_utc();
+        assert!(
+            time >= before && time < after + chrono::Duration::seconds(1),
+            "{time} must be at or after {before} and less than one second after {after}"
+        );
+        times.push(time);
+        orientations.push(
+            texts
+                .into_iter()
+                .find(|text| text.contains("## Where you are"))
+                .expect("orientation"),
+        );
+    }
+    assert!(
+        times[1] > times[0],
+        "a later turn must refresh the clock: {times:?}"
+    );
+    assert_eq!(
+        orientations[0], orientations[1],
+        "orientation must remain byte-identical"
     );
 }
 
@@ -23168,4 +23753,445 @@ async fn image_scheme_refusal_survives_an_audit_write_failure() {
         "{error}"
     );
     assert!(storage.db.lock().await.audit_events.is_empty());
+}
+
+/// A child's result is read from its fate, the error before any text it
+/// carries: a refusal that carried text reads as refused, a failure as
+/// failed, and only a result with no error as completed.
+#[tokio::test]
+async fn a_delegation_result_reads_its_fate_before_its_text() {
+    use swage_core::MessageKind;
+    use swage_storage::model::NewAgentMessage;
+    use swage_storage::store::AgentMessageStore;
+
+    let storage = MockStorage::new();
+    let result = |payload: serde_json::Value| async {
+        storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "worker".to_string(),
+                recipient_agent_id: "lead".to_string(),
+                kind: MessageKind::Result,
+                correlation_id: Some(Uuid::new_v4()),
+                payload,
+            })
+            .await
+            .unwrap()
+    };
+    let refused = result(serde_json::json!({
+        "error": "the delegated agent refused the task",
+        "refused": true,
+        "response": "I will not do that.",
+    }))
+    .await;
+    let rendered = super::detached_delivery::render_delegation_result(&refused);
+    assert!(
+        rendered.starts_with("Delegated agent worker refused the task:\nI will not do that."),
+        "{rendered}"
+    );
+    let failed =
+        result(serde_json::json!({ "error": "the tool broke", "response": "partial" })).await;
+    let rendered = super::detached_delivery::render_delegation_result(&failed);
+    assert!(
+        rendered.starts_with("Delegated agent worker failed: the tool broke:\npartial"),
+        "{rendered}"
+    );
+    let completed = result(serde_json::json!({ "response": "done" })).await;
+    assert!(
+        super::detached_delivery::render_delegation_result(&completed)
+            .starts_with("Delegated agent worker completed:\ndone")
+    );
+}
+
+/// A child's Result readdressed to its parent's session after a restart is
+/// delivered by that session's next turn and by no other session of the
+/// same agent: the other session's turn leaves it in the mailbox.
+/// A recovered Result names the parent's thread as well as its session: a
+/// sibling thread of the same session turning first — a queued message on
+/// it drains before the continuation — takes nothing, and the parent's
+/// thread takes it.
+#[tokio::test]
+async fn a_readdressed_result_is_delivered_only_on_the_parents_thread() {
+    use swage_core::{MessageKind, MessageStatus};
+    use swage_storage::model::NewAgentMessage;
+    use swage_storage::store::AgentMessageStore;
+
+    let storage = Arc::new(MockStorage::new());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage
+        .create_session(NewSession {
+            agent_id: "lead".to_string(),
+            ..new_session(topic.id)
+        })
+        .await
+        .unwrap();
+    let mut threads = Vec::new();
+    for _ in 0..2 {
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "lead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "lead".to_string(),
+                state: TurnState::Pending,
+                user_input: Some("next".to_string()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        threads.push((thread.id, turn.id));
+    }
+    let (parent_thread, parent_turn) = threads[0];
+    let (sibling_thread, sibling_turn) = threads[1];
+    let delegate = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "lead".to_string(),
+            recipient_agent_id: "scout".to_string(),
+            kind: MessageKind::Delegate,
+            correlation_id: None,
+            payload: serde_json::json!({ "task": "work" }),
+        })
+        .await
+        .unwrap();
+    let result = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "scout".to_string(),
+            recipient_agent_id: "lead".to_string(),
+            kind: MessageKind::Result,
+            correlation_id: Some(delegate.id),
+            payload: serde_json::json!({
+                "response": "Scouted.",
+                "parent_session_id": session.id,
+                "parent_thread_id": parent_thread,
+            }),
+        })
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+
+    super::detached_delivery::deliver_detached_results(
+        &state,
+        session.id,
+        "lead",
+        sibling_thread,
+        sibling_turn,
+    )
+    .await
+    .unwrap();
+    assert!(
+        storage
+            .list_messages_by_thread(sibling_thread)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the sibling thread's turn takes nothing"
+    );
+    assert_eq!(
+        storage
+            .get_agent_message(result.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MessageStatus::Pending
+    );
+
+    super::detached_delivery::deliver_detached_results(
+        &state,
+        session.id,
+        "lead",
+        parent_thread,
+        parent_turn,
+    )
+    .await
+    .unwrap();
+    let delivered = storage
+        .list_messages_by_thread(parent_thread)
+        .await
+        .unwrap();
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert!(delivered[0].content.contains("Scouted."));
+    assert_eq!(
+        storage
+            .get_agent_message(result.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MessageStatus::Delivered
+    );
+}
+
+/// A Result carried from the mailbox into a thread is put to the same
+/// delivery hooks as one handed straight to its parent: a receive hook
+/// that blocks it fails it with the reason, nothing of it enters the
+/// thread, and the thread is told the result was blocked.
+#[tokio::test]
+async fn a_mailbox_result_a_receive_hook_blocks_is_failed_and_named_not_delivered() {
+    use swage_core::{MessageKind, MessageStatus};
+    use swage_storage::model::NewAgentMessage;
+    use swage_storage::store::AgentMessageStore;
+
+    struct BlockResultReceipt;
+
+    #[async_trait]
+    impl Hook for BlockResultReceipt {
+        fn name(&self) -> &str {
+            "block-result-receipt"
+        }
+
+        async fn execute(&self, event: &HookEvent) -> HookOutcome {
+            match event {
+                HookEvent::MessageReceive { kind, .. } if kind == "result" => {
+                    HookOutcome::Block("results from scouts are quarantined".into())
+                }
+                _ => HookOutcome::Continue,
+            }
+        }
+    }
+
+    let storage = Arc::new(MockStorage::new());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage
+        .create_session(NewSession {
+            agent_id: "lead".to_string(),
+            ..new_session(topic.id)
+        })
+        .await
+        .unwrap();
+    let thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "lead".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let turn = storage
+        .create_turn(NewTurn {
+            thread_id: thread.id,
+            agent_id: "lead".to_string(),
+            state: TurnState::Pending,
+            user_input: Some("next".to_string()),
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+    let delegate = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "lead".to_string(),
+            recipient_agent_id: "scout".to_string(),
+            kind: MessageKind::Delegate,
+            correlation_id: None,
+            payload: serde_json::json!({ "task": "work" }),
+        })
+        .await
+        .unwrap();
+    let result = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "scout".to_string(),
+            recipient_agent_id: "lead".to_string(),
+            kind: MessageKind::Result,
+            correlation_id: Some(delegate.id),
+            payload: serde_json::json!({ "response": "The quarantined text." }),
+        })
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    let mut hook_registry = HookRegistry::new();
+    hook_registry.register(HookRegistration::new(Arc::new(BlockResultReceipt)));
+    state.hook_registry = Some(Arc::new(hook_registry));
+
+    super::detached_delivery::deliver_detached_results(
+        &state, session.id, "lead", thread.id, turn.id,
+    )
+    .await
+    .unwrap();
+
+    let delivered = storage.list_messages_by_thread(thread.id).await.unwrap();
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert_eq!(
+        delivered[0].origin,
+        swage_storage::MessageOrigin::Delegation
+    );
+    assert!(
+        delivered[0]
+            .content
+            .contains("Delegated agent scout's result was blocked before delivery (results from scouts are quarantined)"),
+        "{}",
+        delivered[0].content
+    );
+    assert!(!delivered[0].content.contains("The quarantined text."));
+    let blocked = storage.get_agent_message(result.id).await.unwrap().unwrap();
+    assert_eq!(blocked.status, MessageStatus::Failed);
+    assert_eq!(
+        blocked.failure_reason.as_deref(),
+        Some("results from scouts are quarantined")
+    );
+    // Nothing waits: a second turn delivers nothing more.
+    super::detached_delivery::deliver_detached_results(
+        &state, session.id, "lead", thread.id, turn.id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        storage
+            .list_messages_by_thread(thread.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_readdressed_result_is_delivered_only_in_the_parents_session() {
+    use swage_core::{MessageKind, MessageStatus};
+    use swage_storage::model::NewAgentMessage;
+    use swage_storage::store::AgentMessageStore;
+
+    let storage = Arc::new(MockStorage::new());
+    let topic = storage.general_scope().await.unwrap();
+    let mut sessions = Vec::new();
+    for _ in 0..2 {
+        let session = storage
+            .create_session(NewSession {
+                agent_id: "lead".to_string(),
+                ..new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "lead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "lead".to_string(),
+                state: TurnState::Pending,
+                user_input: Some("next".to_string()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        sessions.push((session.id, thread.id, turn.id));
+    }
+    let (parent_session, parent_thread, parent_turn) = sessions[0];
+    let (other_session, other_thread, other_turn) = sessions[1];
+    let delegate = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "lead".to_string(),
+            recipient_agent_id: "scout".to_string(),
+            kind: MessageKind::Delegate,
+            correlation_id: None,
+            payload: serde_json::json!({ "task": "work" }),
+        })
+        .await
+        .unwrap();
+    let result = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "scout".to_string(),
+            recipient_agent_id: "lead".to_string(),
+            kind: MessageKind::Result,
+            correlation_id: Some(delegate.id),
+            payload: serde_json::json!({
+                "response": "Scouted.",
+                "parent_session_id": parent_session,
+            }),
+        })
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+
+    super::detached_delivery::deliver_detached_results(
+        &state,
+        other_session,
+        "lead",
+        other_thread,
+        other_turn,
+    )
+    .await
+    .unwrap();
+    assert!(
+        storage
+            .list_messages_by_thread(other_thread)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the other session's turn takes nothing"
+    );
+    assert_eq!(
+        storage
+            .get_agent_message(result.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MessageStatus::Pending
+    );
+
+    super::detached_delivery::deliver_detached_results(
+        &state,
+        parent_session,
+        "lead",
+        parent_thread,
+        parent_turn,
+    )
+    .await
+    .unwrap();
+    let delivered = storage
+        .list_messages_by_thread(parent_thread)
+        .await
+        .unwrap();
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert!(delivered[0].content.contains("Scouted."));
+    assert_eq!(
+        storage
+            .get_agent_message(result.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MessageStatus::Delivered
+    );
 }

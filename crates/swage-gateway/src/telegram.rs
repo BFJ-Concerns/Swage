@@ -995,7 +995,7 @@ mod tests {
         provider: impl LlmProvider + 'static,
         client: Arc<TelegramClient>,
     ) -> AppState {
-        let mut state = AppState::new(
+        let mut state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
             Arc::new(provider),
@@ -1109,9 +1109,13 @@ mod tests {
             .requeue_presented_for_inflight_turns()
             .await
             .unwrap();
-        crate::shutdown::recover_orphaned_turns(state.storage.as_ref(), state.topic_store.as_ref())
-            .await
-            .unwrap();
+        crate::shutdown::recover_orphaned_turns(
+            state.storage.as_ref(),
+            state.topic_store.as_ref(),
+            &state.message_router(),
+        )
+        .await
+        .unwrap();
         crate::turn_queue::drain_queues_at_startup(state)
             .await
             .unwrap();

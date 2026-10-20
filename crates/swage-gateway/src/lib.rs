@@ -57,6 +57,8 @@ pub mod context;
 pub mod device;
 pub mod error;
 pub mod experimentation;
+#[cfg(feature = "test-fixtures")]
+pub mod fixtures;
 pub mod handlers;
 pub mod knowledge;
 pub mod knowledge_mirror;
@@ -116,7 +118,7 @@ pub(crate) mod test_support {
     ) -> crate::state::AppState {
         use swage_storage::{Storage, TopicStore};
 
-        crate::state::AppState::new(
+        crate::state::AppState::for_test(
             std::sync::Arc::clone(&storage) as std::sync::Arc<dyn Storage>,
             storage as std::sync::Arc<dyn TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),

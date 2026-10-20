@@ -61,6 +61,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Speech synthesis is advertised only after a successful speech request, and a failed request makes it unavailable with a reason. Voice Settings offers a speech-model check and a retry after correcting the model or provider.
 - New topic sessions select the topic’s configured default model, including API requests without a model; topic settings show the effective default and fresh composers preselect it.
 - A topic whose configuration cannot be read still appears in the topic list, and its composer offers no model, instead of the whole list failing and the web UI failing to load.
 - Topic settings distinguish loading from an empty workspace list and offer a retry after any topic-settings load failure.

@@ -172,6 +172,77 @@ afterEach(() => {
   vi.resetAllMocks();
 });
 
+describe("provider failure notice", () => {
+  it("keeps diagnostics collapsed, names the selected route and offers recovery once", () => {
+    const raw = '{"error":{"message":"Rejected at https://Proxy.Example/v1","request_id":"Req-AbC"}}';
+    const request: MessageView = { role: "user", content: "Hello", timestamp: "2026-10-15T12:00:00Z", turn_id: "failed-turn" };
+    const reply = { ...makeAssistantMessage("Partial answer", undefined, "MixedCase-Model", "failed", "failed-turn"), failure_message: raw };
+    const streaming = makeStreamingStore();
+    Object.defineProperty(streaming, "turnError", { get: () => ({ code: "provider_error", message: raw }) });
+    streaming.startTurn = vi.fn();
+    component = mount(MessageDisplay, { target: document.body, props: { store: makeConversationStore([request, reply]), streamingStore: streaming } });
+    flushSync();
+    expect(document.querySelectorAll(".turn-error")).toHaveLength(1);
+    const notice = document.querySelector<HTMLElement>(".turn-error")!;
+    expect(notice.querySelector("p")?.textContent).toContain("using model MixedCase-Model failed");
+    expect(notice.querySelector("details")?.open).toBe(false);
+    expect(notice.querySelector("pre")?.textContent).toBe(raw);
+    expect(notice.querySelector("a")?.getAttribute("href")).toBe("/settings/providers");
+    notice.querySelector<HTMLButtonElement>("button")!.click();
+    expect(streaming.startTurn).toHaveBeenCalledWith("Hello");
+    const compiled = compile(messageDisplaySource, { generate: "client", css: "external" });
+    expect(compiled.css?.code.match(/\.turn-error[^{}]*\{([^}]+)\}/)?.[1]).toMatch(/text-transform:\s*none/);
+    expect(compiled.css?.code).toMatch(/overflow-wrap:\s*anywhere/);
+  });
+
+  it.each(["unknown provider for model gpt-model-access-does-not-exist", "Authentication rejected"])("uses the failed turn selection with a stale conversation: %s", (cause) => {
+    const request: MessageView = { role: "user", content: "Hello", timestamp: "2026-10-15T12:00:00Z" };
+    const store = makeConversationStore([request]);
+    Object.defineProperty(store.activeConversation!, "selected_model_id", { value: "sol" });
+    const raw = `provider 'cliproxy-openai' at https://Proxy.Example/v1: HTTP error 400: ${JSON.stringify({ error: { message: cause } })}`;
+    const sendMessage = vi.fn();
+    const streaming = createStreamingStore({ conversationStore: store, connectionStore: { sendMessage, cancelTurn: vi.fn() } });
+    streaming.startTurn("Hello", "cliproxy-openai:gpt-model-access-does-not-exist");
+    streaming.handleServerEvent({ type: "error", code: "provider_error", message: raw });
+    component = mount(MessageDisplay, { target: document.body, props: { store, streamingStore: streaming } });
+    flushSync();
+    const summary = document.querySelector(".turn-error p")!.textContent!;
+    expect(summary).toContain("provider cliproxy-openai");
+    expect(summary).toContain("gpt-model-access-does-not-exist");
+    expect(summary).not.toContain("using model sol");
+    expect(document.querySelector(".turn-error pre")!.textContent).toBe(raw);
+  });
+
+  it("shows the submitted model when a queued turn fails", () => {
+    const store = makeConversationStore([{ role: "user", content: "Queued", timestamp: "2026-10-15T12:00:00Z" }]);
+    Object.defineProperty(store.activeConversation!, "root_thread_id", { value: "main-thread" });
+    const sendMessage = vi.fn();
+    const streaming = createStreamingStore({ conversationStore: store, connectionStore: { sendMessage, cancelTurn: vi.fn() } });
+    streaming.startTurn("First", "first-model");
+    streaming.startTurn("Queued", "Queued-Model");
+    const clientId = sendMessage.mock.calls[1][5] as string;
+    streaming.handleServerEvent({ type: "message_queued", session_id: "conv-1", queued: {
+      client_id: clientId, id: "q-1", origin: "user", content: "Queued", queued_at: "2026-10-15T12:00:00Z",
+    } });
+    streaming.handleServerEvent({ type: "turn_complete", turn_id: "first-turn" });
+    streaming.handleServerEvent({ type: "queue_drained", thread_id: "main-thread", session_id: "conv-1", turn_id: "queued-turn", queued_ids: ["q-1"] });
+    streaming.handleServerEvent({ type: "error", code: "provider_error", message: "Request rejected" });
+    component = mount(MessageDisplay, { target: document.body, props: { store, streamingStore: streaming } });
+    flushSync();
+    expect(document.querySelector(".turn-error p")?.textContent).toContain("using model Queued-Model failed");
+  });
+
+  it("offers generic recovery without inventing a provider or error category", () => {
+    const streaming = makeStreamingStore();
+    Object.defineProperty(streaming, "turnError", { get: () => ({ code: "provider_error", message: "opaque diagnostic" }) });
+    component = mount(MessageDisplay, { target: document.body, props: { store: makeConversationStore([{ role: "user", content: "Hello", timestamp: "2026-10-15T12:00:00Z" }]), streamingStore: streaming } });
+    flushSync();
+    expect(document.querySelector(".turn-error p")?.textContent).toBe("The request failed. See the details for the reported cause.");
+    expect(document.querySelector(".turn-error button")?.textContent).toBe("Retry");
+    expect(document.querySelector(".turn-error a")?.textContent).toBe("Provider settings");
+  });
+});
+
 describe("turn context inspector trigger", () => {
   it.each([true, false])("retries the person's request from an empty-response account with recorded input %s", async (recorded) => {
     const request: MessageView = { role: "user", origin: "user", content: "Summarise the document.", timestamp: "2026-10-05T12:00:00Z", ...(recorded ? { turn_id: "empty-turn" } : {}) };
@@ -1256,5 +1327,52 @@ describe("authorship of platform-written messages", () => {
       document.body.querySelectorAll('[aria-label="Your message"]'),
     ).toHaveLength(1);
     expect(document.body.querySelectorAll(".message.platform")).toHaveLength(3);
+  });
+});
+
+
+describe("message link navigation", () => {
+  afterEach(() => { document.body.replaceChildren(); });
+
+  it.each(["/settings/memory?scope=general&reference=general%2Fprofile", `${window.location.origin}/settings/memory?scope=general&reference=general%2Fprofile`])("routes a memory notice inside the app: %s", (href) => {
+    const onNavigate = vi.fn();
+    const component = mount(MessageDisplay, {
+      target: document.body,
+      props: {
+        store: makeConversationStore([makeAssistantMessage(`Memory updated from this conversation: [page](${href})`)]),
+        onNavigate,
+      },
+    });
+    onTestFinished(() => unmount(component));
+    flushSync();
+    const location = window.location.href;
+    const link = document.querySelector<HTMLAnchorElement>(".markdown-body a")!;
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+    link.dispatchEvent(click);
+    expect(onNavigate).toHaveBeenCalledExactlyOnceWith("/settings/memory?scope=general&reference=general%2Fprofile");
+    expect(click.defaultPrevented).toBe(true);
+    expect(window.location.href).toBe(location);
+  });
+
+  it.each([
+    { href: "https://elsewhere.example/page", ctrlKey: false },
+    { href: "/settings/memory", ctrlKey: true },
+    { href: "/api/memory/pages", ctrlKey: false },
+  ])("leaves ordinary browser navigation intact: $href ($ctrlKey)", ({ href, ctrlKey }) => {
+    const onNavigate = vi.fn();
+    const component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store: makeConversationStore([makeAssistantMessage(`[page](${href})`)]), onNavigate },
+    });
+    onTestFinished(() => unmount(component));
+    flushSync();
+    const link = document.querySelector<HTMLAnchorElement>(".markdown-body a")!;
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, ctrlKey });
+    let intercepted: boolean | undefined;
+    // Observe the component's decision, then suppress jsdom's unsupported document navigation.
+    document.addEventListener("click", (event) => { intercepted = event.defaultPrevented; event.preventDefault(); }, { once: true });
+    link.dispatchEvent(click);
+    expect(onNavigate).not.toHaveBeenCalled();
+    expect(intercepted).toBe(false);
   });
 });

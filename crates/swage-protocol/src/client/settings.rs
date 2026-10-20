@@ -143,6 +143,9 @@ pub enum ProviderProtocol {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[ts(optional_fields = nullable)]
 pub struct ProviderSettings {
+    #[serde(default)]
+    #[ts(optional)]
+    pub display_name: Option<String>,
     pub protocol: ProviderProtocol,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
@@ -158,6 +161,9 @@ pub struct ProviderSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[ts(optional_fields = nullable)]
 pub struct SaveProviderSettings {
+    #[serde(default)]
+    #[ts(optional)]
+    pub display_name: Option<String>,
     pub protocol: ProviderProtocol,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]
@@ -188,10 +194,17 @@ pub struct ModelCapabilitiesConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, as = "Option<_>")]
     pub effort: Option<EffortCapability>,
+    /// The most output tokens one response may carry, when the catalogue
+    /// declares it; absent, the provider adapter's account for the models it
+    /// serves applies, and a model neither declares takes the adapter's
+    /// floor. A caller's own `max_tokens` is sent as it is either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, as = "Option<_>")]
+    pub output_limit: Option<u32>,
 }
 impl ModelCapabilitiesConfig {
     pub fn is_empty(&self) -> bool {
-        !self.reasoning_replay && self.effort.is_none()
+        !self.reasoning_replay && self.effort.is_none() && self.output_limit.is_none()
     }
 }
 
@@ -584,9 +597,9 @@ pub struct VoiceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[ts(optional_fields = nullable)]
 pub struct SettingsResponse {
-    pub providers: HashMap<String, ProviderSettings>,
+    pub providers: BTreeMap<String, ProviderSettings>,
     pub default_provider: String,
-    pub models: HashMap<String, ModelSettings>,
+    pub models: BTreeMap<String, ModelSettings>,
     pub default_model: String,
     pub generation_presets: HashMap<String, GenerationPresetConfig>,
     pub tool_runtime: ToolRuntimeSettings,

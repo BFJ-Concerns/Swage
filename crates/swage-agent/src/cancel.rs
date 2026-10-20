@@ -273,6 +273,16 @@ mod tests {
             self.inner.get_agent_message(id).await
         }
 
+        async fn find_delegate_for_thread(
+            &self,
+            thread_id: Uuid,
+            started_by: chrono::DateTime<chrono::Utc>,
+        ) -> Result<Option<AgentMessage>, StorageError> {
+            self.inner
+                .find_delegate_for_thread(thread_id, started_by)
+                .await
+        }
+
         async fn list_pending_for_agent(
             &self,
             _agent_id: &str,
@@ -290,6 +300,14 @@ mod tests {
         }
 
         async fn update_agent_message_payload(
+            &self,
+            _id: Uuid,
+            _payload: serde_json::Value,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+
+        async fn reissue_agent_message(
             &self,
             _id: Uuid,
             _payload: serde_json::Value,
@@ -327,6 +345,13 @@ mod tests {
             thread_id: Uuid,
         ) -> Result<Vec<swage_storage::Turn>, StorageError> {
             self.inner.list_turns_by_thread(thread_id).await
+        }
+
+        async fn list_child_turns(
+            &self,
+            parent_turn_id: Uuid,
+        ) -> Result<Vec<swage_storage::Turn>, StorageError> {
+            self.inner.list_child_turns(parent_turn_id).await
         }
 
         async fn force_turn_failure(&self, id: Uuid) -> Result<(), StorageError> {

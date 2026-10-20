@@ -496,7 +496,7 @@ describe("expired approval result", () => {
 describe("readable result payloads", () => {
   it.each([
     [{ output: '# Title\n\n## 1\n"quoted"' }, '# Title\n\n## 1\n"quoted"'],
-    [{ output: JSON.stringify({ output: "first\nsecond", full_snapshot: true }) }, "first\nsecond"],
+    [{ output: JSON.stringify({ output: "first\nsecond", full_snapshot: true }) }, JSON.stringify({ output: "first\nsecond", full_snapshot: true }, null, 2)],
   ])("unwraps text output and keeps its envelope disclosed: %j", (result, expected) => {
     component = mount(ToolCallDisplay, {
       target: document.body,
@@ -509,6 +509,29 @@ describe("readable result payloads", () => {
     flushSync(() => disclosure!.querySelector("summary")!.click());
     expect(disclosure!.open).toBe(true);
     expect(disclosure!.querySelector("pre")!.textContent).toBe(JSON.stringify(result, null, 2));
+  });
+
+  it.each([
+    { output: '{"output":"hello","version":1}' },
+    JSON.stringify({ output: '{"output":"hello","version":1}' }),
+  ])("keeps every key in JSON file content after decoding the recorded envelope: %j", (result) => {
+    component = mount(ToolCallDisplay, {
+      target: document.body,
+      props: { toolCall: makeCompletedCall({ tool: "file_read", result }), isLive: false },
+    });
+    const displayed = document.querySelector(".tool-result .result-content")!.textContent!;
+    expect(displayed).toContain('"output"');
+    expect(displayed).toContain('"version"');
+    expect(JSON.parse(displayed)).toEqual({ output: "hello", version: 1 });
+    expect(document.querySelector("details pre")!.textContent).toBe(JSON.stringify(result, null, 2));
+  });
+
+  it("shows ordinary envelope text without its wrapper", () => {
+    component = mount(ToolCallDisplay, {
+      target: document.body,
+      props: { toolCall: makeCompletedCall({ result: { output: "plain text" } }), isLive: false },
+    });
+    expect(document.querySelector(".tool-result .result-content")!.textContent).toBe("plain text");
   });
 
   it("formats a JSON-encoded structured result", () => {

@@ -31,6 +31,7 @@
   let result = $state<MemoryInstructionResponse | null>(null);
   let loadGeneration = 0;
   let readGeneration = 0;
+  let pendingNotice: { address: MemoryPageAddress; selectionGeneration: number } | null = null;
   let selected: { topicId: string | null; reference: string } | null = null;
   const scopes = $derived([
     { topicId: null, label: "General" },
@@ -59,6 +60,7 @@
   }
 
   async function openPage(topicId: string | null, pageReference: string): Promise<void> {
+    pendingNotice = null;
     const generation = ++readGeneration;
     selected = { topicId, reference: pageReference };
     instructionScope = topicId ?? "";
@@ -72,11 +74,28 @@
     }
   }
 
+  function acceptGroups(loaded: ScopeGroup[]): void {
+    groups = loaded;
+    if (!pendingNotice) return;
+    const { address: requested, selectionGeneration } = pendingNotice;
+    // A reference spells its scope kind but not which topic, so a link
+    // names the scope; one naming none opens the first scope listing it.
+    const holder = loaded.find(
+      (group) =>
+        (requested.scope === null || (group.topicId ?? "general") === requested.scope) &&
+        group.pages.some((listed) => listed.reference === requested.reference),
+    );
+    if (holder && selectionGeneration === readGeneration) {
+      void openPage(holder.topicId, requested.reference);
+    }
+  }
+
   $effect(() => {
     const requestedScopes = scopes;
     const requested = page;
     const generation = ++loadGeneration;
     const selectionGeneration = ++readGeneration;
+    pendingNotice = requested ? { address: requested, selectionGeneration } : null;
     selected = null;
     loading = true;
     error = null;
@@ -84,19 +103,7 @@
     void loadGroups(requestedScopes)
       .then((loaded) => {
         if (generation !== loadGeneration) return;
-        groups = loaded;
-        // A reference spells its scope kind but not which topic, so a link
-        // names the scope; one naming none opens the first scope listing it.
-        const holder = requested
-          ? loaded.find(
-              (group) =>
-                (requested.scope === null || (group.topicId ?? "general") === requested.scope) &&
-                group.pages.some((listed) => listed.reference === requested.reference),
-            )
-          : undefined;
-        if (holder && requested && selectionGeneration === readGeneration) {
-          void openPage(holder.topicId, requested.reference);
-        }
+        acceptGroups(loaded);
       })
       .finally(() => {
         if (generation === loadGeneration) loading = false;
@@ -136,7 +143,7 @@
     try {
       const refreshed = await loadGroups(scopes, groups);
       if (generation === loadGeneration) {
-        groups = refreshed;
+        acceptGroups(refreshed);
         loading = false;
       }
     } finally {

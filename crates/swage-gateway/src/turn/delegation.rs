@@ -1,13 +1,12 @@
 use super::{
     AgentError, AppState, Arc, CancellationToken, DELEGATED_CHILDREN_METADATA_KEY,
     DelegationExecutor, DelegationHandler, DispatchContextComposition, GatewayDispatcherRequest,
-    MessageRouter, NewAgentMessage, ResolvedToolRoot, Uuid,
-    WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY, WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY,
-    WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY, WORKER_PLACEMENT_CWD_METADATA_KEY,
-    WORKFLOW_CALL_TOOLS_METADATA_KEY, add_dispatch_bound_task_definition_ids,
-    apply_agent_definition, apply_dispatch_bounds, apply_dispatch_task_bounds,
-    apply_workflow_call_tools, available_skills_for_agent, build_agent_config_for_topic_workspace,
-    build_approval_registrar, build_assembly_elements,
+    NewAgentMessage, ResolvedToolRoot, Uuid, WORKER_PLACEMENT_AUTHORITY_CONTEXT_METADATA_KEY,
+    WORKER_PLACEMENT_AUTHORITY_PATH_METADATA_KEY, WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY,
+    WORKER_PLACEMENT_CWD_METADATA_KEY, WORKFLOW_CALL_TOOLS_METADATA_KEY,
+    add_dispatch_bound_task_definition_ids, apply_agent_definition, apply_dispatch_bounds,
+    apply_dispatch_task_bounds, apply_workflow_call_tools, available_skills_for_agent,
+    build_agent_config_for_topic_workspace, build_approval_registrar, build_assembly_elements,
     build_gateway_dispatcher_for_unattended_execution, build_session_environment,
     configuration_hierarchy, dispatch_bound_agent_ids_for_turn, dispatch_bound_metadata,
     dispatch_bound_task_definition_ids_for_turn, effective_tool_permissions_record,
@@ -350,7 +349,8 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
             session.active_workspace_attachment_id,
         )
         .await;
-        let environment = build_session_environment(&self.topic, &self.tool_root, session);
+        let environment =
+            build_session_environment(&self.topic, &self.tool_root, session, &workspace_policy);
         let available_skills = available_skills_for_agent(
             &self.topic.location(),
             &self.agent_id,
@@ -1141,7 +1141,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         let target_sandbox_guard = target_dispatcher_build.sandbox_guard;
         let target_dispatcher = target_dispatcher_build.dispatcher;
 
-        let router = Arc::new(MessageRouter::new(self.state.storage.clone(), None));
+        let router = Arc::new(self.state.message_router());
         let executor = DelegationExecutor {
             storage: self.state.storage.clone(),
             provider: child_provider,
@@ -1178,6 +1178,11 @@ impl DelegationHandler for GatewayDelegationHandler {
         if let Some(context) = context {
             payload["context"] = context;
         }
+        // The parent's own tool call for this delegation, so a reader of
+        // the record — recovery after a restart — can tell whether the
+        // child's result reached the parent's thread as that call's
+        // result, not only its mailbox.
+        payload["_call_id"] = serde_json::json!(delegate_call_id);
 
         let delegate_msg = match router
             .send_message(NewAgentMessage {

@@ -575,7 +575,7 @@ fn make_empty_state() -> AppState {
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
     let topic_store: Arc<dyn swage_storage::store::TopicStore> =
         storage as Arc<dyn swage_storage::store::TopicStore>;
-    AppState::new(
+    AppState::for_test(
         storage_arc,
         topic_store,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
@@ -611,7 +611,7 @@ async fn make_state_with_session_and_storage() -> (AppState, Uuid, Arc<MockStora
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
     let topic_store: Arc<dyn swage_storage::store::TopicStore> =
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>;
-    let state = AppState::new(
+    let state = AppState::for_test(
         storage_arc,
         topic_store,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,

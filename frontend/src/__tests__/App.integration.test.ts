@@ -142,7 +142,7 @@ vi.mock("../lib/api/materials", () => ({
 }));
 
 vi.mock("../lib/api/sessions", () => ({
-  listRecentSessions: vi.fn(async () => []),
+  listRecentSessions: vi.fn(),
 }));
 
 vi.mock("../lib/api/operator", () => ({
@@ -157,6 +157,7 @@ vi.mock("../lib/api/operator", () => ({
 vi.mock("../lib/api/settings", () => ({
   discoverModels: vi.fn(),
   fetchSettings: vi.fn(),
+  fetchProviderSecrets: vi.fn(),
   restartGateway: vi.fn(),
   saveSettings: vi.fn(),
 }));
@@ -390,7 +391,9 @@ describe("App", () => {
 
   beforeEach(() => {
     websocketHarness.reset();
-    vi.clearAllMocks();
+    // Discard unused one-shot responses as well as calls between journeys.
+    vi.resetAllMocks();
+    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValue([]);
     setPath("/");
     delete window.swageDesktop;
     localStorage.clear();
@@ -405,6 +408,10 @@ describe("App", () => {
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(
       makeOperatorOverview(),
     );
+    vi.mocked(settingsApi.fetchProviderSecrets).mockResolvedValue({
+      secrets: [],
+      managed_backend: { status: "ready", detail: "", key_source: null },
+    });
     vi.mocked(settingsApi.fetchSettings).mockRejectedValue(
       new Error("settings are not configured in this test"),
     );
@@ -1255,7 +1262,10 @@ describe("App", () => {
   it("submits the refreshed inherited topic default after a settings save", async () => {
     const topic = makeTopic({ effective_default_model: "old-model" });
     const entry = { provider_id: "local", model_id: "wire", aliases: [], generation_preset: null };
-    const before = makeSettings({ "old-model": entry, "new-model": entry });
+    const before = makeSettings({
+      "old-model": { ...entry, model_id: "old-model" },
+      "new-model": { ...entry, model_id: "new-model" },
+    });
     before.default_model = "old-model";
     const saved = structuredClone(before);
     saved.default_model = "new-model";
@@ -2135,7 +2145,7 @@ describe("App", () => {
     flushSync(() => settingsButton!.click());
     await settleUi();
     const newModelButton = Array.from(document.querySelectorAll("button")).find(
-      (button) => button.textContent?.trim().startsWith("local/new-model"),
+      (button) => button.textContent?.trim() === "new-model · local",
     );
     flushSync(() => newModelButton!.click());
     await waitForText(
@@ -2178,7 +2188,7 @@ describe("App", () => {
     const existingModelButton = Array.from(
       document.querySelectorAll("button"),
     ).find((button) =>
-      button.textContent?.trim().startsWith("local/existing-model"),
+      button.textContent?.trim() === "existing-model · local",
     );
     flushSync(() => existingModelButton!.click());
     await waitForText(
