@@ -5758,6 +5758,13 @@ fn enqueue_mock_turn_input(
         .map(|queued| queued.seq)
         .max()
         .map_or(0, |seq| seq + 1);
+    let arrived_at = input
+        .channel_message_ids
+        .iter()
+        .filter_map(|id| db.channel_messages.iter().find(|row| row.id == *id))
+        .map(|row| row.received_at)
+        .min()
+        .unwrap_or_else(chrono::Utc::now);
     let queued = swage_storage::QueuedTurnInput {
         delivery_targets: input.delivery_targets,
         attended: input.attended,
@@ -5771,7 +5778,7 @@ fn enqueue_mock_turn_input(
         attachments: input.attachments,
         schedule_run_id: input.schedule_run_id,
         channel_message_ids: input.channel_message_ids,
-        created_at: chrono::Utc::now(),
+        created_at: arrived_at,
     };
     db.turn_queue.push(queued.clone());
     queued
@@ -5856,7 +5863,7 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
             .filter(|queued| queued.session_id == session_id)
             .cloned()
             .collect();
-        queued.sort_by_key(|queued| queued.seq);
+        queued.sort_by_key(|queued| (queued.created_at, queued.seq));
         Ok(queued)
     }
 

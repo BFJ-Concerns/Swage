@@ -308,6 +308,9 @@ pub trait TaskDefinitionStore: Send + Sync {
 #[async_trait]
 pub trait TurnQueueStore: Send + Sync {
     /// Enqueue one arrival batch atomically, retaining a row per input.
+    /// Inbox-attributed inputs retain the earliest named inbox arrival time;
+    /// other inputs arrive now. List and drain order by arrival, with enqueue
+    /// sequence breaking ties, so destination resolution cannot reorder them.
     async fn enqueue_turn_inputs(
         &self,
         inputs: Vec<NewQueuedTurnInput>,
