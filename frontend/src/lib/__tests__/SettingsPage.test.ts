@@ -721,8 +721,9 @@ describe("SettingsPage", () => {
     expect(document.body.textContent).toContain("Saved provider/model settings require a gateway restart");
   }, 10_000);
 
-  it.each(["restore", "display", "generation"])("clears the obsolete archive notice on %s", async (action) => {
-    const tab = writable<"automation" | "display" | "generation">("automation");
+  it.each(["restore", "display", "generation", "providers"])("clears the obsolete archive notice on %s", async (action) => {
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(configuredProvider());
+    const tab = writable<"automation" | "display" | "generation" | "providers">("automation");
     const currentTab = fromStore(tab);
     component = mount(SettingsPage, { target: document.body, props: { get tab() { return currentTab.current; } } });
     await flushUi();
@@ -735,11 +736,23 @@ describe("SettingsPage", () => {
     if (action === "restore") {
       delay.value = "7";
       delay.dispatchEvent(new Event("input", { bubbles: true }));
-    } else tab.set(action as "display" | "generation");
+    } else tab.set(action as "display" | "generation" | "providers");
     await new Promise((resolve) => setTimeout(resolve, 850));
     await flushUi();
     expect(document.querySelector(".notice.error")).toBeNull();
     expect(settingsApi.saveSettings).not.toHaveBeenCalled();
+    if (action === "providers") {
+      const input = document.querySelector<HTMLInputElement>('.provider-section input[type="text"]')!;
+      input.value = "https://Changed.Example/v1";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 850));
+      await flushUi();
+      expect(settingsApi.saveSettings).toHaveBeenCalledWith(expect.objectContaining({
+        providers: expect.objectContaining({ proxy: expect.objectContaining({ base_url: "https://Changed.Example/v1" }) }),
+        sessions: expect.objectContaining({ archive_after_days: 7 }),
+      }));
+      expect(document.querySelector(".notice.error")).toBeNull();
+    }
   });
 
   it.each(["bundles", "approvals"])("allows saving after a tab switch discards an invalid %s editor", async (kind) => {
@@ -1368,7 +1381,7 @@ describe("SettingsPage", () => {
     expect(document.body.textContent).toContain("Archive delay saved as 1 day.");
   });
 
-  it("explains why voice autosave is blocked by an invalid archive draft", async () => {
+  it("saves voice edits after leaving an invalid archive draft", async () => {
     const tab = writable<"automation" | "voice">("automation");
     const currentTab = fromStore(tab);
     component = mount(SettingsPage, {
@@ -1396,10 +1409,12 @@ describe("SettingsPage", () => {
     await new Promise((resolve) => setTimeout(resolve, 850));
     await flushUi();
 
-    expect(settingsApi.saveSettings).not.toHaveBeenCalled();
+    expect(settingsApi.saveSettings).toHaveBeenCalledWith(expect.objectContaining({
+      sessions: expect.objectContaining({ archive_after_days: 7 }),
+      voice: { transcription_model: "whisper-1" },
+    }));
     expect(transcription.value).toBe("whisper-1");
-    expect(document.querySelector('[role="alert"]')?.textContent ?? "")
-      .toContain("Fix the archive delay in Automation before saving.");
+    expect(document.querySelector('[role="alert"]')).toBeNull();
 
     tab.set("automation");
     await flushUi();

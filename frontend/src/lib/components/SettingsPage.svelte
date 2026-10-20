@@ -132,6 +132,9 @@
     const currentTab = tab;
     const invalidArchive = archiveDelayError;
     untrack(() => {
+      if (currentTab !== "automation" && invalidArchive && settings) {
+        settings.sessions.archive_after_days = lastSavedArchiveDelay;
+      }
       if (error === ARCHIVE_SAVE_ERROR && (!invalidArchive || currentTab !== "automation")) error = null;
     });
   });
