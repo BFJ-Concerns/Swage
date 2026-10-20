@@ -614,6 +614,7 @@ async fn track_delegated_session(
                     let result = execution.await;
                     announce_delegated_cancellation(state, session_id, turn_id).await;
                     state.active_turns.lock().await.remove(&session_id);
+                    crate::turn_queue::spawn_drain(state.clone(), session_id);
                     result
                 }
                 Err(_) => execution.await,
@@ -622,8 +623,10 @@ async fn track_delegated_session(
         result = &mut execution => {
             // Completion can win the same poll that published the address.
             if let Ok(started) = started_rx.try_recv() {
-                announce_delegated_cancellation(state, started.child_session_id, started.child_turn_id).await;
+                let session_id = started.child_session_id;
+                announce_delegated_cancellation(state, session_id, started.child_turn_id).await;
                 if let Some(sender) = forward_started { let _ = sender.send(started); }
+                crate::turn_queue::spawn_drain(state.clone(), session_id);
             }
             result
         },
@@ -1594,4 +1597,157 @@ struct DispatchFilesystemAuthority {
     active_workspace_attachment_id: Option<Uuid>,
     placement: Option<ResolvedWorkerDirectory>,
     workflow_call_tools: Option<serde_json::Value>,
+}
+
+#[cfg(test)]
+mod settlement_tests {
+    use super::*;
+    use swage_storage::{NewTurn, TurnState};
+    use tokio::sync::{mpsc, oneshot};
+
+    async fn tracked_child(
+        ending: TurnState,
+        queue_message: bool,
+    ) -> (
+        AppState,
+        Uuid,
+        mpsc::UnboundedReceiver<crate::websocket::ServerEvent>,
+    ) {
+        let (state, session_id) = super::super::tests::make_state_with_session(vec![
+            swage_core::StreamChunk::Delta {
+                content: "Queued answer".into(),
+            },
+            swage_core::StreamChunk::Done {
+                finish_reason: None,
+            },
+        ])
+        .await;
+        let thread_id = state.storage.list_by_session(session_id).await.unwrap()[0].id;
+        let turn = state
+            .storage
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "gateway".into(),
+                state: TurnState::Processing,
+                user_input: Some("Delegated request".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let (events, receiver) = mpsc::unbounded_channel();
+        state.listen_to_session(session_id, events).await;
+        let (started, started_rx) = oneshot::channel();
+        let (registered, registered_rx) = oneshot::channel();
+        let delegate_message_id = Uuid::new_v4();
+        started
+            .send(swage_agent::DetachedDelegation {
+                delegate_message_id,
+                child_session_id: session_id,
+                child_thread_id: thread_id,
+                target_agent_id: "gateway".into(),
+                child_turn_id: turn.id,
+                status: None,
+                status_as_of: None,
+                error_message: None,
+            })
+            .ok()
+            .unwrap();
+        let execution = Box::pin(async {
+            registered_rx.await.unwrap();
+            assert!(state.active_turns.lock().await.contains_key(&session_id));
+            if queue_message {
+                crate::turn_queue::queue_input(
+                    &state,
+                    session_id,
+                    thread_id,
+                    "Next request".into(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    state
+                        .storage
+                        .list_queued_turn_inputs(session_id)
+                        .await
+                        .unwrap()
+                        .len(),
+                    1
+                );
+            }
+            state
+                .storage
+                .update_turn_state(turn.id, ending.clone())
+                .await
+                .unwrap();
+            state
+                .storage
+                .create_agent_message(swage_storage::NewAgentMessage {
+                    sender_agent_id: "gateway".into(),
+                    recipient_agent_id: "parent".into(),
+                    kind: swage_core::MessageKind::Result,
+                    correlation_id: Some(delegate_message_id),
+                    payload: if ending == TurnState::Failed {
+                        serde_json::json!({"error": "child failed"})
+                    } else {
+                        serde_json::json!({"response": "Child answer"})
+                    },
+                })
+                .await
+                .map_err(AgentError::from)
+        });
+        track_delegated_session(
+            &state,
+            CancellationToken::new(),
+            started_rx,
+            Some(registered),
+            execution,
+        )
+        .await
+        .expect("tracked child should return its durable result");
+        assert!(!state.active_turns.lock().await.contains_key(&session_id));
+        (state, session_id, receiver)
+    }
+
+    #[tokio::test]
+    async fn delegated_completion_drains_queued_message_without_another_send() {
+        let (state, session_id, mut events) = tracked_child(TurnState::Completed, true).await;
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while let Some(event) = events.recv().await {
+                if matches!(event, crate::websocket::ServerEvent::TurnComplete { .. }) {
+                    let thread_id = state.storage.list_by_session(session_id).await.unwrap()[0].id;
+                    if state
+                        .storage
+                        .list_turns_by_thread(thread_id)
+                        .await
+                        .unwrap()
+                        .iter()
+                        .any(|turn| {
+                            turn.user_input.as_deref() == Some("Next request")
+                                && turn.state == TurnState::Completed
+                        })
+                    {
+                        return;
+                    }
+                }
+            }
+        })
+        .await;
+        assert!(
+            ended.is_ok(),
+            "queued request must run when the delegated turn ends without another send"
+        );
+        let thread_id = state.storage.list_by_session(session_id).await.unwrap()[0].id;
+        let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
+        assert_eq!(
+            turns.len(),
+            2,
+            "the queued request must create its own turn"
+        );
+        assert!(
+            turns
+                .iter()
+                .any(|turn| turn.user_input.as_deref() == Some("Next request")
+                    && turn.state == TurnState::Completed)
+        );
+    }
 }
