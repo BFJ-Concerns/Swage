@@ -25154,3 +25154,55 @@ async fn conversation_evidence_marks_a_replayed_preview() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn dispatcher_preserves_arguments_beyond_the_replay_bound() {
+    struct WholeArgumentsTool {
+        expected: String,
+        validated: Arc<AtomicBool>,
+        executed: Arc<AtomicBool>,
+    }
+    #[async_trait]
+    impl crate::tool::Tool for WholeArgumentsTool {
+        fn name(&self) -> &str {
+            "echo"
+        }
+        fn description(&self) -> &str {
+            "Return the submitted text."
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object", "properties":{"text":{"type":"string"}},"required":["text"]})
+        }
+        fn validate_call(&self, params: &serde_json::Value) -> Result<(), ToolError> {
+            assert_eq!(
+                params["text"].as_str(),
+                Some(self.expected.as_str()),
+                "validation must receive the complete argument"
+            );
+            self.validated.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn execute(
+            &self,
+            params: serde_json::Value,
+            _ctx: &dyn swage_tool::context::ToolContext,
+        ) -> Result<serde_json::Value, ToolError> {
+            assert_eq!(
+                params["text"].as_str(),
+                Some(self.expected.as_str()),
+                "execution must receive the complete argument"
+            );
+            self.executed.store(true, Ordering::SeqCst);
+            Ok(params)
+        }
+    }
+    let validated = Arc::new(AtomicBool::new(false));
+    let executed = Arc::new(AtomicBool::new(false));
+    start_long_result_turn(Arc::new(WholeArgumentsTool {
+        expected: "x".repeat(6500) + "READ-MARKER",
+        validated: validated.clone(),
+        executed: executed.clone(),
+    }))
+    .await;
+    assert!(validated.load(Ordering::SeqCst), "validation must run");
+    assert!(executed.load(Ordering::SeqCst), "execution must run");
+}

@@ -277,6 +277,11 @@
     {/if}
   {/if}
 
+  <details class="tool-arguments">
+    <summary>Arguments</summary>
+    <pre class="argument-content">{JSON.stringify(toolCall.arguments, null, 2)}</pre>
+  </details>
+
   <!-- ---- Sub-calls: tools invoked within this call (e.g. from python_execute) ---- -->
   {#if toolCall.sub_calls && toolCall.sub_calls.length > 0}
     <div class="sub-calls">
@@ -396,7 +401,8 @@
     gap: 4px;
   }
 
-  .result-content {
+  .result-content,
+  .argument-content {
     margin: 0;
     font-family: var(--font-mono);
     font-size: 11.5px;

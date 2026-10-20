@@ -615,6 +615,25 @@ describe("recorded result navigation", () => {
 
 });
 
+describe("readable edit arguments", () => {
+  it("lets a person inspect the submitted replacement text", () => {
+    component = mount(ToolCallDisplay, {
+      target: document.body,
+      props: { toolCall: makeCompletedCall({ tool: "file_edit", summary: "notes.txt", arguments: {
+        changes: [{ path: "notes.txt", edits: [{ type: "replace", old_text: "Before the edit", new_text: "After the edit" }] }],
+      } }), isLive: false },
+    });
+    expect(document.body.textContent).toContain("Before the edit");
+    expect(document.body.textContent).toContain("After the edit");
+    const details = document.querySelector("details.tool-arguments") as HTMLDetailsElement;
+    flushSync(() => details.querySelector("summary")!.click());
+    expect(details.open).toBe(true);
+    expect(details.textContent).toContain("Before the edit");
+    expect(details.textContent).toContain("After the edit");
+    expect(details.textContent).not.toContain("[object Object]");
+  });
+});
+
 describe("model replay evidence", () => {
   it.each([true, false])("shows what later turns receive (preview=%s)", (preview) => {
     component = mount(ToolCallDisplay, {
