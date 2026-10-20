@@ -2,10 +2,7 @@
   Message history display — renders the active conversation's messages.
   Handles markdown rendering, syntax highlighting, auto-scroll, and streaming.
 -->
-<script lang="ts">
-  import { on } from "svelte/events";
-  import { parseRoute } from "../router";
-  import DOMPurify from "dompurify";
+<script module lang="ts">
   import { marked, Tokenizer } from "marked";
   import { markedHighlight } from "marked-highlight";
   import hljs from "highlight.js/lib/core";
@@ -23,17 +20,6 @@
   import typescript from "highlight.js/lib/languages/typescript";
   import xml from "highlight.js/lib/languages/xml";
   import yaml from "highlight.js/lib/languages/yaml";
-
-  import type { ConversationStore } from "../stores/conversations";
-  import type { StreamingStore } from "../stores/streaming";
-  import { authorLabel, isPersonsMessage } from "../message-authorship";
-  import {
-    DEFAULT_DISPLAY_PREFERENCES,
-    type DisplayPreferences,
-  } from "../display-preferences";
-  import type { ToolCallView } from "../types";
-  import ToolCallDisplay from "./ToolCallDisplay.svelte";
-  import TurnContextInspectorTrigger from "./TurnContextInspectorTrigger.svelte";
 
   // ---- Markdown configuration -----------------------------------------------
   // Module-level setup: runs once when this module is first imported.
@@ -91,6 +77,23 @@
       },
     }),
   );
+</script>
+
+<script lang="ts">
+  import { on } from "svelte/events";
+  import { parseRoute } from "../router";
+  import DOMPurify from "dompurify";
+
+  import type { ConversationStore } from "../stores/conversations";
+  import type { StreamingStore } from "../stores/streaming";
+  import { authorLabel, isPersonsMessage } from "../message-authorship";
+  import {
+    DEFAULT_DISPLAY_PREFERENCES,
+    type DisplayPreferences,
+  } from "../display-preferences";
+  import type { ToolCallView } from "../types";
+  import ToolCallDisplay from "./ToolCallDisplay.svelte";
+  import TurnContextInspectorTrigger from "./TurnContextInspectorTrigger.svelte";
 
   /**
    * Build a display tree from a flat tool_calls list returned by the API.
