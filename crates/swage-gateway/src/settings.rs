@@ -187,6 +187,21 @@ pub async fn save_settings(
     state: &AppState,
     request: SaveSettingsRequest,
 ) -> Result<SettingsResponse, ApiError> {
+    save_settings_with_writer(state, request, |path, body| async move {
+        write_config_atomically(&path, &body).await
+    })
+    .await
+}
+
+async fn save_settings_with_writer<F, Fut>(
+    state: &AppState,
+    request: SaveSettingsRequest,
+    write_config: F,
+) -> Result<SettingsResponse, ApiError>
+where
+    F: FnOnce(PathBuf, String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), ApiError>>,
+{
     validate_settings_request(&request)?;
     if let Some(context) = &request.context {
         validate_context_assembly(state, &context.assembly).await?;
@@ -313,7 +328,12 @@ pub async fn save_settings(
         let secret_id = validate_provider_key_rotation(state, provider).await?;
         provider_keys.push((provider_id, provider, secret_id));
     }
-    for (provider_id, provider, secret_id) in provider_keys {
+    for &(provider_id, provider, secret_id) in &provider_keys {
+        // Existing references already belong to the config. Their material
+        // must remain unchanged until the config write succeeds.
+        if secret_id.is_some() {
+            continue;
+        }
         let secret_ref = persist_provider_key(state, provider_id, provider, secret_id).await?;
         if let Some(secret_ref) = secret_ref {
             partial
@@ -328,7 +348,12 @@ pub async fn save_settings(
     }
     let body = toml::to_string_pretty(&partial)
         .map_err(|error| ApiError::validation(format!("failed to serialise settings: {error}")))?;
-    write_config_atomically(&path, &body).await?;
+    write_config(path, body).await?;
+    for (provider_id, provider, secret_id) in provider_keys {
+        if secret_id.is_some() {
+            persist_provider_key(state, provider_id, provider, secret_id).await?;
+        }
+    }
 
     let saved_providers = partial
         .providers
@@ -1414,6 +1439,98 @@ async fn discover_openrouter_models() -> Result<Vec<DiscoveredModel>, ApiError> 
 mod tests {
     use crate::test_support::SwageHomeGuard;
     use swage_storage::store::SecretStore;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn settings_config_write_failure_keeps_managed_key_and_runtime_until_success() {
+        use swage_storage::store::AuditStore;
+
+        let home = SwageHomeGuard::new();
+        let _key = crate::secret::tests::with_secret_env();
+        let storage = std::sync::Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let state = AppState::new_with_config_root(
+            storage.clone(),
+            storage.clone(),
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        let mut request = succession_settings_request(None);
+        request.providers.get_mut("local").unwrap().api_key = Some("original-fixture-key".into());
+        let first = super::save_settings(&state, request).await.unwrap();
+        let reference = first.providers["local"].api_key_secret_ref.clone().unwrap();
+        let before = serde_json::to_value(state.active_config()).unwrap();
+        let config_before = tokio::fs::read(home.path().join("config.toml"))
+            .await
+            .unwrap();
+        let mut request = succession_settings_request(None);
+        let provider = request.providers.get_mut("local").unwrap();
+        provider.api_key_secret_ref = Some(reference.clone());
+        provider.api_key = Some("replacement-fixture-key".into());
+        provider.display_name = Some("Changed provider".into());
+        let failed = super::save_settings_with_writer(&state, request.clone(), |_, _| {
+            std::future::ready(Err(crate::error::ApiError::validation(
+                "injected config write failure".into(),
+            )))
+        })
+        .await;
+        assert!(
+            failed
+                .unwrap_err()
+                .message()
+                .contains("injected config write failure")
+        );
+        assert_eq!(
+            state
+                .secret_manager
+                .resolve(&reference)
+                .await
+                .unwrap()
+                .value,
+            "original-fixture-key",
+            "failed config write must not rotate the existing credential"
+        );
+        assert_eq!(serde_json::to_value(state.active_config()).unwrap(), before);
+        assert_eq!(
+            tokio::fs::read(home.path().join("config.toml"))
+                .await
+                .unwrap(),
+            config_before
+        );
+
+        let saved = super::save_settings(&state, request).await.unwrap();
+        assert_eq!(
+            saved.providers["local"].api_key_secret_ref.as_deref(),
+            Some(reference.as_str())
+        );
+        assert_eq!(
+            state
+                .secret_manager
+                .resolve(&reference)
+                .await
+                .unwrap()
+                .value,
+            "replacement-fixture-key"
+        );
+        assert_eq!(
+            state.active_config().providers.entries["local"]
+                .display_name
+                .as_deref(),
+            Some("Changed provider")
+        );
+        let rotations = storage
+            .list_audit_events()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_kind == "rotated")
+            .count();
+        assert_eq!(
+            rotations, 1,
+            "only the successful save rotates the credential, exactly once"
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn settings_context_assembly_validation_checks_known_hierarchies_before_writing() {

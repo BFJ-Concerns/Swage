@@ -40,7 +40,7 @@
 
   function formatValue(value: unknown): string {
     if (value == null) return "unset";
-    return typeof value === "string" ? value : JSON.stringify(value);
+    return JSON.stringify(value);
   }
 
   function fieldLabel(path: string[]): string {
@@ -127,7 +127,7 @@
 <aside class="history-pane" aria-label="Operator history">
   <header>
     <p class="eyebrow">Recorded history</p>
-    <h2>Configuration and experiment activity</h2>
+    <h2>Recorded activity</h2>
     <p>Read-only records from the local audit trail and saved turn context.</p>
   </header>
 

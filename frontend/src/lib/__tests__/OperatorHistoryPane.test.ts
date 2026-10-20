@@ -24,6 +24,19 @@ afterEach(() => {
 });
 
 describe("OperatorHistoryPane", () => {
+  it("names the whole audit record and renders configuration, tool, surface and knowledge events", async () => {
+    vi.mocked(fetchOperatorHistory).mockResolvedValue({ configuration_changes: [], variant_selections: [], assembly_reports: [] });
+    const kinds = ["configuration_change", "tool_call", "surface_module_written", "knowledge_recorded"];
+    vi.mocked(fetchAuditEvents).mockResolvedValue({ events: kinds.map((kind, index) => ({
+      id: `event-${index}`, session_id: "session-1", entity_kind: "example", entity_id: `entity-${index}`,
+      event_kind: kind, summary: `Activity ${index}`, metadata: {}, created_at: "2026-10-04T10:00:00Z",
+    })), next_cursor: null });
+    component = mount(OperatorHistoryPane, { target: document.body });
+    await vi.waitFor(() => expect(document.querySelectorAll(".audit-entry")).toHaveLength(4));
+    for (const kind of kinds) expect(document.querySelector(".audit-record")?.textContent).toContain(kind);
+    expect(document.querySelector(".history-pane h2")?.textContent).toBe("Recorded activity");
+  });
+
   it("reads the audit record by the filters the operator sets and pages older events", async () => {
     vi.mocked(fetchOperatorHistory).mockResolvedValue({
       configuration_changes: [],
@@ -130,8 +143,8 @@ describe("OperatorHistoryPane", () => {
       Array.from(row.querySelectorAll("th, td")).map((cell) => cell.textContent?.trim()),
     );
     expect(rows).toEqual([
-      ["Context assembly", "default", "compact"],
-      ["Default model", "sonnet", "sol"],
+      ["Context assembly", '"default"', '"compact"'],
+      ["Default model", '"sonnet"', '"sol"'],
     ]);
     const whole = document.querySelector(".configuration-entry details") as HTMLDetailsElement;
     expect(whole).not.toBeNull();
@@ -170,35 +183,35 @@ describe("OperatorHistoryPane", () => {
       name: "single-field change",
       prior: { voice: { transcription_model: "whisper-1", speech_model: "tts-1" } },
       next: { voice: { transcription_model: "whisper-2", speech_model: "tts-1" } },
-      rows: [["Transcription model", "whisper-1", "whisper-2"]],
+      rows: [["Transcription model", '"whisper-1"', '"whisper-2"']],
     },
     {
       name: "named provider change",
       prior: { providers: { "my.proxy": { base_url: "http://a", has_credential: true } } },
       next: { providers: { "my.proxy": { base_url: "http://b", has_credential: true } } },
-      rows: [["Providers › my.proxy › Base URL", "http://a", "http://b"]],
+      rows: [["Providers › my.proxy › Base URL", '"http://a"', '"http://b"']],
     },
     {
       name: "explicit null value",
       prior: { voice: { speech_model: null } },
       next: { voice: { speech_model: "tts-1" } },
-      rows: [["Speech model", "unset", "tts-1"]],
+      rows: [["Speech model", "unset", '"tts-1"']],
     },
     {
       name: "new null value",
       prior: { voice: { speech_model: "tts-1" } },
       next: { voice: { speech_model: null } },
-      rows: [["Speech model", "tts-1", "unset"]],
+      rows: [["Speech model", '"tts-1"', "unset"]],
     },
     {
       name: "provider credential labels",
       prior: { providers: { google: { api_key: "[REDACTED]", api_key_env: "OLD_KEY", api_key_secret_ref: "secret-old", has_credential: false, base_url: "http://a" } } },
       next: { providers: { google: { api_key: "", api_key_env: "NEW_KEY", api_key_secret_ref: "secret-new", has_credential: true, base_url: "http://b" } } },
       rows: [
-        ["Providers › google › API key", "[REDACTED]", ""],
-        ["Providers › google › API key environment variable", "OLD_KEY", "NEW_KEY"],
-        ["Providers › google › Stored credential", "secret-old", "secret-new"],
-        ["Providers › google › Base URL", "http://a", "http://b"],
+        ["Providers › google › API key", '"[REDACTED]"', '""'],
+        ["Providers › google › API key environment variable", '"OLD_KEY"', '"NEW_KEY"'],
+        ["Providers › google › Stored credential", '"secret-old"', '"secret-new"'],
+        ["Providers › google › Base URL", '"http://a"', '"http://b"'],
         ["Providers › google › Credential", "false", "true"],
       ],
     },
@@ -206,7 +219,7 @@ describe("OperatorHistoryPane", () => {
       name: `literal unset environment variable ${action}`,
       prior: { providers: { google: { api_key_env: action === "set" ? null : "unset" } } },
       next: { providers: { google: { api_key_env: action === "set" ? "unset" : null } } },
-      rows: [["Providers › google › API key environment variable", "unset", "unset"]],
+      rows: [["Providers › google › API key environment variable", action === "set" ? "unset" : '"unset"', action === "set" ? '"unset"' : "unset"]],
     })),
     ...(["creation", "deletion"] as const).map((action) => {
       const snapshot = { providers: { google: {
@@ -219,7 +232,7 @@ describe("OperatorHistoryPane", () => {
         prior: action === "creation" ? null : snapshot,
         next: action === "creation" ? snapshot : null,
         rows: [
-          ["Credential", "false"], ["Protocol", "google"],
+          ["Credential", "false"], ["Protocol", '"google"'],
         ].map(([label, value]) => [
           `Providers › google › ${label}`,
           action === "creation" ? "unset" : value,
