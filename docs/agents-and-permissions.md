@@ -78,9 +78,11 @@ Tool permissions can only narrow what the configuration grants. The shipped
 **Swage default** and **Memory curator** cannot be changed or deleted through
 this tool. Invalid ids, blank display names, empty or duplicate skill names,
 malformed permission overlays and invalid output schemas are refused.
-Ids use lowercase ASCII letters, digits and hyphens. A model preference
+Ids use lowercase ASCII letters, digits and hyphens. Saving a model preference
 outside the configured catalogue is refused with the available ids; choose
 the model when starting a session.
+At run time, a saved model preference no longer in the catalogue leaves the
+resolved default model in place.
 Approval requirements belong in configuration files, not in a definition.
 
 After creating or editing, reload the page. Open **Settings → Agents** to

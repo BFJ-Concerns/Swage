@@ -63,8 +63,10 @@ delegation grants still apply; this tool cannot grant itself access.
 `null` on update. Agent ids use lowercase ASCII letters, digits and hyphens;
 the display name must not be blank. Skill names must be non-empty and unique,
 permission overlays must be valid, and output contracts must be valid JSON
-Schemas. An unknown model id is refused with the configured ids. Tool grants
-can only narrow the configuration's grants; `require_approval` is refused even
+Schemas. Saving an unknown model id is refused with the configured ids.
+At run time, a saved model preference no longer in the catalogue leaves the
+resolved default model in place. Tool grants can only narrow the configuration's
+grants; `require_approval` is refused even
 as an empty list. Set approval requirements in configuration files. The shipped
 **Swage default** (`gateway`) and **Memory curator** (`memory-curator`) cannot
 be changed or deleted through this tool.
