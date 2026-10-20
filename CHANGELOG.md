@@ -148,6 +148,10 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- Plain-text assistant replies keep an 80-character prose measure while streaming and after completion.
+- Session previews show readable HTML text instead of raw tags.
+- Conversation and surface markdown tables share consistent styling with visible cell boundaries.
+- Failed webhooks and automated turns without a reply now report delivery or runtime failures instead of validation errors. Schedule delivery messages name the failed target without repeating the reason; retry behaviour is unchanged.
 - A chat turn interrupted while it waits for a delegated agent, or while recording that agent's result, resumes after a gateway restart instead of losing its reply or stopping the gateway from starting. The resumed reply stays in its originating chat and survives further restarts when batched with a scheduled brief, and later tool results no longer clear the pending delegation. A reconstructed child result still passes the gateway's message-send hooks; if one refuses it, the parent resumes with a notice of the child's fate that carries neither the refused output nor the hook's reason, which stays in the gateway log.
 - Memory notice links open their page even when a curator instruction finishes while the page is loading.
 - Links to app pages in conversation messages navigate within the app instead of reloading it.
