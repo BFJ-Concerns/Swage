@@ -222,7 +222,6 @@ pub(crate) struct AnthropicMessage {
 struct MessagesResponse {
     content: Vec<ContentBlock>,
     usage: ApiUsage,
-    model: String,
     /// Reason the model stopped — "end_turn", "tool_use", "max_tokens", or similar.
     stop_reason: Option<String>,
 }
