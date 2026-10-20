@@ -443,7 +443,7 @@
       -->
       <InformationalSettingsPanel {tab} />
     {:else if tab === "channels"}
-      <ChannelsPanel />
+      <ChannelsPanel {topicId} {topics} />
     {:else if tab === "devices"}
       <!--
         Devices register and pair through the API; this page has no view of them

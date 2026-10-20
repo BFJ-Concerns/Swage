@@ -2271,6 +2271,7 @@ mod tests {
         assert_eq!(
             body_json(response).await,
             serde_json::json!([{
+                "integration": "telegram",
                 "link_code": issued.link_code,
                 "expires_at": issued.expires_at,
             }]),

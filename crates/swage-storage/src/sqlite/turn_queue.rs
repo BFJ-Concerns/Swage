@@ -101,11 +101,23 @@ fn enqueue_inputs(
     let mut queued = Vec::with_capacity(inputs.len());
     for input in inputs {
         let id = Uuid::new_v4();
-        let now = Utc::now();
+        // Destination resolution can finish after a newer direct input has
+        // queued. Inbox arrival, rather than resolution, determines its place.
+        let mut inbox_arrival: Option<DateTime<Utc>> = None;
+        for message_id in &input.channel_message_ids {
+            let received: String = tx.query_row(
+                "SELECT received_at FROM channel_inbound_messages WHERE id = ?1",
+                params![message_id.to_string()],
+                |row| row.get(0),
+            )?;
+            let received = parse_dt(&received)?;
+            inbox_arrival = Some(inbox_arrival.map_or(received, |first| first.min(received)));
+        }
+        let arrived_at = inbox_arrival.unwrap_or_else(Utc::now);
         let attachments = serde_json::to_string(&input.attachments)
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        // The sequence is allocated inside the connection's lock, so two
-        // arrivals never share a place in the queue.
+        // Allocate under the connection's lock for a stable tie-breaker
+        // when arrivals share the same instant.
         let seq: i64 = tx.query_row(
             "SELECT COALESCE(MAX(seq) + 1, 0) FROM turn_queue WHERE session_id = ?1",
             params![input.session_id.to_string()],
@@ -123,7 +135,7 @@ fn enqueue_inputs(
                     input.origin.as_str(),
                     &input.content,
                     attachments,
-                    now.to_rfc3339(),
+                    arrived_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
                     input.schedule_run_id.map(|id| id.to_string()),
                     input.attended,
                     input.client_id.map(|id| id.to_string()),
@@ -151,7 +163,7 @@ fn enqueue_inputs(
             origin: input.origin,
             content: input.content,
             attachments: input.attachments,
-            created_at: now,
+            created_at: arrived_at,
             schedule_run_id: input.schedule_run_id,
             channel_message_ids: input.channel_message_ids,
         });
@@ -229,7 +241,7 @@ impl TurnQueueStore for SqliteStorage {
     ) -> Result<Vec<QueuedTurnInput>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(&format!(
-                "SELECT {COLUMNS} FROM turn_queue WHERE session_id = ?1 ORDER BY seq ASC"
+                "SELECT {COLUMNS} FROM turn_queue WHERE session_id = ?1 ORDER BY created_at ASC, seq ASC"
             ))?;
             let rows = stmt.query_map(params![session_id.to_string()], row_to_queued)?;
             let mut queued = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -251,7 +263,7 @@ impl TurnQueueStore for SqliteStorage {
             let tx = conn.unchecked_transaction()?;
             let mut queued = {
                 let mut stmt = tx.prepare(&format!(
-                    "SELECT {COLUMNS} FROM turn_queue WHERE session_id = ?1 ORDER BY seq ASC"
+                    "SELECT {COLUMNS} FROM turn_queue WHERE session_id = ?1 ORDER BY created_at ASC, seq ASC"
                 ))?;
                 let rows = stmt.query_map(params![session_id.to_string()], row_to_queued)?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?

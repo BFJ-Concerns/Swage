@@ -766,11 +766,15 @@
           "type": "string",
           "format": "date-time"
         },
+        "integration": {
+          "type": "string"
+        },
         "link_code": {
           "type": "string"
         }
       },
       "required": [
+        "integration",
         "link_code",
         "expires_at"
       ]
