@@ -14,6 +14,7 @@
   through to reach their work.
 -->
 <script lang="ts">
+  import { untrack } from "svelte";
   import ConversationChannel from "./ConversationChannel.svelte";
   import ConversationList from "./ConversationList.svelte";
   import OperatorDashboard from "./OperatorDashboard.svelte";
@@ -116,7 +117,7 @@
   // The agent the composer starts the next session under. Seeded from the
   // front door's choice, and reset when the scope changes so an agent from
   // another scope never lingers.
-  let selectedAgentId = $state(pendingStart?.agentId ?? "");
+  let selectedAgentId = $state(untrack(() => pendingStart?.agentId ?? ""));
   let selectedAgentTopicId = $state<string | null | undefined>(undefined);
   $effect(() => {
     const currentTopicId = currentTopic?.id ?? null;
@@ -134,7 +135,7 @@
   });
   // A new pending start (not the one seeded above) brings its own agent
   // choice; the user's later change in the composer is left alone.
-  let seededStart = pendingStart;
+  let seededStart = untrack(() => pendingStart);
   $effect(() => {
     if (pendingStart === seededStart) return;
     seededStart = pendingStart;
@@ -304,11 +305,13 @@
       </nav>
       <button class="close" onclick={closeSettings} aria-label="Close settings">×</button>
     </header>
-    {#if settingsTopicSlug}
-      <TopicSettingsPage topic={settingsTopic} tab={settingsTopicTab ?? undefined} {onNavigate} onTopicsChanged={() => topicStore?.loadTopics()} />
-    {:else}
-      <SettingsPage tab={settingsTab ?? undefined} topicId={currentTopic?.id ?? null} topics={topicStore?.topics ?? []} memoryPage={route?.settingsMemoryPage ?? null} {onSettingsSaved} />
-    {/if}
+    <div class="settings-body">
+      {#if settingsTopicSlug}
+        <TopicSettingsPage topic={settingsTopic} tab={settingsTopicTab ?? undefined} {onNavigate} onTopicsChanged={() => topicStore?.loadTopics()} />
+      {:else}
+        <SettingsPage tab={settingsTab ?? undefined} topicId={currentTopic?.id ?? null} topics={topicStore?.topics ?? []} memoryPage={route?.settingsMemoryPage ?? null} {onSettingsSaved} />
+      {/if}
+    </div>
   </div>
 {:else if libraryMode}
   <!-- The shared library's catalogue: what is saved, described and tagged,
@@ -419,8 +422,9 @@
   .library { height: 100vh; overflow: auto; }
   .back-btn { margin: .75rem; }
   nav { display: flex; gap: .5rem; flex-wrap: wrap; }
-  .settings-window { height: calc(100vh - 4rem); overflow: auto; }
-  .settings-chrome { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; padding: .75rem; border-bottom: 1px solid var(--ink); }
+  .settings-window { height: calc(100vh - 4rem); display: flex; flex-direction: column; overflow: hidden; }
+  .settings-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
+  .settings-chrome { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; padding: .75rem; border-bottom: 1px solid var(--ink); }
   .settings-chrome h2 { margin: 0; font-size: 1rem; }
   .settings-chrome .topic-tab { border-left: 1px dotted var(--rule-soft); padding-left: .5rem; }
   .settings-chrome .topic-tab ~ .topic-tab { border-left: none; padding-left: 0; }

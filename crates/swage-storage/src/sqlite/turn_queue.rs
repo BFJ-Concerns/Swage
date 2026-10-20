@@ -513,14 +513,6 @@ mod tests {
             .await
             .unwrap();
         let rows = storage.list_pending_channel_messages().await.unwrap();
-        let parent = storage
-            .begin_channel_turn(thread, "gateway", "delegate", vec![rows[0].id, rows[1].id])
-            .await
-            .unwrap();
-        storage
-            .update_turn_state(parent.id, TurnState::Delegating)
-            .await
-            .unwrap();
         let other_thread = ThreadStore::create(
             &storage,
             NewThread {
@@ -530,12 +522,40 @@ mod tests {
         )
         .await
         .unwrap();
+        storage
+            .enqueue_turn_input(NewQueuedTurnInput {
+                attended: false,
+                channel_message_ids: vec![rows[2].id],
+                ..queued(session, other_thread.id, "unrelated")
+            })
+            .await
+            .unwrap();
         let other = storage
-            .begin_channel_turn(other_thread.id, "other", "unrelated", vec![rows[2].id])
+            .drain_queued_turn_inputs(session, "other")
+            .await
+            .unwrap()
+            .unwrap()
+            .turn;
+        storage
+            .update_turn_state(other.id, TurnState::Completed)
             .await
             .unwrap();
         storage
-            .update_turn_state(other.id, TurnState::Completed)
+            .enqueue_turn_input(NewQueuedTurnInput {
+                attended: false,
+                channel_message_ids: vec![rows[0].id, rows[1].id],
+                ..queued(session, thread, "delegate")
+            })
+            .await
+            .unwrap();
+        let parent = storage
+            .drain_queued_turn_inputs(session, "gateway")
+            .await
+            .unwrap()
+            .unwrap()
+            .turn;
+        storage
+            .update_turn_state(parent.id, TurnState::Delegating)
             .await
             .unwrap();
         let snapshot = serde_json::to_value(
