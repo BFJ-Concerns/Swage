@@ -2758,10 +2758,9 @@ mod tests {
             )
             .expect("select recorded replay columns");
 
-        let arguments: swage_core::CompactToolReplay =
-            serde_json::from_str(&model_arguments).expect("arguments compact replay");
-        assert_eq!(arguments.kind, "tool_arguments");
-        assert_eq!(arguments.preview, r#"{"cmd":"missing-command"}"#);
+        let arguments: serde_json::Value =
+            serde_json::from_str(&model_arguments).expect("native model arguments");
+        assert_eq!(arguments, serde_json::json!({"cmd": "missing-command"}));
 
         let result: swage_core::CompactToolReplay =
             serde_json::from_str(&model_result).expect("result compact replay");

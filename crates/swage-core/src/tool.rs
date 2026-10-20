@@ -57,6 +57,7 @@ pub struct ToolResultMetadata {
 }
 
 const MODEL_REPLAY_PREVIEW_CHARS: usize = 2000;
+const MODEL_ARGUMENT_STRING_CHARS: usize = 2000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactToolReplay {
@@ -83,9 +84,11 @@ pub struct ToolResultReference {
     pub call_id: String,
 }
 
+/// Keep tool parameters in their native JSON shape, bounding each string value.
 pub fn compact_tool_arguments_for_model(arguments: &serde_json::Value) -> String {
-    let raw = stable_json(arguments);
-    compact_tool_replay("tool_arguments", &raw, None, None).to_stable_json()
+    let mut arguments = arguments.clone();
+    compact_argument_values(&mut arguments);
+    serde_json::to_string(&arguments).expect("tool arguments serialise")
 }
 
 pub fn compact_tool_result_for_model(content: &str, is_error: bool) -> String {
@@ -193,8 +196,25 @@ fn compact_tool_replay(
     }
 }
 
-fn stable_json(value: &serde_json::Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
+fn compact_argument_values(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => {
+            if let Some((end, _)) = text.char_indices().nth(MODEL_ARGUMENT_STRING_CHARS) {
+                text.truncate(end);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                compact_argument_values(value);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                compact_argument_values(value);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
 }
 
 fn preview_chars(raw: &str, max_chars: usize) -> String {
@@ -328,20 +348,17 @@ mod tests {
 
     #[test]
     fn compact_tool_arguments_for_model_is_deterministic() {
-        let arguments = serde_json::json!({"command": "pwd", "limit": 3});
+        let arguments = serde_json::json!({
+            "command": "pwd", "limit": 3,
+            "options": [true, null, {"ratio": 1.5, "label": "short"}]
+        });
 
         let first = compact_tool_arguments_for_model(&arguments);
         let second = compact_tool_arguments_for_model(&arguments);
 
         assert_eq!(first, second);
-        let envelope: CompactToolReplay = serde_json::from_str(&first).unwrap();
-        assert_eq!(envelope.kind, "tool_arguments");
-        assert_eq!(envelope.preview, r#"{"command":"pwd","limit":3}"#);
-        assert!(!envelope.truncated);
-        assert_eq!(envelope.bytes, envelope.preview.len());
-        assert_eq!(envelope.sha256.len(), 64);
-        assert_eq!(envelope.full_result_ref, None);
-        assert_eq!(envelope.is_error, None);
+        let replayed: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(replayed, arguments);
     }
 
     #[test]

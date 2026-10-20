@@ -60,7 +60,7 @@ fn settings_audit_snapshot(settings: &SettingsResponse) -> Result<serde_json::Va
         .map_err(|error| ApiError::validation(format!("failed to snapshot settings: {error}")))
 }
 
-fn tool_runtime_from_config(
+pub(crate) fn tool_runtime_from_config(
     config: &swage_config::ToolConfig,
 ) -> Result<ToolRuntimeSettings, ApiError> {
     Ok(ToolRuntimeSettings {
@@ -140,11 +140,57 @@ pub async fn load_settings(state: &AppState) -> Result<SettingsResponse, ApiErro
     })
 }
 
+/// A global save can name an assembly used only in a topic or agent scope.
+/// Accept it when any known hierarchy resolves it; turn-time resolution still
+/// chooses the assembly for the particular session's scope and agent.
+async fn validate_context_assembly(state: &AppState, name: &str) -> Result<(), ApiError> {
+    let name = name.trim();
+    if name == "default" {
+        return Ok(());
+    }
+    let resolves = |scope: &ScopeLocation, agent: Option<&str>| {
+        let hierarchy = swage_config::configuration_hierarchy(&state.config_root, scope, agent);
+        let levels = hierarchy
+            .iter()
+            .map(|(level, path)| (level.clone(), path.as_path()))
+            .collect::<Vec<_>>();
+        swage_context::js_assembly::resolve_js_assembly(name, &levels).is_some()
+    };
+    if resolves(&ScopeLocation::General, None) {
+        return Ok(());
+    }
+    for topic in state
+        .topic_store
+        .list_scopes()
+        .await
+        .map_err(swage_core::GatewayError::from)?
+    {
+        let scope = topic.location();
+        if resolves(&scope, None) {
+            return Ok(());
+        }
+        let definitions =
+            crate::service::effective_agent_definitions(state.storage.as_ref(), topic.id).await?;
+        if definitions
+            .iter()
+            .any(|definition| resolves(&scope, Some(&definition.definition.id)))
+        {
+            return Ok(());
+        }
+    }
+    Err(ApiError::validation(format!(
+        "unknown context assembly '{name}': no assembly resolves in any known scope"
+    )))
+}
+
 pub async fn save_settings(
     state: &AppState,
     request: SaveSettingsRequest,
 ) -> Result<SettingsResponse, ApiError> {
     validate_settings_request(&request)?;
+    if let Some(context) = &request.context {
+        validate_context_assembly(state, &context.assembly).await?;
+    }
     let prior_settings = settings_audit_snapshot(&load_settings(state).await?)?;
     let SaveSettingsRequest {
         default_provider,
@@ -1368,6 +1414,99 @@ async fn discover_openrouter_models() -> Result<Vec<DiscoveredModel>, ApiError> 
 mod tests {
     use crate::test_support::SwageHomeGuard;
     use swage_storage::store::SecretStore;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn settings_context_assembly_validation_checks_known_hierarchies_before_writing() {
+        use swage_storage::store::{AgentDefinitionStore, AuditStore, TopicStore};
+
+        let home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let topic = storage
+            .create(swage_storage::NewTopic {
+                name: "Assembly topic".into(),
+                slug: "assembly-topic".into(),
+            })
+            .await
+            .unwrap();
+        for (id, topic_id) in [("global-agent", None), ("topic-agent", Some(topic.id))] {
+            storage
+                .upsert_agent_definition(swage_storage::NewAgentDefinition {
+                    id: id.into(),
+                    topic_id,
+                    display_name: id.into(),
+                    description: String::new(),
+                    instructions: String::new(),
+                    model_id: None,
+                    tool_permissions: None,
+                    skills: vec![],
+                    output_schema: None,
+                    output_max_retries: None,
+                })
+                .await
+                .unwrap();
+        }
+        let state = AppState::new_with_config_root(
+            storage.clone(),
+            storage.clone(),
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        save_settings(&state, succession_settings_request(None))
+            .await
+            .unwrap();
+        let path = home.path().join("config.toml");
+        let prior_config = std::fs::read_to_string(&path).unwrap();
+        let prior_events = storage.list_audit_events().await.unwrap().len();
+        let request = succession_settings_request(Some(json!({
+            "assembly": "missing-assembly", "timeout": 5
+        })));
+        let error = save_settings(&state, request.clone())
+            .await
+            .expect_err("an unknown context assembly must be refused before writing");
+        assert_eq!(
+            error.code(),
+            swage_protocol::client::error::ErrorCode::ValidationError
+        );
+        assert!(error.message().contains("missing-assembly"), "{error:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), prior_config);
+        assert_eq!(state.active_config().context.assembly, "default");
+        assert_eq!(
+            storage.list_audit_events().await.unwrap().len(),
+            prior_events
+        );
+
+        // The same name becomes valid through each real hierarchy in turn.
+        // No case relies on a previous case's assembly file remaining behind.
+        for directory in [
+            home.path().to_path_buf(),
+            topic.location().data_dir(home.path()),
+            ScopeLocation::General.agent_dir(home.path(), "global-agent"),
+            topic.location().agent_dir(home.path(), "topic-agent"),
+            topic.location().agent_dir(home.path(), "global-agent"),
+            ScopeLocation::General.agent_dir(home.path(), "gateway"),
+        ] {
+            let assemblies = directory.join("assemblies");
+            std::fs::create_dir_all(&assemblies).unwrap();
+            let assembly = assemblies.join("missing-assembly.js");
+            std::fs::write(&assembly, "export default function () { return []; }").unwrap();
+            let saved = save_settings(&state, request.clone())
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("assembly under {}: {error:?}", directory.display())
+                });
+            assert_eq!(saved.context.assembly, "missing-assembly");
+            assert!(!saved.restart_required);
+            std::fs::remove_file(assembly).unwrap();
+        }
+        // Once the file disappears, even a previously saved name is refused.
+        let error = save_settings(&state, request)
+            .await
+            .expect_err("removed assembly");
+        assert!(error.message().contains("missing-assembly"));
+    }
 
     fn succession_settings_request(context: Option<serde_json::Value>) -> SaveSettingsRequest {
         let mut value = serde_json::json!({

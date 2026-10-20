@@ -92,6 +92,8 @@ All notable changes to Swage are documented in this file.
 - Settings now lists the selected topic's available slash commands and resolved skills, with read-only detail for each item.
 - New conversations can now choose from the effective agent definitions available to their topic, including the shipped default, whether starting from an existing conversation or an empty topic.
 - Sessions now receive operator guidance from standard `AGENTS.md` files: a global file in the Swage config root and one at the root of each trusted, readable attached workspace, layered after the baseline instructions (global before workspace) and visible in the turn context inspector. Untrusted workspaces contribute nothing.
+- Unattended turns stop after repeated identical failing tool calls and keep the cause. Configure `[tools] max_identical_failures` (default 3, bounded to 1–100).
+- The web UI serves a favicon.
 
 ### Changed
 
@@ -138,6 +140,7 @@ All notable changes to Swage are documented in this file.
 - Delivery-log entries now identify the schedule run and turn that produced them when that attribution is available.
 - Unknown keys under `[generation.presets.*]` and `[models.entries.*.capabilities]` now fail configuration loading instead of being ignored. Most other sections already rejected unknown keys through validation and still do; per-model pricing entries remain lenient.
 - Tool approval prompting now defaults to disabled and remains available through explicit operator configuration.
+- Succession records every diagnosis and summary model call, including its stage, usage, cost and failure, in the compaction report.
 
 ### Removed
 
@@ -309,7 +312,6 @@ All notable changes to Swage are documented in this file.
 - Native file tools refuse to write into a workspace attached without permission to change files.
 - Experimentation variants serve a whole conversation; configuration changes apply when a new session first draws.
 
-- Answering a native file-tool approval with Allow runs the pending operation, including paths relative to a sibling folder; timed-out calls report an expired result.
 - Tool output written into an attached workspace no longer appears as untracked files in that workspace’s Git repository.
 - Session previews in conversation, topic and operator lists show the latest user or assistant message; tool and system messages do not replace the preview.
 - A turn interrupted mid-tool resumes without repeating tools that had already completed: each tool call is recorded as soon as the model selects it and settled when it finishes, a call cut off by a restart is settled as interrupted and one stopped with its turn is settled as cancelled, and the resumed conversation replays those calls with their results.
@@ -406,6 +408,38 @@ All notable changes to Swage are documented in this file.
 - Switching topics no longer carries an unavailable agent into a new conversation.
 - A temporary agent-inventory failure at startup no longer hides the available gateway.
 - Streamed tool calls now remain attached to their assistant turn after completion and appear before the response both immediately and after reloading conversation history.
+- Conversation connections recover after a gateway restart, explain when another tab owns the conversation and how to retry, clear that warning once reconnected, distinguish that refusal from transport loss, keep a running turn when another tab refuses a reconnect, and ignore late events from sockets replaced during navigation.
+- Missing or invalid conversations stop connection retries with an explanation and Retry, while gateway transport failures continue to reconnect.
+- Messages sent while a conversation connection opens report a delivery failure if another tab refuses ownership, ending the local waiting turn.
+- Deep-linked conversations stay connected when their scope’s session list fails to load.
+- Switching session scope clears the sidebar immediately and ignores older list responses.
+- General sessions show “General” in the header; named topics keep their topic label.
+- Selecting another session prevents an outstanding creation response from changing the conversation or URL.
+- Conversation navigation and creation failures show their own recoverable errors, including the gateway’s error code and message, while the current conversation remains available.
+- The session-start topic selector and the recent-session topic filter can search large topic catalogues.
+- Tool records and completion events distinguish operation failure, refusal, cancellation with unconfirmed completion, and validation after execution. Signal-terminated shell commands report failure; approval feedback keeps whether execution began. Model-visible errors state when the operation ran before its result was rejected, or may have run, and keep the source detail and advice.
+- Approval expiry under the interrupt policy records an unexecuted, expired tool call and names the timeout in live notices and replay; it is not reported as a person stopping the turn.
+- Stop keeps calls and their turn cancelled in live views, conversation readback and subsequent context.
+- Approval decisions keep their waiter after a failed settlement, honour accepted answers when timers are ready, and apply the configured expiry policy through both client routes.
+- Failed turns keep their cause in polling, history and queued schedule records. Provider overload remains distinct from rate limiting.
+- Empty browser scroll references and workflow name or source arguments are rejected before they are used.
+- A diagnosis that reaches its output limit is recorded as incomplete, and the session uses threshold succession without carrying the truncated synthesis.
+- A turn's context describes only the tools that turn is offered: memory guidance, the orientation's preferred tools and the surface tool descriptions no longer name tools or operations the session cannot use.
+- Installation refuses binding flags without `--lan`, prints IPv6 addresses correctly, directs ephemeral-port users to status, keeps unspecified host, port and configuration defaults, and restarts only a gateway confirmed healthy and running.
+- Settings → Channels issues link codes for the selected integration and topic, or unscoped in General, names that destination before issuance, and records issuance in the local audit trail without exposing the code.
+- Channel link codes show instructions for their own integration; Telegram codes include the complete `/link` command.
+- Inputs queued while a session is busy keep their arrival order, including inbox arrivals whose destination resolved later.
+- Run pages show readable local times with exact timestamps available on hover, and completed provider rounds show their elapsed seconds.
+- Worker cards show status, model, effort, placement and provider-round count before a collapsed, expandable briefing.
+- Run pages require a recorded timer entry before showing a timer wake, label decision holds explicitly, and keep multiline script errors under Error details.
+- Gateways bound to a LAN address stop gracefully with `swage gateway stop`; refused shutdown requests report their reason instead of calling the gateway unresponsive.
+- Settings keeps its heading, section navigation and save feedback visible while its fields scroll.
+- Settings save feedback is quiet and transient, and says that saved changes, including Sandbox, apply to new turns.
+- Automation settings name every input for assistive technology, with visible labels for context, approval and permission fields and seconds stated for both timeouts.
+- Settings refuses context assembly names absent from every known global, topic and agent hierarchy, naming the unknown assembly before saving.
+- Long sessions no longer fail ordinary file and shell calls with "missing required field" after the model copies earlier tool calls from its history.
+- Interrupted sandbox IPC reads retain partial frames, so the next call can complete the frame without corrupting the connection.
+- Sandboxed shell commands honour `shell_timeout_secs` even after closing their output streams, report that limit when they time out, and leave later calls receiving their own replies.
 
 ## 0.2.0 — 2026-08-13
 

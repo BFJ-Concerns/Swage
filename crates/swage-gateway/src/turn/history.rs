@@ -150,27 +150,36 @@ pub(super) fn compact_tool_replay_messages(
 pub(super) fn parse_model_arguments(
     record: &ToolCallRecord,
 ) -> Result<serde_json::Value, swage_core::StorageError> {
-    match serde_json::from_str(&record.model_arguments) {
-        Ok(arguments) => Ok(arguments),
-        Err(model_error) => match serde_json::from_str(&record.arguments) {
-            Ok(arguments) => {
-                // Older rows may predate compact model arguments. The raw
-                // arguments are still provider-valid JSON, so using them is
-                // an explicit degraded replay rather than invented context.
-                tracing::warn!(
-                    turn_id = %record.turn_id,
-                    call_id = %record.call_id,
-                    error = %model_error,
-                    "compact tool arguments are invalid; replaying validated raw arguments"
-                );
-                Ok(arguments)
-            }
-            Err(raw_error) => Err(swage_core::StorageError::Corruption {
-                message: format!(
-                    "tool call '{}' has invalid compact arguments ({model_error}) and raw arguments ({raw_error})",
-                    record.call_id
-                ),
-            }),
-        },
-    }
+    let model_error = match serde_json::from_str::<serde_json::Value>(&record.model_arguments) {
+        Ok(arguments) if !is_tool_argument_envelope(&arguments) => return Ok(arguments),
+        Ok(_) => "stored arguments use a replay envelope".to_string(),
+        Err(error) => error.to_string(),
+    };
+    let arguments = serde_json::from_str(&record.arguments).map_err(|raw_error| {
+        swage_core::StorageError::Corruption {
+            message: format!(
+                "tool call '{}' has unusable model arguments ({model_error}) and invalid raw arguments ({raw_error})",
+                record.call_id
+            ),
+        }
+    })?;
+    tracing::warn!(
+        turn_id = %record.turn_id,
+        call_id = %record.call_id,
+        error = %model_error,
+        "model tool arguments are unusable; replaying bounded raw arguments"
+    );
+    // Recover the row's original parameters, never a preview that may end
+    // mid-JSON, using the same bound as newly stored model arguments.
+    Ok(
+        serde_json::from_str(&swage_core::compact_tool_arguments_for_model(&arguments))
+            .expect("compacted tool arguments are valid JSON"),
+    )
+}
+
+fn is_tool_argument_envelope(arguments: &serde_json::Value) -> bool {
+    arguments.get("kind").and_then(serde_json::Value::as_str) == Some("tool_arguments")
+        && ["bytes", "sha256", "truncated", "preview"]
+            .iter()
+            .all(|key| arguments.get(key).is_some())
 }
