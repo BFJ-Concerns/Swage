@@ -83,8 +83,8 @@
                 </span>
 
                 {#if outcome}
-                  <span class="interrupted" title={outcome} aria-label={outcome}>
-                    ⚠
+                  <span class="interrupted">
+                    <span aria-hidden="true">⚠</span> {outcome}
                   </span>
                 {/if}
               </div>

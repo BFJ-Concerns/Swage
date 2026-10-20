@@ -75,7 +75,10 @@ describe("ConversationList", () => {
     ]) {
       const row = rows.find(row => row.querySelector('.preview')?.textContent?.trim() === preview);
       expect(row).toBeDefined();
-      expect(row!.querySelector(`[aria-label="${label}"]`)).not.toBeNull();
+      const marker = row!.querySelector(`[aria-label="${label}"]`) ?? Array.from(row!.querySelectorAll("span")).find(span => span.textContent?.replace("⚠", "").trim() === label);
+      expect(marker?.textContent?.replace("⚠", "").trim()).toBe(label);
+      expect(marker?.querySelector('[aria-hidden="true"]')?.textContent).toBe("⚠");
+      expect(marker?.hasAttribute("aria-label")).toBe(false);
       expect(row!.querySelector(`[aria-label="${opposite}"]`)).toBeNull();
     }
     const recovered = rows.find(row => row.querySelector('.preview')?.textContent?.trim() === "Recovered reply");
