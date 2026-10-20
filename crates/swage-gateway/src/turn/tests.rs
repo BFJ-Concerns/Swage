@@ -3215,7 +3215,32 @@ impl SessionStore for MockStorage {
                 let has_interrupted_turn = db.turns.values().any(|turn| {
                     thread_ids.contains(&turn.thread_id) && turn.state == TurnState::Interrupted
                 });
+                let mut turns: Vec<_> = db
+                    .turns
+                    .values()
+                    .filter(|turn| thread_ids.contains(&turn.thread_id))
+                    .collect();
+                turns.sort_by_key(|turn| {
+                    (
+                        std::cmp::Reverse(turn.created_at),
+                        db.threads[&turn.thread_id].created_at,
+                    )
+                });
+                let latest_turn = turns
+                    .first()
+                    .map(|turn| swage_storage::SessionTurnActivity {
+                        id: turn.id,
+                        state: turn.state.clone(),
+                    });
+                let has_processing_turn = turns.iter().any(|turn| {
+                    matches!(
+                        turn.state,
+                        TurnState::Processing | TurnState::Delegating | TurnState::AwaitingApproval
+                    )
+                });
                 swage_storage::SessionActivity {
+                    latest_turn,
+                    has_processing_turn,
                     last_activity: latest.map_or(session.created_at, |message| message.created_at),
                     latest_message: latest.map(|message| message.content.clone()),
                     has_interrupted_turn,

@@ -377,6 +377,17 @@ pub struct SessionActivity {
     /// The latest user or assistant message's text.
     pub latest_message: Option<String>,
     pub has_interrupted_turn: bool,
+    /// The newest turn across every thread in the session.
+    pub latest_turn: Option<SessionTurnActivity>,
+    /// Any turn is processing, delegating or awaiting approval.
+    pub has_processing_turn: bool,
+}
+
+/// The turn facts needed to describe a session's current activity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionTurnActivity {
+    pub id: Uuid,
+    pub state: TurnState,
 }
 
 /// Which sessions the recent-sessions listing returns.

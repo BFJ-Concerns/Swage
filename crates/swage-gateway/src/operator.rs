@@ -141,24 +141,7 @@ async fn list_operator_sessions(
     for activity in activities {
         let session = activity.session;
         if let Some(topic) = scopes.get(&session.topic_id) {
-            let mut latest_turn = None;
-            let mut has_processing_turn = false;
-            for thread in state.storage.list_by_session(session.id).await? {
-                for turn in state.storage.list_turns_by_thread(thread.id).await? {
-                    has_processing_turn |= matches!(
-                        turn.state,
-                        TurnState::Processing | TurnState::Delegating | TurnState::AwaitingApproval
-                    );
-                    if latest_turn
-                        .as_ref()
-                        .is_none_or(|latest: &swage_storage::Turn| {
-                            turn.created_at > latest.created_at
-                        })
-                    {
-                        latest_turn = Some(turn);
-                    }
-                }
-            }
+            let latest_turn = activity.latest_turn;
             let origin = latest_turn
                 .as_ref()
                 .and_then(|turn| scheduled_turns.get(&turn.id))
@@ -166,7 +149,8 @@ async fn list_operator_sessions(
                     schedule_id: *schedule_id,
                 })
                 .unwrap_or_else(|| session.origin.clone());
-            let running_detected = active_turns.contains_key(&session.id) || has_processing_turn;
+            let running_detected =
+                active_turns.contains_key(&session.id) || activity.has_processing_turn;
             if let SessionOrigin::WorkflowWorker { run_id } = origin
                 && read_runs.insert(run_id)
                 && let Some(run) = state.storage.get_workflow_run(run_id).await?
