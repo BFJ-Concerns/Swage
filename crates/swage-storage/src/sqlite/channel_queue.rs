@@ -1,13 +1,13 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rusqlite::{ErrorCode, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
 use swage_core::StorageError;
 
 use crate::model::{
     ChannelInboundMessage, ChannelInboundMessageState, NewChannelInboundMessage,
-    PendingChannelOrigin, Turn, TurnState,
+    PendingChannelOrigin,
 };
 use crate::sqlite::SqliteStorage;
 use crate::store::ChannelQueueStore;
@@ -211,91 +211,6 @@ impl ChannelQueueStore for SqliteStorage {
         .await
     }
 
-    async fn begin_channel_turn(
-        &self,
-        thread_id: Uuid,
-        agent_id: &str,
-        composed_input: &str,
-        message_ids: Vec<Uuid>,
-    ) -> Result<Turn, StorageError> {
-        let agent_id = agent_id.to_string();
-        let composed_input = composed_input.to_string();
-        self.with_conn(move |conn| {
-            if message_ids.is_empty() {
-                return Err(rusqlite::Error::InvalidParameterName(
-                    "message_ids must not be empty".to_string(),
-                ));
-            }
-
-            let tx = conn.unchecked_transaction()?;
-            let turn_id = Uuid::new_v4();
-            let now = Utc::now();
-            let now_str = now.to_rfc3339();
-            let state = TurnState::Pending;
-            let state_str = state.to_string();
-
-            tx.execute(
-                "INSERT INTO turns (id, thread_id, agent_id, user_input, state, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    turn_id.to_string(),
-                    thread_id.to_string(),
-                    &agent_id,
-                    &composed_input,
-                    &state_str,
-                    &now_str,
-                ],
-            )?;
-
-            let mut claimed = 0usize;
-            for id in &message_ids {
-                claimed += tx.execute(
-                    "UPDATE channel_inbound_messages
-                     SET state = 'presented',
-                         turn_id = ?2,
-                         presented_at = ?3
-                     WHERE id = ?1
-                       AND state = 'pending'
-                       AND NOT EXISTS (SELECT 1 FROM turn_queue_channel_messages q WHERE q.message_id = channel_inbound_messages.id)",
-                    params![id.to_string(), turn_id.to_string(), &now_str],
-                )?;
-            }
-            if claimed != message_ids.len() {
-                return Err(rusqlite::Error::SqliteFailure(
-                    rusqlite::ffi::Error {
-                        code: ErrorCode::ConstraintViolation,
-                        extended_code: 0,
-                    },
-                    Some("channel messages were claimed by another drain".to_string()),
-                ));
-            }
-
-            tx.commit()?;
-            Ok(Turn {
-                id: turn_id,
-                thread_id,
-                agent_id,
-                state,
-                user_input: Some(composed_input),
-                inbound_audit: None,
-                assistant_response: None,
-                input_tokens: None,
-                output_tokens: None,
-                cost_microcents: None,
-                structured_output: None,
-                parent_turn_id: None,
-                created_at: now,
-                completed_at: None,
-                delegated_input_tokens: None,
-                delegated_output_tokens: None,
-                execution_isolation: None,
-                failure_message: None,
-                            attribution: None,
-})
-        })
-        .await
-    }
-
     async fn discard_channel_messages(
         &self,
         message_ids: Vec<Uuid>,
@@ -366,8 +281,12 @@ impl ChannelQueueStore for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{NewSession, NewThread, NewTopic};
-    use crate::store::{ChannelQueueStore, SessionStore, ThreadStore, TopicStore, TurnStore};
+    use crate::model::{
+        MessageOrigin, NewQueuedTurnInput, NewSession, NewThread, NewTopic, Turn, TurnState,
+    };
+    use crate::store::{
+        ChannelQueueStore, SessionStore, ThreadStore, TopicStore, TurnQueueStore, TurnStore,
+    };
 
     fn inbound(external_id: &str, content: &str) -> NewChannelInboundMessage {
         NewChannelInboundMessage {
@@ -408,6 +327,44 @@ mod tests {
         .await
         .unwrap();
         (thread.id, agent_id)
+    }
+
+    async fn present_channel_rows(
+        storage: &SqliteStorage,
+        thread_id: Uuid,
+        agent_id: &str,
+        rows: &[ChannelInboundMessage],
+    ) -> Turn {
+        let session_id = ThreadStore::get(storage, thread_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .session_id;
+        storage
+            .enqueue_turn_inputs(
+                rows.iter()
+                    .map(|row| NewQueuedTurnInput {
+                        session_id,
+                        thread_id,
+                        origin: MessageOrigin::User,
+                        content: row.content.clone(),
+                        attended: false,
+                        delivery_targets: Vec::new(),
+                        client_id: None,
+                        attachments: Vec::new(),
+                        schedule_run_id: None,
+                        channel_message_ids: vec![row.id],
+                    })
+                    .collect(),
+            )
+            .await
+            .unwrap();
+        storage
+            .drain_queued_turn_inputs(session_id, agent_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .turn
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -467,85 +424,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn begin_channel_turn_claims_only_named_rows() {
-        let storage = SqliteStorage::in_memory().unwrap();
-        let (thread_id, agent_id) = thread(&storage).await;
-        storage
-            .ingest_channel_inbound(
-                vec![inbound("11", "one"), inbound("12", "two")],
-                "telegram",
-                "bot-1",
-                "12",
-            )
-            .await
-            .unwrap();
-        let origin = storage
-            .list_pending_channel_origins()
-            .await
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
-        let rows = storage
-            .list_pending_by_origin(origin.clone())
-            .await
-            .unwrap();
-        let turn = storage
-            .begin_channel_turn(thread_id, &agent_id, "one", vec![rows[0].id])
-            .await
-            .unwrap();
-        assert_eq!(turn.user_input.as_deref(), Some("one"));
-
-        let remaining = storage.list_pending_by_origin(origin).await.unwrap();
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].content, "two");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn begin_channel_turn_rolls_back_when_claim_conflicts() {
-        let storage = SqliteStorage::in_memory().unwrap();
-        let (thread_id, agent_id) = thread(&storage).await;
-        storage
-            .ingest_channel_inbound(
-                vec![inbound("21", "one"), inbound("22", "two")],
-                "telegram",
-                "bot-1",
-                "22",
-            )
-            .await
-            .unwrap();
-        let origin = storage
-            .list_pending_channel_origins()
-            .await
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
-        let rows = storage
-            .list_pending_by_origin(origin.clone())
-            .await
-            .unwrap();
-
-        let result = storage
-            .begin_channel_turn(
-                thread_id,
-                &agent_id,
-                "one",
-                vec![rows[0].id, Uuid::new_v4()],
-            )
-            .await;
-
-        assert!(matches!(result, Err(StorageError::ConstraintViolation(_))));
-        let pending = storage.list_pending_by_origin(origin).await.unwrap();
-        assert_eq!(pending.len(), 2);
-        assert_eq!(
-            storage.list_turns_by_thread(thread_id).await.unwrap().len(),
-            0,
-            "the failed claim must roll back the placeholder turn"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
     async fn requeue_presented_messages_for_pending_turns() {
         let storage = SqliteStorage::in_memory().unwrap();
         let (thread_id, agent_id) = thread(&storage).await;
@@ -564,10 +442,7 @@ mod tests {
             .list_pending_by_origin(origin.clone())
             .await
             .unwrap();
-        storage
-            .begin_channel_turn(thread_id, &agent_id, "stuck", vec![rows[0].id])
-            .await
-            .unwrap();
+        present_channel_rows(&storage, thread_id, &agent_id, &rows).await;
 
         let requeued = storage
             .requeue_presented_for_inflight_turns()
@@ -601,10 +476,7 @@ mod tests {
             .list_pending_by_origin(origin.clone())
             .await
             .unwrap();
-        let turn = storage
-            .begin_channel_turn(thread_id, &agent_id, "delegated", vec![rows[0].id])
-            .await
-            .unwrap();
+        let turn = present_channel_rows(&storage, thread_id, &agent_id, &rows).await;
         storage
             .update_turn_state(turn.id, TurnState::Delegating)
             .await
@@ -655,10 +527,7 @@ mod tests {
             .unwrap();
         let rows = storage.list_pending_by_origin(origin).await.unwrap();
         let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
-        let turn = storage
-            .begin_channel_turn(thread_id, &agent_id, "first\n\nsecond", ids.clone())
-            .await
-            .unwrap();
+        let turn = present_channel_rows(&storage, thread_id, &agent_id, &rows).await;
         let other = storage
             .create_turn(crate::model::NewTurn {
                 thread_id,
