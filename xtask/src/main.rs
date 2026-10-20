@@ -583,14 +583,15 @@ fn check_tracker_tags() -> Result<()> {
     files.sort();
     let mut violations = Vec::new();
     for file in files {
-        let html_comments = match file.extension().and_then(|extension| extension.to_str()) {
-            Some("rs") => false,
-            Some("ts" | "svelte") => true,
+        let syntax = match file.extension().and_then(|extension| extension.to_str()) {
+            Some("rs") => SourceSyntax::Rust,
+            Some("ts") => SourceSyntax::TypeScript,
+            Some("svelte") => SourceSyntax::Svelte,
             _ => continue,
         };
         let file = file.strip_prefix(".")?;
         let contents = fs::read_to_string(file)?;
-        for (line, column) in source_tracker_tag_locations(&contents, html_comments) {
+        for (line, column) in source_tracker_tag_locations(&contents, syntax) {
             violations.push(format!("{}:{line}:{column}", file.display()));
         }
     }
@@ -605,10 +606,19 @@ fn check_tracker_tags() -> Result<()> {
     }
 }
 
-/// Locate tracker tags in line comments and, where enabled, HTML comments.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceSyntax {
+    Rust,
+    TypeScript,
+    Svelte,
+}
+
+/// Locate tracker tags in source comments, with Svelte prose outside script code.
 /// Columns are one-based byte offsets, like the other static scans.
-fn source_tracker_tag_locations(contents: &str, html_comments: bool) -> Vec<(usize, usize)> {
+fn source_tracker_tag_locations(contents: &str, syntax: SourceSyntax) -> Vec<(usize, usize)> {
     enum Region {
+        Markup,
+        MarkupTag { script: bool, quote: Option<u8> },
         Code,
         Quoted(u8),
         RawString(usize),
@@ -616,7 +626,16 @@ fn source_tracker_tag_locations(contents: &str, html_comments: bool) -> Vec<(usi
         HtmlComment,
     }
 
-    let mut region = Region::Code;
+    fn tag_name_ends(rest: &[u8]) -> bool {
+        rest.first()
+            .is_some_and(|byte| byte.is_ascii_whitespace() || *byte == b'>')
+    }
+
+    let mut region = if syntax == SourceSyntax::Svelte {
+        Region::Markup
+    } else {
+        Region::Code
+    };
     let mut locations = Vec::new();
     for (line_number, line) in contents.lines().enumerate() {
         let bytes = line.as_bytes();
@@ -624,6 +643,39 @@ fn source_tracker_tag_locations(contents: &str, html_comments: bool) -> Vec<(usi
         while index < bytes.len() {
             let tail = &bytes[index..];
             match region {
+                Region::Markup => {
+                    if tail.starts_with(b"<!--") {
+                        region = Region::HtmlComment;
+                        index += 4;
+                        continue;
+                    }
+                    if bytes[index] == b'<' {
+                        let script = tail.strip_prefix(b"<script").is_some_and(tag_name_ends);
+                        region = Region::MarkupTag {
+                            script,
+                            quote: None,
+                        };
+                    }
+                }
+                Region::MarkupTag { script, quote } => match quote {
+                    Some(delimiter) if bytes[index] == delimiter => {
+                        region = Region::MarkupTag {
+                            script,
+                            quote: None,
+                        };
+                    }
+                    Some(_) => {}
+                    None if matches!(bytes[index], b'\'' | b'"') => {
+                        region = Region::MarkupTag {
+                            script,
+                            quote: Some(bytes[index]),
+                        };
+                    }
+                    None if bytes[index] == b'>' => {
+                        region = if script { Region::Code } else { Region::Markup };
+                    }
+                    None => {}
+                },
                 Region::Quoted(quote) => {
                     if bytes[index] == b'\\' {
                         index += 2;
@@ -658,7 +710,11 @@ fn source_tracker_tag_locations(contents: &str, html_comments: bool) -> Vec<(usi
                 }
                 Region::HtmlComment => {
                     if tail.starts_with(b"-->") {
-                        region = Region::Code;
+                        region = if syntax == SourceSyntax::Svelte {
+                            Region::Markup
+                        } else {
+                            Region::Code
+                        };
                         index += 3;
                         continue;
                     }
@@ -667,6 +723,16 @@ fn source_tracker_tag_locations(contents: &str, html_comments: bool) -> Vec<(usi
                     }
                 }
                 Region::Code => {
+                    if syntax == SourceSyntax::Svelte
+                        && tail.strip_prefix(b"</script").is_some_and(tag_name_ends)
+                    {
+                        region = Region::MarkupTag {
+                            script: false,
+                            quote: None,
+                        };
+                        index += 2;
+                        continue;
+                    }
                     if tail.starts_with(b"//") {
                         for column in index + 2..bytes.len() {
                             if tracker_tag_at(line, column) {
@@ -675,7 +741,7 @@ fn source_tracker_tag_locations(contents: &str, html_comments: bool) -> Vec<(usi
                         }
                         break;
                     }
-                    if html_comments && tail.starts_with(b"<!--") {
+                    if syntax == SourceSyntax::TypeScript && tail.starts_with(b"<!--") {
                         region = Region::HtmlComment;
                         index += 4;
                         continue;
@@ -685,7 +751,7 @@ fn source_tracker_tag_locations(contents: &str, html_comments: bool) -> Vec<(usi
                         index += 2;
                         continue;
                     }
-                    if !html_comments && bytes[index] == b'r' {
+                    if syntax == SourceSyntax::Rust && bytes[index] == b'r' {
                         let hashes = tail[1..].iter().take_while(|&&byte| byte == b'#').count();
                         if tail.get(hashes + 1) == Some(&b'"') {
                             region = Region::RawString(hashes);
@@ -694,10 +760,10 @@ fn source_tracker_tag_locations(contents: &str, html_comments: bool) -> Vec<(usi
                         }
                     }
                     if bytes[index] == b'"'
-                        || (html_comments && matches!(bytes[index], b'\'' | b'`'))
+                        || (syntax != SourceSyntax::Rust && matches!(bytes[index], b'\'' | b'`'))
                     {
                         region = Region::Quoted(bytes[index]);
-                    } else if !html_comments && bytes[index] == b'\'' {
+                    } else if syntax == SourceSyntax::Rust && bytes[index] == b'\'' {
                         // A Rust character literal ends after one character or escape;
                         // a lifetime's apostrophe must not hide a trailing comment.
                         let end = if tail.get(1) == Some(&b'\\') {
@@ -2156,7 +2222,7 @@ mod tests {
     #[test]
     fn tracker_tags_report_line_comment_columns() {
         assert_eq!(
-            super::source_tracker_tag_locations("  // [a1b2] [8uce]", false),
+            super::source_tracker_tag_locations("  // [a1b2] [8uce]", super::SourceSyntax::Rust),
             vec![(1, 6), (1, 13)]
         );
     }
@@ -2164,7 +2230,10 @@ mod tests {
     #[test]
     fn tracker_tags_report_doc_comment_columns() {
         assert_eq!(
-            super::source_tracker_tag_locations("/// [a1b2]\n//! [8uce]", false),
+            super::source_tracker_tag_locations(
+                "/// [a1b2]\n//! [8uce]",
+                super::SourceSyntax::Rust
+            ),
             vec![(1, 5), (2, 5)]
         );
     }
@@ -2174,7 +2243,7 @@ mod tests {
         assert_eq!(
             super::source_tracker_tag_locations(
                 "<p><!-- [a1b2] --> [8uce]</p>\n<!--\n [v7qg]\n-->",
-                true
+                super::SourceSyntax::Svelte
             ),
             vec![(1, 9), (3, 2)]
         );
@@ -2185,7 +2254,7 @@ mod tests {
         assert_eq!(
             super::source_tracker_tag_locations(
                 "// [test] [hitl] [1234] [A1b2] [a1b] [a1b23] [a1b2]",
-                false
+                super::SourceSyntax::Rust
             ),
             vec![(1, 46)]
         );
@@ -2193,21 +2262,58 @@ mod tests {
 
     #[test]
     fn tracker_tags_allow_named_words() {
-        assert!(super::source_tracker_tag_locations("// [utf8]", false).is_empty());
+        assert!(
+            super::source_tracker_tag_locations("// [utf8]", super::SourceSyntax::Rust).is_empty()
+        );
     }
 
     #[test]
     fn tracker_tags_ignore_strings_and_scan_trailing_comments() {
         let source = "let text = \"// [a1b2]\"; // [8uce]";
         assert_eq!(
-            super::source_tracker_tag_locations(source, false),
+            super::source_tracker_tag_locations(source, super::SourceSyntax::Rust),
             vec![(1, 28)]
         );
         assert!(
-            super::source_tracker_tag_locations("const text = '<!-- [a1b2] -->';", true).is_empty()
+            super::source_tracker_tag_locations(
+                "const text = '<!-- [a1b2] -->';",
+                super::SourceSyntax::TypeScript
+            )
+            .is_empty()
         );
         assert!(
-            super::source_tracker_tag_locations("let text = r#\"// [a1b2]\"#;", false).is_empty()
+            super::source_tracker_tag_locations(
+                "let text = r#\"// [a1b2]\"#;",
+                super::SourceSyntax::Rust
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn tracker_tags_find_html_comments_after_svelte_contractions() {
+        assert_eq!(
+            super::source_tracker_tag_locations(
+                "<p>It's ready</p>\n<!-- [a1b2] seeded -->",
+                super::SourceSyntax::Svelte
+            ),
+            vec![(2, 6)]
+        );
+    }
+
+    #[test]
+    fn tracker_tags_keep_svelte_script_strings_outside_comments() {
+        let source = "<script lang=\"ts\">\nconst text = \"It's // [8uce] ready\";\n// [a1b2] seeded\n</script>\n<p>It's ready</p>\n<!-- [v7qg] seeded -->";
+        assert_eq!(
+            super::source_tracker_tag_locations(source, super::SourceSyntax::Svelte),
+            vec![(3, 4), (6, 6)]
+        );
+        assert_eq!(
+            super::source_tracker_tag_locations(
+                "const text = \"It's // [8uce] ready\";\n// [a1b2] seeded",
+                super::SourceSyntax::TypeScript
+            ),
+            vec![(2, 4)]
         );
     }
 
