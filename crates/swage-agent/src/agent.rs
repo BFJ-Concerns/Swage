@@ -1909,6 +1909,8 @@ impl Agent {
         let mut delegation_wait_owner = None;
         let mut round = 0usize;
         let mut incomplete_reason;
+        // The closing-account request is made at most once per turn.
+        let mut closing_account_requested = false;
 
         'outer: loop {
             // Check cancellation eagerly before starting each round. This
@@ -1951,8 +1953,35 @@ impl Agent {
             let round_reasoning = round_outcome.reasoning;
             accumulated.push_str(&round_text);
 
-            // An output limit settles partial work; otherwise no tool calls means a final response.
-            if incomplete_reason.is_some() || round_tool_calls.is_empty() {
+            // An output limit settles partial work; otherwise no tool calls
+            // means a final response — unless that response is empty after
+            // tool rounds, which is answered once with the closing request
+            // (`closing_account`), so the reply never ends on an interim
+            // narration of work that may not have happened.
+            if incomplete_reason.is_some() {
+                break 'outer;
+            }
+            if round_tool_calls.is_empty() {
+                if crate::closing_account::closing_account_due(
+                    &round_text,
+                    round,
+                    closing_account_requested,
+                ) {
+                    closing_account_requested = true;
+                    let mut messages = llm_request.messages.clone();
+                    messages.push(ChatMessage::new(
+                        Role::User,
+                        self.config.closing_account_request.clone(),
+                    ));
+                    llm_request = CompletionRequest {
+                        messages,
+                        ..llm_request
+                    };
+                    continue 'outer;
+                }
+                if closing_account_requested && round_text.trim().is_empty() {
+                    accumulated.push_str(crate::closing_account::ENDED_WITHOUT_ACCOUNT);
+                }
                 break 'outer;
             }
 

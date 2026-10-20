@@ -296,6 +296,25 @@ pub(super) async fn process_turn_with_composition_and_focus(
         return Err(GatewayError::ConfigError(error.to_string()));
     }
 
+    // The closing-account request is a variant location with one variant so
+    // far: the session's draw is recorded so a reply can be read against
+    // the text that asked for it, and the authored default serves.
+    if let Err(error) = crate::experimentation::select_session_variant(
+        state,
+        &config.experimentation,
+        crate::experimentation::LOCATION_CLOSING_ACCOUNT_REQUEST,
+        &[],
+        "authored",
+        session_id,
+        Some(prepared_turn_id),
+    )
+    .await
+    {
+        record_terminal_state_and_release(state, session_id, prepared_turn_id, TurnState::Failed)
+            .await?;
+        return Err(GatewayError::ConfigError(error.to_string()));
+    }
+
     // Step 5: Set up the cancellation token before any turn processing begins.
     let cancel_token = cancellation_override.unwrap_or_default();
     {
