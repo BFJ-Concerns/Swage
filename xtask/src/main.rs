@@ -618,7 +618,6 @@ enum SourceSyntax {
 fn source_tracker_tag_locations(contents: &str, syntax: SourceSyntax) -> Vec<(usize, usize)> {
     enum Region {
         Markup,
-        MarkupTag { script: bool, quote: Option<u8> },
         Code,
         Quoted(u8),
         RawString(usize),
@@ -637,48 +636,43 @@ fn source_tracker_tag_locations(contents: &str, syntax: SourceSyntax) -> Vec<(us
         Region::Code
     };
     let mut locations = Vec::new();
-    for (line_number, line) in contents.lines().enumerate() {
+    let mut line_offset = 0;
+    let mut skip_until: usize = 0;
+    for (line_number, line) in contents.split_inclusive('\n').enumerate() {
+        let line_start = line_offset;
+        line_offset += line.len();
         let bytes = line.as_bytes();
-        let mut index = 0;
+        let mut index = skip_until.saturating_sub(line_start);
         while index < bytes.len() {
             let tail = &bytes[index..];
             match region {
                 Region::Markup => {
-                    if tail.starts_with(b"<!--") {
+                    let remaining = &line[index..];
+                    let comment = remaining.find("<!--");
+                    let script = remaining.match_indices("<script").find_map(|(offset, _)| {
+                        tag_name_ends(&remaining.as_bytes()[offset + "<script".len()..])
+                            .then_some(offset)
+                    });
+                    if let Some(start) =
+                        comment.filter(|&start| script.is_none_or(|script| start < script))
+                    {
                         region = Region::HtmlComment;
-                        index += 4;
+                        index += start + "<!--".len();
                         continue;
                     }
-                    let tag_name = tail.strip_prefix(b"</").or_else(|| tail.strip_prefix(b"<"));
-                    if tag_name.and_then(|name| name.first()).is_some_and(|byte| {
-                        byte.is_ascii_alphabetic() || matches!(byte, b'_' | b':')
-                    }) {
-                        let script = tail.strip_prefix(b"<script").is_some_and(tag_name_ends);
-                        region = Region::MarkupTag {
-                            script,
-                            quote: None,
-                        };
+                    if let Some(start) = script {
+                        let after_name = line_start + index + start + "<script".len();
+                        if let (Some(end), _) = opening_tag_end(&contents[after_name..], None) {
+                            skip_until = after_name + end + 1;
+                            region = Region::Code;
+                            index = skip_until - line_start;
+                        } else {
+                            index += start + "<script".len();
+                        }
+                        continue;
                     }
+                    break;
                 }
-                Region::MarkupTag { script, quote } => match quote {
-                    Some(delimiter) if bytes[index] == delimiter => {
-                        region = Region::MarkupTag {
-                            script,
-                            quote: None,
-                        };
-                    }
-                    Some(_) => {}
-                    None if matches!(bytes[index], b'\'' | b'"') => {
-                        region = Region::MarkupTag {
-                            script,
-                            quote: Some(bytes[index]),
-                        };
-                    }
-                    None if bytes[index] == b'>' => {
-                        region = if script { Region::Code } else { Region::Markup };
-                    }
-                    None => {}
-                },
                 Region::Quoted(quote) => {
                     if bytes[index] == b'\\' {
                         index += 2;
@@ -712,28 +706,33 @@ fn source_tracker_tag_locations(contents: &str, syntax: SourceSyntax) -> Vec<(us
                     }
                 }
                 Region::HtmlComment => {
-                    if tail.starts_with(b"-->") {
-                        region = if syntax == SourceSyntax::Svelte {
-                            Region::Markup
-                        } else {
-                            Region::Code
-                        };
-                        index += 3;
-                        continue;
+                    let closing = line[index..].find("-->").map(|offset| index + offset);
+                    let end = closing.unwrap_or(bytes.len());
+                    for column in index..end {
+                        if tracker_tag_at(line, column) {
+                            locations.push((line_number + 1, column + 1));
+                        }
                     }
-                    if tracker_tag_at(line, index) {
-                        locations.push((line_number + 1, index + 1));
+                    if closing.is_none() {
+                        break;
                     }
+                    region = if syntax == SourceSyntax::Svelte {
+                        Region::Markup
+                    } else {
+                        Region::Code
+                    };
+                    index = end + "-->".len();
+                    continue;
                 }
                 Region::Code => {
                     if syntax == SourceSyntax::Svelte
                         && tail.strip_prefix(b"</script").is_some_and(tag_name_ends)
+                        && let (Some(end), _) =
+                            opening_tag_end(&contents[line_start + index..], None)
                     {
-                        region = Region::MarkupTag {
-                            script: false,
-                            quote: None,
-                        };
-                        index += 2;
+                        skip_until = line_start + index + end + 1;
+                        region = Region::Markup;
+                        index = skip_until - line_start;
                         continue;
                     }
                     if tail.starts_with(b"//") {
@@ -853,6 +852,20 @@ fn check_frontend_design_tokens() -> Result<()> {
     }
 }
 
+fn opening_tag_end(line: &str, mut quote: Option<char>) -> (Option<usize>, Option<char>) {
+    for (index, character) in line.char_indices() {
+        match quote {
+            Some(delimiter) if character == delimiter => quote = None,
+            Some(_) => {}
+            None if matches!(character, '\'' | '\"') => quote = Some(character),
+            None if character == '>' => return (Some(index), None),
+            None => {}
+        }
+    }
+
+    (None, quote)
+}
+
 fn component_style_lines(contents: &str) -> impl Iterator<Item = (usize, &str, usize)> {
     enum StyleRegion {
         Outside,
@@ -867,20 +880,6 @@ fn component_style_lines(contents: &str) -> impl Iterator<Item = (usize, &str, u
 
         matches!(after_name.chars().next(), None | Some('>'))
             || after_name.chars().next().is_some_and(char::is_whitespace)
-    }
-
-    fn opening_tag_end(line: &str, mut quote: Option<char>) -> (Option<usize>, Option<char>) {
-        for (index, character) in line.char_indices() {
-            match quote {
-                Some(delimiter) if character == delimiter => quote = None,
-                Some(_) => {}
-                None if matches!(character, '\'' | '\"') => quote = Some(character),
-                None if character == '>' => return (Some(index), None),
-                None => {}
-            }
-        }
-
-        (None, quote)
     }
 
     fn style_before_closing_tag(line: &str) -> Option<usize> {
@@ -2324,6 +2323,20 @@ mod tests {
                 super::SourceSyntax::TypeScript
             ),
             vec![(2, 4)]
+        );
+    }
+
+    #[test]
+    fn tracker_tags_find_comments_after_svelte_compact_comparisons() {
+        let source = "<script>let a = 1, b = 2;</script>\n{#if a<b}\n<!-- [a1b2] seeded -->\n<p>Ready</p>\n{/if}\n";
+        assert_eq!(
+            super::source_tracker_tag_locations(source, super::SourceSyntax::Svelte),
+            vec![(3, 6)]
+        );
+        let multiline_script = "<script\n data-label=\"a > b\"\n lang=\"ts\">\nconst text = \"It's // [8uce] ready\";\n// [a1b2] seeded\n</script>\n{#if a<b}\n<!-- [v7qg] seeded -->\n{/if}";
+        assert_eq!(
+            super::source_tracker_tag_locations(multiline_script, super::SourceSyntax::Svelte),
+            vec![(5, 4), (8, 6)]
         );
     }
 
