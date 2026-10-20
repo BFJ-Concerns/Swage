@@ -1213,6 +1213,26 @@ describe("assistant message width", () => {
     onTestFinished(() => style.remove());
   }
 
+  it.each([false, true])("caps plain reply prose while streaming=%s", (live) => {
+    const text = "A long plain reply. ".repeat(100);
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: {
+        store: makeConversationStore(live ? [] : [makeAssistantMessage(text)]),
+        streamingStore: { ...makeStreamingStore([], live), streamedContent: live ? text : "" },
+        displayPreferences: {
+          theme: "system", density: "compact", message_model_display: "off",
+          conversation_rendering: "plain", print_marks: "full",
+        },
+      },
+    });
+    applyComponentStyles();
+    const body = document.querySelector<HTMLElement>(".plain-body")!;
+    expect(body.textContent).toBe(text);
+    expect(getComputedStyle(body).maxWidth).toBe("80ch");
+    expect(getComputedStyle(body).whiteSpace).toBe("pre-wrap");
+  });
+
   const wideReply = [
     "Here is the comparison.",
     "",

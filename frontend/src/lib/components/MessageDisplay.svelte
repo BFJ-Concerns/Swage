@@ -712,6 +712,7 @@
   }
 
   .plain-body {
+    max-width: 80ch;
     white-space: pre-wrap;
   }
 
