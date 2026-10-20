@@ -480,7 +480,7 @@
             {@const outcome = sessionOutcomeLabel(session.latest_turn_state)}
             <article class="record-row">
               <strong>{session.message_preview || "Untitled session"}</strong>
-              {#if outcome}<span title={outcome} aria-label={outcome}>⚠</span>{/if}
+              {#if outcome}<span><span aria-hidden="true">⚠</span> {outcome}</span>{/if}
               <span>{session.agent_id} · {new Date(session.last_activity).toLocaleString()}</span>
               {#if onNavigate}
                 <button type="button" onclick={() => onNavigate?.(`/conversations/${encodeURIComponent(session.id)}`)}>Open</button>
