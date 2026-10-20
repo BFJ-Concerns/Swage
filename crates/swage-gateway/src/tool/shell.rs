@@ -44,7 +44,10 @@ impl Tool for ShellTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command in the workspace directory."
+        "Execute a shell command in the workspace directory. A commit you make carries the \
+         person's own git author identity, supplied to git for you; when git says it has no \
+         identity, tell the person and ask whose name to commit under — never set an author \
+         yourself."
     }
 
     fn execution_outcome(
@@ -368,6 +371,18 @@ mod tests {
         ctx.turn_id = Some(uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").unwrap());
         ctx.call_id = Some("call/with topics".to_string());
         ctx
+    }
+
+    /// The description is the standing text on commit authorship: the author
+    /// is supplied, and a missing one is the person's to settle, never the
+    /// agent's to invent.
+    #[test]
+    fn the_description_keeps_the_agent_from_inventing_a_commit_author() {
+        let shell = tool(1);
+        let description = shell.description();
+        assert!(description.contains("git author identity"));
+        assert!(description.contains("tell the person and ask"));
+        assert!(description.contains("never set an author yourself"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

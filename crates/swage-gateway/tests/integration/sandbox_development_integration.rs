@@ -1269,3 +1269,121 @@ async fn sandboxed_git_commits_are_signed_on_the_host_with_the_operators_key() {
             && e.entity_id == e.metadata["fingerprint"]
     }));
 }
+
+/// A sandboxed commit carries the operator's author identity as the
+/// workspace's git configures it, with no git configuration of the host
+/// visible inside; where the host configures none, the sandboxed commit is
+/// refused by git itself rather than made under an invented author.
+#[tokio::test(flavor = "multi_thread")]
+async fn sandboxed_commits_carry_the_operators_author_identity_or_ask_for_one() {
+    use swage_gateway::git_identity::CommitIdentity;
+    use swage_sandbox::Sandbox;
+
+    let mut env = ProcessEnvGuard::new();
+    env.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    let root = tempfile::Builder::new()
+        .prefix("t")
+        .tempdir_in(
+            std::env::var_os("XDG_RUNTIME_DIR")
+                .unwrap_or_else(|| std::env::temp_dir().into_os_string()),
+        )
+        .unwrap();
+    let git = |repo: &std::path::Path, args: &[&str]| {
+        let done = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            done.status.success(),
+            "{}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+        String::from_utf8_lossy(&done.stdout).trim().to_owned()
+    };
+    let commit_inside = |policy: SandboxConfig, repo: std::path::PathBuf| async move {
+        let mut sandbox = swage_sandbox::BubblewrapSandbox::new(
+            policy,
+            swage_sandbox::llm_handler::HostLlmHandler::new(|_| async {
+                unreachable!("git uses no model")
+            }),
+        );
+        sandbox.spawn_agent().await.expect("sandbox starts");
+        let result = sandbox
+            .execute_tool(
+                "shell",
+                json!({"command": format!(
+                    "cd {} && git commit -q --allow-empty -m inside 2>&1; echo exit=$?",
+                    repo.display()
+                )}),
+            )
+            .await
+            .unwrap();
+        sandbox.shutdown().await.unwrap();
+        assert!(result.error.is_none(), "{:?}", result.error);
+        result.output["output"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    };
+
+    // The operator's identity, configured for the workspace on the host.
+    let named = root.path().join("named");
+    std::fs::create_dir(&named).unwrap();
+    git(&named, &["init", "-q"]);
+    git(&named, &["config", "user.name", "Operator Example"]);
+    git(
+        &named,
+        &["config", "user.email", "operator@example.invalid"],
+    );
+    let identity = CommitIdentity::from_host_git(&named)
+        .await
+        .expect("the workspace's identity is read on the host");
+    let mut policy = SandboxConfig::builder()
+        .working_directory(root.path())
+        .write_path(root.path())
+        .build()
+        .unwrap();
+    identity.configure(&mut policy);
+    policy
+        .environment
+        .insert("HOME".into(), root.path().display().to_string());
+    let output = commit_inside(policy, named.clone()).await;
+    assert!(output.trim_end().ends_with("exit=0"), "{output}");
+    assert_eq!(
+        git(&named, &["log", "-1", "--format=%an <%ae>"]),
+        "Operator Example <operator@example.invalid>"
+    );
+
+    // No identity on the host for this workspace: git inside asks, and no
+    // commit is made.
+    let anonymous = root.path().join("anonymous");
+    std::fs::create_dir(&anonymous).unwrap();
+    git(&anonymous, &["init", "-q"]);
+    git(&anonymous, &["config", "user.name", ""]);
+    git(&anonymous, &["config", "user.email", ""]);
+    assert_eq!(CommitIdentity::from_host_git(&anonymous).await, None);
+    let mut policy = SandboxConfig::builder()
+        .working_directory(root.path())
+        .write_path(root.path())
+        .build()
+        .unwrap();
+    policy
+        .environment
+        .insert("HOME".into(), root.path().display().to_string());
+    let output = commit_inside(policy, anonymous.clone()).await;
+    assert!(!output.trim_end().ends_with("exit=0"), "{output}");
+    assert!(
+        output.contains("tell me who you are") || output.contains("empty ident"),
+        "git inside must ask for an identity rather than commit: {output}"
+    );
+    let commits = std::process::Command::new("git")
+        .args(["rev-list", "--count", "HEAD"])
+        .current_dir(&anonymous)
+        .output()
+        .unwrap();
+    assert!(
+        !commits.status.success() || String::from_utf8_lossy(&commits.stdout).trim() == "0",
+        "no commit may exist under an invented author"
+    );
+}

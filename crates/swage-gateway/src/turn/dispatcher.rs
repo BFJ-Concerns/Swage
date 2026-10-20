@@ -416,6 +416,7 @@ pub(super) async fn build_turn_sandbox(
     egress: swage_sandbox::EgressSetup,
     credentials: Option<&crate::git_credential::CredentialServer>,
     signer: Option<&crate::git_signer::SignerServer>,
+    identity: Option<&crate::git_identity::CommitIdentity>,
 ) -> Result<TurnSandboxBuild, swage_core::SandboxError> {
     if let Some(directory) = &agent_config.tool_output_directory {
         tokio::fs::create_dir_all(directory)
@@ -494,6 +495,7 @@ pub(super) async fn build_turn_sandbox(
         egress,
         credentials,
         signer,
+        identity,
         swage_sandbox::find_bwrap().is_ok(),
         true,
     )
@@ -567,6 +569,7 @@ async fn build_turn_sandbox_for_backend_selection(
     egress: swage_sandbox::EgressSetup,
     credentials: Option<&crate::git_credential::CredentialServer>,
     signer: Option<&crate::git_signer::SignerServer>,
+    identity: Option<&crate::git_identity::CommitIdentity>,
     bubblewrap_available: bool,
     spawn_fallback: bool,
 ) -> Result<TurnSandboxBuild, swage_core::SandboxError> {
@@ -583,6 +586,9 @@ async fn build_turn_sandbox_for_backend_selection(
     }
     if let Some(signer) = signer {
         signer.configure(&mut sandbox_config)?;
+    }
+    if let Some(identity) = identity {
+        identity.configure(&mut sandbox_config);
     }
 
     let provider = state.active_provider();
@@ -765,6 +771,10 @@ pub(crate) async fn build_gateway_dispatcher(
         )?),
         None => None,
     };
+    // The operator's author identity, as the workspace's git sees it: the
+    // author sandboxed commits carry. None leaves sandboxed git asking.
+    let identity =
+        crate::git_identity::CommitIdentity::from_host_git(&agent_config.working_directory).await;
     let sandbox_build = build_turn_sandbox(
         state,
         config,
@@ -773,6 +783,7 @@ pub(crate) async fn build_gateway_dispatcher(
         egress.clone(),
         Some(&credentials),
         signer.as_deref(),
+        identity.as_ref(),
     )
     .await?;
     tracing::debug!(backend = ?sandbox_build.backend, "selected turn sandbox backend");
@@ -788,6 +799,9 @@ pub(crate) async fn build_gateway_dispatcher(
         credentials.configure(&mut policy)?;
         if let Some(signer) = &signer {
             signer.configure(&mut policy)?;
+        }
+        if let Some(identity) = &identity {
+            identity.configure(&mut policy);
         }
         Some(policy)
     } else {
@@ -1421,6 +1435,7 @@ mod tests {
             test_egress(),
             None,
             None,
+            None,
         )
         .await
         .expect("a declared boundary needs no sandbox of its own");
@@ -1471,6 +1486,7 @@ mod tests {
             test_egress(),
             None,
             None,
+            None,
         )
         .await
         .expect("explicitly opted-in non-Codex execution should remain available");
@@ -1502,6 +1518,7 @@ mod tests {
             &agent_config,
             None,
             test_egress(),
+            None,
             None,
             None,
             false,

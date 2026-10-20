@@ -409,6 +409,14 @@ the same: sandboxed git is given a signing program that refuses, so a
 commit that signs fails with that cause until the format is carried; the
 gateway log says why at the turn's start.
 
+Commits made inside the sandbox carry the operator's own author identity:
+`user.name` and `user.email` are read on the host as the workspace's git
+sees them and given to the sandboxed git the same way. An operator whose
+git has no identity for the workspace gets none inside either, so a
+sandboxed commit fails with git's own request to say who you are; the
+agent is told to put that question to the person rather than commit under
+an author of its own making.
+
 ### Landlock
 
 The inner layer applies Landlock — a kernel-enforced, per-path filesystem

@@ -193,8 +193,9 @@ impl KeyMaterial {
     }
 }
 
-/// One value of the host's git configuration as the workspace sees it.
-async fn host_git_config(workspace: &Path, args: &[&str]) -> Option<String> {
+/// One value of the host's git configuration as the workspace sees it, or
+/// `None` where git has none or the read fails.
+pub(crate) async fn host_git_config(workspace: &Path, args: &[&str]) -> Option<String> {
     let output = tokio::process::Command::new("git")
         .arg("-C")
         .arg(workspace)
