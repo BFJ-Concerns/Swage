@@ -1235,9 +1235,15 @@ fn native_call(id: &str, name: &str, arguments: Value) -> Vec<StreamChunk> {
 }
 
 fn native_done() -> Vec<StreamChunk> {
-    vec![StreamChunk::Done {
-        finish_reason: Some(FinishReason::Stop),
-    }]
+    // Each scripted turn has a final reply before the next turn's tool call.
+    vec![
+        StreamChunk::Delta {
+            content: "Finished processing the tool result.".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: Some(FinishReason::Stop),
+        },
+    ]
 }
 
 async fn attach_native_workspace(
