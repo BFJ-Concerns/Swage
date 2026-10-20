@@ -5832,8 +5832,27 @@ async fn workflow_read_only_attachment_placement_stays_read_only() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_workflow_workers_write_only_inside_their_own_worktrees() {
+    Box::pin(assert_live_workflow_workers_write_only_inside_their_own_worktrees()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn live_worker_worktree_journey_completes_twenty_times_under_parallel_load() {
+    // Four independent journeys overlap while the rest of the crate runs.
+    // Each journey retains the original placement, journal and cleanup assertions.
+    use futures::{StreamExt, stream};
+    stream::iter(1..=20)
+        .map(|attempt| async move {
+            Box::pin(assert_live_workflow_workers_write_only_inside_their_own_worktrees()).await;
+            eprintln!("live worker worktree journey completed: {attempt}/20");
+        })
+        .buffer_unordered(4)
+        .collect::<Vec<_>>()
+        .await;
+}
+
+async fn assert_live_workflow_workers_write_only_inside_their_own_worktrees() {
     let fixture = tempfile::tempdir().expect("scratch fixture");
     let repo = fixture.path().join("repo");
     seed_git_repo(&repo);
@@ -6341,7 +6360,7 @@ async fn timed_out_agent_call_is_cancelled_journalled_and_replayed_without_reinv
             Some(swage_core::Effort::High)
         );
     }
-    wait_for_worker_turn_interrupted(&storage).await;
+    wait_for_worker_turn_cancelled(&storage).await;
     assert!(
         state.active_turns.lock().await.is_empty(),
         "timed-out worker must release its active-turn registration"
@@ -6460,7 +6479,7 @@ async fn parent_cancellation_wins_over_a_configured_agent_call_timeout() {
         1
     );
     assert_eq!(provider.requests.lock().expect("requests").len(), 1);
-    wait_for_worker_turn_interrupted(&storage).await;
+    wait_for_worker_turn_cancelled(&storage).await;
     assert!(
         state.active_turns.lock().await.is_empty(),
         "cancelled worker must release its active-turn registration"
@@ -17756,7 +17775,7 @@ async fn wait_for_provider_requests(provider: &ScriptedRecordingProvider, expect
     .expect("provider request");
 }
 
-async fn wait_for_worker_turn_interrupted(storage: &SqliteStorage) {
+async fn wait_for_worker_turn_cancelled(storage: &SqliteStorage) {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let sessions = storage
@@ -17775,8 +17794,8 @@ async fn wait_for_worker_turn_interrupted(storage: &SqliteStorage) {
                         .expect("worker turns")
                     {
                         match turn.state {
-                            TurnState::Interrupted => return,
-                            TurnState::Completed | TurnState::Failed => {
+                            TurnState::Cancelled => return,
+                            TurnState::Interrupted | TurnState::Completed | TurnState::Failed => {
                                 panic!("cancelled worker turn ended {:?}", turn.state)
                             }
                             _ => {}
@@ -17788,7 +17807,7 @@ async fn wait_for_worker_turn_interrupted(storage: &SqliteStorage) {
         }
     })
     .await
-    .expect("worker turn becomes interrupted");
+    .expect("worker turn becomes cancelled");
 }
 
 async fn recorded_terminal_account(storage: &SqliteStorage, run_id: Uuid) -> Value {
@@ -19305,7 +19324,7 @@ async fn a_worker_cancelled_mid_round_reads_cut_short_not_failed() {
         .await
         .expect("cancel the running run");
     wait_for_terminal(&state, run.id).await;
-    wait_for_worker_turn_interrupted(&storage).await;
+    wait_for_worker_turn_cancelled(&storage).await;
 
     let detail = get_run(State(state), Path(run.id)).await.expect("detail").0;
     let entry = detail
@@ -19508,36 +19527,52 @@ async fn run_accounts_start_observes_immediate_outcomes() {
             .create_session(swage_storage::fixtures::new_session(topic.id))
             .await
             .expect("session");
+        let pending = workflow_pause_test_hook::install("start-snapshot-pending", session.id);
         let pause = workflow_pause_test_hook::install("start-snapshot-read", session.id);
         let launcher = GatewayWorkflowLauncher::new(state.clone());
-        // Waiting for settlement tests the terminal result, not whether the
-        // executor happened to finish within the launcher's 25 ms grace period.
         let start = tokio::spawn(async move {
             launcher
-                .start_inline(session.id, source, Value::Null, None, true)
+                .start_inline(session.id, source, Value::Null, None, false)
                 .await
                 .expect("start")
         });
-        tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.acquire())
-            .await
-            .expect("start snapshot reached")
-            .expect("pause remains open")
-            .forget();
-        let record = storage
+        tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            pending.entered.acquire(),
+        )
+        .await
+        .expect("start reaches snapshot pause")
+        .expect("snapshot pause remains open")
+        .forget();
+        let run = storage
             .list_workflow_runs(topic.id)
             .await
             .expect("runs")
             .into_iter()
             .find(|run| run.dispatching_session_id == Some(session.id))
-            .expect("launched run");
-        let (_, following_observation) = storage
-            .get_workflow_run_observation(record.id)
+            .expect("session run");
+        // Observe real settlement before letting the start path take its snapshot.
+        wait_for_terminal(&state, run.id).await;
+        pending.release.add_permits(1);
+        tokio::time::timeout(std::time::Duration::from_secs(45), pause.entered.acquire())
+            .await
+            .expect("start snapshot reached")
+            .expect("pause remains open")
+            .forget();
+        let (record, following_observation) = storage
+            .get_workflow_run_observation(run.id)
             .await
             .expect("following observation")
             .expect("run");
         pause.release.add_permits(1);
-        let result = start.await.expect("launcher finished");
-        assert_eq!(result["state"], expected);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(45), start)
+            .await
+            .expect("start returns after settlement")
+            .expect("start task");
+        assert_eq!(
+            result["state"], expected,
+            "the start result must observe an immediately settled run"
+        );
         let observed = chrono::DateTime::parse_from_rfc3339(
             result["status_as_of"].as_str().expect("observation time"),
         )

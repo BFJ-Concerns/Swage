@@ -21,22 +21,22 @@ use super::{ServerEvent, dispatch_client_message};
 
 /// Validate preconditions for a WebSocket upgrade.
 ///
-/// Returns `None` if the upgrade can proceed, or `Some(error_response)` if it
+/// Returns `None` if the upgrade can proceed, or `Some(error)` if it
 /// should be rejected. Extracted so the precondition logic can be tested
 /// independently of the WebSocket upgrade machinery.
 pub(crate) async fn check_upgrade_preconditions(
     state: &AppState,
     session_id: Uuid,
-) -> Option<Response> {
+) -> Option<ApiError> {
     // Verify the conversation (session) exists in storage.
     match state.storage.get_session(session_id).await {
         Ok(Some(_)) => {}
         Ok(None) => {
-            return Some(ApiError::not_found("conversation", session_id).into_response());
+            return Some(ApiError::not_found("conversation", session_id));
         }
         Err(e) => {
             tracing::error!(%session_id, error = %e, "storage error checking conversation");
-            return Some(ApiError::internal("failed to check conversation".into()).into_response());
+            return Some(ApiError::internal("failed to check conversation".into()));
         }
     }
 
@@ -49,13 +49,10 @@ pub(crate) async fn check_upgrade_preconditions(
 
     // Reject duplicate connections to the same conversation.
     if state.active_connections.lock().await.contains(&session_id) {
-        return Some(
-            ApiError::new(
-                ErrorCode::AlreadyConnected,
-                format!("conversation {session_id} already has an active connection"),
-            )
-            .into_response(),
-        );
+        return Some(ApiError::new(
+            ErrorCode::AlreadyConnected,
+            format!("conversation {session_id} already has an active connection"),
+        ));
     }
 
     None
@@ -63,15 +60,33 @@ pub(crate) async fn check_upgrade_preconditions(
 
 /// Axum route handler for `GET /api/conversations/:id/ws`.
 ///
-/// Validates the conversation exists and has no existing live connection,
-/// then upgrades to a WebSocket.
+/// Missing conversations fail the upgrade. An existing connection refuses
+/// ownership with an error event after the upgrade, then closes the socket
+/// without registering another client.
 pub async fn ws_handler(
     State(state): State<AppState>,
     Path(session_id): Path<Uuid>,
     ws: WebSocketUpgrade,
 ) -> Response {
     if let Some(rejection) = check_upgrade_preconditions(&state, session_id).await {
-        return rejection;
+        if rejection.code() == ErrorCode::AlreadyConnected {
+            // Browsers hide HTTP upgrade refusals. Use the existing error
+            // event to explain ownership without admitting a second client.
+            return ws.on_upgrade(move |mut socket| async move {
+                let event = ServerEvent::Error {
+                    code: "already_connected".to_string(),
+                    message: rejection.message().to_string(),
+                };
+                match serde_json::to_string(&event) {
+                    Ok(frame) => {
+                        let _ = socket.send(Message::Text(frame.into())).await;
+                    }
+                    Err(error) => tracing::error!(%error, "failed to serialise connection refusal"),
+                }
+                let _ = socket.send(Message::Close(None)).await;
+            });
+        }
+        return rejection.into_response();
     }
 
     // Mark connection as active now that preconditions passed.

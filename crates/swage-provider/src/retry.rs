@@ -122,7 +122,9 @@ impl RetryProvider {
     /// The result is floored at `retry_after` extracted from a `RateLimited`
     /// error, ensuring the provider's hint is always respected.
     fn compute_backoff(&self, attempt: u32, error: &ProviderError) -> Duration {
-        let retry_after = if let ProviderError::RateLimited { retry_after, .. } = error {
+        let retry_after = if let ProviderError::RateLimited { retry_after, .. }
+        | ProviderError::Overloaded { retry_after, .. } = error
+        {
             *retry_after
         } else {
             None
@@ -1078,6 +1080,32 @@ mod tests {
     // -----------------------------------------------------------------------
     // retry_after — RateLimited hint must be honoured
     // -----------------------------------------------------------------------
+
+    #[tokio::test(start_paused = true)]
+    async fn overload_exhaustion_preserves_category_and_retry_after() {
+        let hint = Duration::from_secs(5);
+        let retry = RetryProvider::new(
+            FailN::new(
+                10,
+                crate::http::map_http_error(529, "capacity exhausted".into(), Some(5)),
+            ),
+            RetryConfig {
+                max_retries: 2,
+                initial_backoff: Duration::ZERO,
+                max_backoff: Duration::ZERO,
+            },
+        );
+        let started = tokio::time::Instant::now();
+        let error = retry.complete(completion_req()).await.unwrap_err();
+        assert!(
+            matches!(error, ProviderError::Overloaded { retry_after: Some(value), .. } if value == hint),
+            "exhaustion must keep overload distinct: {error}"
+        );
+        assert!(
+            started.elapsed() >= hint * 2,
+            "overload must retain its retry-after floor"
+        );
+    }
 
     #[tokio::test(start_paused = true)]
     async fn complete_waits_at_least_retry_after_on_rate_limit() {

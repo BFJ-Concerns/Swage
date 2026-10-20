@@ -82,6 +82,13 @@ impl SwageError {
 /// Errors from LLM provider interactions.
 #[derive(Debug, Clone, Serialize, Deserialize, Error)]
 pub enum ProviderError {
+    /// The provider could not serve the request because it was overloaded.
+    #[error("provider {provider} overloaded: {message}")]
+    Overloaded {
+        provider: String,
+        message: String,
+        retry_after: Option<Duration>,
+    },
     /// Rate limit exceeded (transient).
     #[error("rate limited by provider {provider}")]
     RateLimited {
@@ -144,6 +151,7 @@ impl ProviderError {
         matches!(
             self,
             ProviderError::RateLimited { .. }
+                | ProviderError::Overloaded { .. }
                 | ProviderError::Timeout { .. }
                 | ProviderError::Network { .. }
                 | ProviderError::StreamError(_)
@@ -284,6 +292,11 @@ pub enum DelegateCompletionMode {
 /// Errors from tool execution.
 #[derive(Debug, Error)]
 pub enum ToolError {
+    /// Execution returned an error without declaring whether work completed.
+    #[error("{source}")]
+    ExecutionUncertain { source: Box<ToolError> },
+    #[error("{source}")]
+    AfterExecution { source: Box<ToolError> },
     /// Tool not found in registry (permanent).
     #[error("tool not found: {name}")]
     NotFound { name: String },
@@ -394,9 +407,70 @@ impl std::fmt::Display for PermissionDeniedReason {
 }
 
 impl ToolError {
+    /// Preserve declared execution facts; otherwise keep completion unknown.
+    pub fn execution_uncertain(self) -> Self {
+        match self {
+            Self::RequiresApproval { .. }
+            | Self::RequiresLocationApproval { .. }
+            | Self::RequiresDelegation { .. }
+            | Self::AfterExecution { .. }
+            | Self::ExecutionUncertain { .. } => self,
+            _ => Self::ExecutionUncertain {
+                source: Box::new(self),
+            },
+        }
+    }
+
+    pub fn after_execution(self) -> Self {
+        match self {
+            Self::RequiresApproval { .. }
+            | Self::RequiresLocationApproval { .. }
+            | Self::RequiresDelegation { .. }
+            | Self::AfterExecution { .. } => self,
+            _ => Self::AfterExecution {
+                source: Box::new(self),
+            },
+        }
+    }
+
+    pub fn execution(&self) -> swage_protocol::client::conversation::ToolExecution {
+        use swage_protocol::client::conversation::{
+            ToolExecution, ToolExecutionStage, ToolOutcome,
+        };
+        match self {
+            Self::ExecutionUncertain { source } => ToolExecution {
+                outcome: if matches!(source.as_ref(), Self::InvalidParameters { .. }) {
+                    ToolOutcome::Rejected
+                } else {
+                    ToolOutcome::Failed
+                },
+                stage: ToolExecutionStage::Unknown,
+                completion: swage_protocol::client::conversation::ToolCompletion::Unknown,
+            },
+            Self::AfterExecution { source } => ToolExecution {
+                outcome: if matches!(source.as_ref(), Self::InvalidParameters { .. }) {
+                    ToolOutcome::Rejected
+                } else {
+                    ToolOutcome::Failed
+                },
+                stage: ToolExecutionStage::Finished,
+                ..ToolExecution::failed()
+            },
+            Self::ExecutionFailed { .. } | Self::Timeout { .. } => ToolExecution {
+                outcome: ToolOutcome::Failed,
+                stage: ToolExecutionStage::Unknown,
+                completion: swage_protocol::client::conversation::ToolCompletion::Unknown,
+            },
+            _ => ToolExecution::refused(),
+        }
+    }
+
     /// Returns true if the error represents a transient failure that may
     /// succeed on retry.
     pub fn is_retriable(&self) -> bool {
+        if let Self::AfterExecution { source } | Self::ExecutionUncertain { source } = self {
+            return source.is_retriable();
+        }
         // Approval and delegation variants are control flow, not transient failures.
         matches!(
             self,

@@ -30,6 +30,17 @@ impl Tool for WorkflowRunTool {
     fn description(&self) -> &str {
         "Start either an available workflow by name or a newly authored workflow from JavaScript source. A request that an available workflow already serves — an unattended research sweep, say — is started here, by name, in the same turn it is asked for, rather than carried out conversationally first. Provide exactly one of name or source. Inline source inherits this session's dispatch bounds and cannot deliver outside the run; use wait=true only when this turn needs the final result. Before authoring source, activate the Workflow Authoring skill: it documents the whole script surface — agent, agentStart, wait, parallel, pipeline, workflow, gate, postEvent, awaitEvent, budget, the meta/defaults headers, and the determinism rules."
     }
+    fn execution_outcome(
+        &self,
+        result: &Value,
+    ) -> swage_protocol::client::conversation::ToolExecution {
+        if result["state"] == "failed" {
+            swage_protocol::client::conversation::ToolExecution::failed()
+        } else {
+            swage_protocol::client::conversation::ToolExecution::succeeded()
+        }
+    }
+
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
@@ -68,7 +79,17 @@ impl Tool for WorkflowRunTool {
     fn requires_device_execution(&self) -> bool {
         true
     }
-    async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+    fn validate_call(&self, params: &Value) -> Result<(), ToolError> {
+        for key in ["name", "source"] {
+            if params.get(key).is_some_and(|value| {
+                !value.is_null() && value.as_str().is_none_or(|text| text.trim().is_empty())
+            }) {
+                return Err(ToolError::InvalidParameters {
+                    name: self.name().into(),
+                    message: format!("{key} must be a non-empty string"),
+                });
+            }
+        }
         let name = params.get("name").and_then(Value::as_str);
         let source = params.get("source").and_then(Value::as_str);
         if matches!((name, source), (Some(_), Some(_)) | (None, None)) {
@@ -77,6 +98,13 @@ impl Tool for WorkflowRunTool {
                 message: "provide exactly one of name or source".into(),
             });
         }
+        Ok(())
+    }
+
+    async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
+        self.validate_call(&params)?;
+        let name = params.get("name").and_then(Value::as_str);
+        let source = params.get("source").and_then(Value::as_str);
         let args = params.get("args").cloned().unwrap_or(Value::Null);
         let budget = params
             .get("budget")
@@ -179,21 +207,40 @@ mod tests {
             crate::tool::ToolDispatcher::allow_all(
                 vec![Arc::new(WorkflowRunTool) as Arc<dyn Tool>],
             );
-        let context = MockToolContext::new("agent", Uuid::new_v4().to_string());
+        let root = tempfile::tempdir().unwrap();
+        let mut context = MockToolContext::new("agent", Uuid::new_v4().to_string());
+        context.working_directory = root.path().to_path_buf();
 
-        for params in [json!({}), json!({"name": "saved", "source": "return null"})] {
-            let error = dispatcher
-                .dispatch("workflow_run", params, &context, "agent")
-                .await
-                .expect_err("ambiguous input should be rejected through the dispatcher");
-            assert!(
-                matches!(
-                    error,
-                    ToolError::InvalidParameters { ref message, .. }
-                        if message == "provide exactly one of name or source"
-                ),
-                "unexpected dispatcher error: {error}"
-            );
+        for approved in [false, true] {
+            for params in [json!({}), json!({"name": "saved", "source": "return null"})] {
+                let result = if approved {
+                    dispatcher
+                        .dispatch_approved("workflow_run", params, &context, "agent")
+                        .await
+                } else {
+                    dispatcher
+                        .dispatch("workflow_run", params, &context, "agent")
+                        .await
+                };
+                let error =
+                    result.expect_err("ambiguous input should be refused through the dispatcher");
+                assert_eq!(
+                    error.execution(),
+                    swage_protocol::client::conversation::ToolExecution::refused()
+                );
+                assert!(
+                    swage_agent::agent::format_tool_error_for_model(&error)
+                        .contains("provide exactly one of name or source")
+                );
+                assert!(
+                    matches!(
+                        error,
+                        ToolError::InvalidParameters { ref message, .. }
+                            if message == "provide exactly one of name or source"
+                    ),
+                    "unexpected dispatcher error: {error}"
+                );
+            }
         }
 
         for params in [json!({"name": "saved"}), json!({"source": "return null"})] {
@@ -202,11 +249,9 @@ mod tests {
                 .await
                 .expect_err("one workflow input should pass schema validation and reach execution");
             assert!(
-                matches!(
-                    error,
-                    ToolError::ExecutionFailed { ref message, .. }
-                        if message == "workflow_run requires gateway execution"
-                ),
+                error
+                    .to_string()
+                    .contains("workflow_run requires gateway execution"),
                 "one workflow input did not reach execution: {error}"
             );
         }

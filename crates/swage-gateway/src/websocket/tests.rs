@@ -143,6 +143,7 @@ fn server_event_tool_start_includes_parent_call_id_when_some() {
 #[test]
 fn server_event_tool_end_serialises() {
     let event = ServerEvent::ToolEnd {
+        execution: None,
         call_id: "toolu_01abc".to_string(),
         tool: "shell".to_string(),
         result: serde_json::json!("file1\nfile2\nfile3"),
@@ -166,6 +167,7 @@ fn server_event_tool_end_serialises() {
 #[test]
 fn server_event_tool_end_omits_parent_call_id_when_none() {
     let event = ServerEvent::ToolEnd {
+        execution: None,
         call_id: "toolu_native".to_string(),
         tool: "shell".to_string(),
         result: serde_json::json!("ok"),
@@ -185,6 +187,7 @@ fn server_event_tool_end_omits_parent_call_id_when_none() {
 #[test]
 fn server_event_tool_end_includes_parent_call_id_when_some() {
     let event = ServerEvent::ToolEnd {
+        execution: None,
         call_id: "sub_01".to_string(),
         tool: "shell".to_string(),
         result: serde_json::json!("output"),
@@ -201,6 +204,7 @@ fn server_event_tool_end_includes_parent_call_id_when_some() {
 #[test]
 fn server_event_tool_end_serialises_without_total_bytes() {
     let event = ServerEvent::ToolEnd {
+        execution: None,
         call_id: "toolu_02".to_string(),
         tool: "file_read".to_string(),
         result: serde_json::json!({"content": "hello"}),
@@ -220,6 +224,7 @@ fn server_event_tool_end_serialises_without_total_bytes() {
 #[test]
 fn server_event_tool_end_truncated() {
     let event = ServerEvent::ToolEnd {
+        execution: None,
         call_id: "toolu_03".to_string(),
         tool: "shell".to_string(),
         result: serde_json::json!("partial output..."),
@@ -816,6 +821,7 @@ fn provider_retry_settled_serialises() {
 fn output_schema_failed_serialises() {
     let turn_id = Uuid::new_v4();
     let event = ServerEvent::OutputSchemaFailed {
+        failure_message: "required name".into(),
         turn_id,
         attempts: 3,
         errors: vec![SchemaValidationError {
@@ -1422,4 +1428,54 @@ async fn queued_websocket_send_preserves_its_client_id() {
         client_id.to_string(),
         "a queued acknowledgement must identify its client send"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_duplicate_socket_receives_the_reason_over_the_websocket() {
+    use axum::routing::get;
+    use futures::StreamExt;
+    use tokio::time::{Duration, timeout};
+
+    use swage_storage::store::{SessionStore, Storage, TopicStore};
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .unwrap();
+    let session_id = session.id;
+    let state = AppState::new_with_config_root(
+        storage.clone() as Arc<dyn Storage>,
+        storage as Arc<dyn TopicStore>,
+        Arc::new(MockProvider::new(vec![])),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    let router = axum::Router::new()
+        .route("/ws/{id}", get(super::ws_handler))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let url = format!("ws://{address}/ws/{session_id}");
+    let (mut first, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let duplicate = tokio_tungstenite::connect_async(&url).await;
+    assert!(
+        duplicate.is_ok(),
+        "the browser must receive the rejection reason on the socket: {duplicate:?}"
+    );
+    let (mut duplicate, _) = duplicate.unwrap();
+    let frame = timeout(Duration::from_secs(3), duplicate.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let event: ServerEvent = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+    assert!(matches!(event, ServerEvent::Error { code, .. } if code == "already_connected"));
+    assert!(first.close(None).await.is_ok());
+    let _ = duplicate.close(None).await;
+    server.abort();
 }

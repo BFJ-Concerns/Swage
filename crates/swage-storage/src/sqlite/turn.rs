@@ -287,13 +287,13 @@ impl TurnStore for SqliteStorage {
                 let now_str = Utc::now().to_rfc3339();
                 conn.execute(
                     "UPDATE turns SET state = ?1, completed_at = ?2
-                     WHERE id = ?3 AND state NOT IN ('completed', 'refused', 'incomplete', 'failed', 'interrupted')",
+                     WHERE id = ?3 AND state NOT IN ('completed', 'refused', 'incomplete', 'failed', 'interrupted', 'cancelled')",
                     params![&state_str, &now_str, id.to_string()],
                 )?;
             } else {
                 let changed = conn.execute(
                     "UPDATE turns SET state = ?1
-                     WHERE id = ?2 AND state NOT IN ('completed', 'refused', 'incomplete', 'failed', 'interrupted')
+                     WHERE id = ?2 AND state NOT IN ('completed', 'refused', 'incomplete', 'failed', 'interrupted', 'cancelled')
                        AND (state != 'delegating' OR ?1 = 'delegating')",
                     params![&state_str, id.to_string()],
                 )?;
@@ -335,7 +335,7 @@ impl TurnStore for SqliteStorage {
             let recorded = tx.execute(
                 "UPDATE tool_calls
                  SET result = ?1, model_result = ?2, status = ?3, duration_ms = ?4,
-                     truncated = ?5, total_bytes = ?6
+                     truncated = ?5, total_bytes = ?6, execution = ?9
                  WHERE id = ?7 AND turn_id = ?8 AND result IS NULL",
                 params![
                     result,
@@ -345,7 +345,13 @@ impl TurnStore for SqliteStorage {
                     call.truncated,
                     call.total_bytes,
                     call.id.to_string(),
-                    call.turn_id.to_string()
+                    call.turn_id.to_string(),
+                    call.execution
+                        .map(|value| serde_json::to_string(&value))
+                        .transpose()
+                        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(
+                            error
+                        )))?
                 ],
             )?;
             if recorded != 1 {
@@ -724,6 +730,7 @@ mod tests {
             TurnState::Incomplete,
             TurnState::Failed,
             TurnState::Interrupted,
+            TurnState::Cancelled,
         ] {
             let turn = storage.create_turn(new_turn(thread_id)).await.unwrap();
             storage

@@ -1,10 +1,7 @@
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
-use swage_core::{
-    StorageError, compact_tool_arguments_for_model, compact_tool_result_for_model_with_reference,
-    tool_result_reference,
-};
+use swage_core::StorageError;
 
 /// Track which migrations have been applied.
 const CREATE_MIGRATIONS_TABLE: &str = "
@@ -64,8 +61,6 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ),
         ("038_constrain_message_enums", CONSTRAIN_MESSAGE_ENUMS),
         ("040_session_selected_model", ADD_SESSION_SELECTED_MODEL),
-        ("041_tool_call_model_replay", ADD_TOOL_CALL_MODEL_REPLAY),
-        ("042_tool_call_provider_round", ADD_TOOL_CALL_PROVIDER_ROUND),
         ("043_knowledge_base", CREATE_KNOWLEDGE_BASE_TABLES),
         ("044_agent_definitions", CREATE_AGENT_DEFINITION_TABLE),
         (
@@ -82,10 +77,6 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
         ("051_workflow_run_parking", ADD_WORKFLOW_RUN_PARKING),
         ("052_task_definitions", CREATE_TASK_DEFINITION_TABLE),
         ("053_session_variables", CREATE_SESSION_VARIABLES),
-        (
-            "055_tool_call_display_summary",
-            ADD_TOOL_CALL_DISPLAY_SUMMARY,
-        ),
         ("056_turn_delegated_tokens", ADD_TURN_DELEGATED_TOKENS),
         ("057_surfaces", CREATE_PAGE_TABLES),
         ("058_surface_annotations", CREATE_PAGE_ANNOTATION_TABLE),
@@ -328,13 +319,6 @@ const CREATE_WORKER_CALL_RECORD: &str = "
 const ADD_TURN_DELEGATED_TOKENS: &str = "
 ALTER TABLE turns ADD COLUMN delegated_input_tokens INTEGER;
 ALTER TABLE turns ADD COLUMN delegated_output_tokens INTEGER;
-";
-
-/// One-line display headline per tool call, derived from the tool's declared
-/// display hints at execution time. Nullable: a tool with no hint stores
-/// NULL and renderers use their generic fallback.
-const ADD_TOOL_CALL_DISPLAY_SUMMARY: &str = "
-ALTER TABLE tool_calls ADD COLUMN display_summary TEXT;
 ";
 
 const CREATE_SESSION_VARIABLES: &str = "
@@ -1245,6 +1229,11 @@ const COMPLETE_SCHEMA: &str = "
     -- Tool calls: execution records for a specific turn.
     -- parent_call_id supports nested / sub-tool invocations (NULL = top-level).
     CREATE TABLE IF NOT EXISTS tool_calls (
+        execution TEXT,
+        model_arguments TEXT,
+        model_result TEXT,
+        provider_round INTEGER NOT NULL DEFAULT 0,
+        display_summary TEXT,
         id             TEXT    NOT NULL PRIMARY KEY,
         turn_id        TEXT    NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
         call_id        TEXT    NOT NULL,
@@ -1380,15 +1369,6 @@ const ADD_SESSION_METADATA_COLUMN: &str = "
 
 const ADD_SESSION_SELECTED_MODEL: &str = "
     ALTER TABLE sessions ADD COLUMN selected_model_id TEXT;
-";
-
-const ADD_TOOL_CALL_MODEL_REPLAY: &str = "
-    ALTER TABLE tool_calls ADD COLUMN model_arguments TEXT;
-    ALTER TABLE tool_calls ADD COLUMN model_result TEXT;
-";
-
-const ADD_TOOL_CALL_PROVIDER_ROUND: &str = "
-    ALTER TABLE tool_calls ADD COLUMN provider_round INTEGER NOT NULL DEFAULT 0;
 ";
 
 /// Approval requests — one row per HITL approval gate triggered during a turn.
@@ -1915,8 +1895,6 @@ fn initialise_schema(conn: &Connection) -> Result<(), StorageError> {
             super::secret::migrate_managed_secret_storage(conn)?;
         } else if name == "028_deduplicate_attachment_ingestion_content" {
             super::attachment::migrate_attachment_ingested_markdown_dedup(conn)?;
-        } else if name == "041_tool_call_model_replay" {
-            migrate_tool_call_model_replay(conn)?;
         } else {
             // Apply migration inside a transaction for atomicity.
             conn.execute_batch(&format!("BEGIN; {sql} COMMIT;"))
@@ -2000,63 +1978,6 @@ fn check_recorded_migrations(
             first_unapplied = Some(name);
         }
     }
-    Ok(())
-}
-
-fn migrate_tool_call_model_replay(conn: &Connection) -> Result<(), StorageError> {
-    conn.execute_batch(&format!("BEGIN; {ADD_TOOL_CALL_MODEL_REPLAY} COMMIT;"))
-        .map_err(|e| {
-            StorageError::MigrationFailed(format!(
-                "migration '041_tool_call_model_replay' failed: {e}"
-            ))
-        })?;
-
-    let legacy_rows = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, turn_id, call_id, arguments, result, status
-                 FROM tool_calls
-                 WHERE model_arguments IS NULL
-                    OR (result IS NOT NULL AND model_result IS NULL)",
-            )
-            .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                ))
-            })
-            .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StorageError::MigrationFailed(e.to_string()))?
-    };
-
-    for (id, turn_id, call_id, arguments, result, status) in legacy_rows {
-        let argument_value = serde_json::from_str(&arguments)
-            .unwrap_or_else(|_| serde_json::Value::String(arguments.clone()));
-        let model_arguments = compact_tool_arguments_for_model(&argument_value);
-        let model_result = result.as_ref().map(|result| {
-            compact_tool_result_for_model_with_reference(
-                result,
-                status.as_deref() != Some("success"),
-                tool_result_reference(&turn_id, &call_id),
-            )
-        });
-
-        conn.execute(
-            "UPDATE tool_calls
-             SET model_arguments = ?1, model_result = ?2
-             WHERE id = ?3",
-            params![model_arguments, model_result, id],
-        )
-        .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
-    }
-
     Ok(())
 }
 
@@ -2791,21 +2712,29 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_model_replay_migration_backfills_legacy_rows() {
-        let conn = open_migrated_until_exclusive("041_tool_call_model_replay");
+    fn fresh_store_records_tool_call_model_replay() {
+        let conn = open_migrated();
         let topic_id = default_topic_id(&conn);
         let now = chrono::Utc::now().to_rfc3339();
         let session_id = insert_session(&conn, &topic_id, &now);
         let thread_id = insert_thread(&conn, &session_id, &now);
         let turn_id = insert_turn(&conn, &thread_id, &now);
-        let call_id = "legacy_call";
+        let call_id = "recorded_call";
 
+        let arguments = swage_core::compact_tool_arguments_for_model(
+            &serde_json::json!({"cmd": "missing-command"}),
+        );
+        let result = swage_core::compact_tool_result_for_model_with_reference(
+            "command not found",
+            true,
+            swage_core::tool_result_reference(&turn_id, call_id),
+        );
         conn.execute(
             "INSERT INTO tool_calls
              (id, turn_id, call_id, tool, arguments, agent_id, result, status,
-              duration_ms, truncated, total_bytes, position, created_at)
+              duration_ms, truncated, total_bytes, position, created_at, model_arguments, model_result)
              VALUES (?1, ?2, ?3, 'shell', ?4, 'agent-test', ?5, 'error',
-                     12, 0, 17, 0, ?6)",
+                     12, 0, 17, 0, ?6, ?7, ?8)",
             rusqlite::params![
                 uuid::Uuid::new_v4().to_string(),
                 &turn_id,
@@ -2813,11 +2742,11 @@ mod tests {
                 r#"{"cmd":"missing-command"}"#,
                 "command not found",
                 now,
+                arguments,
+                result,
             ],
         )
-        .expect("insert legacy tool call");
-
-        super::migrate_tool_call_model_replay(&conn).expect("backfill replay fields");
+        .expect("insert tool call with model replay");
 
         let (model_arguments, model_result): (String, String) = conn
             .query_row(
@@ -2827,7 +2756,7 @@ mod tests {
                 rusqlite::params![call_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .expect("select backfilled replay columns");
+            .expect("select recorded replay columns");
 
         let arguments: swage_core::CompactToolReplay =
             serde_json::from_str(&model_arguments).expect("arguments compact replay");

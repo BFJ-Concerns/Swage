@@ -10,6 +10,7 @@
   never reported reads "not recorded" with its reason, never as zero spend.
 -->
 <script lang="ts">
+  import { formatRunTime, formatRunDuration } from "../run-times";
   import { conversationPath } from "../router";
   import type { WorkflowJournalEntry } from "../protocol/WorkflowJournalEntry";
   import type { WorkflowRunDetailResponse } from "../protocol/WorkflowRunDetailResponse";
@@ -114,6 +115,11 @@
     return [attempt.model ?? "default model", attempt.effort ?? "default effort"].join(", ");
   }
 
+  function briefingPreview(prompt: string): string {
+    const text = prompt.replace(/\s+/g, " ").trim();
+    return text.length > 160 ? `${text.slice(0, 160)}…` : text;
+  }
+
   function navigate(event: MouseEvent, path: string) {
     if (onNavigate && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.button === 0) {
       event.preventDefault();
@@ -156,8 +162,13 @@
         <li class="call">
           <h3>{entry.label ?? call.dispatch?.agent_definition_id ?? "Worker"}</h3>
 
+          <dl>
+            <dt>Status</dt>
+            <dd class="termination">{terminationLabel(termination)}</dd>
+            <dt>Provider rounds</dt>
+            <dd>{call.provider_rounds == null ? "Not recorded" : call.provider_rounds.length}</dd>
+          </dl>
           {#if call.dispatch}
-            <p class="prompt">{call.dispatch.prompt}</p>
             <dl>
               <dt>Asked for</dt>
               <dd>
@@ -166,6 +177,26 @@
               </dd>
               <dt>Ran with</dt>
               <dd>{call.dispatch.attempts.length ? resolvedLabel(call.dispatch.attempts[call.dispatch.attempts.length - 1]) : "not yet resolved"}</dd>
+              {#if call.dispatch.placement}
+                <dt>Placed at</dt>
+                <dd>
+                  {#if placementInAccount(call.dispatch.placement.path)}
+                    Shown in the terminal account
+                  {:else}
+                    {call.dispatch.placement.path}
+                  {/if}
+                  ({call.dispatch.placement.can_write ? "writable" : "read-only"})
+                </dd>
+              {/if}
+            </dl>
+            <details class="briefing">
+              <summary>
+                Briefing <span class="preview">{briefingPreview(call.dispatch.prompt)}</span>
+                <span class="expand">Expand</span><span class="collapse">Collapse</span>
+              </summary>
+              <p class="prompt">{call.dispatch.prompt}</p>
+            </details>
+            <dl>
               {#if call.dispatch.attempts.length > 0}
                 <dt>Attempts</dt>
                 <dd class="attempts">
@@ -179,17 +210,6 @@
                       </li>
                     {/each}
                   </ol>
-                </dd>
-              {/if}
-              {#if call.dispatch.placement}
-                <dt>Placed at</dt>
-                <dd>
-                  {#if placementInAccount(call.dispatch.placement.path)}
-                    Shown in the terminal account
-                  {:else}
-                    {call.dispatch.placement.path}
-                  {/if}
-                  ({call.dispatch.placement.can_write ? "writable" : "read-only"})
                 </dd>
               {/if}
               <dt>Granted</dt>
@@ -211,15 +231,13 @@
           {/if}
           {#if call.liveness}
             <dl class="liveness">
-              <dt>Started</dt><dd>{call.liveness.started_at}</dd>
-              <dt>First evidence</dt><dd>{call.liveness.first_evidence_at ?? "Not yet recorded"}</dd>
+              <dt>Started</dt><dd>{@render recordedTime(call.liveness.started_at)}</dd>
+              <dt>First evidence</dt><dd>{#if call.liveness.first_evidence_at}{@render recordedTime(call.liveness.first_evidence_at)}{:else}Not yet recorded{/if}</dd>
             </dl>
           {/if}
           <dl>
             <dt>Spend</dt>
             <dd class="usage">{usageLabel(call.usage, termination)}</dd>
-            <dt>Stopped</dt>
-            <dd class="termination">{terminationLabel(termination)}</dd>
           </dl>
 
           {#if call.provider_rounds == null}
@@ -234,6 +252,7 @@
                   <th>Round</th>
                   <th>Started</th>
                   <th>Ended</th>
+                  <th>Duration</th>
                   <th>Outcome</th>
                 </tr>
               </thead>
@@ -242,8 +261,9 @@
                   <tr>
                     <td class="numeric">{round.attempt}</td>
                     <td class="numeric">{round.round}</td>
-                    <td>{round.started_at}</td>
-                    <td>{round.completed_at ?? "—"}</td>
+                    <td>{@render recordedTime(round.started_at)}</td>
+                    <td>{#if round.completed_at}{@render recordedTime(round.completed_at)}{:else}—{/if}</td>
+                    <td>{round.completed_at ? formatRunDuration(round.started_at, round.completed_at) : "—"}</td>
                     <td>{roundLabel(round)}</td>
                   </tr>
                 {/each}
@@ -255,6 +275,10 @@
     </ul>
   {/if}
 </section>
+
+{#snippet recordedTime(stamp: string)}
+  <time datetime={stamp} title={stamp}>{formatRunTime(stamp)}</time>
+{/snippet}
 
 <style>
   .run-detail {
@@ -290,6 +314,25 @@
   .call {
     border-bottom: var(--rule);
     padding-block: 0.5rem;
+  }
+
+  .briefing summary {
+    cursor: pointer;
+    overflow-wrap: anywhere;
+  }
+
+  .preview {
+    color: var(--ink-soft);
+  }
+
+  .collapse,
+  .briefing[open] .preview,
+  .briefing[open] .expand {
+    display: none;
+  }
+
+  .briefing[open] .collapse {
+    display: inline;
   }
 
   .prompt {

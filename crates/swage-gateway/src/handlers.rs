@@ -1595,6 +1595,7 @@ pub async fn get_turn(
 
     Ok(Json(TurnPollResponse {
         turn_id: turn.id,
+        failure_message: turn.failure_message,
         state: turn.state.to_string(),
         assistant_response: turn.assistant_response,
         structured_output: turn.structured_output,
@@ -1835,6 +1836,7 @@ async fn execute_external_delegate_message(
             silent_ws_tx,
             crate::turn::effective_tool_permissions_record(&effective_target_resolved),
             composition,
+            dispatcher_build.dispatcher.offered_tools(),
         ),
         snapshot_recorder: Some(crate::turn::delegation_snapshot_recorder_for_state(
             state.clone(),
@@ -2116,6 +2118,7 @@ pub async fn list_turns(
         .into_iter()
         .map(|t| TurnPollResponse {
             turn_id: t.id,
+            failure_message: t.failure_message,
             state: t.state.to_string(),
             assistant_response: t.assistant_response,
             structured_output: t.structured_output,
@@ -2271,6 +2274,7 @@ mod tests {
         assert_eq!(
             body_json(response).await,
             serde_json::json!([{
+                "integration": "telegram",
                 "link_code": issued.link_code,
                 "expires_at": issued.expires_at,
             }]),

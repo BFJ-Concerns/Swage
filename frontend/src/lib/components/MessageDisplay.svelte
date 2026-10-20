@@ -240,7 +240,7 @@
   // exists to hold it.
   function endedWithoutReply(message: (typeof messages)[number]): boolean {
     if (!isPersonsMessage(message)) return false;
-    if (message.turn_state !== "failed" && message.turn_state !== "interrupted") return false;
+    if (message.turn_state !== "failed" && message.turn_state !== "interrupted" && message.turn_state !== "cancelled") return false;
     if (!message.turn_id) {
       // A request settled live, before the gateway's record names its turn:
       // a reply would follow it directly.
@@ -384,7 +384,7 @@
           <!-- Assistant messages render as markdown. -->
           <div
             class="message-content assistant-content markdown-body"
-            class:interrupted={message.turn_state === "interrupted" ||
+            class:interrupted={message.turn_state === "interrupted" || message.turn_state === "cancelled" ||
               message.turn_state === "failed" || message.turn_state === "incomplete"}
           >
             {#if shouldRenderMarkdown}
@@ -395,7 +395,9 @@
               <div class="plain-body">{message.content}</div>
             {/if}
 
-            {#if message.turn_state === "interrupted"}
+            {#if message.turn_state === "cancelled"}
+              <p class="interrupted-notice">Response cancelled</p>
+            {:else if message.turn_state === "interrupted"}
               <!-- Subtle notice below the partial response. -->
               <p class="interrupted-notice">↩ Response interrupted</p>
             {:else if message.turn_state === "incomplete"}
@@ -420,7 +422,7 @@
             </div>
           {/if}
           <p class="interrupted-notice">
-            {message.turn_state === "interrupted" ? "↩ Interrupted before a reply" : "⚠ No reply — the turn failed"}
+            {message.turn_state === "cancelled" ? "Cancelled before a reply" : message.turn_state === "interrupted" ? "↩ Interrupted before a reply" : "⚠ No reply — the turn failed"}
           </p>
         {/if}
         {#if message.failure_message}
