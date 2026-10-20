@@ -12,17 +12,17 @@ impl TestRepository {
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
+                    .expect("test clock must be after the Unix epoch")
                     .as_nanos()
             ));
-        fs::create_dir(&root).unwrap();
+        fs::create_dir(&root).expect("create tracker test repository");
         Self(root)
     }
 }
 
 impl Drop for TestRepository {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).unwrap();
+        fs::remove_dir_all(&self.0).expect("remove tracker test repository");
     }
 }
 
