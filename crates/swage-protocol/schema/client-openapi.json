@@ -6507,6 +6507,13 @@
               }
             ]
           },
+          "model_replay_truncated": {
+            "description": "Whether later turns receive only a preview of this result. Absent when\nthere is no completed, recognised model replay to account for.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "parent_call_id": {
             "type": [
               "string",

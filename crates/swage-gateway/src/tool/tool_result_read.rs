@@ -80,6 +80,36 @@ impl Tool for ToolResultReadTool {
     }
 }
 
+/// An explicit read expands a stored preview. Keep its dispatcher-scanned output
+/// in later requests instead of applying the preview budget to it again. The
+/// hash ties the expansion to the exact bytes recorded for the model; raw rows
+/// that differ from that safe representation must never replace it.
+pub(crate) fn recovered_model_result(record: &swage_storage::ToolCallRecord) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    if record.tool != TOOL_RESULT_READ_TOOL || record.status.as_deref() != Some("success") {
+        return None;
+    }
+    let raw = record.result.as_deref()?;
+    let encoded = record.model_result.as_deref()?;
+    // Approval accounts precede the single-line envelope. Preserve that account
+    // when expanding the result, without interpreting or changing its text.
+    let (prefix, envelope) = encoded.rsplit_once('\n').unwrap_or(("", encoded));
+    let replay: swage_core::CompactToolReplay = serde_json::from_str(envelope).ok()?;
+    let sha256: String = Sha256::digest(raw.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    if replay.kind != "tool_result" || replay.sha256 != sha256 {
+        return None;
+    }
+    Some(if prefix.is_empty() {
+        raw.to_owned()
+    } else {
+        format!("{prefix}\n{raw}")
+    })
+}
+
 /// Resolve a stored tool-call reference (`tool_call:<turn>:<call>:result`)
 /// to the call it names, provided the call's turn belongs to the current
 /// turn's thread. A reference from another conversation, a malformed one and
@@ -452,5 +482,30 @@ mod tests {
         assert_eq!(output["output"], "full copied branch result");
         assert_eq!(output["tool"], "shell");
         assert_eq!(output["call_id"], "call_1");
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recovery_rejects_raw_bytes_that_differ_from_the_model_record() {
+        let (storage, _, _, referenced_turn_id) = test_turns().await;
+        let mut call = new_call(
+            referenced_turn_id,
+            "recovered",
+            Some("scanned content".into()),
+        );
+        call.tool = "tool_result_read".into();
+        call.model_result = Some(swage_core::compact_tool_result_for_model(
+            call.result.as_deref().unwrap(),
+            false,
+        ));
+        let mut record = storage.create_tool_call(call).await.unwrap();
+        assert_eq!(
+            super::recovered_model_result(&record).as_deref(),
+            Some("scanned content")
+        );
+        record.result = Some("different unscanned content".into());
+        assert_eq!(
+            super::recovered_model_result(&record),
+            None,
+            "a differing raw result must never replace the model-safe replay"
+        );
     }
 }

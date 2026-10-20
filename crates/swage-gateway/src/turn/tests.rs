@@ -25013,3 +25013,144 @@ async fn later_replay_accounts_for_reads_with_retrieval() {
 async fn later_replay_accounts_for_reads_without_retrieval() {
     assert_later_replay_accounts_for_reads(false).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn later_replay_keeps_recovered_content() {
+    let (state, session_id) = start_long_result_turn(Arc::new(EchoMockTool)).await;
+    let thread_id = state.storage.list_by_session(session_id).await.unwrap()[0].id;
+    let turn_id = state.storage.list_turns_by_thread(thread_id).await.unwrap()[0].id;
+    let reference = swage_core::tool_result_reference(&turn_id.to_string(), "c1");
+    let read_provider = MultiRoundMockProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "recovered".into(),
+                name: "tool_result_read".into(),
+                arguments: serde_json::json!({ "reference": reference }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "read again".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]);
+    state.replace_runtime(
+        state.active_config(),
+        Arc::new(read_provider),
+        crate::tool::ToolDispatcher::allow_all(vec![Arc::new(
+            crate::tool::tool_result_read::ToolResultReadTool {
+                max_output_bytes: 65536,
+            },
+        ) as Arc<dyn crate::tool::Tool>]),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Read the recorded result".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .unwrap();
+    let read_turn = state
+        .storage
+        .list_turns_by_thread(thread_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|turn| turn.id != turn_id)
+        .unwrap();
+    let rows = state
+        .storage
+        .list_tool_calls_by_turn(read_turn.id)
+        .await
+        .unwrap();
+    assert_eq!(rows[0].status.as_deref(), Some("success"));
+    assert!(rows[0].result.as_ref().unwrap().contains("READ-MARKER"));
+
+    let (second_provider, captured) = CapturingProvider::new(vec![
+        StreamChunk::Delta {
+            content: "second complete".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]);
+    state.replace_runtime(
+        state.active_config(),
+        Arc::new(second_provider),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Where did you read the marker?".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .unwrap();
+    let request = captured.lock().unwrap().take().unwrap();
+    let recovered = request
+        .messages
+        .iter()
+        .filter_map(|message| message.tool_replay())
+        .flatten()
+        .find_map(|part| match part {
+            ToolReplayPart::ToolResult {
+                call_id, content, ..
+            } if call_id == "recovered" => Some(content),
+            _ => None,
+        })
+        .expect("the recovered read is replayed");
+    assert!(
+        recovered.contains("READ-MARKER"),
+        "later provider requests must keep the recovered tail: {recovered}"
+    );
+    let service =
+        crate::service::ConversationService::new(state.storage.clone(), state.topic_store.clone());
+    let detail = serde_json::to_value(service.get_conversation(session_id).await.unwrap()).unwrap();
+    let read = detail["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|message| message["tool_calls"].as_array().unwrap())
+        .find(|call| call["call_id"] == "recovered")
+        .unwrap();
+    assert_eq!(
+        read["model_replay_truncated"], false,
+        "the recovered read is shown as a full replay"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn conversation_evidence_marks_a_replayed_preview() {
+    let (state, session_id) = start_long_result_turn(Arc::new(EchoMockTool)).await;
+    let service =
+        crate::service::ConversationService::new(state.storage.clone(), state.topic_store.clone());
+    let detail = serde_json::to_value(service.get_conversation(session_id).await.unwrap()).unwrap();
+    let call = detail["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|message| message["tool_calls"].as_array().unwrap())
+        .find(|call| call["call_id"] == "c1")
+        .unwrap();
+    assert_eq!(
+        call["model_replay_truncated"], true,
+        "the conversation must disclose the replay's preview-only delivery"
+    );
+}
+

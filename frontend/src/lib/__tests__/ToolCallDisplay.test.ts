@@ -614,3 +614,15 @@ describe("recorded result navigation", () => {
   });
 
 });
+
+describe("model replay evidence", () => {
+  it.each([true, false])("shows what later turns receive (preview=%s)", (preview) => {
+    component = mount(ToolCallDisplay, {
+      target: document.body,
+      props: { toolCall: makeCompletedCall({ model_replay_truncated: preview, truncated: false }), isLive: false },
+    });
+    expect(document.querySelector(".model-delivery")?.textContent).toBe(
+      preview ? "Later turns receive a preview." : "Later turns receive the full result.",
+    );
+  });
+});

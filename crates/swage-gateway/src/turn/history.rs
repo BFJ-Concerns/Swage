@@ -143,13 +143,18 @@ fn compact_tool_replay_messages_with_retrieval(
             // A started row proves the model selected the call, even when
             // settlement failed. Describe the unknown outcome without
             // writing a second record or exposing an unscanned raw result.
-            let model_result = record.model_result.clone().unwrap_or_else(|| {
-                swage_core::compact_tool_result_for_model_with_reference(
-                    swage_storage::store::INTERRUPTED_TOOL_RESULT,
-                    true,
-                    swage_core::tool_result_reference(&record.turn_id.to_string(), &record.call_id),
-                )
-            });
+            let model_result = crate::tool::tool_result_read::recovered_model_result(record)
+                .or_else(|| record.model_result.clone())
+                .unwrap_or_else(|| {
+                    swage_core::compact_tool_result_for_model_with_reference(
+                        swage_storage::store::INTERRUPTED_TOOL_RESULT,
+                        true,
+                        swage_core::tool_result_reference(
+                            &record.turn_id.to_string(),
+                            &record.call_id,
+                        ),
+                    )
+                });
             let model_result = match (
                 retrieval,
                 serde_json::from_str::<swage_core::CompactToolReplay>(&model_result),
