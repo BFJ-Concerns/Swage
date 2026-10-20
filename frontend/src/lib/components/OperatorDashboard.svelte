@@ -239,8 +239,8 @@
                   {#if session.has_running_turn}
                     <StatusBadge register="in-motion" label="running" />
                   {/if}
-                  {#if session.has_interrupted_turn}
-                    <StatusBadge register="wants-a-human" label="interrupted" />
+                  {#if session.ending}
+                    <StatusBadge register="wants-a-human" label={session.ending === "cancelled" ? "cancelled (cut short)" : session.ending} />
                   {/if}
                 </div>
                 <div class="secondary-line session-preview">

@@ -1,7 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use swage_core::GatewayError;
-use swage_storage::{ApprovalState, SessionListing};
+use swage_protocol::{
+    client::workflow::WorkflowRunTerminalAccount, hosting::OperatorSessionEnding,
+};
+use swage_storage::{ApprovalState, SessionListing, SessionOrigin, TurnState};
 
 use crate::{
     channel_gateway::{ChannelStatusListResponse, list_channel_statuses},
@@ -52,12 +55,17 @@ pub async fn operator_overview(state: &AppState) -> Result<OperatorOverviewRespo
         })
         .collect();
 
+    let active_turn_count = sessions
+        .iter()
+        .filter(|session| session.has_running_turn)
+        .count();
     let gateway = OperatorGatewaySummary {
         status: presence.gateway.status.clone(),
-        health: classify_gateway_health(&presence, &channels, &devices).to_string(),
+        health: classify_gateway_health(&presence, &channels, &devices, active_turn_count)
+            .to_string(),
         shutdown_requested: presence.gateway.shutdown_requested,
         seconds_since_activity: presence.gateway.seconds_since_activity,
-        active_turn_count: presence.gateway.active_turn_count,
+        active_turn_count,
         active_connection_count: presence.gateway.active_connection_count,
     };
 
@@ -77,6 +85,7 @@ fn classify_gateway_health(
     presence: &crate::presence::PresenceSnapshotResponse,
     channels: &ChannelStatusListResponse,
     devices: &[OperatorDeviceSummary],
+    active_turn_count: usize,
 ) -> &'static str {
     if presence.gateway.shutdown_requested
         || devices.iter().any(|device| device.state != "connected")
@@ -86,7 +95,7 @@ fn classify_gateway_health(
             .any(|channel| channel.status == "degraded")
     {
         "degraded"
-    } else if presence.gateway.active_turn_count > 0 {
+    } else if active_turn_count > 0 {
         "busy"
     } else {
         "healthy"
@@ -113,10 +122,84 @@ async fn list_operator_sessions(
         })
         .await?;
     let mut sessions = Vec::with_capacity(activities.len());
+    let mut worker_endings = HashMap::new();
+    let mut read_runs = HashSet::new();
 
     for activity in activities {
         let session = activity.session;
         if let Some(topic) = scopes.get(&session.topic_id) {
+            let mut latest_turn = None;
+            let mut has_processing_turn = false;
+            for thread in state.storage.list_by_session(session.id).await? {
+                for turn in state.storage.list_turns_by_thread(thread.id).await? {
+                    has_processing_turn |= matches!(
+                        turn.state,
+                        TurnState::Processing | TurnState::Delegating | TurnState::AwaitingApproval
+                    );
+                    if latest_turn
+                        .as_ref()
+                        .is_none_or(|latest: &swage_storage::Turn| {
+                            turn.created_at > latest.created_at
+                        })
+                    {
+                        latest_turn = Some(turn);
+                    }
+                }
+            }
+            let running_detected = active_turns.contains_key(&session.id) || has_processing_turn;
+            if let SessionOrigin::WorkflowWorker { run_id } = session.origin
+                && read_runs.insert(run_id)
+                && let Some(run) = state.storage.get_workflow_run(run_id).await?
+                && let Some(account) = run.terminal_account
+            {
+                let account: WorkflowRunTerminalAccount =
+                    serde_json::from_value(account).map_err(|error| {
+                        GatewayError::ConfigError(format!("invalid run account: {error}"))
+                    })?;
+                let journal = crate::workflow::journal_with_live_workers(
+                    state,
+                    run_id,
+                    state.storage.list_workflow_journal(run_id).await?,
+                )
+                .await
+                .map_err(GatewayError::ConfigError)?;
+                let cancelled_workers = if matches!(
+                    account.ending,
+                    swage_protocol::client::workflow::WorkflowRunEnding::Cancelled
+                ) {
+                    &account.workers.cut_short[..]
+                } else {
+                    &[]
+                };
+                for (workers, ending) in [
+                    (&account.workers.failed[..], OperatorSessionEnding::Failed),
+                    (cancelled_workers, OperatorSessionEnding::Cancelled),
+                ] {
+                    for worker in workers {
+                        if let Some(child_id) = journal
+                            .iter()
+                            .find(|entry| entry.id == worker.journal_entry_id)
+                            .and_then(|entry| entry.agent_call.as_ref())
+                            .and_then(|call| call.session_id)
+                        {
+                            worker_endings.insert(child_id, ending);
+                        }
+                    }
+                }
+            }
+            let has_running_turn = running_detected && !worker_endings.contains_key(&session.id);
+            let ending = if has_running_turn {
+                None
+            } else {
+                worker_endings.get(&session.id).copied().or_else(|| {
+                    latest_turn.as_ref().and_then(|turn| match turn.state {
+                        TurnState::Cancelled => Some(OperatorSessionEnding::Cancelled),
+                        TurnState::Failed => Some(OperatorSessionEnding::Failed),
+                        TurnState::Interrupted => Some(OperatorSessionEnding::Interrupted),
+                        _ => None,
+                    })
+                })
+            };
             sessions.push(OperatorSessionSummary {
                 id: session.id,
                 topic_id: topic.client_topic_id(),
@@ -128,9 +211,10 @@ async fn list_operator_sessions(
                 created_at: session.created_at,
                 last_activity: session.updated_at,
                 message_preview: activity.latest_message,
-                has_interrupted_turn: activity.has_interrupted_turn,
+                has_interrupted_turn: matches!(ending, Some(OperatorSessionEnding::Interrupted)),
                 has_active_connection: active_connections.contains(&session.id),
-                has_running_turn: active_turns.contains_key(&session.id),
+                has_running_turn,
+                ending,
             });
         }
     }

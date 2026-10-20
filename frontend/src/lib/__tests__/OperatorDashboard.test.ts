@@ -153,6 +153,17 @@ describe("OperatorDashboard", () => {
     }
   });
 
+  it.each(["cancelled", "failed", "interrupted"] as const)("renders the %s session ending badge", async (ending) => {
+    const overview = makeOverview();
+    overview.sessions[0] = { ...overview.sessions[0], has_running_turn: false, has_interrupted_turn: false, ending };
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(overview);
+    component = mount(OperatorDashboard, { target: document.body });
+    await settleUi();
+    const labels = Array.from(document.querySelectorAll(".session-summary .badge")).map((badge) => badge.textContent?.trim());
+    expect(labels).toContain(ending === "cancelled" ? "cancelled (cut short)" : ending);
+    if (ending !== "interrupted") expect(labels).not.toContain("interrupted");
+  });
+
   it.each([false, true])("hides a paused schedule's next run while retaining an active schedule's (gated: %s)", async (gated) => {
     const nextRun = "2026-01-01T01:00:00Z";
     const paused = makeSchedule({

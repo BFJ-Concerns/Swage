@@ -1146,12 +1146,31 @@
         "devices"
       ]
     },
+    "OperatorSessionEnding": {
+      "description": "A terminal turn's standing on the operator surface.",
+      "type": "string",
+      "enum": [
+        "cancelled",
+        "failed",
+        "interrupted"
+      ]
+    },
     "OperatorSessionSummary": {
       "type": "object",
       "properties": {
         "created_at": {
           "type": "string",
           "format": "date-time"
+        },
+        "ending": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperatorSessionEnding"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "has_active_connection": {
           "type": "boolean"

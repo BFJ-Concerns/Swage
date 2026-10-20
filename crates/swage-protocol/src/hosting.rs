@@ -101,6 +101,15 @@ pub struct OperatorGatewaySummary {
     pub active_connection_count: usize,
 }
 
+/// A terminal turn's standing on the operator surface.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorSessionEnding {
+    Cancelled,
+    Failed,
+    Interrupted,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct OperatorSessionSummary {
@@ -116,6 +125,7 @@ pub struct OperatorSessionSummary {
     pub has_interrupted_turn: bool,
     pub has_active_connection: bool,
     pub has_running_turn: bool,
+    pub ending: Option<OperatorSessionEnding>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
