@@ -216,6 +216,12 @@ impl ToolDispatcher {
             .collect()
     }
 
+    /// The offered set with each tool's secret-resolving parameters, from
+    /// the registry's own declarations.
+    pub fn offered(&self) -> crate::registry::OfferedTools {
+        self.registry.offered(self.offered_tools())
+    }
+
     fn offered_tool(&self, tool_name: &str) -> Option<Arc<dyn crate::tool::Tool>> {
         check_permission(&self.permissions, tool_name).ok()?;
         let tool = self.registry.get(tool_name)?;

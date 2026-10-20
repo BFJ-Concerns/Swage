@@ -9117,7 +9117,7 @@ async fn an_approval_gated_tool_is_offered_only_where_the_runtime_offers_it() {
     assert!(
         turn_offered_tools(&state, &gated, &agent_config, None, None, None, &no_grants,)
             .await
-            .contains(MEMORY_READ_TOOL),
+            .is_offered(MEMORY_READ_TOOL),
         "the agent runtime offers a gated tool and pauses for the approval"
     );
 
@@ -9126,7 +9126,7 @@ async fn an_approval_gated_tool_is_offered_only_where_the_runtime_offers_it() {
     assert!(
         !turn_offered_tools(&state, &codex, &agent_config, None, None, None, &no_grants,)
             .await
-            .contains(MEMORY_READ_TOOL),
+            .is_offered(MEMORY_READ_TOOL),
         "the Codex runtime withholds a gated tool"
     );
 
@@ -9149,7 +9149,7 @@ async fn an_approval_gated_tool_is_offered_only_where_the_runtime_offers_it() {
             &granted,
         )
         .await
-        .contains(MEMORY_READ_TOOL),
+        .is_offered(MEMORY_READ_TOOL),
         "a session's grant lifts the gate and the Codex runtime offers the tool"
     );
 }
@@ -17439,6 +17439,7 @@ async fn placed_worker_orientation_keeps_its_working_directory() {
         environment,
         vec![],
         std::collections::BTreeSet::new(),
+        std::collections::BTreeMap::new(),
     )
     .content()[0]
         .text_content();
@@ -17675,7 +17676,7 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
         )),
         test_environment(),
         vec![],
-        std::collections::BTreeSet::new(),
+        swage_tool::registry::OfferedTools::default(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
@@ -17712,7 +17713,7 @@ fn elements_built_without_memory_omit_the_memory_element() {
         None,
         test_environment(),
         vec![],
-        std::collections::BTreeSet::new(),
+        swage_tool::registry::OfferedTools::default(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
@@ -17772,7 +17773,7 @@ async fn named_assembly_composes_the_memory_element_like_any_other() {
         Some(memory),
         test_environment(),
         vec![],
-        std::collections::BTreeSet::new(),
+        swage_tool::registry::OfferedTools::default(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
@@ -17909,7 +17910,7 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
             assembly: Some("briefing".into()),
             skills: None,
         },
-        session_value_dispatcher.offered_tools(),
+        session_value_dispatcher.offered(),
     );
 
     let output = assembler
@@ -17992,7 +17993,7 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
         )),
         test_environment(),
         vec![],
-        std::collections::BTreeSet::new(),
+        swage_tool::registry::OfferedTools::default(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
@@ -18296,7 +18297,7 @@ fn instruction_provenance_counts_configured_files_at_their_own_levels() {
             None,
             test_environment(),
             vec![],
-            std::collections::BTreeSet::new(),
+            swage_tool::registry::OfferedTools::default(),
             "gpt-test-model",
             swage_context::working_norms::WorkingNormsScaffold::Native,
             &[],
@@ -18349,7 +18350,7 @@ fn assembly_elements_layer_operator_guidance_after_instructions() {
         None,
         test_environment(),
         vec![],
-        std::collections::BTreeSet::new(),
+        swage_tool::registry::OfferedTools::default(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],

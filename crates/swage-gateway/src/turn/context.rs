@@ -46,7 +46,7 @@ pub(crate) fn build_assembly_elements(
     memory: Option<MemoryIndexElement>,
     environment: SessionEnvironment,
     available_skills: Vec<AvailableSkill>,
-    offered_tools: std::collections::BTreeSet<String>,
+    offered_tools: swage_tool::registry::OfferedTools,
     model_id: &str,
     working_norms_scaffold: WorkingNormsScaffold,
     hierarchy: &[(HierarchyLevel, PathBuf)],
@@ -56,7 +56,8 @@ pub(crate) fn build_assembly_elements(
         Box::new(OrientationElement::new(
             environment,
             available_skills,
-            offered_tools,
+            offered_tools.names,
+            offered_tools.secret_reference_parameters,
         )),
         Box::new(swage_context::current_time::CurrentTimeElement::new(
             chrono::Utc::now(),
