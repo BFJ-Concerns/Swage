@@ -23,7 +23,10 @@ impl Tool for ToolResultReadTool {
     }
 
     fn description(&self) -> &str {
-        "Fetch the complete output of an earlier tool call when the conversation shows only a truncated version with a reference id."
+        "See the whole of a tool result you received in an earlier turn of this \
+         conversation. The conversation's record keeps only such a result's opening \
+         characters and a full_result_ref; you received it whole when the call returned. \
+         Pass that full_result_ref, copied exactly, as reference to see all of it again."
     }
 
     fn parameters(&self) -> Value {
@@ -32,7 +35,7 @@ impl Tool for ToolResultReadTool {
             "properties": {
                 "reference": {
                     "type": "string",
-                    "description": "The full_result_ref id shown alongside a truncated tool result."
+                    "description": "The full_result_ref shown with the recorded tool result, copied exactly: it has the form tool_call:<turn>:<call>:result, and every segment is needed."
                 }
             },
             "required": ["reference"]
@@ -236,6 +239,40 @@ mod tests {
             parent_call_id: None,
             display_summary: None,
         }
+    }
+
+    fn names_as_a_word(text: &str, word: &str) -> bool {
+        text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(|token| token == word)
+    }
+
+    /// The model reaches an elided result from the replay's note and this
+    /// text alone, so the description names the parameter and the field of
+    /// the replay it is filled from, and the parameter says what it means.
+    #[test]
+    fn the_description_names_the_parameter_and_the_replay_field_it_takes() {
+        let tool = ToolResultReadTool {
+            max_output_bytes: 1_000,
+        };
+        let description = tool.description();
+        let schema = tool.parameters();
+        for (parameter, spec) in schema["properties"].as_object().expect("properties") {
+            assert!(
+                names_as_a_word(description, parameter),
+                "the description names the parameter {parameter}"
+            );
+            assert!(
+                spec["description"]
+                    .as_str()
+                    .is_some_and(|text| text.split_whitespace().count() >= 8),
+                "the parameter {parameter} says what it means"
+            );
+        }
+        assert!(names_as_a_word(description, "full_result_ref"));
+        assert!(
+            !description.contains("truncated"),
+            "the text says the earlier turn had the result whole, not that it was cut short"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
