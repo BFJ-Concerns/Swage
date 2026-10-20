@@ -9705,8 +9705,7 @@ async fn later_turn_rebuilds_tool_replay_from_persisted_compact_rows() {
         .expect("tool-use replay");
     assert_eq!(tool_use.0, "c1");
     assert_eq!(tool_use.1, "echo");
-    assert_eq!(tool_use.2["kind"], "tool_arguments");
-    assert_eq!(tool_use.2["preview"], r#"{"text":"first"}"#);
+    assert_eq!(tool_use.2, &serde_json::json!({"text": "first"}));
 
     let tool_result_message = captured
         .messages
@@ -10048,8 +10047,7 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
         swage_core::ToolReplayPart::ToolCall { call_id, name, arguments }
             if call_id == "call_1"
                 && name == "echo"
-                && arguments["kind"] == "tool_arguments"
-                && arguments["preview"] == r#"{"text":"first"}"#
+                && arguments == &serde_json::json!({"text": "first"})
     )));
 
     let tool_result_replay = captured
@@ -10357,6 +10355,213 @@ fn complete_replay_record(call_id: &str) -> ToolCallRecord {
         parent_call_id: None,
         display_summary: None,
     }
+}
+
+#[test]
+fn replayed_file_read_arguments_validate_against_the_tool_schema() {
+    use crate::tool::Tool;
+
+    let record = complete_replay_record("native-read");
+    let replay = compact_tool_replay_messages(&[record]).unwrap();
+    let ToolReplayPart::ToolCall { arguments, .. } = &replay[0].tool_replay().unwrap()[0] else {
+        panic!("expected replayed tool call");
+    };
+    let schema = crate::tool::file_read::FileReadTool {
+        max_output_bytes: 4096,
+    }
+    .parameters();
+    assert!(
+        jsonschema::is_valid(&schema, arguments),
+        "replayed file_read arguments must validate against its parameter schema: {arguments}"
+    );
+    assert_eq!(arguments["path"], "Cargo.toml");
+    assert!(arguments.get("kind").is_none());
+    assert!(arguments.get("preview").is_none());
+}
+
+#[test]
+fn replayed_long_argument_values_are_bounded_inside_the_native_shape() {
+    let long = "界".repeat(2001);
+    let boundary = "é".repeat(2000);
+    let long_key = "k".repeat(2001);
+    let raw = serde_json::json!({
+        "path": "notes.txt",
+        "content": long,
+        "nested": [{"text": long, "boundary": boundary}, [long, 42, true, null]],
+        long_key.clone(): "value"
+    });
+    let mut record = complete_replay_record("long-write");
+    record.tool = "file_write".into();
+    record.arguments = raw.to_string();
+    record.model_arguments = swage_core::compact_tool_arguments_for_model(&raw);
+
+    let replay = compact_tool_replay_messages(&[record]).unwrap();
+    let ToolReplayPart::ToolCall { arguments, .. } = &replay[0].tool_replay().unwrap()[0] else {
+        panic!("expected replayed tool call");
+    };
+    assert_eq!(
+        arguments,
+        &serde_json::json!({
+            "path": "notes.txt",
+            "content": "界".repeat(2000),
+            "nested": [{"text": "界".repeat(2000), "boundary": boundary},
+                       ["界".repeat(2000), 42, true, null]],
+            long_key: "value"
+        }),
+        "only string values exceeding 2,000 characters may be shortened"
+    );
+}
+
+#[test]
+fn replayed_old_argument_envelopes_recover_bounded_raw_arguments_and_keep_results() {
+    let raw = serde_json::json!({"path": "Cargo.toml", "note": "x".repeat(2001)});
+    let mut old = complete_replay_record("old-read");
+    old.arguments = raw.to_string();
+    old.model_arguments = serde_json::json!({
+        "kind": "tool_arguments", "bytes": old.arguments.len(),
+        "sha256": "a".repeat(64), "truncated": true,
+        "preview": "not the original arguments"
+    })
+    .to_string();
+    let mut native = complete_replay_record("native-kind");
+    native.model_arguments = serde_json::json!({
+        "path": "kind.txt", "kind": "tool_arguments", "preview": "ordinary parameter"
+    })
+    .to_string();
+    let result = old.model_result.clone().unwrap();
+    let replay = compact_tool_replay_messages(&[old.clone(), native]).unwrap();
+    let calls = replay[0].tool_replay().unwrap();
+    assert!(
+        matches!(&calls[0], ToolReplayPart::ToolCall { call_id, arguments, .. }
+        if call_id == "old-read" && arguments == &serde_json::json!({
+            "path": "Cargo.toml", "note": "x".repeat(2000)
+        })),
+        "an old envelope must recover bounded arguments from the raw row"
+    );
+    assert!(
+        matches!(&calls[1], ToolReplayPart::ToolCall { arguments, .. }
+        if arguments == &serde_json::json!({
+            "path": "kind.txt", "kind": "tool_arguments", "preview": "ordinary parameter"
+        })),
+        "native parameters resembling part of an envelope must remain intact"
+    );
+    assert!(
+        matches!(&replay[1].tool_replay().unwrap()[0],
+        ToolReplayPart::ToolResult { call_id, content, .. }
+        if call_id == "old-read" && content == &result),
+        "recovering old arguments must retain the original result"
+    );
+
+    old.arguments = "{invalid".into();
+    assert!(
+        matches!(
+            compact_tool_replay_messages(&[old]),
+            Err(StorageError::Corruption { .. })
+        ),
+        "a preview is no substitute for corrupt raw arguments"
+    );
+}
+
+#[tokio::test]
+async fn replayed_native_arguments_are_redacted_in_recorded_provider_requests() {
+    let secret = "registered-replayed-argument-secret";
+    let provider = InspectorProtocolProvider {
+        adapter: Box::new(swage_provider::openai::OpenAiProvider::from_config(
+            swage_provider::ProviderConfig::keyless("replay-test", "http://unused.invalid/v1"),
+        )),
+        stream: MultiRoundMockProvider::new(vec![
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "secret-argument".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::json!({"text": secret}),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::ToolUse),
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "done".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "next turn".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+        ]),
+    };
+    let (state, session_id, storage) =
+        make_state_with_tool_provider_and_storage(Arc::new(provider)).await;
+    state
+        .secret_manager
+        .create_secret(crate::secret::CreateSecretRequest {
+            name: "Replay capture secret".into(),
+            material_kind: "plugin_secret".into(),
+            owner_kind: "service".into(),
+            backend_kind: "managed".into(),
+            scope_kind: "plugin".into(),
+            scope_id: Some("replay-test".into()),
+            metadata: None,
+            value: Some(secret.into()),
+            external_reference: None,
+        })
+        .await
+        .unwrap();
+
+    for input in ["Echo once", "Continue from history"] {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            input.to_owned(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    let thread = storage.list_by_session(session_id).await.unwrap().remove(0);
+    let turns = storage.list_turns_by_thread(thread.id).await.unwrap();
+    assert_eq!(turns.len(), 2);
+    let stored_calls = storage.list_tool_calls_by_turn(turns[0].id).await.unwrap();
+    assert_eq!(stored_calls.len(), 1);
+    assert!(
+        stored_calls[0].model_arguments.contains(secret),
+        "the replay input must actually contain the registered secret"
+    );
+    let snapshot = storage.get_snapshot(turns[1].id).await.unwrap().unwrap();
+    let report: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+    let requests = report["provider_visible"]["requests"].as_array().unwrap();
+    assert!(
+        !requests.is_empty(),
+        "the next turn must record its provider request"
+    );
+    let request = &requests[0]["request"];
+    assert!(
+        !request.to_string().contains(secret),
+        "registered secret values must be absent from the recorded provider request"
+    );
+    let call = request["body"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message["tool_calls"].as_array())
+        .flatten()
+        .find(|call| call["id"] == "secret-argument")
+        .expect("the earlier call must reach the next turn's recorded request");
+    let arguments: serde_json::Value =
+        serde_json::from_str(call["function"]["arguments"].as_str().unwrap()).unwrap();
+    assert_eq!(arguments, serde_json::json!({"text": "[REDACTED_SECRET]"}));
 }
 
 #[test]
