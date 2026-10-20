@@ -57,6 +57,10 @@ export function createTopicStore(): TopicStore {
       try {
         const topics = await api.listTopics();
         topicsStore.set(topics);
+        const currentTopicId = get(currentTopicStore)?.id;
+        currentTopicStore.set(
+          topics.find((topic) => topic.id === currentTopicId) ?? null,
+        );
       } finally {
         // Always clear loading — even on error, so the UI isn't stuck.
         isLoadingStore.set(false);

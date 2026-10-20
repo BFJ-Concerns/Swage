@@ -107,6 +107,38 @@ describe("loadTopics", () => {
     expect(store.isLoading).toBe(false);
   });
 
+  it("refreshes the selected topic when its inherited model default changes", async () => {
+    const store = createTopicStore();
+    vi.mocked(api.listTopics).mockResolvedValueOnce([
+      { ...topicA, effective_default_model: "old-model" },
+    ]);
+    await store.loadTopics();
+    await store.selectTopic(topicA.id);
+    vi.mocked(api.listTopics).mockResolvedValueOnce([
+      { ...topicA, effective_default_model: "new-model" },
+    ]);
+
+    await store.loadTopics();
+
+    expect(store.currentTopic?.effective_default_model).toBe("new-model");
+  });
+
+  it("keeps the scope closed if it is closed during a catalogue reload", async () => {
+    const store = createTopicStore();
+    vi.mocked(api.listTopics).mockResolvedValueOnce([topicA]);
+    await store.loadTopics();
+    await store.selectTopic(topicA.id);
+    let resolve!: (topics: typeof topicA[]) => void;
+    vi.mocked(api.listTopics).mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    const loading = store.loadTopics();
+    store.closeTopic();
+    resolve([topicA]);
+
+    await loading;
+
+    expect(store.currentTopic).toBeNull();
+  });
+
   it("clears isLoading even if the API call throws", async () => {
     const store = createTopicStore();
     vi.mocked(api.listTopics).mockRejectedValueOnce(
