@@ -11,6 +11,30 @@ import RecentSessions from "../components/RecentSessions.svelte";
 import * as sessionsApi from "../api/sessions";
 import type { RecentSession } from "../protocol/RecentSession";
 import type { RecentSessionsEntry } from "../protocol/RecentSessionsEntry";
+import type { WorkSurfaceChannel } from "../api/work-surface";
+import type { ServerEvent } from "../types";
+
+// A stand-in for the server end of the work-surface channel: `emit` pushes
+// into whatever the list subscribed with, and nothing after `close`, as the
+// real channel delivers nothing once closed.
+function fakeChannel(): WorkSurfaceChannel & { emit(event: ServerEvent): void; closed: boolean } {
+  const handlers: ((event: ServerEvent) => void)[] = [];
+  const channel = {
+    closed: false,
+    onSignal(handler: (event: ServerEvent) => void) {
+      handlers.push(handler);
+    },
+    onReconnect() {},
+    close() {
+      channel.closed = true;
+    },
+    emit(event: ServerEvent) {
+      if (channel.closed) return;
+      for (const handler of handlers) handler(event);
+    },
+  };
+  return channel;
+}
 
 vi.mock("../api/sessions", () => ({
   listRecentSessions: vi.fn(),
@@ -74,6 +98,39 @@ describe("RecentSessions", () => {
       component = undefined;
     }
     document.body.replaceChildren();
+  });
+
+  it("refetches when the gateway signals a session changed, and closes the channel on unmount", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(sessionsApi.listRecentSessions).mockResolvedValue([
+        conversationEntry(makeSession({ id: "conv-1", message_preview: "Plan the release" })),
+      ]);
+      const channel = fakeChannel();
+
+      component = mount(RecentSessions, { target: document.body, props: { channelFactory: () => channel } });
+      await vi.runOnlyPendingTimersAsync();
+      expect(sessionsApi.listRecentSessions).toHaveBeenCalledTimes(1);
+
+      // A burst of signals is one refetch; a signal for another list's
+      // concern (a surface) is none.
+      channel.emit({ type: "session_updated", session_id: "conv-1" });
+      channel.emit({ type: "session_updated", session_id: "conv-2" });
+      channel.emit({ type: "surface_updated", surface_id: "s-1", module_id: null });
+      await vi.runOnlyPendingTimersAsync();
+      expect(sessionsApi.listRecentSessions).toHaveBeenCalledTimes(2);
+
+      // A signal just before unmount schedules a refetch that unmounting
+      // cancels, and the channel is closed.
+      channel.emit({ type: "session_updated", session_id: "conv-1" });
+      unmount(component);
+      component = undefined;
+      expect(channel.closed).toBe(true);
+      await vi.runOnlyPendingTimersAsync();
+      expect(sessionsApi.listRecentSessions).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("lists every scope's sessions in the order the gateway gave, automated ones nested beneath their source", async () => {

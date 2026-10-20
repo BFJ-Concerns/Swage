@@ -302,6 +302,8 @@ pub(super) async fn process_turn_with_composition_and_focus(
         let mut turns = state.active_turns.lock().await;
         turns.insert(session_id, cancel_token.clone());
     }
+    // The session is running now: lists showing it hear so at once.
+    crate::service::announce_session_updated(state, session_id);
 
     // A turn is active execution: an archived session it lands on returns
     // to the recent list now, before anything else the turn does. Always

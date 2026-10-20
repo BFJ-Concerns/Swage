@@ -145,6 +145,7 @@ impl SubscriptionState {
             // always delivered.
             ServerEvent::SurfaceUpdated { .. }
             | ServerEvent::LibraryUpdated { .. }
+            | ServerEvent::SessionUpdated { .. }
             | ServerEvent::Lagged { .. } => true,
 
             // Retry progress is observability noise — only deliver to subscribers.

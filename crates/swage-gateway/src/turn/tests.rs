@@ -7088,6 +7088,47 @@ async fn failed_ordinary_attempt_recording_releases_the_prepared_turn() {
     );
 }
 
+/// A turn tells every session list that its session changed when it begins
+/// and again when it settles, on the work-surface broadcast — so a recent
+/// list refetches as the state changes, never on a timer.
+#[tokio::test]
+async fn a_turn_signals_session_lists_when_it_begins_and_when_it_settles() {
+    let _home = SwageHomeGuard::isolate();
+    let (state, session_id) = make_state_with_session(vec![StreamChunk::Done {
+        finish_reason: None,
+    }])
+    .await;
+    let state = state.with_test_sandbox();
+    let mut signals = state.broadcast.subscribe();
+
+    Box::pin(process_turn(
+        &state,
+        session_id,
+        None,
+        "Hello",
+        mpsc::unbounded_channel().0,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    ))
+    .await
+    .expect("the turn completes");
+
+    let mut session_signals = 0;
+    while let Ok(event) = signals.try_recv() {
+        if let ServerEvent::SessionUpdated {
+            session_id: signalled,
+        } = event
+        {
+            assert_eq!(signalled, session_id);
+            session_signals += 1;
+        }
+    }
+    assert_eq!(
+        session_signals, 2,
+        "one signal when the turn begins and one when it settles"
+    );
+}
+
 #[tokio::test]
 async fn default_turn_persists_sandboxed_boundary() {
     let _home = SwageHomeGuard::isolate();

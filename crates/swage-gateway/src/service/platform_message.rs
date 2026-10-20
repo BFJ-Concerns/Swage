@@ -87,6 +87,16 @@ pub(crate) fn announce_appended_message(state: &AppState, session_id: Uuid, mess
     });
 }
 
+/// Tell every session list that a session's list-visible state changed: a
+/// turn began or settled on it. A signal, not content — the list refetches
+/// through the recent-sessions path, so what it shows is always what the
+/// gateway would answer, never a patch applied in the client.
+pub(crate) fn announce_session_updated(state: &AppState, session_id: Uuid) {
+    let _ = state
+        .broadcast
+        .send(ServerEvent::SessionUpdated { session_id });
+}
+
 /// The wire state an inbound row's turn holds the moment it is recorded.
 pub(crate) fn pending_turn_state() -> Option<WireTurnState> {
     Some(WireTurnState::Pending)

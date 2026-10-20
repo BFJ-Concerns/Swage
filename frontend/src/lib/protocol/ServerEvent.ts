@@ -37,7 +37,7 @@ parent_call_id?: string | null, } | { "type": "lagged", dropped: number, } | { "
 /**
  * The module written; absent for surface-level changes (creation).
  */
-module_id?: string | null, } | { "type": "library_updated", entry_id: string, } | { "type": "message_appended", session_id: string, message: MessageView, } | { "type": "message_queued", session_id: string, queued: QueuedMessageView, } | { "type": "queue_drained", session_id: string, turn_id: string, thread_id: string, queued_ids: Array<string>, } | { "type": "context_assembled", turn_id: string, report: AssemblyReport, } | { "type": "turn_complete", turn_id: string,
+module_id?: string | null, } | { "type": "library_updated", entry_id: string, } | { "type": "session_updated", session_id: string, } | { "type": "message_appended", session_id: string, message: MessageView, } | { "type": "message_queued", session_id: string, queued: QueuedMessageView, } | { "type": "queue_drained", session_id: string, turn_id: string, thread_id: string, queued_ids: Array<string>, } | { "type": "context_assembled", turn_id: string, report: AssemblyReport, } | { "type": "turn_complete", turn_id: string,
 /**
  * Output-limit cause when the reply is incomplete.
  */

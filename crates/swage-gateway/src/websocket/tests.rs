@@ -1479,3 +1479,18 @@ async fn a_duplicate_socket_receives_the_reason_over_the_websocket() {
     let _ = duplicate.close(None).await;
     server.abort();
 }
+
+/// A session's running-state change is a work-surface signal for session
+/// lists and belongs to no conversation socket: the list refetches, the
+/// conversation already has its own stream.
+#[test]
+fn session_updated_is_a_list_signal_and_not_a_conversation_event() {
+    let event = ServerEvent::SessionUpdated {
+        session_id: Uuid::new_v4(),
+    };
+    assert!(super::work_surface::is_work_surface_signal(&event));
+    assert!(!super::connection::broadcast_event_matches_session(
+        Uuid::new_v4(),
+        &event
+    ));
+}

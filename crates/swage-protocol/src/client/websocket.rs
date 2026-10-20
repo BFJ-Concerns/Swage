@@ -147,6 +147,10 @@ pub enum ServerEvent {
     /// Clients showing the catalogue refetch it — the event is the signal,
     /// not the content.
     LibraryUpdated { entry_id: Uuid },
+    /// A session's list-visible state changed: a turn began or settled on
+    /// it, so it is running, idle, or left interrupted. Clients showing
+    /// session lists refetch — the event is the signal, not the content.
+    SessionUpdated { session_id: Uuid },
     /// A message was recorded on a conversation by something other than the
     /// person at this client — a schedule's brief, a delegation's completion
     /// notice, a notice from the platform — so open views append it where it

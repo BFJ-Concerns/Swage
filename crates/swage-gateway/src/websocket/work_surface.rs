@@ -8,6 +8,10 @@
 //! client may open, carrying the server-wide signals a work surface refetches
 //! on.
 //!
+//! The same channel carries the session-list signal: a list of sessions is
+//! open with no conversation selected as often as a surface is, and it
+//! refetches on a signal the same way.
+//!
 //! The channel is a signal, not a payload route. Clients answer a signal by
 //! reading through the authoritative HTTP path; nothing here is rendered.
 
@@ -27,13 +31,16 @@ use super::ServerEvent;
 ///
 /// `SurfaceUpdated` tells an open surface that a surface it may be showing has
 /// changed; `LibraryUpdated` tells a catalogue view that the shared library
-/// changed; `Shutdown` tells it the gateway is going away. Everything else on
-/// the broadcast channel belongs to a conversation or to observability.
+/// changed; `SessionUpdated` tells a session list that a session's running
+/// state changed; `Shutdown` tells it the gateway is going away. Everything
+/// else on the broadcast channel belongs to a conversation or to
+/// observability.
 pub(crate) fn is_work_surface_signal(event: &ServerEvent) -> bool {
     matches!(
         event,
         ServerEvent::SurfaceUpdated { .. }
             | ServerEvent::LibraryUpdated { .. }
+            | ServerEvent::SessionUpdated { .. }
             | ServerEvent::Lagged { .. }
             | ServerEvent::Shutdown { .. }
     )

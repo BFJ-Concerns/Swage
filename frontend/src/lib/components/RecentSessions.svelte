@@ -11,10 +11,17 @@
   never opens a topic or touches a session's working context. The archived
   toggle lists what the inactivity sweep has hidden, so an old session is
   found and resumed from here, never by an identifier.
+
+  The list is live: it listens on the work-surface signal channel and
+  refetches when the gateway says a session changed, so a run starting or
+  settling shows here as soon as it shows in its own conversation. The
+  signal carries identity only; the list is always what the gateway answers.
 -->
 <script lang="ts">
   import { onMount } from "svelte";
   import { listRecentSessions } from "../api/sessions";
+  import { createWorkSurfaceChannel } from "../api/work-surface";
+  import type { WorkSurfaceChannel } from "../api/work-surface";
   import { messagePreview } from "../message-preview";
   import { relativeTime } from "../utils/relative-time";
   import type { RecentSession } from "../protocol/RecentSession";
@@ -30,9 +37,11 @@
     onSelectSession?: (id: string) => void;
     // Open the record of a workflow run that was started outside any session.
     onOpenWorkflowRun?: (id: string) => void;
+    // The signal channel to listen on; tests supply a fake.
+    channelFactory?: () => WorkSurfaceChannel;
   }
 
-  let { topics = [], onSelectSession, onOpenWorkflowRun }: Props = $props();
+  let { topics = [], onSelectSession, onOpenWorkflowRun, channelFactory = createWorkSurfaceChannel }: Props = $props();
 
   let topicFilter = $state<string | null>(null);
   let topicSearch = $state("");
@@ -47,6 +56,10 @@
   let groupExpanded = $state<Record<string, boolean>>(readGroupExpanded());
   // A slow response for an earlier filter must not overwrite a later one.
   let loadGeneration = 0;
+  // Signals arrive in bursts (a turn settling signals once per session it
+  // touched); one refetch answers the burst.
+  const SIGNAL_COALESCE_MS = 100;
+  let signalTimer: ReturnType<typeof setTimeout> | null = null;
 
   async function load(): Promise<void> {
     const generation = ++loadGeneration;
@@ -63,8 +76,29 @@
     }
   }
 
+  function reloadOnSignal(): void {
+    if (signalTimer !== null) return;
+    signalTimer = setTimeout(() => {
+      signalTimer = null;
+      void load();
+    }, SIGNAL_COALESCE_MS);
+  }
+
   onMount(() => {
     void load();
+    const channel = channelFactory();
+    channel.onSignal((event) => {
+      // A dropped signal may have been the one for a session shown here.
+      if (event.type === "session_updated" || event.type === "lagged") reloadOnSignal();
+    });
+    channel.onReconnect(reloadOnSignal);
+    return () => {
+      channel.close();
+      if (signalTimer !== null) {
+        clearTimeout(signalTimer);
+        signalTimer = null;
+      }
+    };
   });
 
   function setFilter(topicId: string | null): void {
