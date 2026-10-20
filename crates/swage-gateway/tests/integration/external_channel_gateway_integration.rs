@@ -791,7 +791,14 @@ async fn unavailable_webhook_target_fails_explicitly() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["code"], "delivery_failed");
+    assert!(
+        !body["message"]
+            .as_str()
+            .unwrap()
+            .contains("validation error")
+    );
     assert!(
         body["message"]
             .as_str()

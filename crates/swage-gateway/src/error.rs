@@ -147,6 +147,8 @@ pub fn error_code(error: &GatewayError) -> ErrorCode {
         GatewayError::TurnInProgress { .. } => ErrorCode::TurnInProgress,
         GatewayError::TopicConflict(_) => ErrorCode::Conflict,
         GatewayError::ValidationError(_) => ErrorCode::ValidationError,
+        GatewayError::DeliveryFailed(_) => ErrorCode::DeliveryFailed,
+        GatewayError::RuntimeError(_) => ErrorCode::RuntimeError,
         GatewayError::Provider(_) => ErrorCode::ProviderError,
         GatewayError::SignInUnsupported(_) => ErrorCode::SignInUnsupported,
         GatewayError::SignInFailed(_) => ErrorCode::SignInFailed,
@@ -379,6 +381,20 @@ mod tests {
     fn probe_router() -> Router {
         Router::new()
             .route(
+                "/delivery-failure",
+                axum::routing::get(|| async {
+                    ApiError::from(GatewayError::DeliveryFailed("webhook unreachable".into()))
+                }),
+            )
+            .route(
+                "/runtime-failure",
+                axum::routing::get(|| async {
+                    ApiError::from(GatewayError::RuntimeError(
+                        "automated response missing".into(),
+                    ))
+                }),
+            )
+            .route(
                 "/probe",
                 post(|Json(_): Json<Probe>| async { StatusCode::OK }),
             )
@@ -386,6 +402,35 @@ mod tests {
                 "/probe/{id}",
                 axum::routing::get(|Path(_): Path<Uuid>| async { StatusCode::OK }),
             )
+    }
+
+    async fn read_probe_failure(path: &str) -> (StatusCode, ApiErrorBody) {
+        let response = probe_router()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        read_error(response).await
+    }
+
+    #[tokio::test]
+    async fn delivery_failure_answers_with_its_runtime_contract() {
+        let (status, body) = read_probe_failure("/delivery-failure").await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(serde_json::to_value(body.code).unwrap(), "delivery_failed");
+        assert_eq!(body.message, "delivery failed: webhook unreachable");
+    }
+
+    #[tokio::test]
+    async fn automated_failure_answers_with_its_runtime_contract() {
+        let (status, body) = read_probe_failure("/runtime-failure").await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(serde_json::to_value(body.code).unwrap(), "runtime_error");
+        assert_eq!(body.message, "runtime error: automated response missing");
     }
 
     #[tokio::test]

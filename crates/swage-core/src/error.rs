@@ -664,6 +664,14 @@ pub enum GatewayError {
     #[error("validation error: {0}")]
     ValidationError(String),
 
+    /// Output delivery failed at runtime (not automatically retried).
+    #[error("delivery failed: {0}")]
+    DeliveryFailed(String),
+
+    /// Automated execution did not produce its required result (not retried).
+    #[error("runtime error: {0}")]
+    RuntimeError(String),
+
     /// The selected provider does not expose the requested sign-in flow.
     #[error("provider sign-in is unsupported: {0}")]
     SignInUnsupported(String),
@@ -692,6 +700,8 @@ impl GatewayError {
             | GatewayError::TopicNotFound { .. }
             | GatewayError::TopicConflict(_)
             | GatewayError::ValidationError(_)
+            | GatewayError::DeliveryFailed(_)
+            | GatewayError::RuntimeError(_)
             | GatewayError::SignInUnsupported(_)
             | GatewayError::SignInFailed(_)
             | GatewayError::ProviderRuntimeUnavailable(_) => false,

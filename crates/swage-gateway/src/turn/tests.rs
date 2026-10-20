@@ -2253,8 +2253,8 @@ impl LlmProvider for PendingProvider {
 }
 
 /// A mock provider whose stream reports its first poll, then remains open without emitting.
-struct EmptyPendingProvider {
-    stream_polled: Arc<Notify>,
+pub(crate) struct EmptyPendingProvider {
+    pub(crate) stream_polled: Arc<Notify>,
 }
 
 #[async_trait]
@@ -6770,7 +6770,7 @@ pub(crate) async fn make_state_with_storage_and_root(
     .await
 }
 
-async fn make_state_with_provider_and_root(
+pub(crate) async fn make_state_with_provider_and_root(
     provider: Arc<dyn LlmProvider>,
     storage: Arc<MockStorage>,
     config_root: Option<std::path::PathBuf>,
