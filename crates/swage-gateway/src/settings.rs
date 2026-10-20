@@ -6,7 +6,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 
 use crate::error::ApiError;
-use crate::secret::parse_secret_reference;
+use crate::secret::{CreateSecretRequest, PreparedCredentialWrites, parse_secret_reference};
 use crate::state::AppState;
 
 pub use swage_protocol::client::settings::{
@@ -342,11 +342,10 @@ where
         let secret_id = validate_provider_key_rotation(state, provider).await?;
         provider_keys.push((provider_id, provider, secret_id));
     }
-    let mut credentials = ProviderKeyWrites::default();
+    let mut credentials = PreparedCredentialWrites::default();
     for (provider_id, provider, secret_id) in provider_keys {
-        if let Some(reference) = credentials
-            .prepare(state, provider_id, provider, secret_id)
-            .await?
+        if let Some(reference) =
+            prepare_provider_key(&mut credentials, state, provider_id, provider, secret_id).await?
         {
             partial
                 .providers
@@ -409,20 +408,17 @@ where
 
     let response = settings_from_config(runtime_config.clone(), false, state.managed_gateway)?;
     let new_settings = settings_audit_snapshot(&response)?;
-    credentials
-        .events
-        .push(crate::config_change::config_change_event(
-            crate::config_change::ConfigChange {
-                entity_kind: "settings",
-                entity_id: "global",
-                action: "save_settings",
-                source: "operator_http",
-                session_id: None,
-                summary: "saved settings",
-                prior_state: Some(prior_settings),
-                new_state: Some(new_settings),
-            },
-        ));
+    let settings_event =
+        crate::config_change::config_change_event(crate::config_change::ConfigChange {
+            entity_kind: "settings",
+            entity_id: "global",
+            action: "save_settings",
+            source: "operator_http",
+            session_id: None,
+            summary: "saved settings",
+            prior_state: Some(prior_settings),
+            new_state: Some(new_settings),
+        });
     let previous_body = match tokio::fs::read_to_string(&path).await {
         Ok(body) => Some(body),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -436,12 +432,8 @@ where
     // and their records then commit together, before exposing the new runtime.
     write_config(path.clone(), body).await?;
     if let Err(error) = state
-        .storage
-        .write_credentials_with_audit(
-            credentials.creations,
-            credentials.rotations,
-            credentials.events,
-        )
+        .secret_manager
+        .commit_credentials(credentials, settings_event)
         .await
     {
         let restored = match previous_body {
@@ -1255,99 +1247,52 @@ async fn validate_provider_key_rotation(
     Ok(Some(id))
 }
 
-#[derive(Default)]
-struct ProviderKeyWrites {
-    creations: Vec<swage_storage::NewSecretRecord>,
-    rotations: Vec<(uuid::Uuid, String)>,
-    events: Vec<swage_storage::NewAuditEvent>,
-}
-
-impl ProviderKeyWrites {
-    async fn prepare(
-        &mut self,
-        state: &AppState,
-        provider_id: &str,
-        provider: &SaveProviderSettings,
-        secret_id: Option<uuid::Uuid>,
-    ) -> Result<Option<String>, ApiError> {
-        let Some(value) = provider
-            .api_key
-            .as_deref()
-            .filter(|value| !value.is_empty())
-        else {
-            return Ok(None);
-        };
-        if let Some(id) = secret_id
-            && let Some((_, pending)) = self
-                .rotations
-                .iter()
-                .find(|(pending_id, _)| *pending_id == id)
-        {
-            if pending != value {
-                return Err(ApiError::validation(
-                    "Providers sharing a credential must use the same replacement key.".into(),
-                ));
-            }
-            return Ok(provider.api_key_secret_ref.clone());
+async fn prepare_provider_key(
+    credentials: &mut PreparedCredentialWrites,
+    state: &AppState,
+    provider_id: &str,
+    provider: &SaveProviderSettings,
+    secret_id: Option<uuid::Uuid>,
+) -> Result<Option<String>, ApiError> {
+    let Some(value) = provider
+        .api_key
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    if let Some(id) = secret_id
+        && let Some(pending) = credentials.pending_rotation(id)
+    {
+        if pending != value {
+            return Err(ApiError::validation(
+                "Providers sharing a credential must use the same replacement key.".into(),
+            ));
         }
-        let (record, reference, event_kind) = if let Some(id) = secret_id {
-            let existing = state.secret_manager.get_secret(id).await?;
-            let reference = existing.reference;
-            let record = swage_storage::NewSecretRecord {
-                id,
-                name: existing.name,
-                material_kind: existing.material_kind,
-                owner_kind: existing.owner_kind,
-                backend_kind: existing.backend_kind,
-                scope_kind: existing.scope_kind,
-                scope_id: existing.scope_id,
-                external_reference: None,
-                metadata: existing.metadata,
-                value: Some(value.to_string()),
-            };
-            (record, reference, "rotated")
-        } else {
-            if value.trim().is_empty() {
-                return Err(ApiError::validation(
-                    "provider_key value must not be empty".into(),
-                ));
-            }
-            let id = uuid::Uuid::new_v4();
-            let record = swage_storage::NewSecretRecord {
-                id,
+        return Ok(provider.api_key_secret_ref.clone());
+    }
+    let reference = if let Some(id) = secret_id {
+        state
+            .secret_manager
+            .prepare_rotation(credentials, id, value.to_string())
+            .await?
+    } else {
+        state.secret_manager.prepare_creation(
+            credentials,
+            CreateSecretRequest {
                 name: format!("provider:{provider_id}:api-key"),
                 material_kind: "provider_key".into(),
                 owner_kind: "provider".into(),
                 backend_kind: "managed".into(),
                 scope_kind: "global".into(),
                 scope_id: None,
-                metadata: json!({ "provider_id": provider_id }),
+                metadata: Some(json!({ "provider_id": provider_id })),
                 value: Some(value.to_string()),
                 external_reference: None,
-            };
-            (record, format!("secret://managed/{id}"), "created")
-        };
-        self.events.push(swage_storage::NewAuditEvent {
-            id: format!("secret-{event_kind}-{}", uuid::Uuid::new_v4()),
-            session_id: None,
-            entity_kind: "secret".into(),
-            entity_id: record.id.to_string(),
-            event_kind: event_kind.into(),
-            summary: format!("secret {event_kind}"),
-            metadata: json!({
-                "reference": reference, "material_kind": record.material_kind,
-                "owner_kind": record.owner_kind, "scope_kind": record.scope_kind,
-                "scope_id": record.scope_id, "backend_kind": record.backend_kind,
-                "detail": {},
-            }),
-        });
-        if secret_id.is_some() {
-            self.rotations.push((record.id, value.to_string()));
-        } else {
-            self.creations.push(record);
-        }
-        Ok(Some(reference))
-    }
+            },
+        )?
+    };
+    Ok(Some(reference))
 }
 
 fn global_config_path(config_root: &std::path::Path) -> PathBuf {
