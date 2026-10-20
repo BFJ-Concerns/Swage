@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type TestContext } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 
 import { compile } from "svelte/compiler";
@@ -31,6 +31,25 @@ vi.mock("../api/operator", () => ({
   resumeSchedule: vi.fn(),
   triggerSchedule: vi.fn(),
 }));
+
+async function launchLayoutBrowser(context: TestContext) {
+  try {
+    return await chromium.launch({
+      headless: true,
+      executablePath: process.env.SWAGE_BROWSER_BIN || undefined,
+    });
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("Executable doesn't exist")) {
+      throw error;
+    }
+    const reason = "no Chromium binary was found for OperatorDashboard layout tests";
+    if (process.env.SWAGE_BROWSER_TESTS === "required") {
+      throw new Error(`SWAGE_BROWSER_TESTS=required but ${reason}`, { cause: error });
+    }
+    process.stderr.write(`Skipping browser layout test: ${reason}\n`);
+    context.skip(reason);
+  }
+}
 
 function makeOverview(overrides: Partial<OperatorOverview> = {}): OperatorOverview {
   return {
@@ -136,7 +155,7 @@ describe("OperatorDashboard", () => {
     }
   });
 
-  it("keeps the heading within 80px and supervision panels in the first viewport at 1440x1000", async () => {
+  it("keeps the heading within 80px and supervision panels in the first viewport at 1440x1000", async (context) => {
     const overview = makeOverview();
     overview.sessions = Array.from({ length: 8 }, (_, index) => ({
       ...overview.sessions[0], id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
@@ -147,7 +166,7 @@ describe("OperatorDashboard", () => {
     const scope = Array.from(document.querySelector(".ops-deck")!.classList)
       .find((name) => name.startsWith("svelte-"))!;
     const { css } = compile(operatorDashboardSource, { filename: "OperatorDashboard.svelte" });
-    const browser = await chromium.launch({ headless: true });
+    const browser = await launchLayoutBrowser(context);
     try {
       const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
       await page.setContent(`<style>${risoCss}\n${appCss.replace(/@import[^;]+;/g, "")}\n${(css?.code ?? "").replace(/svelte-[a-z0-9]+/g, scope)}</style>${document.body.innerHTML}`);
@@ -164,7 +183,7 @@ describe("OperatorDashboard", () => {
     }
   });
 
-  it("keeps Channels and Devices lists uncapped while the fleet scrolls", async () => {
+  it("keeps Channels and Devices lists uncapped while the fleet scrolls", async (context) => {
     const overview = makeOverview();
     overview.sessions = Array.from({ length: 20 }, (_, index) => ({ ...overview.sessions[0], id: `session-${index}` }));
     overview.channels.channels = Array.from({ length: 20 }, (_, index) => ({ ...overview.channels.channels[0], integration: `channel-${index}` }));
@@ -175,7 +194,7 @@ describe("OperatorDashboard", () => {
     const scope = Array.from(document.querySelector(".ops-deck")!.classList)
       .find((name) => name.startsWith("svelte-"))!;
     const { css } = compile(operatorDashboardSource, { filename: "OperatorDashboard.svelte" });
-    const browser = await chromium.launch({ headless: true });
+    const browser = await launchLayoutBrowser(context);
     try {
       const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
       await page.setContent(`<style>${risoCss}\n${appCss.replace(/@import[^;]+;/g, "")}\n${(css?.code ?? "").replace(/svelte-[a-z0-9]+/g, scope)}</style>${document.body.innerHTML}`);
