@@ -49,6 +49,7 @@ fn run() -> Result<()> {
         Some("fmt-check") => fmt_check(),
         Some("check") => check(),
         Some("check-gate") => check_gate(),
+        Some("check-tracker-tags") => check_tracker_tags(),
         Some("check-design-tokens") => check_frontend_design_tokens(),
         Some("clippy") => clippy(),
         Some("test") => test(),
@@ -399,6 +400,7 @@ fn clippy() -> Result<()> {
 /// command that catches branch drift before the full verification gate.
 fn check_gate() -> Result<()> {
     check_tracked_local_state()?;
+    check_tracker_tags()?;
     fmt_check()?;
     check()?;
     check_frontend_design_tokens()?;
@@ -571,6 +573,168 @@ fn verify() -> Result<()> {
             .into()),
         }
     })
+}
+
+const TRACKER_TAG_ALLOWED_WORDS: &[&str] = &["utf8"];
+
+fn check_tracker_tags() -> Result<()> {
+    let mut files = Vec::new();
+    for root in ["crates", "frontend", "xtask"] {
+        collect_files(Path::new(root), &mut files)?;
+    }
+    files.sort();
+    let mut violations = Vec::new();
+    for file in files {
+        let html_comments = match file.extension().and_then(|extension| extension.to_str()) {
+            Some("rs") => false,
+            Some("ts" | "svelte") => true,
+            _ => continue,
+        };
+        let contents = fs::read_to_string(&file)?;
+        for (line, column) in source_tracker_tag_locations(&contents, html_comments) {
+            violations.push(format!("{}:{line}:{column}", file.display()));
+        }
+    }
+    if violations.is_empty() {
+        println!("==> Source comments contain no tracker tags");
+        Ok(())
+    } else {
+        Err(format!(
+            "tracker tags found in source comments:\n  {}\nRemove the bracketed tracker tag; keep any useful explanation as prose.",
+            violations.join("\n  ")
+        ).into())
+    }
+}
+
+/// Locate tracker tags in line comments and, where enabled, HTML comments.
+/// Columns are one-based byte offsets, like the other static scans.
+fn source_tracker_tag_locations(contents: &str, html_comments: bool) -> Vec<(usize, usize)> {
+    enum Region {
+        Code,
+        Quoted(u8),
+        RawString(usize),
+        BlockComment(usize),
+        HtmlComment,
+    }
+
+    let mut region = Region::Code;
+    let mut locations = Vec::new();
+    for (line_number, line) in contents.lines().enumerate() {
+        let bytes = line.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            let tail = &bytes[index..];
+            match region {
+                Region::Quoted(quote) => {
+                    if bytes[index] == b'\\' {
+                        index += 2;
+                        continue;
+                    }
+                    if bytes[index] == quote {
+                        region = Region::Code;
+                    }
+                }
+                Region::RawString(hashes) => {
+                    if tail.starts_with(b"\"")
+                        && tail
+                            .get(1..1 + hashes)
+                            .is_some_and(|suffix| suffix.iter().all(|&byte| byte == b'#'))
+                    {
+                        index += hashes;
+                        region = Region::Code;
+                    }
+                }
+                Region::BlockComment(depth) => {
+                    if tail.starts_with(b"/*") {
+                        region = Region::BlockComment(depth + 1);
+                        index += 1;
+                    } else if tail.starts_with(b"*/") {
+                        region = if depth == 1 {
+                            Region::Code
+                        } else {
+                            Region::BlockComment(depth - 1)
+                        };
+                        index += 1;
+                    }
+                }
+                Region::HtmlComment => {
+                    if tail.starts_with(b"-->") {
+                        region = Region::Code;
+                        index += 3;
+                        continue;
+                    }
+                    if tracker_tag_at(line, index) {
+                        locations.push((line_number + 1, index + 1));
+                    }
+                }
+                Region::Code => {
+                    if tail.starts_with(b"//") {
+                        for column in index + 2..bytes.len() {
+                            if tracker_tag_at(line, column) {
+                                locations.push((line_number + 1, column + 1));
+                            }
+                        }
+                        break;
+                    }
+                    if html_comments && tail.starts_with(b"<!--") {
+                        region = Region::HtmlComment;
+                        index += 4;
+                        continue;
+                    }
+                    if tail.starts_with(b"/*") {
+                        region = Region::BlockComment(1);
+                        index += 2;
+                        continue;
+                    }
+                    if !html_comments && bytes[index] == b'r' {
+                        let hashes = tail[1..].iter().take_while(|&&byte| byte == b'#').count();
+                        if tail.get(hashes + 1) == Some(&b'"') {
+                            region = Region::RawString(hashes);
+                            index += hashes + 2;
+                            continue;
+                        }
+                    }
+                    if bytes[index] == b'"'
+                        || (html_comments && matches!(bytes[index], b'\'' | b'`'))
+                    {
+                        region = Region::Quoted(bytes[index]);
+                    } else if !html_comments && bytes[index] == b'\'' {
+                        // A Rust character literal ends after one character or escape;
+                        // a lifetime's apostrophe must not hide a trailing comment.
+                        let end = if tail.get(1) == Some(&b'\\') {
+                            tail[2..]
+                                .iter()
+                                .position(|&byte| byte == b'\'')
+                                .map(|offset| offset + 2)
+                        } else {
+                            line[index + 1..].chars().next().map(|ch| 1 + ch.len_utf8())
+                        };
+                        if let Some(end) = end.filter(|&end| tail.get(end) == Some(&b'\'')) {
+                            index += end;
+                        }
+                    }
+                }
+            }
+            index += 1;
+        }
+    }
+    locations
+}
+
+fn tracker_tag_at(line: &str, index: usize) -> bool {
+    let Some(token) = line.as_bytes().get(index..index + 6) else {
+        return false;
+    };
+    token[0] == b'['
+        && token[5] == b']'
+        && token[1..5]
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && token[1..5].iter().any(u8::is_ascii_lowercase)
+        && token[1..5].iter().any(u8::is_ascii_digit)
+        && !TRACKER_TAG_ALLOWED_WORDS
+            .iter()
+            .any(|word| word.as_bytes() == &token[1..5])
 }
 
 fn check_frontend_design_tokens() -> Result<()> {
@@ -1533,7 +1697,7 @@ fn option_value(arg: &str) -> &str {
 
 fn print_help() {
     println!(
-        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check (workspace and frontend type check only)\n  check-gate (full static rung)\n  check-design-tokens\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan] [--host HOST] [--port PORT]"
+        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check (workspace and frontend type check only)\n  check-gate (full static rung)\n  check-tracker-tags\n  check-design-tokens\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan] [--host HOST] [--port PORT]"
     );
 }
 
@@ -1553,6 +1717,7 @@ mod tests {
     fn gate_stage_name(call: &str) -> &str {
         match call {
             "check_tracked_local_state" => "Tracked-local-state check",
+            "check_tracker_tags" => "Tracker-tag check",
             "fmt_check" => "Format check",
             "check" => "Type check",
             "check_frontend_design_tokens" => "Frontend design-token check",
@@ -1986,6 +2151,64 @@ mod tests {
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
             ["gateway", "start", "--foreground", "--port", "32143"],
+        );
+    }
+
+    #[test]
+    fn tracker_tags_report_line_comment_columns() {
+        assert_eq!(
+            super::source_tracker_tag_locations("  // [a1b2] [8uce]", false),
+            vec![(1, 6), (1, 13)]
+        );
+    }
+
+    #[test]
+    fn tracker_tags_report_doc_comment_columns() {
+        assert_eq!(
+            super::source_tracker_tag_locations("/// [a1b2]\n//! [8uce]", false),
+            vec![(1, 5), (2, 5)]
+        );
+    }
+
+    #[test]
+    fn tracker_tags_report_html_comment_columns() {
+        assert_eq!(
+            super::source_tracker_tag_locations(
+                "<p><!-- [a1b2] --> [8uce]</p>\n<!--\n [v7qg]\n-->",
+                true
+            ),
+            vec![(1, 9), (3, 2)]
+        );
+    }
+
+    #[test]
+    fn tracker_tags_require_exact_mixed_lowercase_tokens() {
+        assert_eq!(
+            super::source_tracker_tag_locations(
+                "// [test] [hitl] [1234] [A1b2] [a1b] [a1b23] [a1b2]",
+                false
+            ),
+            vec![(1, 46)]
+        );
+    }
+
+    #[test]
+    fn tracker_tags_allow_named_words() {
+        assert!(super::source_tracker_tag_locations("// [utf8]", false).is_empty());
+    }
+
+    #[test]
+    fn tracker_tags_ignore_strings_and_scan_trailing_comments() {
+        let source = "let text = \"// [a1b2]\"; // [8uce]";
+        assert_eq!(
+            super::source_tracker_tag_locations(source, false),
+            vec![(1, 28)]
+        );
+        assert!(
+            super::source_tracker_tag_locations("const text = '<!-- [a1b2] -->';", true).is_empty()
+        );
+        assert!(
+            super::source_tracker_tag_locations("let text = r#\"// [a1b2]\"#;", false).is_empty()
         );
     }
 
