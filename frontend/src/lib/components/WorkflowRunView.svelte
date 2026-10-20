@@ -23,21 +23,23 @@
 
   let { detail, loadState, errorMessage, onNavigate }: Props = $props();
 
-  let cancelling = $state(false);
+  let cancellingRunId = $state<string | null>(null);
+  const cancelling = $derived(cancellingRunId === run?.id && (run?.state === "running" || run?.state === "parked"));
   let cancelError = $state("");
   async function cancel() {
     if (!run || cancelling) return;
     const runId = run.id;
-    cancelling = true;
+    cancellingRunId = runId;
+    let requested = false;
     cancelError = "";
     try {
       await cancelWorkflowRun(runId);
+      requested = true;
       const refreshed = await fetchWorkflowRun(runId);
       if (run?.id === runId && refreshed) detail = refreshed;
     } catch (error) {
       cancelError = error instanceof Error ? error.message : String(error);
-    } finally {
-      cancelling = false;
+      if (!requested) cancellingRunId = null;
     }
   }
 
@@ -153,7 +155,7 @@
   {:else if run}
     <header>
       <h2>{run.script_name ?? "Inline workflow"}</h2>
-      <p class="state">{run.state}</p>
+      <p class="state">{cancelling ? "Cancelling…" : run.state}</p>
       <p class="identity">Run {run.id}</p>
       {#if run.state === "running" || run.state === "parked"}
         <button onclick={cancel} disabled={cancelling}>{cancelling ? "Cancelling…" : "Cancel"}</button>

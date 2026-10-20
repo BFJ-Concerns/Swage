@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
+import { writable, fromStore } from "svelte/store";
 import WorkflowRunView from "../components/WorkflowRunView.svelte";
 import type { WorkflowRun } from "../protocol/WorkflowRun";
 import type { WorkflowRunDetailResponse } from "../protocol/WorkflowRunDetailResponse";
@@ -82,6 +83,26 @@ describe("WorkflowRunView", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it("keeps cancellation pending until the received detail is terminal", async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(new Response("{}", { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(detail(run(null))), { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    try {
+      const updates = writable(detail(run(null)));
+      const current = fromStore(updates);
+      component = mount(WorkflowRunView, { target: document.body, props: {
+        get detail() { return current.current; }, loadState: "loaded", errorMessage: "",
+      } });
+      flushSync(() => document.querySelector<HTMLButtonElement>("header button")!.click());
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(document.querySelector<HTMLButtonElement>("header button")?.disabled).toBe(true));
+      expect(document.querySelector("header button")?.textContent).toBe("Cancelling…");
+      flushSync(() => { updates.set(detail(run(emptyAccount({ ending: "cancelled" })))); });
+      expect(document.querySelector(".ending-line")?.textContent).toContain("Cancelled");
+      expect(document.querySelector("header button")).toBeNull();
+    } finally { vi.unstubAllGlobals(); }
   });
 
   it("renders run, interruption and cancellation times locally with exact stamps", () => {
