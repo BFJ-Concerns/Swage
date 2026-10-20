@@ -74,14 +74,11 @@ pub(crate) struct GatewayDispatcherBuild {
     pub(crate) isolation: ExecutionIsolation,
 }
 
-/// Where a turn's tools run. `Declared` is the boundary the install states
-/// for every turn (`AppState::declared_execution_boundary`): the turn is
-/// neither sandboxed per turn nor degraded, and its record says so.
+/// Whether a turn's tools run sandboxed or without isolation for a stated reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExecutionIsolation {
     Isolated,
     Degraded { reason: String },
-    Declared { boundary: String },
 }
 
 /// The turn-row record of an isolation.
@@ -90,9 +87,6 @@ pub(crate) fn turn_isolation(isolation: &ExecutionIsolation) -> swage_storage::T
         ExecutionIsolation::Isolated => swage_storage::TurnIsolation::Isolated,
         ExecutionIsolation::Degraded { reason } => swage_storage::TurnIsolation::Degraded {
             reason: reason.clone(),
-        },
-        ExecutionIsolation::Declared { boundary } => swage_storage::TurnIsolation::Declared {
-            boundary: boundary.clone(),
         },
     }
 }
@@ -262,19 +256,6 @@ pub(super) async fn build_turn_sandbox(
             })?;
     }
 
-    // An install that declares its boundary (a container image, for one)
-    // runs every turn inside it: no per-turn sandbox is built, the host
-    // sandbox settings are not consulted, and the turn's record names the
-    // boundary rather than "isolated" or "degraded".
-    if let Some(boundary) = state.declared_execution_boundary.as_ref() {
-        return Ok(TurnSandboxBuild {
-            sandbox: None,
-            isolation: ExecutionIsolation::Declared {
-                boundary: boundary.clone(),
-            },
-            backend: SandboxBackend::None,
-        });
-    }
     if !config.sandbox.enabled {
         return Ok(TurnSandboxBuild {
             sandbox: None,
@@ -742,46 +723,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_declared_boundary_runs_every_turn_inside_it_and_records_no_degradation() {
-        let (mut state, session_id) = make_state_with_session(Vec::new()).await;
-        state.declared_execution_boundary = Some("container".into());
+    async fn disabled_sandbox_persists_its_degraded_reason() {
+        let (state, session_id) = make_state_with_session(Vec::new()).await;
         let workspace = tempfile::tempdir().unwrap();
         let agent_config = AgentConfig::new("gateway")
             .with_workspace(workspace.path(), vec![workspace.path().to_path_buf()]);
-        // Even with the host sandbox switched off: the declaration decides.
         let mut config = swage_config::ResolvedConfig::default();
         config.sandbox.enabled = false;
+        let turn_id =
+            crate::automated_turn::create_placeholder_turn(&state, session_id, "gateway", "Hello")
+                .await
+                .unwrap();
 
         let build = build_turn_sandbox(&state, &config, &agent_config, None)
             .await
-            .expect("a declared boundary needs no sandbox of its own");
+            .unwrap();
+        record_turn_isolation(&state, &build.isolation, turn_id)
+            .await
+            .unwrap();
+
+        let turn = state.storage.get_turn(turn_id).await.unwrap().unwrap();
         assert_eq!(
-            build.isolation,
-            ExecutionIsolation::Declared {
-                boundary: "container".into()
-            }
+            turn.execution_isolation,
+            Some(swage_storage::TurnIsolation::Degraded {
+                reason: "sandbox_disabled_by_configuration".into(),
+            }),
+            "a disabled sandbox must record why the turn ran without isolation"
         );
         assert_eq!(build.backend, SandboxBackend::None);
-
-        record_degraded_execution(
-            &state,
-            &build.isolation,
-            "interactive turn",
-            Some(session_id),
-            Some(Uuid::new_v4()),
-        )
-        .await
-        .unwrap();
-        assert!(
-            state.storage.list_audit_events().await.unwrap().is_empty(),
-            "a declared boundary is neither isolated nor degraded: nothing to audit"
-        );
-        assert_eq!(
-            turn_isolation(&build.isolation),
-            swage_storage::TurnIsolation::Declared {
-                boundary: "container".into()
-            }
-        );
     }
 
     #[tokio::test]
