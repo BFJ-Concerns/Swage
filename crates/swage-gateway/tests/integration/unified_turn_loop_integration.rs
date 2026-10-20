@@ -225,7 +225,7 @@ async fn start_test_server_with_config(
     dispatcher: swage_gateway::tool::ToolDispatcher,
 ) -> (LiveTestGateway, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let root = tempfile::tempdir().expect("isolated turn-loop root");
+    let root = crate::support::scratch_tempdir();
     let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
@@ -1235,6 +1235,84 @@ async fn output_limit_marks_the_detached_child_and_parent_notice_incomplete() {
             .iter()
             .any(|e| e["type"] == "message_appended" && e["message"]["id"] == notice["id"]),
         "parent's notice must reach its open view"
+    );
+}
+
+/// The mounted view uses the real HTTP client, WebSocket client and stores.
+/// Only the provider is gated: the gateway must produce the cancellation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stopping_an_open_delegated_child_settles_its_rendered_view() {
+    use swage_storage::store::{AgentDefinitionStore, ToolCallStore, TurnStore};
+
+    let mut provider = MockProvider::new(vec![]);
+    provider.detached_comparison = true;
+    provider.child_release = Some(Arc::new(tokio::sync::Semaphore::new(0)));
+    let (gateway, storage) = start_test_server_with_config(
+        provider,
+        ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![Arc::new(
+            swage_tool::delegate::DelegateTool,
+        )
+            as Arc<dyn swage_gateway::tool::Tool>]),
+    )
+    .await;
+    storage
+        .upsert_agent_definition(swage_storage::NewAgentDefinition {
+            id: "researcher".into(),
+            topic_id: None,
+            display_name: "Researcher".into(),
+            description: String::new(),
+            instructions: String::new(),
+            model_id: None,
+            tool_permissions: None,
+            skills: vec![],
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .unwrap();
+    let (_, created) = http(&gateway, "POST", "/api/conversations").await;
+    let id = created["id"].as_str().unwrap();
+    let (mut sink, mut stream) = connect_ws(gateway.address, id).await;
+    ws_send(
+        &mut sink,
+        json!({"type":"send_message", "content":"Delegate comparison"}),
+    )
+    .await;
+    let _ = ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(10)).await;
+    let (_, parent) = http(&gateway, "GET", &format!("/api/conversations/{id}")).await;
+    let thread = uuid::Uuid::parse_str(parent["root_thread_id"].as_str().unwrap()).unwrap();
+    let turns = storage.list_turns_by_thread(thread).await.unwrap();
+    let calls = storage.list_tool_calls_by_turn(turns[0].id).await.unwrap();
+    let detached: Value = serde_json::from_str(calls[0].result.as_deref().unwrap()).unwrap();
+
+    let frontend = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../frontend");
+    let output = tokio::process::Command::new("npm")
+        .current_dir(frontend)
+        .args([
+            "test",
+            "--",
+            "--maxWorkers=1",
+            "--environment",
+            "./src/lib/__tests__/fixtures/network-dom-environment.ts",
+            "src/lib/__tests__/OpenedDelegation.delivery.test.ts",
+        ])
+        .env(
+            "VITE_SWAGE_TEST_GATEWAY_URL",
+            format!("http://{}", gateway.address),
+        )
+        .env(
+            "VITE_SWAGE_TEST_CHILD_ID",
+            detached["child_session_id"].as_str().unwrap(),
+        )
+        .output()
+        .await
+        .expect("run the mounted frontend delivery regression");
+    println!("{}", String::from_utf8_lossy(&output.stdout));
+    eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "the opened child view must settle after the gateway cancels its turn"
     );
 }
 

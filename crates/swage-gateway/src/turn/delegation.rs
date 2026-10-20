@@ -575,6 +575,22 @@ impl DelegationSnapshotRecorder for SnapshotOnlyDelegationRecorder {
     }
 }
 
+// Execution has settled before this read. A cancellation request alone must
+// never tell an open view that the turn has ended.
+async fn announce_delegated_cancellation(state: &AppState, session_id: Uuid, turn_id: Uuid) {
+    match state.storage.get_turn(turn_id).await {
+        Ok(Some(turn)) if turn.state == swage_storage::TurnState::Cancelled => {
+            state
+                .send_to_session(session_id, &crate::websocket::ServerEvent::Cancelled {})
+                .await;
+        }
+        Err(error) => {
+            tracing::warn!(%turn_id, %error, "could not read delegated cancellation for the open view")
+        }
+        _ => {}
+    }
+}
+
 // Both completion modes publish their child session through the same stop
 // registry; the executor owns the token and its lifetime remains the turn's.
 async fn track_delegated_session(
@@ -591,9 +607,11 @@ async fn track_delegated_session(
             match started {
                 Ok(started) => {
                     let session_id = started.child_session_id;
+                    let turn_id = started.child_turn_id;
                     state.active_turns.lock().await.insert(session_id, token);
                     if let Some(sender) = forward_started { let _ = sender.send(started); }
                     let result = execution.await;
+                    announce_delegated_cancellation(state, session_id, turn_id).await;
                     state.active_turns.lock().await.remove(&session_id);
                     result
                 }
@@ -602,9 +620,9 @@ async fn track_delegated_session(
         }
         result = &mut execution => {
             // Completion can win the same poll that published the address.
-            if let Ok(started) = started_rx.try_recv()
-                && let Some(sender) = forward_started {
-                let _ = sender.send(started);
+            if let Ok(started) = started_rx.try_recv() {
+                announce_delegated_cancellation(state, started.child_session_id, started.child_turn_id).await;
+                if let Some(sender) = forward_started { let _ = sender.send(started); }
             }
             result
         },
