@@ -269,7 +269,11 @@ async fn boot_recovery_marks_lists_and_resumes_an_interrupted_knowledge_worker_o
     // spawns the workflow wake loop. The original request remains in-flight,
     // exactly as it would after the gateway process dies.
     assert_eq!(
-        storage.interrupt_running_workflow_runs().await.unwrap(),
+        storage
+            .record_gateway_interruption(chrono::Utc::now())
+            .await
+            .unwrap()
+            .running_interrupted,
         1,
         "boot recovery should mark the abandoned running workflow"
     );

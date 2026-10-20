@@ -1,4 +1,6 @@
 use rusqlite::{Connection, params};
+use sha2::{Digest, Sha256};
+use std::sync::OnceLock;
 use swage_core::{
     StorageError, compact_tool_arguments_for_model, compact_tool_result_for_model_with_reference,
     tool_result_reference,
@@ -13,14 +15,8 @@ const CREATE_MIGRATIONS_TABLE: &str = "
     )
 ";
 
-/// The ordered set of migrations to apply. Each entry is (name, sql).
-///
-/// Order is significant — migrations are applied in array order and never
-/// re-run. A landed entry is never renumbered, renamed, or removed: the name
-/// is what an existing store records as applied, and a store whose recorded
-/// names are not a prefix of this list is refused at open
-/// ([`check_recorded_migrations`]). Change a landed migration's effect by
-/// appending a new entry.
+/// Schema construction steps for fresh stores. Existing stores must match the
+/// complete schema; these steps never upgrade an existing store.
 fn migrations() -> Vec<(&'static str, &'static str)> {
     vec![
         ("001_complete_schema", COMPLETE_SCHEMA),
@@ -104,15 +100,11 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
             "063_session_surfaces_and_library",
             SESSION_SURFACES_AND_LIBRARY,
         ),
-        ("064_turn_queue", CREATE_TURN_QUEUE),
         ("065_turn_execution_isolation", ADD_TURN_EXECUTION_ISOLATION),
         ("066_turn_failure_message", ADD_TURN_FAILURE_MESSAGE),
     ]
 }
 
-/// Messages accepted while a session's turn was running, held in arrival
-/// order until the next turn takes them as its input. A row carries the
-/// origin it arrived with, so the message it becomes is labelled truthfully.
 /// The execution boundary a turn ran inside, recorded when its dispatcher
 /// settled: the isolated, degraded, declared and its detail (the
 /// degradation reason or the declared boundary).
@@ -126,27 +118,6 @@ const ADD_TURN_EXECUTION_ISOLATION: &str = "
 /// a reload as it did live.
 const ADD_TURN_FAILURE_MESSAGE: &str = "
     ALTER TABLE turns ADD COLUMN failure_message TEXT;
-";
-
-const CREATE_TURN_QUEUE: &str = "
-    CREATE TABLE turn_queue (
-        id          TEXT    NOT NULL PRIMARY KEY,
-        session_id  TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        thread_id   TEXT    NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-        seq         INTEGER NOT NULL,
-        origin      TEXT    NOT NULL CHECK (origin IN ('user', 'assistant', 'tool', 'delegation', 'schedule', 'workflow', 'platform')),
-        content     TEXT    NOT NULL,
-        attachments TEXT    NOT NULL DEFAULT '[]',
-        created_at  TEXT    NOT NULL,
-        schedule_run_id TEXT REFERENCES schedule_runs(id) ON DELETE CASCADE,
-        attended    INTEGER NOT NULL CHECK (attended IN (0, 1)),
-        client_id   TEXT,
-        UNIQUE (session_id, seq)
-    );
-    CREATE TABLE turn_queue_channel_messages (
-        queued_id TEXT NOT NULL REFERENCES turn_queue(id) ON DELETE CASCADE,
-        message_id TEXT NOT NULL UNIQUE REFERENCES channel_inbound_messages(id) ON DELETE CASCADE
-    );
 ";
 
 /// Surfaces belong to sessions, and the shared surface library replaces the
@@ -175,20 +146,24 @@ const SESSION_SURFACES_AND_LIBRARY: &str = "
         title            TEXT NOT NULL,
         library_entry_id TEXT REFERENCES surface_library_entries(id) ON DELETE SET NULL,
         seeded_from_name TEXT,
+        shape_only       INTEGER NOT NULL DEFAULT 0 CHECK (shape_only IN (0, 1)),
         seeded_at        TEXT,
         created_at       TEXT NOT NULL,
         updated_at       TEXT NOT NULL
     );
     CREATE INDEX idx_surfaces_session ON surfaces(session_id, created_at);
     CREATE TABLE surface_modules (
-        id          TEXT NOT NULL PRIMARY KEY,
-        surface_id  TEXT NOT NULL REFERENCES surfaces(id) ON DELETE CASCADE,
-        kind        TEXT NOT NULL,
-        position    INTEGER NOT NULL,
-        source      TEXT NOT NULL,
-        revision    INTEGER NOT NULL DEFAULT 0,
-        created_at  TEXT NOT NULL,
-        updated_at  TEXT NOT NULL
+        id            TEXT NOT NULL PRIMARY KEY,
+        surface_id    TEXT NOT NULL REFERENCES surfaces(id) ON DELETE CASCADE,
+        kind          TEXT NOT NULL,
+        position      INTEGER NOT NULL,
+        source        TEXT NOT NULL,
+        revision      INTEGER NOT NULL DEFAULT 0,
+        created_at    TEXT NOT NULL,
+        updated_at    TEXT NOT NULL,
+        -- The run or turn that delivered the module, as JSON of the wire
+        -- shape; NULL for a module written by hand.
+        delivery_json TEXT
     );
     CREATE INDEX idx_surface_modules_surface ON surface_modules(surface_id);
     CREATE TABLE surface_annotations (
@@ -198,6 +173,7 @@ const SESSION_SURFACES_AND_LIBRARY: &str = "
         body        TEXT NOT NULL,
         tags        TEXT NOT NULL,
         author      TEXT NOT NULL,
+        resolved_at TEXT,
         created_at  TEXT NOT NULL,
         updated_at  TEXT NOT NULL
     );
@@ -410,7 +386,11 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
         -- recoverable from a run that never returned. Generic JSON like
         -- every other run blob; the contract lives in `swage-protocol` and
         -- is enforced at the wire boundary.
-        terminal_account_json TEXT
+        terminal_account_json TEXT,
+        -- Every gateway interruption the run lived through, as a JSON list
+        -- of { detected_at, run_state } entries written by the boot that
+        -- found it running or parked with no gateway alive to serve it.
+        interruptions_json   TEXT NOT NULL DEFAULT '[]'
     );
     INSERT INTO workflow_runs_parking_new (
         id, topic_id, script_version_id, inline_workflow_id,
@@ -452,6 +432,13 @@ const ADD_WORKFLOW_RUN_PARKING: &str = "
 /// the two new host-call kinds (event, gate); SQLite cannot widen a CHECK in
 /// place, so the table is rebuilt, existing rows carrying over unchanged.
 const CREATE_WORKFLOW_RUN_EVENTS: &str = "
+    CREATE TABLE workflow_run_acknowledgements (
+        run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+        consumer TEXT NOT NULL,
+        acknowledged_at TEXT NOT NULL,
+        PRIMARY KEY (consumer, run_id)
+    );
+
     CREATE TABLE IF NOT EXISTS workflow_run_events (
         id                 TEXT NOT NULL PRIMARY KEY,
         run_id             TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
@@ -947,6 +934,26 @@ const CREATE_ACTIVE_SKILLS: &str = "
 /// created with their final columns and constraints; there is no incremental
 /// ALTER TABLE patching required on a fresh database.
 const COMPLETE_SCHEMA: &str = "
+    CREATE TABLE turn_queue (
+        id          TEXT    NOT NULL PRIMARY KEY,
+        session_id  TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        thread_id   TEXT    NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        seq         INTEGER NOT NULL,
+        origin      TEXT    NOT NULL CHECK (origin IN ('user', 'assistant', 'tool', 'delegation', 'schedule', 'workflow', 'platform')),
+        content     TEXT    NOT NULL,
+        attachments TEXT    NOT NULL DEFAULT '[]',
+        created_at  TEXT    NOT NULL,
+        delivery_targets TEXT NOT NULL DEFAULT '[]',
+        schedule_run_id TEXT REFERENCES schedule_runs(id) ON DELETE CASCADE,
+        attended    INTEGER NOT NULL CHECK (attended IN (0, 1)),
+        client_id   TEXT,
+        UNIQUE (session_id, seq)
+    );
+    CREATE TABLE turn_queue_channel_messages (
+        queued_id TEXT NOT NULL REFERENCES turn_queue(id) ON DELETE CASCADE,
+        message_id TEXT NOT NULL UNIQUE REFERENCES channel_inbound_messages(id) ON DELETE CASCADE
+    );
+
     -- Topics: name + slug uniqueness. External resources attach through
     -- workspace_attachments so topics can exist without any workspace.
     CREATE TABLE IF NOT EXISTS topics (
@@ -1006,6 +1013,14 @@ const COMPLETE_SCHEMA: &str = "
 
     -- Channel links: durable one-time binding from an external conversation
     -- origin to the topic/agent/session it should resume.
+    CREATE TABLE channel_link_codes (
+        code TEXT NOT NULL PRIMARY KEY,
+        integration TEXT NOT NULL,
+        topic_id TEXT,
+        agent_id TEXT,
+        home_target_json TEXT,
+        expires_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS channel_links (
         integration      TEXT NOT NULL,
         account          TEXT NOT NULL,
@@ -1125,7 +1140,9 @@ const COMPLETE_SCHEMA: &str = "
         output_tokens      INTEGER,
         state              TEXT    NOT NULL DEFAULT 'pending',
         created_at         TEXT    NOT NULL,
-        completed_at       TEXT
+        completed_at       TEXT,
+        attended           INTEGER,
+        delivery_targets   TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_turns_thread_id ON turns(thread_id);
@@ -1787,11 +1804,80 @@ const CREATE_TASK_DEFINITION_TABLE: &str = "
     );
 ";
 
-/// Apply all pending migrations to `conn`.
-///
-/// Migrations are tracked by name in `_swage_migrations`. Already-applied
-/// migrations are skipped, so this is safe to call on every startup.
+/// Open only a fresh store or one whose definitions match this build.
+/// Migration names alone cannot detect SQL edited in place during private alpha.
 pub fn run_migrations(conn: &Connection) -> Result<(), StorageError> {
+    let populated: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
+    if !populated {
+        return initialise_schema(conn);
+    }
+
+    // Prefer a named history error when the store has a migration record.
+    // Stores without one still receive the schema mismatch diagnosis below.
+    let has_history: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = '_swage_migrations')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
+    if has_history {
+        check_recorded_migrations(conn, &migrations())?;
+    }
+
+    static EXPECTED: OnceLock<Result<Vec<u8>, StorageError>> = OnceLock::new();
+    let expected = EXPECTED.get_or_init(|| {
+        let fresh = Connection::open_in_memory()
+            .map_err(|e| StorageError::ConnectionFailed(e.to_string()))?;
+        initialise_schema(&fresh)?;
+        schema_fingerprint(&fresh)
+    });
+    let expected = expected
+        .as_ref()
+        .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
+    if &schema_fingerprint(conn)? != expected {
+        return Err(StorageError::UnknownSchema {
+            message: "the store schema does not match this build; rebuild this data root".into(),
+        });
+    }
+    Ok(())
+}
+
+fn schema_fingerprint(conn: &Connection) -> Result<Vec<u8>, StorageError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema
+         WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+        )
+        .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
+    let definitions = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
+    let mut hash = Sha256::new();
+    for definition in definitions {
+        let definition = definition.map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
+        let encoded = serde_json::to_vec(&definition)
+            .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
+        hash.update(encoded);
+    }
+    Ok(hash.finalize().to_vec())
+}
+
+/// Construct the schema on an empty connection.
+fn initialise_schema(conn: &Connection) -> Result<(), StorageError> {
     // Ensure the tracking table exists first.
     conn.execute_batch(CREATE_MIGRATIONS_TABLE)
         .map_err(|e| StorageError::MigrationFailed(e.to_string()))?;
@@ -2087,6 +2173,64 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[test]
+    fn changed_schema_definition_is_refused_on_open() {
+        let dir = tempfile::tempdir().expect("temporary store");
+        let path = dir.path().join("different-definitions.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            super::run_migrations(&conn).unwrap();
+            conn.execute_batch("ALTER TABLE topics ADD COLUMN obsolete_column TEXT;")
+                .unwrap();
+        }
+        assert!(
+            matches!(
+                super::super::SqliteStorage::open(&path),
+                Err(StorageError::UnknownSchema { .. })
+            ),
+            "a store with a different schema definition must be refused on open"
+        );
+    }
+
+    #[test]
+    fn pre_channel_queue_schema_is_refused_on_open() {
+        let dir = tempfile::tempdir().expect("temporary store");
+        let path = dir.path().join("pre-change.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            super::run_migrations(&conn).unwrap();
+            // Reconstruct the pre-PR schema: both migration names were already
+            // recorded, but neither of these definitions existed.
+            conn.execute_batch(
+                "DROP TABLE channel_link_codes;
+                 ALTER TABLE turn_queue DROP COLUMN delivery_targets;
+                 INSERT OR IGNORE INTO _swage_migrations (name, applied_at)
+                 VALUES ('064_turn_queue', datetime('now'));",
+            )
+            .unwrap();
+            let missing: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('turn_queue') WHERE name = 'delivery_targets'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(missing, 0);
+            let recorded: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM _swage_migrations WHERE name IN ('001_complete_schema', '064_turn_queue')",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(
+                recorded, 2,
+                "the pre-change migration names are already applied"
+            );
+        }
+        assert!(
+            matches!(
+                super::super::SqliteStorage::open(&path),
+                Err(StorageError::UnknownSchema { .. })
+            ),
+            "a pre-change store must be refused on open, not opened without channel_link_codes and delivery_targets"
+        );
+    }
+
+    #[test]
     fn tool_calls_table_created() {
         let conn = open_migrated();
         // Querying the table is the cleanest proof it exists.
@@ -2099,6 +2243,8 @@ mod tests {
     #[test]
     fn store_recording_a_migration_this_build_does_not_know_is_refused() {
         let conn = open_migrated();
+        conn.execute_batch("ALTER TABLE topics ADD COLUMN foreign_column TEXT;")
+            .expect("change the schema alongside the unknown history");
         conn.execute(
             "INSERT INTO _swage_migrations (name, applied_at) VALUES ('999_from_a_newer_build', datetime('now'))",
             [],
@@ -2118,6 +2264,8 @@ mod tests {
     #[test]
     fn store_with_a_gap_in_its_recorded_migrations_is_refused() {
         let conn = open_migrated();
+        conn.execute_batch("DROP TABLE workflow_runs;")
+            .expect("remove the schema associated with the missing migration");
         conn.execute(
             "DELETE FROM _swage_migrations WHERE name = '046_workflow_run_parentage'",
             [],
@@ -2135,15 +2283,31 @@ mod tests {
     }
 
     #[test]
-    fn an_older_store_upgrades_through_the_prefix() {
+    fn schema_without_migration_history_is_refused() {
+        let conn = open_migrated();
+        conn.execute_batch("DROP TABLE _swage_migrations;")
+            .expect("remove the migration history");
+
+        let error = super::run_migrations(&conn).expect_err("unrecognised schema");
+        match error {
+            StorageError::UnknownSchema { message } => {
+                assert!(
+                    message.contains("schema does not match this build"),
+                    "{message}"
+                );
+                assert!(message.contains("rebuild this data root"), "{message}");
+            }
+            other => panic!("expected UnknownSchema, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_older_store_with_a_partial_schema_is_refused() {
         let conn = open_migrated_until_exclusive("060_workflow_run_holds");
-        super::run_migrations(&conn).expect("a strict prefix is an older store, not a foreign one");
-        let recorded: i64 = conn
-            .query_row("SELECT COUNT(*) FROM _swage_migrations", [], |row| {
-                row.get(0)
-            })
-            .expect("count recorded migrations");
-        assert_eq!(recorded as usize, super::migrations().len());
+        assert!(matches!(
+            super::run_migrations(&conn),
+            Err(StorageError::UnknownSchema { .. })
+        ));
     }
 
     #[test]
@@ -2653,7 +2817,7 @@ mod tests {
         )
         .expect("insert legacy tool call");
 
-        super::run_migrations(&conn).expect("remaining migrations should apply");
+        super::migrate_tool_call_model_replay(&conn).expect("backfill replay fields");
 
         let (model_arguments, model_result): (String, String) = conn
             .query_row(

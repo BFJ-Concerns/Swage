@@ -704,6 +704,15 @@ pub async fn create_channel_link_code(
     ))
 }
 
+/// `GET /api/onboarding/channels/link-codes` — read valid unredeemed codes.
+pub async fn list_channel_link_codes(
+    State(state): State<AppState>,
+) -> Result<Json<channel_wire::ChannelLinkCodeListResponse>, ApiError> {
+    Ok(Json(
+        crate::onboarding::list_channel_link_codes(&state).await?,
+    ))
+}
+
 /// `POST /api/onboarding/devices/pairing-codes` — issue a one-time device pairing code.
 pub async fn create_device_pairing_code(
     State(state): State<AppState>,
@@ -1030,7 +1039,8 @@ pub async fn create_topic(
     State(state): State<AppState>,
     Json(req): Json<CreateTopicRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let svc = TopicService::new(state.topic_store, state.config_root);
+    let config = state.active_config();
+    let svc = TopicService::new(state.topic_store, state.config_root).with_config(config);
     let resp = svc.create_topic(req).await?;
     Ok((StatusCode::CREATED, Json(resp)))
 }
@@ -1041,7 +1051,8 @@ pub async fn create_topic(
 pub async fn list_topics(
     State(state): State<AppState>,
 ) -> Result<Json<TopicListResponse>, ApiError> {
-    let svc = TopicService::new(state.topic_store, state.config_root);
+    let config = state.active_config();
+    let svc = TopicService::new(state.topic_store, state.config_root).with_config(config);
     let resp = svc.list_topics().await?;
     Ok(Json(resp))
 }
@@ -1053,7 +1064,8 @@ pub async fn get_topic(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<TopicResponse>, ApiError> {
-    let svc = TopicService::new(state.topic_store, state.config_root);
+    let config = state.active_config();
+    let svc = TopicService::new(state.topic_store, state.config_root).with_config(config);
     let resp = svc.get_topic(id).await?;
     Ok(Json(resp))
 }
@@ -1066,7 +1078,8 @@ pub async fn update_topic(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateTopicRequest>,
 ) -> Result<Json<TopicResponse>, ApiError> {
-    let svc = TopicService::new(state.topic_store, state.config_root);
+    let config = state.active_config();
+    let svc = TopicService::new(state.topic_store, state.config_root).with_config(config);
     let resp = svc.update_topic(id, req).await?;
     Ok(Json(resp))
 }
@@ -1079,7 +1092,8 @@ pub async fn delete_topic(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let svc = TopicService::new(state.topic_store, state.config_root);
+    let config = state.active_config();
+    let svc = TopicService::new(state.topic_store, state.config_root).with_config(config);
     svc.delete_topic(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1393,14 +1407,30 @@ pub async fn submit_turn(
     .await
     .map_err(ApiError::from)?;
 
+    let topic = state
+        .topic_store
+        .get(session.topic_id)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .ok_or_else(|| {
+            ApiError::from(GatewayError::TopicNotFound {
+                id: session.topic_id,
+            })
+        })?;
+    let (config, _) =
+        crate::turn::resolve_turn_admission_config(&state, &topic.location(), &session)
+            .await
+            .map_err(ApiError::from)?;
+
     crate::turn::resolve_turn_model_and_attachments(
         &state,
-        state.active_config(),
+        config,
         req.model.as_deref(),
         session.selected_model_id.as_deref(),
         session.id,
         &req.attachments,
     )
+    .await
     .map_err(ApiError::from)?;
     // A message that arrives while a turn is running is held for the next
     // turn, never refused. The persisted check comes first: REST
@@ -1596,7 +1626,6 @@ pub async fn send_agent_message(
     State(state): State<AppState>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    use swage_agent::MessageRouter;
     use swage_core::MessageKind;
     use swage_storage::model::NewAgentMessage;
 
@@ -1615,7 +1644,7 @@ pub async fn send_agent_message(
 
     // Durable messages are persisted first; delegate messages then start
     // background execution so the caller can poll the message status.
-    let router = MessageRouter::new(state.storage.clone(), None);
+    let router = state.message_router();
     let sender_agent_id = req.sender_agent_id;
     let recipient_agent_id = req.recipient_agent_id;
     let payload = req.payload;
@@ -1647,7 +1676,7 @@ pub async fn send_agent_message(
             .await
             {
                 tracing::warn!(error = ?error, "external delegate execution failed");
-                let router = MessageRouter::new(state_for_task.storage.clone(), None);
+                let router = state_for_task.message_router();
                 if let Err(fail_error) = router.fail_message(message_id, error.message()).await {
                     tracing::warn!(
                         message_id = %message_id,
@@ -1676,7 +1705,7 @@ async fn execute_external_delegate_message(
 ) -> Result<(), ApiError> {
     use std::sync::Arc;
 
-    use swage_agent::{DelegationExecutor, MessageRouter};
+    use swage_agent::DelegationExecutor;
 
     let topic = state
         .topic_store
@@ -1728,6 +1757,24 @@ async fn execute_external_delegate_message(
         &mut session_metadata,
         &bound_task_definition_ids,
     );
+    let delegation_handler = crate::turn::GatewayDelegationHandler::for_external_child(
+        state.clone(),
+        &topic.location(),
+        &delegate_msg.sender_agent_id,
+        sender_turn_id,
+    )
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))?;
+    delegation_handler
+        .check_external_depth(
+            &delegate_msg.recipient_agent_id,
+            &delegate_msg.id.to_string(),
+            sender_turn_id,
+        )
+        .await
+        .map_err(|error| ApiError::validation(error.to_string()))?;
+    delegation_handler.record_bound(&mut session_metadata);
+
     let active_workspace_attachment_id =
         active_workspace_attachment_for_sender_turn(&state, sender_turn_id).await?;
     let (mut target_agent_config, tool_root) = crate::turn::build_agent_config_for_topic_workspace(
@@ -1766,7 +1813,7 @@ async fn execute_external_delegate_message(
     .await
     .map_err(|error| ApiError::internal(error.to_string()))?;
 
-    let router = Arc::new(MessageRouter::new(state.storage.clone(), None));
+    let router = Arc::new(state.message_router());
 
     let executor = DelegationExecutor {
         storage: state.storage.clone(),
@@ -1776,9 +1823,7 @@ async fn execute_external_delegate_message(
         approval_registrar: Some(crate::turn::build_approval_registrar(
             state.approval_channels.clone(),
         )),
-        delegation_handler: Some(Arc::new(crate::turn::GatewayDelegationHandler::new(
-            state.clone(),
-        ))),
+        delegation_handler: Some(Arc::new(delegation_handler)),
         router: router.clone(),
         active_delegations: swage_agent::active_delegations(),
         context_assembler: crate::turn::delegated_context_assembler(
@@ -1790,6 +1835,7 @@ async fn execute_external_delegate_message(
             silent_ws_tx,
             crate::turn::effective_tool_permissions_record(&effective_target_resolved),
             composition,
+            dispatcher_build.dispatcher.offered_tools(),
         ),
         snapshot_recorder: Some(crate::turn::delegation_snapshot_recorder_for_state(
             state.clone(),
@@ -1807,6 +1853,7 @@ async fn execute_external_delegate_message(
             Some(dispatcher_build.dispatcher),
             session_metadata,
             tokio_util::sync::CancellationToken::new(),
+            None,
             None,
             None,
             None,
@@ -2143,7 +2190,7 @@ mod tests {
         storage: Arc<MockStorage>,
         config: swage_config::ResolvedConfig,
     ) -> (Router, Arc<MockStorage>) {
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider,
@@ -2174,6 +2221,62 @@ mod tests {
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn channel_link_code_list_uses_declared_response_and_preserves_array_body() {
+        let root = tempfile::tempdir().unwrap();
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::open(&root.path().join("codes.db")).unwrap());
+        let state = AppState::new(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            Arc::new(MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let helper_response: channel_wire::ChannelLinkCodeListResponse =
+            crate::onboarding::list_channel_link_codes(&state)
+                .await
+                .unwrap();
+        assert!(helper_response.0.is_empty());
+        let response: Json<channel_wire::ChannelLinkCodeListResponse> =
+            list_channel_link_codes(State(state.clone())).await.unwrap();
+        assert_eq!(
+            body_json(response.into_response()).await,
+            serde_json::json!([])
+        );
+
+        let issued = crate::onboarding::create_channel_link_code(
+            &state,
+            channel_wire::CreateChannelLinkCodeRequest {
+                integration: swage_protocol::client::delivery::ExternalChannelIntegration::Telegram,
+                topic_id: None,
+                agent_id: None,
+                home_target: None,
+            },
+        )
+        .await
+        .unwrap();
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/onboarding/channels/link-codes")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(response).await,
+            serde_json::json!([{
+                "integration": "telegram",
+                "link_code": issued.link_code,
+                "expires_at": issued.expires_at,
+            }]),
+        );
     }
 
     #[test]
@@ -2275,6 +2378,7 @@ mod tests {
                 "{base_url}/api/settings/providers/anthropic/models"
             ))
             .json(&swage_protocol::client::settings::SaveProviderSettings {
+                display_name: None,
                 protocol: swage_protocol::client::settings::ProviderProtocol::Anthropic,
                 worker_staleness_threshold_ms: None,
                 base_url: None,
@@ -2687,7 +2791,7 @@ mod tests {
 
         let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("storage"));
         let topic = storage.general_scope().await.expect("topic");
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn swage_storage::TopicStore>,
             Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
@@ -2810,7 +2914,7 @@ mod tests {
         let mut config = swage_config::ResolvedConfig::default();
         config.tools.permissions.require_approval =
             vec![swage_config::RequireApprovalEntry::Simple("echo".into())];
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -2879,6 +2983,222 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn external_delegate_cannot_exceed_root_limit() {
+        use swage_agent::MessageRouter;
+        use swage_core::{MessageKind, StreamChunk};
+        use swage_storage::store::{AgentDefinitionStore, AuditStore};
+        let _home = SwageHomeGuard::new();
+        let child_dir = swage_core::ScopeLocation::General.agent_dir(_home.path(), "child");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        std::fs::write(
+            child_dir.join("config.toml"),
+            "[sessions]\nmax_delegation_depth = 3\n",
+        )
+        .unwrap();
+        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let topic = storage.general_scope().await.unwrap();
+        for id in ["child", "grandchild"] {
+            storage
+                .upsert_agent_definition(swage_storage::NewAgentDefinition {
+                    id: id.into(),
+                    topic_id: Some(topic.id),
+                    display_name: id.into(),
+                    description: String::new(),
+                    instructions: String::new(),
+                    model_id: None,
+                    tool_permissions: None,
+                    skills: vec![],
+                    output_schema: None,
+                    output_max_retries: None,
+                })
+                .await
+                .unwrap();
+        }
+        let (provider, captured) = CapturingMultiRoundProvider::new(vec![
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "too-deep".into(),
+                    name: "delegate".into(),
+                    arguments: serde_json::json!({"target_agent": "grandchild", "task": "continue"}),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(swage_core::FinishReason::ToolUse),
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "finished".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "finished".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+        ]);
+        let mut config = swage_config::ResolvedConfig::default();
+        config.sandbox.enabled = false;
+        config.sessions.max_delegation_depth = 1;
+        config.tools.permissions.allow = vec!["delegate".into()];
+        config.tools.permissions.require_approval = vec![];
+        let state = AppState::new(
+            storage.clone(),
+            storage.clone(),
+            Arc::new(provider),
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![
+                Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn crate::tool::Tool>,
+            ]),
+            None,
+        );
+        let message = MessageRouter::new(storage.clone(), None)
+            .send_message(swage_storage::NewAgentMessage {
+                sender_agent_id: "root".into(),
+                recipient_agent_id: "child".into(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({"task": "start"}),
+            })
+            .await
+            .unwrap();
+        Box::pin(execute_external_delegate_message(
+            state, message, topic.id, None,
+        ))
+        .await
+        .unwrap();
+        assert!(
+            storage
+                .list_sessions_by_agent_id("grandchild")
+                .await
+                .unwrap()
+                .is_empty(),
+            "an externally started child at depth one cannot create a grandchild with limit one"
+        );
+        let child = storage
+            .list_sessions_by_agent_id("child")
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let refusals = storage
+            .list_audit_events_by_session(child.id)
+            .await
+            .unwrap();
+        let refusal = refusals
+            .iter()
+            .find(|event| event.event_kind == "delegation_refused")
+            .unwrap();
+        assert_eq!(refusal.metadata["depth"], 2);
+        assert_eq!(refusal.metadata["limit"], 1);
+        assert!(
+            captured
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.messages.iter().any(|message| message
+                    .tool_replay()
+                    .is_some_and(|parts| parts.iter().any(|part| matches!(part,
+                swage_core::ToolReplayPart::ToolResult { content, is_error: true, .. }
+                    if content.contains("delegation depth 2 exceeds the limit 1"))))))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn external_sender_at_limit_is_refused_before_child_creation() {
+        use swage_agent::MessageRouter;
+        use swage_storage::store::{AuditStore, ThreadStore};
+        let _home = SwageHomeGuard::new();
+        let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let topic = storage.general_scope().await.unwrap();
+        let sender = storage
+            .create_session(swage_storage::NewSession {
+                agent_id: "root".into(),
+                topic_id: topic.id,
+                metadata: Some(serde_json::json!({"delegation_bound": {"depth": 1, "limit": 1}})),
+                ..swage_storage::fixtures::new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            swage_storage::NewThread {
+                session_id: sender.id,
+                agent_id: "root".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let turn = storage
+            .create_turn(swage_storage::NewTurn {
+                thread_id: thread.id,
+                agent_id: "root".into(),
+                state: swage_storage::TurnState::Completed,
+                user_input: None,
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let (provider, _) = CapturingMultiRoundProvider::new(vec![]);
+        let mut config = swage_config::ResolvedConfig::default();
+        config.sandbox.enabled = false;
+        let state = AppState::new(
+            storage.clone(),
+            storage.clone(),
+            Arc::new(provider),
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let message = MessageRouter::new(storage.clone(), None)
+            .send_message(swage_storage::NewAgentMessage {
+                sender_agent_id: "root".into(),
+                recipient_agent_id: "child".into(),
+                kind: swage_core::MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({"task": "continue"}),
+            })
+            .await
+            .unwrap();
+        let result = Box::pin(execute_external_delegate_message(
+            state,
+            message,
+            topic.id,
+            Some(turn.id),
+        ))
+        .await;
+        assert!(
+            storage
+                .list_sessions_by_agent_id("child")
+                .await
+                .unwrap()
+                .is_empty(),
+            "external sender at its limit must not create a child session"
+        );
+        assert!(result.is_err());
+        let events = storage
+            .list_audit_events_by_session(sender.id)
+            .await
+            .unwrap();
+        let refusal = events
+            .iter()
+            .find(|event| event.event_kind == "delegation_refused")
+            .expect("durable refusal");
+        assert_eq!(refusal.metadata["depth"], 2);
+        assert_eq!(refusal.metadata["limit"], 1);
+        assert!(
+            refusal
+                .summary
+                .contains("delegation depth 2 exceeds the limit 1")
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn external_delegate_message_uses_shared_context_assembly() {
         use swage_agent::MessageRouter;
@@ -2916,13 +3236,14 @@ mod tests {
             instructions: "Use the external delegated specialist instructions.".to_string(),
             ..swage_config::ResolvedConfig::default()
         };
-        let state = AppState::new(
+        let state = AppState::new_with_config_root(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(provider) as Arc<dyn LlmProvider>,
             config,
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
+            swage_home.path().to_path_buf(),
         );
         let router = MessageRouter::new(state.storage.clone(), None);
         let delegate_msg = router
@@ -3077,7 +3398,7 @@ mod tests {
             .expect("write agent permissions");
         }
 
-        let state = AppState::new(
+        let state = AppState::new_with_config_root(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -3087,6 +3408,7 @@ mod tests {
                 Arc::new(NamedTool::new("target_only")) as Arc<dyn crate::tool::Tool>,
             ]),
             None,
+            swage_home.path().to_path_buf(),
         );
         let router = MessageRouter::new(state.storage.clone(), None);
         let delegate_msg = router
@@ -3766,6 +4088,162 @@ mod tests {
         })
         .await
         .expect("selected-provider turn completes");
+    }
+
+    #[tokio::test]
+    async fn image_scheme_rest_preflight_uses_topic_and_agent_policy() {
+        use swage_storage::store::{SessionStore, TopicStore};
+
+        for agent_override in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let topic_dir = root.path().join("topics/images");
+            std::fs::create_dir_all(&topic_dir).unwrap();
+            std::fs::write(
+                topic_dir.join("config.toml"),
+                "[attachments]\naccepted_schemes = ['http']\n",
+            )
+            .unwrap();
+            if agent_override {
+                let agent_dir = topic_dir.join("agents/gateway");
+                std::fs::create_dir_all(&agent_dir).unwrap();
+                std::fs::write(
+                    agent_dir.join("config.toml"),
+                    "[attachments]\naccepted_schemes = ['ftp']\n",
+                )
+                .unwrap();
+            }
+            let storage = Arc::new(MockStorage::new());
+            let topic = storage
+                .create(swage_storage::model::NewTopic {
+                    name: "Images".into(),
+                    slug: "images".into(),
+                })
+                .await
+                .unwrap();
+            let session = storage
+                .create_session(swage_storage::NewSession {
+                    agent_id: "gateway".into(),
+                    ..swage_storage::fixtures::new_session(topic.id)
+                })
+                .await
+                .unwrap();
+            swage_storage::ThreadStore::create(
+                storage.as_ref(),
+                swage_storage::model::NewThread {
+                    session_id: session.id,
+                    agent_id: session.agent_id.clone(),
+                },
+            )
+            .await
+            .unwrap();
+            let (provider, requests) = CapturingMultiRoundProvider::new(vec![vec![
+                swage_core::StreamChunk::Delta {
+                    content: "seen".into(),
+                },
+                swage_core::StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ]]);
+            let mut state = AppState::new(
+                storage.clone() as Arc<dyn Storage>,
+                storage.clone() as Arc<dyn TopicStore>,
+                Arc::new(provider),
+                swage_config::ResolvedConfig::default(),
+                crate::tool::ToolDispatcher::allow_all(vec![]),
+                None,
+            );
+            state.config_root = root.path().to_owned();
+            let router = build_router(state);
+            let url = if agent_override {
+                "ftp://example.test/a.png"
+            } else {
+                "http://example.test/a.png"
+            };
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/turns")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(
+                            serde_json::json!({
+                                "conversation_id": session.id,
+                                "message": "look",
+                                "attachments": [{"kind": "image_url", "url": url}]
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = body_json(response).await;
+            assert_eq!(
+                status,
+                StatusCode::ACCEPTED,
+                "scoped policy must admit {url}: {body}"
+            );
+            let turn_id = body["turn_id"].as_str().unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let response = router
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .uri(format!("/api/turns/{turn_id}"))
+                                .body(axum::body::Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    let turn = body_json(response).await;
+                    assert_ne!(
+                        turn["state"], "failed",
+                        "scoped execution must agree: {turn}"
+                    );
+                    if turn["state"] == "completed" {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("scoped turn completes");
+            assert!(
+                requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|request| request.messages.iter().any(|message| message
+                        .content()
+                        .contains(&swage_core::ContentPart::ImageUrl { url: url.into() }))),
+                "the provider receives the admitted reference intact"
+            );
+
+            // The install default allows HTTPS, but this scope does not.
+            let refused = router.oneshot(
+                Request::builder().method("POST").uri("/api/turns")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::json!({
+                        "conversation_id": session.id,
+                        "message": "look again",
+                        "attachments": [{"kind": "image_url", "url": "https://example.test/a.png"}]
+                    }).to_string())).unwrap()
+            ).await.unwrap();
+            assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            let body = body_json(refused).await;
+            assert!(
+                body["message"].as_str().unwrap().contains("https"),
+                "{body}"
+            );
+            assert_eq!(
+                requests.lock().unwrap().len(),
+                1,
+                "the refused send never calls the provider"
+            );
+        }
     }
 
     #[tokio::test]
@@ -5064,7 +5542,7 @@ mod tests {
         let provider = Arc::new(MockProvider::new(vec![]));
         let (broadcast_tx, broadcast_rx) = broadcast::channel(16);
         let shutdown_signal = CancellationToken::new();
-        let mut state = AppState::new(
+        let mut state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider as Arc<dyn swage_provider::LlmProvider>,

@@ -11,7 +11,9 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
+import { UNSETTLED_RUN_REFRESH_MS } from "../one-shot-runs";
 import App from "../../App.svelte";
+import * as operatorApi from "../api/operator";
 import { createConversation, getConversation } from "../api/conversations";
 import type { WebSocketClient } from "../api/websocket";
 
@@ -154,6 +156,7 @@ describe("ambient channel control path", () => {
       unmount(component);
       component = undefined;
     }
+    vi.restoreAllMocks();
     document.body.replaceChildren();
     window.history.replaceState({}, "", "/");
   });
@@ -222,6 +225,7 @@ describe("ambient channel control path", () => {
     vi.mocked(createConversation).mockResolvedValueOnce({
       id: "conv-new",
       agent_id: "gateway",
+      agent_display_name: "Swage default",
       topic_id: topic.id,
       selected_model_id: null,
       created_at: "2026-08-29T10:10:00Z",
@@ -246,9 +250,13 @@ describe("ambient channel control path", () => {
   it("routes a workflow run URL into the run view and requests that run", async () => {
     window.history.replaceState({}, "", "/workflow-runs/run-route");
     const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ run: { id: "run-route", state: "running" }, journal: [] }), {
-        status: 200,
-      }),
+      new Response(
+        JSON.stringify({
+          run: { id: "run-route", state: "running", interruptions: [] },
+          journal: [],
+        }),
+        { status: 200 },
+      ),
     );
     component = mount(App, { target: document.body });
 
@@ -257,4 +265,166 @@ describe("ambient channel control path", () => {
     });
     expect(fetch).toHaveBeenCalledWith("/api/workflow-runs/run-route");
   });
+  function runResponse(id: string, state = "running") {
+    const ended = ["completed", "failed", "cancelled"].includes(state);
+    return new Response(JSON.stringify({ run: { id, state, interruptions: [], created_at: "2026-09-02T10:00:00Z", terminal_account: ended ? { ending: state === "failed" ? { ending: "threw", error: "timer threw" } : state === "cancelled" ? { ending: "cancelled" } : { ending: "returned" }, workers: { done: [], failed: [], cut_short: [], unsettled: [] }, settled_at: "2026-09-02T10:05:00Z" } : null }, journal: [] }), { status: 200 });
+  }
+
+  async function startRunView() {
+    window.history.replaceState({}, "", "/workflow-runs/run-polled");
+    component = mount(App, { target: document.body });
+    await vi.waitFor(() => expect(document.querySelector(".run .state")).not.toBeNull(), { timeout: 5000 });
+    vi.useFakeTimers();
+  }
+
+  it.each([["parked", "failed"], ["running", "cancelled"], ["running", "completed"]])("run view refreshes %s to %s and stops at its account", async (initial, terminal) => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(runResponse("run-polled", initial)).mockImplementation(async () => runResponse("run-polled", terminal));
+    try {
+      await startRunView();
+      // The initial read scheduled its timeout under the real clock.
+      // Re-entering the route below lets fake time own the refresh timer.
+      window.history.pushState({}, "", "/workflow-runs/run-polled-again");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+      fetch.mockReset().mockResolvedValueOnce(runResponse("run-polled-again", initial)).mockImplementation(async () => runResponse("run-polled-again", terminal));
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS);
+      expect(document.querySelector(".run .state")?.textContent).toBe(terminal);
+      expect(document.querySelector(".ending-line")?.textContent).toBe(terminal === "failed" ? "Threw — timer threw" : terminal === "cancelled" ? "Cancelled" : "Returned");
+      expect(document.body.textContent).not.toContain("This run has not ended yet");
+      const calls = fetch.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS * 3);
+      expect(fetch).toHaveBeenCalledTimes(calls);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("run view retries a failed refresh and receives the terminal account", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => runResponse("run-polled"));
+    try {
+      await startRunView();
+      window.history.pushState({}, "", "/workflow-runs/run-retry");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+      fetch.mockReset().mockResolvedValueOnce(runResponse("run-retry")).mockRejectedValueOnce(new Error("refresh unavailable")).mockImplementation(async () => runResponse("run-retry", "completed"));
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS);
+      expect(document.querySelector('.run [role="alert"]')?.textContent ?? "").toContain("refresh unavailable");
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS);
+      expect(document.querySelector(".ending-line")?.textContent).toBe("Returned");
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(["navigation", "unmount"])("run view cancels an armed refresh on %s", async (leaving) => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => runResponse("run-polled"));
+    try {
+      await startRunView();
+      // Re-enter under fake time; leave before the first refresh fires.
+      window.history.pushState({}, "", "/workflow-runs/run-armed");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+      fetch.mockClear();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS - 1);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      if (leaving === "navigation") {
+        window.history.pushState({}, "", "/");
+        window.dispatchEvent(new PopStateEvent("popstate"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(document.querySelector(".workflow-run")).toBeNull();
+      } else {
+        await unmount(component!);
+        component = undefined;
+      }
+      const requests = fetch.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS * 3);
+      expect(fetch).toHaveBeenCalledTimes(requests);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("run view drops an old route's pending read and clears its timer", async () => {
+    let release!: (response: Response) => void;
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => runResponse("run-polled"));
+    try {
+      await startRunView();
+      window.history.pushState({}, "", "/workflow-runs/run-pending");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+      fetch.mockReset().mockResolvedValueOnce(runResponse("run-pending")).mockImplementationOnce(() => new Promise<Response>((resolve) => { release = resolve; })).mockImplementation(async () => runResponse("new-run", "completed"));
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      window.history.pushState({}, "", "/workflow-runs/new-run");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+      await vi.advanceTimersByTimeAsync(0);
+      release(runResponse("run-pending"));
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS * 3);
+      expect(document.querySelector(".run .identity")?.textContent).toContain("new-run");
+      expect(document.querySelector(".run .state")?.textContent).toBe("completed");
+      expect(fetch).toHaveBeenCalledTimes(3);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("run view stops refreshing after unmount even with a read pending", async () => {
+    let release!: (response: Response) => void;
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => runResponse("run-polled"));
+    try {
+      await startRunView();
+      window.history.pushState({}, "", "/workflow-runs/run-unmounted");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+      fetch.mockReset().mockResolvedValueOnce(runResponse("run-unmounted")).mockImplementationOnce(() => new Promise<Response>((resolve) => { release = resolve; })).mockImplementation(async () => runResponse("run-unmounted"));
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      await unmount(component!); component = undefined;
+      release(runResponse("run-unmounted"));
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS * 3);
+      expect(fetch).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each([
+    ["launching conversation", ".run header a", "parent-session"],
+    ["terminal worker", ".workers .worker a", "worker-session"],
+    ["worker detail", ".call > a", "worker-session"],
+    ["earlier attempt", ".attempts li:first-child a", "earlier-session"],
+  ])("opens the %s from a run page as its conversation", async (_label, selector, sessionId) => {
+    window.history.replaceState({}, "", "/workflow-runs/linked-run");
+    const returned = JSON.parse(await runResponse("linked-run", "completed").text());
+    returned.run.dispatching_session_id = "parent-session";
+    returned.run.terminal_account.workers.done = [{ journal_entry_id: "entry-worker", seq: 0, label: "Recorded worker", redispatched_after_interruption: false }];
+    returned.journal = [{ id: "entry-worker", kind: "agent_call", status: "completed", agent_call: {
+      session_id: "worker-session", termination: { termination: "settled" },
+      usage: { availability: "unavailable", reason: "provider_reported_no_usage" },
+      dispatch: { prompt: "Recorded prompt", grants: null, attempts: [
+        { cause: { cause: "first" }, opened_at: "2026-09-02T10:00:00Z", model: "earlier-model", effort: "low", session_id: "earlier-session", turn_id: "earlier-turn" },
+        { cause: { cause: "after_interruption" }, opened_at: "2026-09-02T10:01:00Z", model: "later-model", effort: "high", session_id: "worker-session", turn_id: "worker-turn" },
+      ] }, provider_rounds: [],
+    } }];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify(returned), { status: 200 }));
+    component = mount(App, { target: document.body });
+    await vi.waitFor(() => expect(document.querySelector(selector)).not.toBeNull());
+    (document.querySelector(selector) as HTMLAnchorElement).click();
+    await vi.waitFor(() => expect(document.querySelector('main.conversation [aria-label="Conversation"]')?.textContent ?? "").toContain(`History of ${sessionId}`));
+    expect(window.location.pathname).toBe(`/conversations/${sessionId}`);
+    expect(getConversation).toHaveBeenCalledWith(sessionId);
+    expect(wsClient.connect).toHaveBeenCalledWith(sessionId);
+    expect(document.querySelector("main.landing")).toBeNull();
+  });
+
+  it("returns to an already selected launching conversation from the operator surface", async () => {
+    component = await mountAppOnConversation();
+    // The destination selection must work even if the operator read fails.
+    vi.spyOn(operatorApi, "fetchOperatorOverview").mockRejectedValue(new Error("operator service unavailable"));
+    surfaceButton("Operator").click();
+    window.history.pushState({}, "", "/workflow-runs/existing-parent");
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      const returned = JSON.parse(await runResponse("existing-parent", "completed").text());
+      returned.run.dispatching_session_id = "conv-1";
+      return new Response(JSON.stringify(returned), { status: 200 });
+    });
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    await vi.waitFor(() => expect(document.querySelector(".run header a")).not.toBeNull());
+    (document.querySelector(".run header a") as HTMLAnchorElement).click();
+    await vi.waitFor(() => expect(document.querySelector('main.conversation [aria-label="Conversation"]')?.textContent ?? "").toContain("History of conv-1"));
+    expect(window.location.pathname).toBe("/conversations/conv-1");
+    expect(document.querySelector("main.operator")).toBeNull();
+  });
+
 });

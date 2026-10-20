@@ -21,6 +21,12 @@ impl Tool for WorkflowRunTool {
     fn name(&self) -> &str {
         "workflow_run"
     }
+    fn display_hints(&self) -> swage_tool::tool::ToolDisplayHints {
+        swage_tool::tool::ToolDisplayHints {
+            summary_param: Some("name"),
+        }
+    }
+
     fn description(&self) -> &str {
         "Start either an available workflow by name or a newly authored workflow from JavaScript source. A request that an available workflow already serves — an unattended research sweep, say — is started here, by name, in the same turn it is asked for, rather than carried out conversationally first. Provide exactly one of name or source. Inline source inherits this session's dispatch bounds and cannot deliver outside the run; use wait=true only when this turn needs the final result. Before authoring source, activate the Workflow Authoring skill: it documents the whole script surface — agent, agentStart, wait, parallel, pipeline, workflow, gate, postEvent, awaitEvent, budget, the meta/defaults headers, and the determinism rules."
     }
@@ -142,6 +148,19 @@ impl Tool for WorkflowRunTool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn declared_headline_renders_the_call_argument() {
+        let tool = WorkflowRunTool;
+        assert_eq!(
+            swage_tool::tool::display_summary(
+                &tool.display_hints(),
+                &json!({"name": "research-sweep", "args": {"query": "example"}})
+            )
+            .as_deref(),
+            Some("research-sweep")
+        );
+    }
+
     use std::sync::Arc;
 
     use super::*;
@@ -242,7 +261,7 @@ mod tests {
             })
             .await
             .expect("session");
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -337,7 +356,7 @@ mod tests {
             })
             .await
             .expect("session");
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -373,5 +392,79 @@ mod tests {
             !model_visible.contains("..."),
             "the production error must reach the model without silent truncation: {model_visible}"
         );
+    }
+}
+
+#[cfg(test)]
+mod run_page_tests {
+    use super::*;
+    use crate::{state::AppState, tool_executor::GatewayToolContext};
+    use std::sync::Arc;
+    use swage_storage::{SessionStore, SqliteStorage, Storage, TopicStore, WorkflowStore};
+    use swage_tool::context::MockToolContext;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn inline_run_result_and_detail_keep_the_view_address_name_origin_and_wake() {
+        let root = tempfile::tempdir().expect("test root");
+        let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+        let topic = storage.general_scope().await.expect("topic");
+        let session = storage
+            .create_session(swage_storage::fixtures::new_session(topic.id))
+            .await
+            .expect("session");
+        let config = swage_config::ResolvedConfig::default();
+        let state = AppState::new_with_config_root(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            config,
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            root.path().to_path_buf(),
+        );
+        let base = MockToolContext::new("current-agent", session.id.to_string());
+        let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
+        let context =
+            GatewayToolContext::new(&base, ws_tx, Arc::clone(&storage) as Arc<dyn Storage>)
+                .with_app_state(Some(state.clone()));
+        let result = WorkflowRunTool.execute(json!({"source": r#"export const meta = { name: "three-whys" }; await wait({timerMs: 600000}); return 1;"#}), &context).await.expect("launch");
+        let id: Uuid = serde_json::from_value(result["id"].clone()).expect("id");
+        // Wait for the host's durable timer parking, rather than putting a
+        // wake time in the fixture that the projection merely echoes.
+        let parked = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let record = storage
+                    .get_workflow_run(id)
+                    .await
+                    .expect("read")
+                    .expect("run");
+                if record.state == "parked" {
+                    break record;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("parked");
+        let detail =
+            crate::workflow::get_run(axum::extract::State(state.clone()), crate::error::Path(id))
+                .await
+                .expect("detail")
+                .0;
+        let wire = serde_json::to_value(&detail).expect("wire");
+        crate::workflow::cancel_run(axum::extract::State(state), crate::error::Path(id))
+            .await
+            .expect("cancel");
+        assert_eq!(result["view_url"], format!("/workflow-runs/{id}"));
+        assert_eq!(wire["run"]["script_name"], "three-whys");
+        assert_eq!(
+            wire["run"]["dispatching_session_id"],
+            session.id.to_string()
+        );
+        assert_eq!(
+            wire["run"]["wake_at"],
+            serde_json::to_value(parked.wake_at).expect("wake")
+        );
+        assert!(!wire["run"]["wake_at"].is_null());
     }
 }

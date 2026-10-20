@@ -12,7 +12,9 @@ use crate::model::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use swage_core::ApprovalTimeoutPolicy;
-pub use swage_protocol::client::settings::{PartialMemoryConfig, PartialSessionsConfig};
+pub use swage_protocol::client::settings::{
+    PartialAttachmentsConfig, PartialMemoryConfig, PartialSessionsConfig,
+};
 
 // ---------------------------------------------------------------------------
 // Partial section types — mirror of model types, all fields Option<T>
@@ -260,6 +262,7 @@ pub struct PartialConfig {
     pub scheduling: Option<PartialSchedulingConfig>,
     pub sessions: Option<PartialSessionsConfig>,
     pub memory: Option<PartialMemoryConfig>,
+    pub attachments: Option<PartialAttachmentsConfig>,
     pub voice: Option<PartialVoiceConfig>,
     pub generation: Option<PartialGenerationConfig>,
     pub channels: Option<PartialChannelsConfig>,
@@ -422,6 +425,7 @@ impl From<ResolvedConfig> for PartialConfig {
             }),
             sessions: Some(r.sessions.clone().into()),
             memory: Some(r.memory.clone().into()),
+            attachments: Some(r.attachments.clone().into()),
             voice: Some(PartialVoiceConfig {
                 transcription_model: r.voice.transcription_model.clone(),
                 speech_model: r.voice.speech_model.clone(),
@@ -700,6 +704,11 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
             PartialSessionsConfig::overlay,
         ),
         memory: merge_section(base.memory, overlay.memory, PartialMemoryConfig::overlay),
+        attachments: merge_section(
+            base.attachments,
+            overlay.attachments,
+            PartialAttachmentsConfig::overlay,
+        ),
         voice: merge_overlay_section(base.voice, overlay.voice),
         generation: merge_section(base.generation, overlay.generation, |b, o| {
             let mut presets = b.presets.unwrap_or_default();
@@ -985,6 +994,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
         },
         sessions: partial.sessions.unwrap_or_default().resolve(),
         memory: partial.memory.unwrap_or_default().resolve(),
+        attachments: partial.attachments.unwrap_or_default().resolve(),
         voice: {
             let v = partial.voice.unwrap_or_default();
             VoiceConfig {
@@ -994,6 +1004,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
         },
         // Instructions are assembled separately by the instructions module
         instructions: String::new(),
+        instruction_sources: Vec::new(),
         dangerously_skip_permissions: partial.dangerously_skip_permissions.unwrap_or(false),
     }
 }
@@ -1173,6 +1184,7 @@ mod tests {
                 entries: Some(HashMap::from([(
                     "openai".to_string(),
                     ProviderEndpointConfig {
+                        display_name: None,
                         protocol: Protocol::OpenAi,
                         api_key_secret_ref: None,
                         api_key_env: Some("OPENAI_API_KEY".to_string()),
@@ -1998,6 +2010,33 @@ mod tests {
     }
 
     #[test]
+    fn delegation_depth_cascades_through_partial_config() {
+        assert_eq!(
+            serde_json::to_value(resolve(PartialConfig::default()).sessions).unwrap()["max_delegation_depth"],
+            4,
+            "the runtime cascade supplies the declared depth default"
+        );
+        let base: PartialConfig = toml::from_str("[sessions]\nmax_delegation_depth = 2\n").unwrap();
+        let overlay: PartialConfig =
+            toml::from_str("[sessions]\nmax_delegation_depth = 6\n").unwrap();
+        let resolved = resolve(merge_partial(base, overlay));
+        assert_eq!(
+            serde_json::to_value(&resolved.sessions).unwrap()["max_delegation_depth"],
+            6,
+            "the child layer controls delegation depth"
+        );
+        let reloaded = resolve(PartialConfig::from(resolved.clone()));
+        assert_eq!(
+            serde_json::to_value(&reloaded.sessions).unwrap()["max_delegation_depth"],
+            6
+        );
+        assert_eq!(
+            serde_json::to_value(resolve(PartialConfig::default()).sessions).unwrap()["max_delegation_depth"],
+            4
+        );
+    }
+
+    #[test]
     fn sessions_archive_delay_defaults_and_overlays() {
         assert_eq!(
             resolve(PartialConfig::default())
@@ -2009,12 +2048,14 @@ mod tests {
         let base = PartialConfig {
             sessions: Some(PartialSessionsConfig {
                 archive_after_days: Some(30),
+                ..Default::default()
             }),
             ..Default::default()
         };
         let overlay = PartialConfig {
             sessions: Some(PartialSessionsConfig {
                 archive_after_days: Some(3),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -2315,5 +2356,23 @@ mod tests {
         let telegram = merged.channels.unwrap().telegram.unwrap();
         assert_eq!(telegram.bot_token_secret_ref, Some(None));
         assert_eq!(telegram.bot_token_env, Some(None));
+    }
+    #[test]
+    fn image_scheme_settings_default_replace_and_round_trip() {
+        assert_eq!(
+            resolve(PartialConfig::default())
+                .attachments
+                .accepted_schemes,
+            ["https", "data"]
+        );
+        let base: PartialConfig =
+            toml::from_str("[attachments]\naccepted_schemes = ['https', 'data']").unwrap();
+        let overlay: PartialConfig =
+            toml::from_str("[attachments]\naccepted_schemes = ['http']").unwrap();
+        let resolved = resolve(merge_partial(base, overlay));
+        assert_eq!(resolved.attachments.accepted_schemes, ["http"]);
+        let encoded = toml::to_string(&PartialConfig::from(resolved.clone())).unwrap();
+        let again = resolve(toml::from_str(&encoded).unwrap());
+        assert_eq!(again.attachments, resolved.attachments);
     }
 }

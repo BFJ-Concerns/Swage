@@ -39,14 +39,96 @@
     toolCall.status === "error" || toolCall.status === "rejected" || toolCall.status === "expired",
   );
 
-  // True once the result is long enough to warrant collapsing.
-  const resultText = $derived(
-    typeof toolCall.result === "string"
-      ? toolCall.result
-      : toolCall.result != null
-        ? JSON.stringify(toolCall.result, null, 2)
-        : "",
+  // Accept only complete objects/arrays, even when quoted through several layers.
+  function embeddedStructure(text: string): object | undefined {
+    const escapeControls = (value: string) => value.replace(
+      /[\u0000-\u001f]/g,
+      (character) => JSON.stringify(character).slice(1, -1),
+    );
+    for (let depth = 0; depth < 20; depth++) {
+      const candidate = text.trim();
+      let decoded: unknown;
+      try {
+        // Quoted text can carry literal line breaks from a text snapshot.
+        decoded = JSON.parse(candidate.startsWith('"') ? escapeControls(candidate) : candidate);
+      } catch {
+        try {
+          // Some text producers escape the JSON's quotes without its whitespace.
+          if (!candidate.startsWith("{") && !candidate.startsWith("[")) return undefined;
+          decoded = JSON.parse(`"${escapeControls(candidate)}"`);
+        } catch {
+          return undefined;
+        }
+      }
+      if (decoded !== null && typeof decoded === "object") return decoded;
+      if (typeof decoded !== "string" || decoded === text) return undefined;
+      text = decoded;
+    }
+    return undefined;
+  }
+
+  function readableStructure(value: unknown, depth = 0): unknown {
+    if (depth >= 20) return value;
+    if (typeof value === "string") {
+      const decoded = embeddedStructure(value);
+      return decoded === undefined ? value : readableStructure(decoded, depth + 1);
+    }
+    if (Array.isArray(value)) return value.map((item) => readableStructure(item, depth + 1));
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).map(
+        ([key, item]) => [key, readableStructure(item, depth + 1)],
+      ));
+    }
+    return value;
+  }
+
+  function readableText(text: string): string {
+    // Leave ordinary quoted text intact; replace only spans that decode as JSON.
+    return text.replace(/"(?:\\[\s\S]|[^"\\])*"/g, (quoted) => {
+      const decoded = embeddedStructure(quoted);
+      return decoded === undefined ? quoted : JSON.stringify(readableStructure(decoded), null, 2);
+    });
+  }
+
+  // Decode the recorded envelope once; its text content is never an envelope.
+  function readableResult(value: unknown): string {
+    // Records can themselves be serialised text.
+    for (let depth = 0; depth < 20 && typeof value === "string"; depth++) {
+      try {
+        const decoded: unknown = JSON.parse(value);
+        if (typeof decoded !== "string" && (decoded === null || typeof decoded !== "object")) break;
+        value = decoded;
+      } catch {
+        break;
+      }
+    }
+    if (
+      value !== null && typeof value === "object" &&
+      "output" in value && typeof value.output === "string"
+    ) {
+      value = value.output;
+    }
+    if (typeof value === "string") {
+      const structure = embeddedStructure(value);
+      return structure === undefined ? readableText(value) : JSON.stringify(readableStructure(structure), null, 2);
+    }
+    return value == null ? "" : JSON.stringify(value, null, 2);
+  }
+
+  const resultText = $derived(readableResult(toolCall.result));
+  const rawResult = $derived(JSON.stringify(toolCall.result, null, 2));
+  const hasEnvelope = $derived(
+    resultText !== (typeof toolCall.result === "string" ? toolCall.result : rawResult),
   );
+  const resultLink = $derived.by(() => {
+    let result = toolCall.result;
+    if (typeof result === "string") {
+      try { result = JSON.parse(result); } catch { return null; }
+    }
+    if (!result || typeof result !== "object" || !("view_url" in result)) return null;
+    const path = result.view_url;
+    return typeof path === "string" && /^\/(?![\/\\])[^\u0000-\u0020\u007f\\]*$/u.test(path) ? path : null;
+  });
   const isLongResult = $derived(resultText.length >= 500);
 
   // Initialise expansion based on result length.
@@ -90,7 +172,17 @@
     }
     const firstKey = Object.keys(call.arguments)[0];
     if (firstKey !== undefined) {
-      return `${firstKey}=${String(call.arguments[firstKey])}`;
+      const value = call.arguments[firstKey];
+      let summary: string;
+      if (Array.isArray(value)) {
+        summary = `[${value.length} items]`;
+      } else if (value !== null && typeof value === "object") {
+        const keys = Object.keys(value);
+        summary = `{${keys.slice(0, 3).join(", ")}${keys.length > 3 ? ", …" : ""}}`;
+      } else {
+        summary = String(value);
+      }
+      return `${firstKey}=${summary}`;
     }
     return "";
   }
@@ -140,6 +232,7 @@
 
   <!-- ---- Result block: only shown once the call has completed ---- -->
   {#if toolCall.result !== null}
+    {#if resultLink}<a class="result-link" href={resultLink}>Open result</a>{/if}
     <div class="tool-result" class:collapsed={isLongResult && !isExpanded}>
       {#if isLongResult && !isExpanded}
         <!-- Collapsed view: preview of first ~3 lines. -->
@@ -158,6 +251,13 @@
         </span>
       {/if}
     </div>
+
+    {#if hasEnvelope}
+      <details>
+        <summary>Raw result</summary>
+        <pre class="result-content">{rawResult}</pre>
+      </details>
+    {/if}
 
     {#if isLongResult}
       <!-- Toggle sits below the result block so it doesn't shift the header. -->

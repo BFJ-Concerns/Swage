@@ -256,6 +256,47 @@ impl AgentMessageStore for SqliteStorage {
         .await
     }
 
+    async fn reissue_agent_message(
+        &self,
+        id: Uuid,
+        payload: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let payload_str = payload.to_string();
+        let now = Utc::now().to_rfc3339();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE agent_messages SET payload = ?1, created_at = ?2, status = 'pending', failure_reason = NULL WHERE id = ?3",
+                params![&payload_str, &now, id.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn find_delegate_for_thread(
+        &self,
+        thread_id: Uuid,
+        started_by: DateTime<Utc>,
+    ) -> Result<Option<AgentMessage>, StorageError> {
+        let started_by = started_by.to_rfc3339();
+        self.with_conn(move |conn| {
+            conn.query_row(
+                "SELECT id, sender_agent_id, recipient_agent_id, kind, correlation_id,
+                        payload, status, failure_reason, created_at, delivered_at
+                 FROM agent_messages
+                 WHERE kind = 'delegate'
+                   AND json_extract(payload, '$._thread_id') = ?1
+                   AND created_at <= ?2
+                 ORDER BY created_at DESC
+                 LIMIT 1",
+                params![thread_id.to_string(), started_by],
+                row_to_agent_message,
+            )
+            .optional()
+        })
+        .await
+    }
+
     async fn list_by_correlation(
         &self,
         correlation_id: Uuid,
@@ -327,6 +368,78 @@ mod tests {
             correlation_id: None,
             payload: serde_json::json!({"task": "summarise report"}),
         }
+    }
+
+    /// The delegate that started a child thread is found by the thread the
+    /// executor annotated it with; a thread no delegate names has none.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_delegate_is_found_by_the_child_thread_it_was_annotated_with() {
+        let storage = make_storage().await;
+        let delegate = storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "parent".into(),
+                recipient_agent_id: "child".into(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({ "task": "look into it" }),
+            })
+            .await
+            .unwrap();
+        let thread_id = Uuid::new_v4();
+        let mut payload = delegate.payload.clone();
+        payload["_thread_id"] = serde_json::json!(thread_id.to_string());
+        storage
+            .update_agent_message_payload(delegate.id, payload)
+            .await
+            .unwrap();
+
+        let after = delegate.created_at + chrono::Duration::seconds(1);
+        let found = storage
+            .find_delegate_for_thread(thread_id, after)
+            .await
+            .unwrap();
+        assert_eq!(found.map(|m| m.id), Some(delegate.id));
+        assert!(
+            storage
+                .find_delegate_for_thread(Uuid::new_v4(), after)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // A named child's thread is reused: a second delegation to it is a
+        // newer delegate, and a turn started before it still resolves to
+        // the first.
+        let later = storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "parent".into(),
+                recipient_agent_id: "child".into(),
+                kind: MessageKind::Delegate,
+                correlation_id: None,
+                payload: serde_json::json!({ "task": "look again", "_thread_id": thread_id.to_string() }),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .find_delegate_for_thread(thread_id, delegate.created_at)
+                .await
+                .unwrap()
+                .map(|m| m.id),
+            Some(delegate.id),
+            "a turn started at the first delegate's moment belongs to it"
+        );
+        assert_eq!(
+            storage
+                .find_delegate_for_thread(
+                    thread_id,
+                    later.created_at + chrono::Duration::seconds(1)
+                )
+                .await
+                .unwrap()
+                .map(|m| m.id),
+            Some(later.id)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -485,6 +598,46 @@ mod tests {
 
         let correlated = storage.list_by_correlation(correlation).await.unwrap();
         assert_eq!(correlated.len(), 2);
+    }
+
+    /// A message reissued at a restart is dated the restart, so an expiry
+    /// window its original time had already left does not take it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reissued_message_is_dated_now_and_outlives_its_original_expiry() {
+        let storage = make_storage().await;
+        let original = storage.create_agent_message(delegate_msg()).await.unwrap();
+        let id = original.id;
+        storage
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE agent_messages SET created_at = ?1 WHERE id = ?2",
+                    params![
+                        (Utc::now() - chrono::Duration::hours(2)).to_rfc3339(),
+                        id.to_string()
+                    ],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        storage
+            .reissue_agent_message(original.id, serde_json::json!({"task": "readdressed"}))
+            .await
+            .unwrap();
+        let expired = storage
+            .expire_stale_messages(std::time::Duration::from_secs(3600))
+            .await
+            .unwrap();
+        assert_eq!(expired, 0, "the reissued message is newer than the window");
+        let reissued = storage
+            .get_agent_message(original.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reissued.status, MessageStatus::Pending);
+        assert_eq!(reissued.payload["task"], "readdressed");
+        assert!(reissued.created_at > original.created_at);
     }
 
     #[tokio::test(flavor = "multi_thread")]

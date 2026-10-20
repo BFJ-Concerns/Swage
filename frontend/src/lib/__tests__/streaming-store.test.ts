@@ -153,7 +153,7 @@ describe("reconnect reconciliation", () => {
     // Force the refresh to remain pending while a newer turn becomes live:
     // a message sent meanwhile was queued, and the gateway started the next
     // turn on it when the old one ended.
-    store.handleServerEvent({ type: "queue_drained", session_id: "conv-1", turn_id: "newer-turn", queued_ids: [] });
+    store.handleServerEvent({ type: "queue_drained", thread_id: "main-thread", session_id: "conv-1", turn_id: "newer-turn", queued_ids: [] });
     store.handleServerEvent({ type: "token", content: "new live content" });
 
     store.reconcileAfterReconnect(recoveredTurnGeneration);
@@ -229,7 +229,7 @@ describe("startTurn", () => {
     // The old turn ends and the queue runs: the view sees a turn start.
     store.handleServerEvent({ type: "turn_complete", turn_id: "t-1" });
     expect(store.isStreaming).toBe(false);
-    store.handleServerEvent({ type: "queue_drained", session_id: "conv-9", turn_id: "t-2", queued_ids: ["q-1"] });
+    store.handleServerEvent({ type: "queue_drained", thread_id: "main-thread", session_id: "conv-9", turn_id: "t-2", queued_ids: ["q-1"] });
     expect(conv.clearQueuedMessages).toHaveBeenCalledWith("conv-9", ["q-1"]);
     expect(store.isStreaming).toBe(true);
     expect(store.streamedContent).toBe("");
@@ -1420,5 +1420,28 @@ describe("output-limit completion", () => {
     expect(conversations.getMessages()[0].turn_state).toBe("incomplete");
     expect(conversations.getMessages()[0].content).toBe("The answer ends at a");
     expect(store.isStreaming).toBe(false);
+  });
+});
+
+describe("queued turn model identity", () => {
+  it("uses the last drained submission and clears it before an unrelated turn", () => {
+    const conv = createMockConversationStore();
+    const conn = createMockConnectionStore();
+    const store = createStreamingStore({ conversationStore: conv, connectionStore: conn });
+    store.startTurn("Active", "active-model");
+    for (const [id, model] of [["q-1", "first-queued"], ["q-2", "last-queued"]]) {
+      store.startTurn(id, model);
+      const clientId = conn.sendMessage.mock.calls.at(-1)![5] as string;
+      store.handleServerEvent({ type: "message_queued", session_id: "test-conversation", queued: {
+        id, client_id: clientId, origin: "user", content: id, queued_at: "2026-10-15T12:00:00Z",
+      } });
+    }
+    store.handleServerEvent({ type: "turn_complete", turn_id: "active" });
+    store.handleServerEvent({ type: "queue_drained", thread_id: "main-thread", session_id: "test-conversation", turn_id: "queued", queued_ids: ["q-1", "q-2"] });
+    store.handleServerEvent({ type: "error", code: "provider_error", message: "Rejected" });
+    expect(store.turnError?.selectedModelId).toBe("last-queued");
+    store.handleServerEvent({ type: "queue_drained", thread_id: "main-thread", session_id: "test-conversation", turn_id: "external", queued_ids: ["external-q"] });
+    store.handleServerEvent({ type: "error", code: "provider_error", message: "Rejected" });
+    expect(store.turnError?.selectedModelId).toBeUndefined();
   });
 });

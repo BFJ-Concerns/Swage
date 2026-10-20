@@ -112,7 +112,7 @@ impl Tool for WorkflowHoldTool {
                     .and_then(Value::as_str)
                     .ok_or_else(|| invalid("'verdict' is required"))?
                     .to_owned();
-                let response = answer_run_hold(
+                let response = Box::pin(answer_run_hold(
                     state,
                     AnswerWorkflowRunHoldRequest { hold_id, verdict },
                     Some(session.topic_id),
@@ -122,7 +122,7 @@ impl Tool for WorkflowHoldTool {
                         session_id: Some(session_id),
                         turn_id: ctx.turn_id(),
                     },
-                )
+                ))
                 .await
                 .map_err(|error| failed(error.message().to_owned()))?;
                 serde_json::to_value(response).map_err(|error| failed(error.to_string()))

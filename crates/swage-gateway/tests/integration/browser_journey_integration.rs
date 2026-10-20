@@ -45,6 +45,146 @@ use tokio_util::sync::CancellationToken;
 static BROWSER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn browser_survives_settings_save_and_grant_update() {
+    let _browser_guard = BROWSER_TEST_LOCK.lock().await;
+    let binary =
+        browser_binary_or_skip().expect("Chromium is required for the settings regression");
+    let fixture = FixtureServer::spawn().await;
+    let temp = TempDir::new().expect("temporary gateway root");
+    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+    let mut config = swage_config::ResolvedConfig::default();
+    config.tools.browser.binary_path = Some(binary);
+    config.tools.browser.allow_hosts = vec![fixture.host()];
+    config.tools.browser.screenshots = BrowserScreenshotPolicy::Off;
+    let state = AppState::new_with_config_root(
+        storage.clone(),
+        storage.clone(),
+        Arc::new(ChannelProvider::new(vec![])),
+        config,
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        temp.path().to_path_buf(),
+    );
+    let mut request: swage_protocol::client::settings::SaveSettingsRequest = serde_json::from_value(json!({
+        "default_provider": "local", "providers": {"local": {"protocol": "openai", "base_url": "http://127.0.0.1:65535/v1"}},
+        "default_model": "local:test", "models": {"local:test": {"provider_id": "local", "model_id": "test", "aliases": [], "capabilities": {"reasoning_replay": false, "effort": null}}}
+    })).expect("settings request");
+    swage_gateway::settings::save_settings(&state, request.clone())
+        .await
+        .expect("initial settings");
+    let base = swage_tool::context::SerializableToolContext {
+        agent_id: "browser-test".into(),
+        session_id: "browser-settings".into(),
+        working_directory: temp.path().to_path_buf(),
+        allowed_paths: vec![temp.path().to_path_buf()],
+        tool_output_directory: None,
+        user_info: None,
+        call_id: None,
+        turn_id: None,
+    };
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let ctx = swage_gateway::tool_executor::GatewayToolContext::new(&base, tx, storage);
+    async fn navigate(
+        state: &AppState,
+        ctx: &dyn swage_tool::context::ToolContext,
+        url: String,
+    ) -> Result<Value, swage_core::ToolError> {
+        state
+            .active_tool_dispatcher()
+            .registry()
+            .get("browser_navigate")
+            .expect("navigate tool")
+            .execute(json!({"url": url}), ctx)
+            .await
+    }
+    fn profile_pids(root: &Path) -> Vec<u32> {
+        let arg = format!(
+            "--user-data-dir={}",
+            root.join("browser/profiles/default").display()
+        );
+        std::fs::read_dir("/proc")
+            .expect("proc")
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let pid = entry.file_name().to_str()?.parse().ok()?;
+                let cmd = std::fs::read(entry.path().join("cmdline")).ok()?;
+                // Chromium can rewrite argv as one space-separated process title.
+                (!cmd.windows(b"--type=".len()).any(|part| part == b"--type=")
+                    && cmd.windows(arg.len()).any(|part| part == arg.as_bytes()))
+                .then_some(pid)
+            })
+            .collect()
+    }
+    navigate(&state, &ctx, fixture.url("/set-cookie"))
+        .await
+        .expect("initial navigation");
+    let pids = profile_pids(temp.path());
+    struct ProfileOwnerCleanup(Vec<u32>);
+    impl Drop for ProfileOwnerCleanup {
+        fn drop(&mut self) {
+            for pid in &self.0 {
+                let _ = std::process::Command::new("kill")
+                    .arg(pid.to_string())
+                    .status();
+            }
+        }
+    }
+    let _cleanup = ProfileOwnerCleanup(pids.clone());
+    assert_eq!(pids.len(), 1, "one browser owns the profile");
+    let before = navigate(&state, &ctx, fixture.url("/whoami"))
+        .await
+        .expect("login before save");
+    assert!(
+        before["output"]
+            .as_str()
+            .unwrap()
+            .contains("Signed in as ben")
+    );
+    // An in-flight turn can retain the old dispatcher while settings rebuild it.
+    let _previous_dispatcher = state.active_tool_dispatcher();
+    request.tool_permissions = Some(serde_json::from_value(json!({"allow": [], "deny": [], "bundles": {}, "require_approval": ["browser_navigate"]})).unwrap());
+    swage_gateway::settings::save_settings(&state, request.clone())
+        .await
+        .expect("approval settings save");
+    let after = navigate(&state, &ctx, fixture.url("/whoami")).await;
+    assert!(
+        after.is_ok(),
+        "navigation after settings save failed: {after:?}; previous browser PIDs: {pids:?}"
+    );
+    assert!(
+        after.unwrap()["output"]
+            .as_str()
+            .unwrap()
+            .contains("Signed in as ben")
+    );
+    assert_eq!(
+        profile_pids(temp.path()),
+        pids,
+        "settings save replaced the profile owner"
+    );
+    request.tool_permissions.as_mut().unwrap().allow =
+        vec!["browser_navigate".into(), "browser_snapshot".into()];
+    request
+        .tool_permissions
+        .as_mut()
+        .unwrap()
+        .require_approval
+        .clear();
+    swage_gateway::settings::save_settings(&state, request)
+        .await
+        .expect("grant update");
+    let after = navigate(&state, &ctx, fixture.url("/whoami")).await;
+    let final_pids = profile_pids(temp.path());
+    assert!(
+        after.expect("navigation after grant update")["output"]
+            .as_str()
+            .unwrap()
+            .contains("Signed in as ben")
+    );
+    assert_eq!(final_pids, pids, "grant update replaced the profile owner");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_browser_drives_fixture_and_persists_profile() {
     let _browser_guard = BROWSER_TEST_LOCK.lock().await;
     let Some(binary) = browser_binary_or_skip() else {
@@ -407,7 +547,7 @@ async fn browser_tools_run_through_dispatcher_storage_and_secret_hygiene() {
         swage_gateway::tool::browser::browser_tools(Arc::clone(&browser_host)),
     );
     let (router, addr) =
-        start_browser_tool_server(provider, dispatcher, Arc::clone(&storage)).await;
+        start_browser_tool_server(temp.path(), provider, dispatcher, Arc::clone(&storage)).await;
 
     let (_, body) = http(&router, "POST", "/api/conversations").await;
     let conv_id = body["id"].as_str().expect("conversation id").to_string();
@@ -426,7 +566,7 @@ async fn browser_tools_run_through_dispatcher_storage_and_secret_hygiene() {
     tx1.send(StreamChunk::ToolUse {
         call_id: "browser-nav".into(),
         name: "browser_navigate".into(),
-        arguments: json!({"url": fixture.url("/login")}),
+        arguments: json!({"url": fixture.url("/long-login")}),
     })
     .await
     .expect("send navigate chunk");
@@ -664,7 +804,7 @@ fn browser_config_with_screenshots(
     screenshots: BrowserScreenshotPolicy,
 ) -> BrowserConfig {
     let tool_config = BrowserToolConfig {
-        binary_path: Some(binary.to_string()),
+        binary_path: Some(isolated_browser_binary(binary, root)),
         page_idle_secs: 30,
         process_idle_secs: 30,
         max_snapshot_bytes: 40_000,
@@ -680,6 +820,40 @@ fn browser_config_with_screenshots(
         screenshots: tool_config.screenshots,
         allow_hosts: tool_config.allow_hosts,
     }
+}
+
+/// Chromium keeps crash reports and certificate stores outside its profile.
+/// Give those child-process paths the same lifetime as the browser fixture.
+fn isolated_browser_binary(binary: &str, root: &std::path::Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+    let mut script = String::from("#!/bin/sh\n");
+    for key in [
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_RUNTIME_DIR",
+    ] {
+        let directory = root.join("browser-environment").join(key);
+        std::fs::create_dir_all(&directory).expect("create isolated browser environment");
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("restrict isolated browser environment permissions");
+        script.push_str(&format!(
+            "export {key}={}\n",
+            quote(directory.to_str().expect("UTF-8 browser environment path"))
+        ));
+    }
+    script.push_str(&format!("exec {} \"$@\"\n", quote(binary)));
+    let launcher = root.join("chromium-isolated");
+    std::fs::write(&launcher, script).expect("write isolated browser launcher");
+    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700))
+        .expect("make isolated browser launcher executable");
+    launcher
+        .to_str()
+        .expect("UTF-8 browser launcher path")
+        .to_owned()
 }
 
 fn browser_binary_or_skip() -> Option<String> {
@@ -761,6 +935,7 @@ impl LlmProvider for ChannelProvider {
 }
 
 async fn start_browser_tool_server(
+    root: &std::path::Path,
     provider: impl LlmProvider + 'static,
     dispatcher: swage_gateway::tool::ToolDispatcher,
     storage: Arc<SqliteStorage>,
@@ -772,13 +947,14 @@ async fn start_browser_tool_server(
         vec![swage_config::model::RequireApprovalEntry::Simple(
             "browser_type".to_string(),
         )];
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(provider),
         config,
         dispatcher,
         None,
+        root.to_path_buf(),
     );
     let router = build_router(state);
     let (addr, _server) = start_live_server(router.clone()).await;
@@ -963,7 +1139,7 @@ async fn spawn_probe_browser(
         .await
         .expect("probe profile");
     let child = swage_gateway::browser::chromium_command(
-        std::path::Path::new(binary),
+        std::path::Path::new(&isolated_browser_binary(binary, root)),
         &profile,
         port,
         false,
@@ -1015,6 +1191,7 @@ impl FixtureServer {
         let saw_login = Arc::new(AtomicBool::new(false));
         let app = Router::new()
             .route("/login", get(login_page).post(login_post))
+            .route("/long-login", get(long_login_page))
             .route("/fallback-mask", get(fallback_mask_page))
             .route("/single-action", get(single_action_page))
             .route("/mutate", get(mutate_page))
@@ -1069,6 +1246,16 @@ async fn login_page() -> Html<&'static str> {
             <a href="/set-cookie">Sign in</a>
         </form>"#,
     )
+}
+
+// The long page puts the snapshot over budget so the secret-hygiene journey
+// exercises the full-snapshot spill path.
+async fn long_login_page() -> Html<String> {
+    Html(format!(
+        "{}<section><p>{}</p></section>",
+        login_page().await.0,
+        "Signing in keeps your account available for later visits. ".repeat(80)
+    ))
 }
 
 async fn login_post(State(saw_login): State<Arc<AtomicBool>>) -> impl IntoResponse {

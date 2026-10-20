@@ -14,7 +14,8 @@
 //! A session that keeps hitting walls succeeds too, whatever its size: the
 //! agent's own recorded failures across the thread's recent turns
 //! (`recent_degradation`, `detect_walls`) trigger a pass whose summary is a
-//! diagnosis written from outside the session — blind readers each locate
+//! conversation summary accompanied by a diagnosis written from outside the
+//! session — blind readers each locate
 //! where things went wrong in a slice of the history, and a synthesis over
 //! their findings names the problems. The successor keeps only the newest
 //! message verbatim, so the failing attempts do not follow it in. Every turn
@@ -121,10 +122,47 @@ pub(super) async fn succeed_over_threshold(
     assemble: impl Fn(&[Box<dyn ContextElement>]) -> AssemblyOutput,
 ) -> AssemblyOutput {
     let mut output = output;
+
     if let Some(degradation) = &site.degradation
         && let Some(history) = history_of(&elements)
     {
         let (outcome, diagnosis) = succeed_on_degradation(&site, degradation, &history).await;
+        let carried = carried_context(&elements, &output, site.variables);
+        // A diagnosis explains the walls; the ordinary summary preserves what
+        // the conversation established, including results unrelated to them.
+        // Rebuild those notes even when the diagnosis is reused: the history
+        // is rebuilt from storage on every turn and may contain new work.
+        let outcome = match outcome {
+            Ok(successor) => match succession::summarise(
+                &carried,
+                &history[..successor.record.messages_removed],
+                site.focus,
+                site.provider,
+            )
+            .await
+            {
+                Ok(established) => succession::successor_after(
+                    &SuccessionRequest {
+                        carried: &carried,
+                        history: &history,
+                        focus: site.focus,
+                        retain_at_most: None,
+                    },
+                    successor.record.messages_removed,
+                    format!(
+                        "{established}\n\n{}",
+                        diagnosis
+                            .synthesis
+                            .as_deref()
+                            .expect("a successful diagnosis has a synthesis")
+                    ),
+                    DEGRADATION_STRATEGY,
+                    site.tokeniser,
+                ),
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        };
         match outcome {
             Ok(mut succession) => {
                 succession.record.diagnosis = Some(diagnosis);
@@ -136,7 +174,7 @@ pub(super) async fn succeed_over_threshold(
                 );
             }
             Err(error) => {
-                tracing::warn!(%error, "the degradation diagnosis did not run");
+                tracing::warn!(%error, "degradation succession did not run");
                 let mut record = succession::failure_record(
                     &history,
                     site.tokeniser,
@@ -163,24 +201,8 @@ pub(super) async fn succeed_over_threshold(
     let Some(history) = history_of(&elements) else {
         return output;
     };
-    // What the first assembly actually carried, by the report's own element
-    // list — so an element a named assembly declared omitted is never shown
-    // to the summariser as "already in place".
-    let carried_names: std::collections::BTreeSet<&str> = output
-        .report
-        .elements
-        .iter()
-        .map(|report| report.name.as_str())
-        .collect();
-    let carried: Vec<ChatMessage> = elements
-        .iter()
-        .filter(|element| {
-            element.name() != HISTORY_ELEMENT
-                && default_assembly_carries(element.name())
-                && carried_names.contains(element.name())
-        })
-        .flat_map(|element| rendered_content(element.as_ref(), site.variables))
-        .collect();
+
+    let carried = carried_context(&elements, &output, site.variables);
 
     // Under a message-count threshold the successor is built to fit: what
     // the first assembly carried besides history, plus the summary, plus the
@@ -225,6 +247,31 @@ pub(super) async fn succeed_over_threshold(
             output
         }
     }
+}
+
+fn carried_context(
+    elements: &[Box<dyn ContextElement>],
+    output: &AssemblyOutput,
+    variables: &BTreeMap<String, String>,
+) -> Vec<ChatMessage> {
+    // What the first assembly actually carried, by the report's own element
+    // list — so an element a named assembly declared omitted is never shown
+    // to the summariser as "already in place".
+    let carried_names: std::collections::BTreeSet<&str> = output
+        .report
+        .elements
+        .iter()
+        .map(|report| report.name.as_str())
+        .collect();
+    elements
+        .iter()
+        .filter(|element| {
+            element.name() != HISTORY_ELEMENT
+                && default_assembly_carries(element.name())
+                && carried_names.contains(element.name())
+        })
+        .flat_map(|element| rendered_content(element.as_ref(), variables))
+        .collect()
 }
 
 /// The successor's assembly: every element but history, the succession
@@ -467,9 +514,28 @@ where
         .await
         .inspect_err(|error| tracing::warn!(%error, "wall signal: report unreadable"))
         .ok()??;
-    let report: serde_json::Value = serde_json::from_str(&report).ok()?;
-    let records: Vec<CompactionRecord> =
-        serde_json::from_value(report.get("compaction_applied")?.clone()).ok()?;
+    // A report that is not the shape the kernel wrote is no diagnosis: the
+    // safe default is to diagnose afresh, said so here rather than passed
+    // over in silence (a derivable read under the record durability
+    // contract — the diagnosis is re-derivable from the wall signal).
+    let report: serde_json::Value = match serde_json::from_str(&report) {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(%error, %turn_id, "wall signal: the earlier report is not JSON; diagnosing afresh");
+            return None;
+        }
+    };
+    let Some(compaction) = report.get("compaction_applied") else {
+        tracing::warn!(%turn_id, "wall signal: the earlier report carries no compaction records; diagnosing afresh");
+        return None;
+    };
+    let records: Vec<CompactionRecord> = match serde_json::from_value(compaction.clone()) {
+        Ok(records) => records,
+        Err(error) => {
+            tracing::warn!(%error, %turn_id, "wall signal: the earlier report's compaction records do not read; diagnosing afresh");
+            return None;
+        }
+    };
     records.into_iter().find_map(|record| {
         let ran = record.requested_strategy == DEGRADATION_STRATEGY
             && record.actual_strategy == THRESHOLD_STRATEGY;
@@ -580,9 +646,10 @@ Write as notes to the assistant, in plain prose without headings.";
 /// The degradation-triggered pass. When the previous turn's diagnosis
 /// answered these same walls, the successor carries it again over the same
 /// split. Otherwise blind readers locate where the history went wrong, a
-/// synthesis names the problems, and the synthesis becomes the successor's
-/// summary; only the newest message is kept verbatim. The diagnosis record
-/// comes back whether or not a successor did, with every model call made.
+/// synthesis names the problems. The coordinator combines this diagnosis
+/// with the ordinary conversation summary before reassembly; only the newest
+/// message is kept verbatim. The diagnosis record comes back whether or not
+/// a successor did, with every diagnosis call made.
 async fn succeed_on_degradation(
     site: &SuccessionSite<'_>,
     degradation: &Degradation,
@@ -824,6 +891,51 @@ fn diagnosis_request(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A snapshot store holding one report, as a turn's earlier report would
+    /// be read back.
+    struct OneReport(Option<String>);
+
+    #[async_trait::async_trait]
+    impl swage_storage::store::ContextSnapshotStore for OneReport {
+        async fn store_snapshot(&self, _: Uuid, _: &str) -> Result<(), swage_core::StorageError> {
+            unreachable!("the test never writes")
+        }
+        async fn get_snapshot(&self, _: Uuid) -> Result<Option<String>, swage_core::StorageError> {
+            Ok(self.0.clone())
+        }
+        async fn list_snapshots_by_topic(
+            &self,
+            _: Uuid,
+            _: usize,
+        ) -> Result<Vec<swage_storage::model::ContextSnapshotRecord>, swage_core::StorageError>
+        {
+            unreachable!("the test never lists")
+        }
+    }
+
+    /// An earlier report that is not what the kernel writes — not JSON, or
+    /// records of another shape — yields no prior diagnosis, so the wall
+    /// signal is diagnosed afresh: the documented safe default, never a
+    /// reused reading of something unreadable.
+    #[tokio::test]
+    async fn an_unreadable_earlier_report_yields_no_prior_diagnosis() {
+        let turn_id = Uuid::new_v4();
+        for report in [
+            None,
+            Some("not json".to_owned()),
+            Some(json!({ "compaction_applied": "not a list" }).to_string()),
+            Some(json!({ "compaction_applied": [{ "element": "history" }] }).to_string()),
+            Some(json!({ "elements": [] }).to_string()),
+        ] {
+            assert!(
+                prior_diagnosis(&OneReport(report.clone()), turn_id)
+                    .await
+                    .is_none(),
+                "{report:?}"
+            );
+        }
+    }
 
     fn rounds(outcomes: &[serde_json::Value]) -> Vec<ProviderRoundRecord> {
         outcomes

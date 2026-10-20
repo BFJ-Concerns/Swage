@@ -210,6 +210,13 @@ pub(crate) fn build_sandbox_config(
         }
     }
 
+    if let Some(directory) = &agent_config.tool_output_directory {
+        let directory = sandbox_path(directory);
+        builder = builder
+            .read_write_mount(&directory)
+            .landlock_write_path(&directory)
+            .tool_output_location(swage_tool::context::ToolOutputLocation { directory });
+    }
     builder
         .build()
         .map_err(|error| swage_core::SandboxError::SpawnFailed {
@@ -244,6 +251,17 @@ pub(super) async fn build_turn_sandbox(
     agent_config: &AgentConfig,
     workspace_policy: Option<&TrustedWorkspacePolicy>,
 ) -> Result<TurnSandboxBuild, swage_core::SandboxError> {
+    if let Some(directory) = &agent_config.tool_output_directory {
+        tokio::fs::create_dir_all(directory)
+            .await
+            .map_err(|error| swage_core::SandboxError::SpawnFailed {
+                message: format!(
+                    "failed to create tool output directory {}: {error}",
+                    directory.display()
+                ),
+            })?;
+    }
+
     // An install that declares its boundary (a container image, for one)
     // runs every turn inside it: no per-turn sandbox is built, the host
     // sandbox settings are not consulted, and the turn's record names the
@@ -570,6 +588,62 @@ pub(crate) async fn record_degraded_execution(
         })
         .await?;
     Ok(())
+}
+
+/// The tools the model will be offered on this turn, by name, read before
+/// the turn's dispatcher exists — context is assembled first, and text in it
+/// that names a tool must not name one the model cannot call. The gates are
+/// the ones the turn applies: the tool registered for the agent
+/// (`ToolRegistry::for_agent`), permitted by the resolved config with this
+/// session's approval grants (`build_permission_config`, as the dispatcher
+/// build and the Codex launch build it), and admitted by the device
+/// advertisement filter for the session's host
+/// (`build_gateway_advertisement_filter`). A granted tool that still needs
+/// approval is offered by the agent runtime, which pauses for the approval,
+/// and withheld by the Codex runtime (`codex::dynamic_tools`), so under the
+/// Codex protocol only an outright `Allowed` answer offers it. Where the
+/// dispatcher already exists and the agent runtime will run it, ask it
+/// (`ToolDispatcher::offered_tools`) instead.
+pub(crate) async fn turn_offered_tools(
+    state: &AppState,
+    config: &swage_config::ResolvedConfig,
+    agent_config: &AgentConfig,
+    session_metadata: Option<&serde_json::Value>,
+    topic_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+    session_approval_grants: &std::collections::HashSet<crate::state::ApprovalGrantKey>,
+) -> std::collections::BTreeSet<String> {
+    use swage_tool::permission::{PermissionCheckResult, check_permission};
+
+    let registry = state
+        .active_tool_dispatcher()
+        .registry()
+        .for_agent(&agent_config.agent_id);
+    let permissions = build_permission_config(
+        config,
+        &state.config,
+        topic_id,
+        session_id,
+        session_approval_grants,
+    );
+    let approval_offers = config.default_provider_protocol() != swage_config::Protocol::Codex;
+    let device = crate::device::resolve_device(state, session_metadata).await;
+    let filter = build_gateway_advertisement_filter(device.as_ref(), agent_config);
+    registry
+        .list()
+        .into_iter()
+        .filter(|name| match check_permission(&permissions, name) {
+            Ok(PermissionCheckResult::Allowed) => true,
+            Ok(PermissionCheckResult::RequiresApproval { .. }) => approval_offers,
+            Err(_) => false,
+        })
+        .filter(|name| {
+            registry
+                .get(name)
+                .is_some_and(|tool| filter.as_ref().is_none_or(|filter| filter(tool.as_ref())))
+        })
+        .map(str::to_string)
+        .collect()
 }
 
 pub(crate) async fn build_gateway_dispatcher_for_unattended_execution(

@@ -174,6 +174,111 @@ mod approval_tests {
         (agent, execution)
     }
 
+    /// Hold the real retry wrapper's first attempt chunk across cancellation,
+    /// modelling a queued receiver that has not delivered it to the agent yet.
+    struct QueuedAttemptCancellationProvider {
+        cancel: Option<tokio_util::sync::CancellationToken>,
+        polled: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for QueuedAttemptCancellationProvider {
+        fn model_id(&self) -> &str {
+            "queued-attempt"
+        }
+        async fn complete(
+            &self,
+            _: CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unreachable!()
+        }
+        async fn complete_with_tools(
+            &self,
+            _: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unreachable!()
+        }
+        fn stream(
+            &self,
+            request: CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+            let Some(cancel) = self.cancel.clone() else {
+                let polled = self.polled.clone();
+                return Box::pin(futures::stream::poll_fn(move |_| {
+                    polled.store(true, Ordering::SeqCst);
+                    std::task::Poll::Pending
+                }));
+            };
+            let retry = swage_provider::retry::RetryProvider::new(
+                Self {
+                    cancel: None,
+                    polled: self.polled.clone(),
+                },
+                swage_provider::retry::RetryConfig::default(),
+            );
+            let mut stream = retry.stream(request);
+            let mut queued = None;
+            Box::pin(futures::stream::poll_fn(move |cx| {
+                if let Some(chunk) = queued.take() {
+                    return std::task::Poll::Ready(Some(chunk));
+                }
+                match stream.as_mut().poll_next(cx) {
+                    std::task::Poll::Ready(Some(chunk @ StreamChunk::ProviderAttempt(_)))
+                        if !cancel.is_cancelled() =>
+                    {
+                        queued = Some(chunk);
+                        cancel.cancel();
+                        std::task::Poll::Pending
+                    }
+                    other => other,
+                }
+            }))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancellation_preserves_a_queued_initial_attempt() {
+        let (mut agent, execution) = approval_fixture(Arc::new(|_, _| {
+            crate::approval::ApprovalChannelRegistration::default()
+        }))
+        .await;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let polled = Arc::new(AtomicBool::new(false));
+        agent.provider = Arc::new(QueuedAttemptCancellationProvider {
+            cancel: Some(cancel.clone()),
+            polled: polled.clone(),
+        });
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let request = serde_json::from_value(serde_json::json!({ "messages": [] })).unwrap();
+        let result = agent
+            .consume_provider_stream(
+                request, &execution, &tx, &cancel, "", &mut 0, &mut 0, &mut false, false, 3,
+            )
+            .await;
+        assert!(matches!(result, Err(AgentError::Cancelled)));
+        assert!(
+            polled.load(Ordering::SeqCst),
+            "the concrete provider was polled before cancellation"
+        );
+        let attempts: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                AgentEvent::ProviderAttempt { record, .. } => Some(record),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            attempts.len(),
+            1,
+            "cancellation must preserve the queued initial attempt as interrupted"
+        );
+        assert_eq!(
+            attempts[0].outcome,
+            swage_core::ProviderAttemptOutcome::Interrupted
+        );
+        assert_eq!(attempts[0].round, 3);
+        assert!(attempts[0].ended_at_ms.unwrap() >= attempts[0].started_at_ms);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn approval_gate_does_not_resume_after_losing_the_storage_update() {
         let registered = Arc::new(Mutex::new(None));
@@ -571,6 +676,488 @@ mod approval_tests {
             feedback, "The user denied this tool call. It did not run, and no approval is pending.",
             "the denial must read as final and carry no UI reason string"
         );
+    }
+
+    struct CompletedDelegation;
+
+    #[async_trait::async_trait]
+    impl crate::delegation::DelegationHandler for CompletedDelegation {
+        async fn handle_delegation(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: Option<Value>,
+            _: Option<String>,
+            _: Option<swage_protocol::client::workflow::WorkerIsolation>,
+            _: Option<Vec<String>>,
+            _: Option<&str>,
+            _: swage_core::DispatchContextComposition,
+            _: &str,
+            _: &str,
+            _: Uuid,
+            _: Uuid,
+            _: tokio_util::sync::CancellationToken,
+            _: swage_core::DelegateCompletionMode,
+        ) -> Result<crate::delegation::DelegationOutcome, AgentError> {
+            Ok(crate::delegation::DelegationOutcome::Completed(
+                serde_json::json!({"response": "survey complete"}),
+            ))
+        }
+    }
+
+    struct DelegateThenWait(std::sync::atomic::AtomicBool);
+
+    #[async_trait::async_trait]
+    impl LlmProvider for DelegateThenWait {
+        fn model_id(&self) -> &str {
+            "delegate-then-wait"
+        }
+        async fn complete(
+            &self,
+            _: CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unreachable!()
+        }
+        async fn complete_with_tools(
+            &self,
+            _: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unreachable!()
+        }
+        fn stream(
+            &self,
+            _: CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+            if self.0.swap(true, Ordering::SeqCst) {
+                return Box::pin(futures::stream::pending());
+            }
+            Box::pin(futures::stream::iter([
+                StreamChunk::ToolUse {
+                    call_id: "call-worker".into(),
+                    name: "delegate".into(),
+                    arguments: serde_json::json!({"target_agent": "worker", "task": "survey", "context": []}),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(swage_core::FinishReason::ToolUse),
+                },
+            ]))
+        }
+    }
+
+    struct PauseDelegationResult {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl swage_hook::Hook for PauseDelegationResult {
+        fn name(&self) -> &str {
+            "pause-delegation-result"
+        }
+        async fn execute(&self, event: &HookEvent) -> HookOutcome {
+            let HookEvent::PostToolUse { result, .. } = event else {
+                panic!("expected the delegation's tool result");
+            };
+            assert_eq!(
+                result["response"], "survey complete",
+                "the delegation must complete before its durable state is inspected: {result}"
+            );
+            self.entered.notify_one();
+            self.release.notified().await;
+            HookOutcome::Continue
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delegation_remains_recoverable_until_its_tool_result_is_recorded() {
+        use swage_storage::store::ToolCallStore;
+        for refuse_resume in [false, true] {
+            let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+            let topic = storage.general_scope().await.unwrap();
+            let session = storage
+                .create_session(swage_storage::fixtures::new_session(topic.id))
+                .await
+                .unwrap();
+            let thread = ThreadStore::create(
+                &*storage,
+                NewThread {
+                    session_id: session.id,
+                    agent_id: "agent".into(),
+                },
+            )
+            .await
+            .unwrap();
+            let turn = storage
+                .create_turn(NewTurn {
+                    thread_id: thread.id,
+                    agent_id: "agent".into(),
+                    state: TurnState::Pending,
+                    user_input: Some("survey".into()),
+                    parent_turn_id: None,
+                })
+                .await
+                .unwrap();
+            if refuse_resume {
+                storage
+                    .with_conn(|conn| {
+                        conn.execute_batch(
+                            "CREATE TRIGGER refuse_resume BEFORE UPDATE OF state ON turns
+                     WHEN OLD.state = 'delegating' AND NEW.state = 'processing'
+                     BEGIN SELECT RAISE(ABORT, 'resume refused'); END;",
+                        )
+                    })
+                    .await
+                    .unwrap();
+            }
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let mut hooks = HookRegistry::new();
+            hooks.register(swage_hook::HookRegistration {
+                hook: Arc::new(PauseDelegationResult {
+                    entered: entered.clone(),
+                    release: release.clone(),
+                }),
+                event_filter: Some(|event| matches!(event, HookEvent::PostToolUse { .. })),
+                matcher: None,
+                priority: 0,
+                failure_mode: swage_hook::FailureMode::FailOpen,
+                timeout: std::time::Duration::from_secs(5),
+            });
+            let mut registry = swage_tool::registry::ToolRegistry::new();
+            registry
+                .register_builtin(Arc::new(swage_tool::delegate::DelegateTool))
+                .unwrap();
+            let agent = Agent {
+                config: AgentConfig::new("agent").with_workspace("/work", vec!["/work".into()]),
+                provider: Arc::new(DelegateThenWait(AtomicBool::new(false))),
+                storage: storage.clone(),
+                tool_dispatcher: Some(ToolDispatcher::new(
+                    Arc::new(registry),
+                    swage_tool::permission::PermissionConfig {
+                        allow: vec!["*".into()],
+                        deny: vec![],
+                        bundles: std::collections::HashMap::new(),
+                        require_approval: vec![],
+                    },
+                    Arc::new(swage_tool::rate_limit::RateLimiter::new()),
+                    swage_tool::rate_limit::RateLimitConfig::default(),
+                    Arc::new(LeakDetector::default()),
+                    false,
+                )),
+                hook_registry: Some(Arc::new(hooks)),
+                leak_detector: None,
+                approval_registrar: None,
+                delegation_handler: Some(Arc::new(CompletedDelegation)),
+                context_transfer_config: swage_config::ContextTransferConfig::default(),
+            };
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let running = agent.process_turn_streaming(
+                TurnRequest {
+                    execution: TurnExecutionContext {
+                        session_id: session.id,
+                        thread_id: thread.id,
+                        turn_id: turn.id,
+                        topic_id: Some(topic.id),
+                    },
+                    user_message: "survey".into(),
+                    assembled_context: vec![ChatMessage::new(Role::User, "survey")],
+                    parent_turn_id: None,
+                    existing_turn_id: Some(turn.id),
+                    cancellation_token: tokio_util::sync::CancellationToken::new(),
+                    compaction_focus: None,
+                    effort: None,
+                },
+                event_tx,
+            );
+            let inspect = async {
+                entered.notified().await;
+                let call = storage
+                    .get_tool_call_by_turn_and_call_id(turn.id, "call-worker")
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(call.result.is_none());
+                assert_eq!(
+                    storage.get_turn(turn.id).await.unwrap().unwrap().state,
+                    TurnState::Delegating,
+                    "a returned delegation with no durable tool result must remain recoverable"
+                );
+                release.notify_one();
+                while let Some(event) = event_rx.recv().await {
+                    if let AgentEvent::ToolEnd { status, .. } = event {
+                        let call = storage
+                            .get_tool_call_by_turn_and_call_id(turn.id, "call-worker")
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        let state = storage.get_turn(turn.id).await.unwrap().unwrap().state;
+                        if refuse_resume {
+                            assert_eq!(status, "error");
+                            assert_eq!(state, TurnState::Delegating);
+                            assert!(
+                                call.result.is_none(),
+                                "a refused state transition must roll the tool result back"
+                            );
+                        } else {
+                            assert_eq!(status, "success");
+                            assert_eq!(
+                                state,
+                                TurnState::Processing,
+                                "a durable result must no longer select the parent for restart resumption"
+                            );
+                            assert!(call.result.as_deref().unwrap().contains("survey complete"));
+                            assert!(call.model_result.is_some());
+                        }
+                        return;
+                    }
+                }
+                panic!("tool result was not emitted");
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                tokio::select! {
+                    () = inspect => {},
+                    result = running => panic!("turn ended before its tool result was inspected: {result:?}"),
+                }
+            }).await.unwrap();
+            // Dropping the pending provider turn models a process exit at this
+            // boundary without running the normal cancellation settlement.
+        }
+    }
+
+    struct DelegateThenEcho {
+        round: std::sync::atomic::AtomicUsize,
+        another_delegation: bool,
+        separate_round: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for DelegateThenEcho {
+        fn model_id(&self) -> &str {
+            "delegate-then-wait"
+        }
+        async fn complete(
+            &self,
+            _: CompletionRequest,
+        ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
+            unreachable!()
+        }
+        async fn complete_with_tools(
+            &self,
+            _: swage_core::ToolCompletionRequest,
+        ) -> Result<swage_core::ToolCompletionResponse, swage_core::ProviderError> {
+            unreachable!()
+        }
+        fn stream(
+            &self,
+            _: CompletionRequest,
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+            let round = self.round.fetch_add(1, Ordering::SeqCst);
+            if round > usize::from(self.separate_round) {
+                return Box::pin(futures::stream::pending());
+            }
+            let mut chunks = vec![
+                StreamChunk::ToolUse {
+                    call_id: "call-worker".into(),
+                    name: "delegate".into(),
+                    arguments: serde_json::json!({"target_agent": "worker", "task": "survey", "context": []}),
+                },
+                StreamChunk::ToolUse {
+                    call_id: "call-echo".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::json!({"text": "hello"}),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(swage_core::FinishReason::ToolUse),
+                },
+            ];
+            if self.another_delegation {
+                chunks.insert(1, StreamChunk::ToolUse {
+                    call_id: "call-next-worker".into(),
+                    name: "delegate".into(),
+                    arguments: serde_json::json!({"target_agent": "worker", "task": "survey again", "context": []}),
+                });
+            }
+            if self.separate_round {
+                if round == 0 {
+                    chunks.truncate(1);
+                    chunks.push(StreamChunk::Done {
+                        finish_reason: Some(swage_core::FinishReason::ToolUse),
+                    });
+                } else {
+                    chunks.remove(0);
+                }
+            }
+            Box::pin(futures::stream::iter(chunks))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_delegation_settlement_is_not_consumed_by_the_next_tool() {
+        use swage_storage::store::ToolCallStore;
+        for (another_delegation, separate_round) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+            let topic = storage.general_scope().await.unwrap();
+            let session = storage
+                .create_session(swage_storage::fixtures::new_session(topic.id))
+                .await
+                .unwrap();
+            let thread = ThreadStore::create(
+                &*storage,
+                NewThread {
+                    session_id: session.id,
+                    agent_id: "agent".into(),
+                },
+            )
+            .await
+            .unwrap();
+            let turn = storage
+                .create_turn(NewTurn {
+                    thread_id: thread.id,
+                    agent_id: "agent".into(),
+                    state: TurnState::Pending,
+                    user_input: Some("survey".into()),
+                    parent_turn_id: None,
+                })
+                .await
+                .unwrap();
+            storage
+                .with_conn(|conn| {
+                    conn.execute_batch(
+                        "CREATE TRIGGER refuse_resume BEFORE UPDATE OF result ON tool_calls
+                     WHEN OLD.call_id = 'call-worker'
+                     BEGIN SELECT RAISE(ABORT, 'delegate result refused'); END;",
+                    )
+                })
+                .await
+                .unwrap();
+            let mut registry = swage_tool::registry::ToolRegistry::new();
+            registry
+                .register_builtin(Arc::new(swage_tool::delegate::DelegateTool))
+                .unwrap();
+            registry.register(Arc::new(EchoTool)).unwrap();
+            let agent = Agent {
+                config: AgentConfig::new("agent").with_workspace("/work", vec!["/work".into()]),
+                provider: Arc::new(DelegateThenEcho {
+                    round: std::sync::atomic::AtomicUsize::new(0),
+                    another_delegation,
+                    separate_round,
+                }),
+                storage: storage.clone(),
+                tool_dispatcher: Some(ToolDispatcher::new(
+                    Arc::new(registry),
+                    swage_tool::permission::PermissionConfig {
+                        allow: vec!["*".into()],
+                        deny: vec![],
+                        bundles: std::collections::HashMap::new(),
+                        require_approval: vec![],
+                    },
+                    Arc::new(swage_tool::rate_limit::RateLimiter::new()),
+                    swage_tool::rate_limit::RateLimitConfig::default(),
+                    Arc::new(LeakDetector::default()),
+                    false,
+                )),
+                hook_registry: None,
+                leak_detector: None,
+                approval_registrar: None,
+                delegation_handler: Some(Arc::new(CompletedDelegation)),
+                context_transfer_config: swage_config::ContextTransferConfig::default(),
+            };
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let running = agent.process_turn_streaming(
+                TurnRequest {
+                    execution: TurnExecutionContext {
+                        session_id: session.id,
+                        thread_id: thread.id,
+                        turn_id: turn.id,
+                        topic_id: Some(topic.id),
+                    },
+                    user_message: "survey".into(),
+                    assembled_context: vec![ChatMessage::new(Role::User, "survey")],
+                    parent_turn_id: None,
+                    existing_turn_id: Some(turn.id),
+                    cancellation_token: tokio_util::sync::CancellationToken::new(),
+                    compaction_focus: None,
+                    effort: None,
+                },
+                event_tx,
+            );
+            let inspect = async {
+                let mut child_completed = false;
+                let mut delegate_record_refused = false;
+                while let Some(event) = event_rx.recv().await {
+                    if let AgentEvent::DelegationCompleted { success, .. } = &event {
+                        assert!(
+                            *success,
+                            "the child must complete successfully before the write failure"
+                        );
+                        child_completed = true;
+                    }
+                    if let AgentEvent::ToolEnd {
+                        call_id,
+                        status,
+                        result,
+                        ..
+                    } = &event
+                        && call_id == "call-worker"
+                    {
+                        assert_eq!(status, "error");
+                        assert!(result.to_string().contains("delegate result refused"));
+                        delegate_record_refused = true;
+                    }
+                    if let AgentEvent::ToolEnd {
+                        call_id, status, ..
+                    } = event
+                    {
+                        if call_id != "call-echo" {
+                            continue;
+                        }
+                        assert!(
+                            child_completed && delegate_record_refused,
+                            "the child must answer and its result write fail before the ordinary tool settles"
+                        );
+                        assert_eq!(status, "success");
+                        if another_delegation {
+                            let later = storage
+                                .get_tool_call_by_turn_and_call_id(turn.id, "call-next-worker")
+                                .await
+                                .unwrap()
+                                .unwrap();
+                            assert!(
+                                later.result.is_some(),
+                                "a later delegation records only its own result"
+                            );
+                        }
+                        let call = storage
+                            .get_tool_call_by_turn_and_call_id(turn.id, "call-worker")
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        assert!(
+                            call.result.is_none(),
+                            "the failed delegate result is still unrecorded"
+                        );
+                        assert_eq!(
+                            storage.get_turn(turn.id).await.unwrap().unwrap().state,
+                            TurnState::Delegating,
+                            "settling a later ordinary tool must not consume an unsettled delegation's recovery mark"
+                        );
+                        return;
+                    }
+                }
+                panic!("no echo result");
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                tokio::select! {
+                    () = inspect => {},
+                    result = running => panic!("turn ended before its tool result was inspected: {result:?}"),
+                }
+            }).await.unwrap();
+            // Dropping the pending provider turn models a process exit at this
+            // boundary without running the normal cancellation settlement.
+        }
     }
 
     struct EchoTool;
@@ -1071,6 +1658,7 @@ impl Agent {
         let mut usage_reported = false;
         let mut total_tool_calls: u32 = 0;
         let mut tool_position: i32 = 0;
+        let mut delegation_wait_owner = None;
         let mut round = 0usize;
         let mut incomplete_reason;
 
@@ -1332,19 +1920,51 @@ impl Agent {
                     let mut safe_result = safe_result;
                     let mut end_result = result_value;
                     let mut end_status = status.clone();
-                    if let Err(error) = self
-                        .storage
-                        .update_tool_call_result(
-                            record.id,
-                            result_content,
-                            &model_result,
-                            &status,
-                            duration_ms as i64,
-                            result_metadata.truncated,
-                            result_metadata.total_bytes,
-                        )
-                        .await
+                    // Dispatch is sequential: the first call to leave the turn
+                    // Delegating owns that wait. Keep its record ID across
+                    // settlement failures and provider rounds; a later call,
+                    // including another delegation, cannot take its place.
+                    // A failed state read stops dispatch rather than letting
+                    // the next call claim a wait whose owner is unknown.
+                    if delegation_wait_owner.is_none()
+                        && self
+                            .storage
+                            .get_turn(turn.id)
+                            .await?
+                            .is_some_and(|turn| turn.state == TurnState::Delegating)
                     {
+                        delegation_wait_owner = Some(record.id);
+                    }
+                    let owns_delegation_wait = delegation_wait_owner == Some(record.id);
+                    let settlement = async {
+                        if owns_delegation_wait {
+                            let mut settled = record;
+                            settled.result = Some(result_content.clone());
+                            settled.model_result = Some(model_result.clone());
+                            settled.status = Some(status.clone());
+                            settled.duration_ms = Some(duration_ms as i64);
+                            settled.truncated = result_metadata.truncated;
+                            settled.total_bytes = result_metadata.total_bytes;
+                            self.storage.settle_delegation_result(settled).await
+                        } else {
+                            self.storage
+                                .update_tool_call_result(
+                                    record.id,
+                                    result_content,
+                                    &model_result,
+                                    &status,
+                                    duration_ms as i64,
+                                    result_metadata.truncated,
+                                    result_metadata.total_bytes,
+                                )
+                                .await
+                        }
+                    }
+                    .await;
+                    if owns_delegation_wait && settlement.is_ok() {
+                        delegation_wait_owner = None;
+                    }
+                    if let Err(error) = settlement {
                         let reason = format!(
                             "tool '{}' ran but its record could not be settled: {error}",
                             call.name
@@ -1710,7 +2330,7 @@ impl Agent {
         collect_tool_calls: bool,
         round: usize,
     ) -> Result<StreamRoundOutcome, AgentError> {
-        use futures::StreamExt;
+        use futures::{FutureExt, StreamExt};
 
         let request_snapshot = self.provider.provider_request_snapshot(&request, true);
         let _ = event_tx.send(AgentEvent::ProviderRequestPrepared {
@@ -1724,10 +2344,38 @@ impl Agent {
         let mut tool_calls = Vec::new();
         let mut reasoning = Vec::new();
         let mut incomplete_reason = None;
+        let mut active_attempt: Option<swage_core::ProviderAttemptRecord> = None;
 
+        let mut stream_polled = false;
         loop {
             tokio::select! {
+                // Cancellation is read first: once the token is cancelled,
+                // a chunk the provider already queued is drained below as
+                // the cancellation's own diagnostics, never taken through
+                // the ordinary path — which would record an attempt as
+                // outstanding and then again as interrupted.
+                biased;
                 _ = cancel_token.cancelled() => {
+                    // A retry may already have queued its initial attempt
+                    // without delivering it to this consumer. Preserve ready
+                    // diagnostics before dropping the stream; never start an
+                    // unpolled stream or wait for more provider output here.
+                    if stream_polled {
+                        while let Some(Some(chunk)) = stream.next().now_or_never() {
+                            if let StreamChunk::ProviderAttempt(mut record) = chunk {
+                                record.round = round;
+                                active_attempt = record.ended_at_ms.is_none().then(|| record.clone());
+                                if record.ended_at_ms.is_some() {
+                                    let _ = event_tx.send(AgentEvent::ProviderAttempt { turn_id: execution.turn_id, record });
+                                }
+                            }
+                        }
+                    }
+                    if let Some(mut record) = active_attempt.take() {
+                        record.ended_at_ms = Some(chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default());
+                        record.outcome = swage_core::ProviderAttemptOutcome::Interrupted;
+                        let _ = event_tx.send(AgentEvent::ProviderAttempt { turn_id: execution.turn_id, record });
+                    }
                     let accumulated_partial = format!("{accumulated_prefix}{text}");
                     self.persist_cancelled_partial(
                         execution.thread_id,
@@ -1743,7 +2391,10 @@ impl Agent {
                     });
                     return Err(AgentError::Cancelled);
                 }
-                chunk = stream.next() => {
+                chunk = futures::future::poll_fn(|cx| {
+                    stream_polled = true;
+                    stream.as_mut().poll_next(cx)
+                }) => {
                     match chunk {
                         Some(StreamChunk::Done { finish_reason: Some(swage_core::FinishReason::Refusal) }) => {
                             self.persist_terminal_response(execution, &format!("{accumulated_prefix}{text}")).await?;
@@ -1795,6 +2446,11 @@ impl Agent {
                                 round,
                                 witness,
                             });
+                        }
+                        Some(StreamChunk::ProviderAttempt(mut record)) => {
+                            record.round = round;
+                            active_attempt = record.ended_at_ms.is_none().then(|| record.clone());
+                            let _ = event_tx.send(AgentEvent::ProviderAttempt { turn_id: execution.turn_id, record });
                         }
                         Some(StreamChunk::ProviderRetryStarted { attempt, max_retries, provider, wait_ms }) => {
                             let _ = event_tx.send(AgentEvent::ProviderRetryStarted {
@@ -2331,6 +2987,7 @@ impl Agent {
         .with_thread_id(execution.thread_id);
         let ctx = AgentToolContext {
             allowed_paths: self.config.allowed_paths.clone(),
+            tool_output_directory: self.config.tool_output_directory.clone(),
             ..ctx
         };
         let dispatch_started_at = std::time::Instant::now();
@@ -2581,11 +3238,24 @@ impl Agent {
                 };
 
                 // Suspend the parent turn — durable state so restart recovery
-                // can find it and transition to Interrupted.
-                let _ = self
+                // can find it and resume it. The mark is what selects the
+                // turn for resumption, so a delegation whose wait cannot be
+                // recorded is not started: the model is told, and the turn
+                // goes on as it was.
+                if let Err(error) = self
                     .storage
                     .update_turn_state(execution.turn_id, TurnState::Delegating)
-                    .await;
+                    .await
+                {
+                    return Ok((
+                        format!(
+                            "delegation not started: the turn's wait could not be recorded ({error}); a restart could not resume it"
+                        ),
+                        true,
+                        "error".to_string(),
+                    )
+                        .into());
+                }
 
                 // Emit DelegationStarted event so clients can track progress.
                 let _ = event_tx.send(AgentEvent::DelegationStarted {
@@ -2614,13 +3284,10 @@ impl Agent {
                     )
                     .await;
 
-                // Resume the parent turn — back to Processing regardless of
-                // outcome. The tool call result (success or error string) is
-                // what the LLM sees.
-                let _ = self
-                    .storage
-                    .update_turn_state(execution.turn_id, TurnState::Processing)
-                    .await;
+                // Keep the durable wait until the caller records this tool's
+                // result. Settlement returns the turn to Processing in the
+                // same transaction, so neither side of a restart loses or
+                // repeats the delegation's result.
 
                 match delegation_result {
                     Ok(crate::delegation::DelegationOutcome::Completed(result)) => {

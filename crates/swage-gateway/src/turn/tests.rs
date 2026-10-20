@@ -496,6 +496,58 @@ async fn seed_history(storage: &MockStorage, session_id: Uuid, count: usize) -> 
 }
 
 #[tokio::test]
+async fn continuity_messages_route_summary_produces_succession_instead_of_fallback() {
+    use axum::{Json, Router, response::IntoResponse, routing::post};
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let requests = Arc::clone(&captured);
+    let app = Router::new().route("/v1/messages", post(move |Json(body): Json<serde_json::Value>| {
+        requests.lock().unwrap().push(body.clone());
+        async move {
+            if body["stream"] == true {
+                ([("content-type", "text/event-stream")], concat!(
+                    "event: message_start\ndata: {\"message\":{\"id\":\"msg_test\",\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n",
+                    "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                    "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Continued.\"}}\n\n",
+                    "event: content_block_stop\ndata: {\"index\":0}\n\n",
+                    "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
+                    "event: message_stop\ndata: {}\n\n"
+                )).into_response()
+            } else {
+                ([("content-type", "application/json")], include_str!("../../../swage-provider/tests/fixtures/claude-succession-response.json")).into_response()
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let storage = Arc::new(MockStorage::new());
+    let provider = swage_provider::anthropic::AnthropicProvider::from_config(
+        swage_provider::ProviderConfig::new(
+            "test-key",
+            "claude-sonnet-5-5",
+            format!("http://{address}"),
+        ),
+    );
+    let (state, session_id) =
+        make_state_with_provider_and_root(Arc::new(provider), Arc::clone(&storage), None).await;
+    seed_history_over_threshold(&storage, session_id).await;
+    run_continue_turn(&state, session_id).await;
+    server.abort();
+    let records = only_snapshot_records(&*storage.db.lock().await);
+    assert_eq!(
+        records.len(),
+        1,
+        "one succession without fallback: {records:?}"
+    );
+    assert_eq!(records[0]["actual_strategy"], "succession", "{records:?}");
+    let requests = captured.lock().unwrap();
+    assert!(requests.iter().any(|request| request["stream"] != true));
+    assert!(requests.iter().any(|request| request["stream"] == true));
+}
+
+#[tokio::test]
 async fn an_over_threshold_context_runs_on_a_successor_assembled_from_its_elements() {
     let storage = Arc::new(MockStorage::new());
     let (state, session_id) =
@@ -957,8 +1009,8 @@ async fn a_turn_whose_walls_are_unchanged_carries_the_previous_diagnosis_again()
 
     assert_eq!(
         provider.completions.load(Ordering::SeqCst),
-        0,
-        "no reader or synthesis runs"
+        1,
+        "only the established-work summary runs; the diagnosis is reused"
     );
     let records = records_of_the_turn_after(&*storage.db.lock().await, diagnosed);
     assert_eq!(records.len(), 1, "{records:?}");
@@ -1124,6 +1176,161 @@ async fn a_turn_whose_window_no_longer_shows_a_wall_gets_its_full_history() {
     assert!(
         !text.contains(PRIOR_DIAGNOSIS),
         "without the diagnosis: {text}"
+    );
+}
+
+/// The summary is derived from the actual transcript sent by the product;
+/// readers and synthesis deliberately return no established facts.
+#[derive(Default)]
+struct TranscriptSummarisingProvider(SummarisingCapturingProvider);
+
+#[async_trait]
+impl LlmProvider for TranscriptSummarisingProvider {
+    fn model_id(&self) -> &str {
+        "transcript-summary"
+    }
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let material = request
+            .messages
+            .iter()
+            .map(ChatMessage::text_content)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let summary = material
+            .split_once("## Conversation to summarise\n\n")
+            .map(|(_, history)| history.to_owned())
+            .unwrap_or_else(|| "The missing-file reads failed repeatedly.".into());
+        Ok(CompletionResponse {
+            content: summary,
+            input_tokens: 10,
+            output_tokens: 10,
+            finish_reason: FinishReason::Stop,
+            cost: None,
+        })
+    }
+    async fn complete_with_tools(
+        &self,
+        _: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unreachable!("turns stream")
+    }
+    fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        self.0.stream(request)
+    }
+}
+
+#[tokio::test]
+async fn continuity_degradation_successor_keeps_established_facts_beside_the_diagnosis() {
+    let storage = Arc::new(MockStorage::new());
+    let provider = Arc::new(TranscriptSummarisingProvider::default());
+    let (state, session_id) = make_state_with_provider_and_root(
+        Arc::clone(&provider) as Arc<dyn LlmProvider>,
+        Arc::clone(&storage),
+        None,
+    )
+    .await;
+    let thread_id = seed_history(&storage, session_id, 8).await;
+    storage
+        .append_message(AppendMessage {
+            thread_id,
+            attachments: vec![],
+            turn_id: None,
+            role: swage_core::Role::User,
+            origin: swage_storage::MessageOrigin::User,
+            content:
+                "CHECKS: compile passed; render passed; fixture validated. Current work: dashboard."
+                    .into(),
+            agent_id: "gateway".into(),
+        })
+        .await
+        .unwrap();
+    let (validated_turn, calls) = seed_finished_turn(
+        &storage,
+        thread_id,
+        TurnState::Completed,
+        &[(
+            "file_write",
+            serde_json::json!({"path": "fixture"}),
+            "success",
+        )],
+        false,
+    )
+    .await;
+    storage
+        .update_tool_call_result(
+            calls[0],
+            "FIXTURE_WRITTEN_AND_VALIDATED",
+            "FIXTURE_WRITTEN_AND_VALIDATED",
+            "success",
+            1,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+    storage
+        .append_message(AppendMessage {
+            thread_id,
+            attachments: vec![],
+            turn_id: Some(validated_turn),
+            role: swage_core::Role::Assistant,
+            origin: swage_storage::MessageOrigin::Assistant,
+            content: "Fixture work completed.".into(),
+            agent_id: "gateway".into(),
+        })
+        .await
+        .unwrap();
+    for index in 0..5 {
+        seed_finished_turn(
+            &storage,
+            thread_id,
+            TurnState::Completed,
+            &[(
+                "file_read",
+                serde_json::json!({"path": format!("missing-{index}")}),
+                "error",
+            )],
+            false,
+        )
+        .await;
+    }
+    run_continue_turn(&state, session_id).await;
+    let records = only_snapshot_records(&*storage.db.lock().await);
+    assert_eq!(records[0]["requested_strategy"], "succession-degradation");
+    assert_eq!(records[0]["actual_strategy"], "succession");
+    let text = streamed_text(&provider.0);
+    assert!(
+        text.contains(
+            "CHECKS: compile passed; render passed; fixture validated. Current work: dashboard."
+        ),
+        "established work must reach the successor independently of its diagnosis: {text}"
+    );
+    assert!(text.contains("The missing-file reads failed repeatedly."));
+    assert!(
+        text.contains("FIXTURE_WRITTEN_AND_VALIDATED"),
+        "completed tool outcome: {text}"
+    );
+    run_continue_turn(&state, session_id).await;
+    let requests = provider.0.streamed.lock().unwrap();
+    let next = requests[1]
+        .messages
+        .iter()
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        next.contains("CHECKS: compile passed; render passed; fixture validated."),
+        "reused diagnosis must retain established work: {next}"
+    );
+    assert!(
+        next.contains("FIXTURE_WRITTEN_AND_VALIDATED"),
+        "reused diagnosis must retain completed tool outcomes: {next}"
     );
 }
 
@@ -1402,14 +1609,16 @@ async fn the_successor_s_briefing_carries_a_session_variable_from_the_store() {
     )
     .await;
     let mut config = state.active_config();
+    // Leave room for the baseline, briefing, summary and retained input.
+    // A six-message limit is smaller than that minimum once the clock is present.
     config.context.compaction_threshold =
-        Some(swage_protocol::client::settings::CompactionThresholdConfig::Messages(6));
+        Some(swage_protocol::client::settings::CompactionThresholdConfig::Messages(16));
     state.replace_runtime(
         config,
         state.active_provider(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
     );
-    seed_history(&storage, session_id, 12).await;
+    seed_history(&storage, session_id, 32).await;
     storage
         .db
         .lock()
@@ -2279,6 +2488,23 @@ impl swage_storage::ProviderRoundStore for MockStorage {
 
 #[async_trait]
 impl swage_storage::WorkflowStore for MockStorage {
+    async fn list_unacknowledged_workflow_runs(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<swage_storage::WorkflowRunRecord>, StorageError> {
+        Ok(vec![])
+    }
+    async fn acknowledge_workflow_runs(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: &[Uuid],
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
     async fn create_workflow_script(
         &self,
         _: swage_storage::NewWorkflowScript,
@@ -2365,18 +2591,25 @@ impl swage_storage::WorkflowStore for MockStorage {
     ) -> Result<(), StorageError> {
         Ok(())
     }
-    async fn record_workflow_call_attempt(
+    async fn open_workflow_call_attempt(
         &self,
         _: Uuid,
         _: serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, StorageError> {
+        // The mock keeps no journal, so no attempt precedes this one.
+        Ok(Vec::new())
+    }
+    async fn resolve_workflow_call_attempt(
+        &self,
+        _: Uuid,
+        _: serde_json::Value,
+    ) -> Result<(), StorageError> {
         if self.fail_workflow_attempt_writes.load(Ordering::SeqCst) {
             return Err(StorageError::QueryFailed(
                 "injected workflow attempt write failure".into(),
             ));
         }
-        // The mock keeps no journal, so no attempt precedes this one.
-        Ok(Vec::new())
+        Ok(())
     }
     async fn cut_short_workflow_journal_entry(
         &self,
@@ -2418,7 +2651,10 @@ impl swage_storage::WorkflowStore for MockStorage {
     ) -> Result<bool, StorageError> {
         unimplemented!()
     }
-    async fn interrupt_running_workflow_runs(&self) -> Result<u64, StorageError> {
+    async fn record_gateway_interruption(
+        &self,
+        _: chrono::DateTime<chrono::Utc>,
+    ) -> Result<swage_storage::model::GatewayInterruptionCounts, StorageError> {
         unimplemented!()
     }
     async fn try_transition_workflow_run_state(
@@ -2582,7 +2818,9 @@ impl swage_storage::WorkflowStore for MockStorage {
         &self,
         _: Uuid,
     ) -> Result<Vec<swage_storage::WorkflowJournalRecord>, StorageError> {
-        unimplemented!()
+        // The mock keeps no journal: every call it dispatches is a first
+        // attempt, and nothing it is asked about has entries.
+        Ok(Vec::new())
     }
 }
 
@@ -2651,6 +2889,7 @@ pub(crate) struct InMemoryDb {
     pub(crate) provider_rounds: Vec<swage_storage::ProviderRoundRecord>,
     pub(crate) session_variables: Vec<swage_storage::SessionVariable>,
     pub(crate) turn_queue: Vec<swage_storage::QueuedTurnInput>,
+    pub(crate) channel_messages: Vec<swage_storage::ChannelInboundMessage>,
 }
 
 impl MockStorage {
@@ -3378,6 +3617,25 @@ impl DeviceStore for MockStorage {
 
 #[async_trait]
 impl ChannelLinkStore for MockStorage {
+    async fn save_channel_link_code(
+        &self,
+        _: swage_storage::model::ChannelLinkCode,
+    ) -> Result<(), StorageError> {
+        unimplemented!()
+    }
+    async fn list_channel_link_codes(
+        &self,
+    ) -> Result<Vec<swage_storage::model::ChannelLinkCode>, StorageError> {
+        unimplemented!()
+    }
+    async fn redeem_channel_link_code(
+        &self,
+        _: &str,
+        _: NewChannelLink,
+    ) -> Result<Option<ChannelLink>, StorageError> {
+        unimplemented!()
+    }
+
     async fn upsert_channel_link(&self, link: NewChannelLink) -> Result<ChannelLink, StorageError> {
         let now = chrono::Utc::now();
         let key = (
@@ -4371,6 +4629,14 @@ impl ThreadStore for MockStorage {
 
 #[async_trait]
 impl swage_storage::SurfaceStore for MockStorage {
+    async fn rename_surface(
+        &self,
+        _: Uuid,
+        _: &str,
+        _: swage_storage::NewAuditEvent,
+    ) -> Result<Option<String>, StorageError> {
+        unimplemented!()
+    }
     async fn create_page(
         &self,
         _: swage_storage::NewSurface,
@@ -4403,6 +4669,7 @@ impl swage_storage::SurfaceStore for MockStorage {
         _: Uuid,
         _: &str,
         _: &str,
+        _: Option<swage_storage::model::ModuleDelivery>,
     ) -> Result<swage_storage::SurfaceModule, StorageError> {
         unimplemented!()
     }
@@ -4417,6 +4684,7 @@ impl swage_storage::SurfaceStore for MockStorage {
         _: Uuid,
         _: i64,
         _: &str,
+        _: Option<swage_storage::model::ModuleDelivery>,
     ) -> Result<Option<swage_storage::ModuleSourceReplacement>, StorageError> {
         unimplemented!()
     }
@@ -4484,6 +4752,13 @@ impl swage_storage::SurfaceStore for MockStorage {
 
 #[async_trait]
 impl swage_storage::SurfaceAnnotationStore for MockStorage {
+    async fn resolve_surface_annotation(
+        &self,
+        _: Uuid,
+        _: swage_storage::NewAuditEvent,
+    ) -> Result<bool, StorageError> {
+        unimplemented!()
+    }
     async fn create_surface_annotation(
         &self,
         _: swage_storage::NewSurfaceAnnotation,
@@ -4541,9 +4816,48 @@ impl TurnStore for MockStorage {
             delegated_output_tokens: None,
             execution_isolation: None,
             failure_message: None,
+            attribution: None,
         };
         self.db.lock().await.turns.insert(t.id, t.clone());
         Ok(t)
+    }
+
+    async fn settle_delegation_result(&self, call: ToolCallRecord) -> Result<(), StorageError> {
+        let write = self.turn_state_write_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_tool_call_settlement.load(Ordering::SeqCst)
+            || self.fail_turn_state_writes.load(Ordering::SeqCst)
+            || self.fail_turn_state_write_at.load(Ordering::SeqCst) == write
+        {
+            return Err(StorageError::QueryFailed(
+                "delegation settlement refused by the test".into(),
+            ));
+        }
+        let mut db = self.db.lock().await;
+        let valid = call.result.is_some()
+            && call.model_result.is_some()
+            && call.status.is_some()
+            && call.duration_ms.is_some()
+            && db
+                .turns
+                .get(&call.turn_id)
+                .is_some_and(|turn| turn.state == TurnState::Delegating);
+        let index = db.tool_calls.iter().position(|stored| {
+            stored.id == call.id && stored.turn_id == call.turn_id && stored.result.is_none()
+        });
+        if !valid || index.is_none() {
+            return Err(StorageError::QueryFailed(
+                "delegation settlement has no matching wait and started call".into(),
+            ));
+        }
+        let stored = &mut db.tool_calls[index.unwrap()];
+        stored.result = call.result;
+        stored.model_result = call.model_result;
+        stored.status = call.status;
+        stored.duration_ms = call.duration_ms;
+        stored.truncated = call.truncated;
+        stored.total_bytes = call.total_bytes;
+        db.turns.get_mut(&call.turn_id).unwrap().state = TurnState::Processing;
+        Ok(())
     }
 
     async fn update_structured_output(
@@ -4565,6 +4879,18 @@ impl TurnStore for MockStorage {
         Ok(self.db.lock().await.turns.get(&id).cloned())
     }
 
+    async fn get_turn_observation(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<(Turn, chrono::DateTime<chrono::Utc>)>, StorageError> {
+        let db = self.db.lock().await;
+        Ok(db
+            .turns
+            .get(&id)
+            .cloned()
+            .map(|turn| (turn, chrono::Utc::now())))
+    }
+
     async fn list_turns_by_thread(&self, thread_id: Uuid) -> Result<Vec<Turn>, StorageError> {
         let mut turns: Vec<Turn> = self
             .db
@@ -4573,6 +4899,20 @@ impl TurnStore for MockStorage {
             .turns
             .values()
             .filter(|t| t.thread_id == thread_id)
+            .cloned()
+            .collect();
+        turns.sort_by_key(|t| t.created_at);
+        Ok(turns)
+    }
+
+    async fn list_child_turns(&self, parent_turn_id: Uuid) -> Result<Vec<Turn>, StorageError> {
+        let mut turns: Vec<Turn> = self
+            .db
+            .lock()
+            .await
+            .turns
+            .values()
+            .filter(|t| t.parent_turn_id == Some(parent_turn_id))
             .cloned()
             .collect();
         turns.sort_by_key(|t| t.created_at);
@@ -4593,6 +4933,14 @@ impl TurnStore for MockStorage {
         }
         let mut db = self.db.lock().await;
         if let Some(turn) = db.turns.get_mut(&id) {
+            if turn.state == TurnState::Delegating
+                && !state.is_terminal()
+                && state != TurnState::Delegating
+            {
+                return Err(StorageError::QueryFailed(
+                    "a delegating turn must settle its owning tool result before changing to another non-terminal state".into(),
+                ));
+            }
             if state.is_terminal() {
                 turn.completed_at = Some(chrono::Utc::now());
             }
@@ -5196,12 +5544,31 @@ impl swage_storage::store::DeliveryStore for MockStorage {
 impl swage_storage::store::ChannelQueueStore for MockStorage {
     async fn ingest_channel_inbound(
         &self,
-        _messages: Vec<swage_storage::NewChannelInboundMessage>,
+        messages: Vec<swage_storage::NewChannelInboundMessage>,
         _cursor_integration: &str,
         _cursor_account: &str,
         _cursor: &str,
     ) -> Result<usize, StorageError> {
-        Ok(0)
+        let mut db = self.db.lock().await;
+        let count = messages.len();
+        for message in messages {
+            db.channel_messages
+                .push(swage_storage::ChannelInboundMessage {
+                    id: Uuid::new_v4(),
+                    integration: message.integration,
+                    account: message.account,
+                    conversation: message.conversation,
+                    external_id: message.external_id,
+                    sender: message.sender,
+                    content: message.content,
+                    state: swage_storage::ChannelInboundMessageState::Pending,
+                    discard_reason: None,
+                    turn_id: None,
+                    received_at: chrono::Utc::now(),
+                    presented_at: None,
+                });
+        }
+        Ok(count)
     }
 
     async fn get_channel_cursor(
@@ -5212,6 +5579,18 @@ impl swage_storage::store::ChannelQueueStore for MockStorage {
         Ok(None)
     }
 
+    async fn list_pending_channel_messages(
+        &self,
+    ) -> Result<Vec<swage_storage::ChannelInboundMessage>, StorageError> {
+        let db = self.db.lock().await;
+        Ok(db
+            .channel_messages
+            .iter()
+            .filter(|row| row.state == swage_storage::ChannelInboundMessageState::Pending)
+            .cloned()
+            .collect())
+    }
+
     async fn list_pending_channel_origins(
         &self,
     ) -> Result<Vec<swage_storage::PendingChannelOrigin>, StorageError> {
@@ -5220,9 +5599,20 @@ impl swage_storage::store::ChannelQueueStore for MockStorage {
 
     async fn list_pending_by_origin(
         &self,
-        _origin: swage_storage::PendingChannelOrigin,
+        origin: swage_storage::PendingChannelOrigin,
     ) -> Result<Vec<swage_storage::ChannelInboundMessage>, StorageError> {
-        Ok(Vec::new())
+        let db = self.db.lock().await;
+        Ok(db
+            .channel_messages
+            .iter()
+            .filter(|row| {
+                row.state == swage_storage::ChannelInboundMessageState::Pending
+                    && row.integration == origin.integration
+                    && row.account == origin.account
+                    && row.conversation == origin.conversation
+            })
+            .cloned()
+            .collect())
     }
 
     async fn begin_channel_turn(
@@ -5241,6 +5631,19 @@ impl swage_storage::store::ChannelQueueStore for MockStorage {
         _reason: &str,
     ) -> Result<u64, StorageError> {
         Ok(0)
+    }
+
+    async fn list_channel_messages_by_turn(
+        &self,
+        turn_id: Uuid,
+    ) -> Result<Vec<swage_storage::ChannelInboundMessage>, StorageError> {
+        let db = self.db.lock().await;
+        Ok(db
+            .channel_messages
+            .iter()
+            .filter(|row| row.turn_id == Some(turn_id))
+            .cloned()
+            .collect())
     }
 
     async fn requeue_presented_for_inflight_turns(&self) -> Result<u64, StorageError> {
@@ -5344,36 +5747,109 @@ impl swage_storage::store::AuditStore for MockStorage {
     }
 }
 
+fn enqueue_mock_turn_input(
+    db: &mut InMemoryDb,
+    input: swage_storage::NewQueuedTurnInput,
+) -> swage_storage::QueuedTurnInput {
+    let seq = db
+        .turn_queue
+        .iter()
+        .filter(|queued| queued.session_id == input.session_id)
+        .map(|queued| queued.seq)
+        .max()
+        .map_or(0, |seq| seq + 1);
+    let arrived_at = input
+        .channel_message_ids
+        .iter()
+        .filter_map(|id| db.channel_messages.iter().find(|row| row.id == *id))
+        .map(|row| row.received_at)
+        .min()
+        .unwrap_or_else(chrono::Utc::now);
+    let queued = swage_storage::QueuedTurnInput {
+        delivery_targets: input.delivery_targets,
+        attended: input.attended,
+        client_id: input.client_id,
+        id: Uuid::new_v4(),
+        session_id: input.session_id,
+        thread_id: input.thread_id,
+        seq,
+        origin: input.origin,
+        content: input.content,
+        attachments: input.attachments,
+        schedule_run_id: input.schedule_run_id,
+        channel_message_ids: input.channel_message_ids,
+        created_at: arrived_at,
+    };
+    db.turn_queue.push(queued.clone());
+    queued
+}
+
 #[async_trait]
 impl swage_storage::store::TurnQueueStore for MockStorage {
+    async fn enqueue_turn_inputs(
+        &self,
+        inputs: Vec<swage_storage::NewQueuedTurnInput>,
+    ) -> Result<Vec<swage_storage::QueuedTurnInput>, StorageError> {
+        let mut queued = Vec::new();
+        for input in inputs {
+            queued.push(self.enqueue_turn_input(input).await?);
+        }
+        Ok(queued)
+    }
+
     async fn enqueue_turn_input(
         &self,
         input: swage_storage::NewQueuedTurnInput,
     ) -> Result<swage_storage::QueuedTurnInput, StorageError> {
         let mut db = self.db.lock().await;
-        let seq = db
-            .turn_queue
-            .iter()
-            .filter(|queued| queued.session_id == input.session_id)
-            .map(|queued| queued.seq)
-            .max()
-            .map_or(0, |seq| seq + 1);
-        let queued = swage_storage::QueuedTurnInput {
-            attended: input.attended,
-            client_id: input.client_id,
-            id: Uuid::new_v4(),
-            session_id: input.session_id,
-            thread_id: input.thread_id,
-            seq,
-            origin: input.origin,
-            content: input.content,
-            attachments: input.attachments,
-            schedule_run_id: input.schedule_run_id,
-            channel_message_ids: input.channel_message_ids,
-            created_at: chrono::Utc::now(),
-        };
-        db.turn_queue.push(queued.clone());
-        Ok(queued)
+        Ok(enqueue_mock_turn_input(&mut db, input))
+    }
+
+    async fn enqueue_delegation_continuation(
+        &self,
+        parent_turn_id: Uuid,
+        input: swage_storage::NewQueuedTurnInput,
+    ) -> Result<swage_storage::QueuedTurnInput, StorageError> {
+        use swage_storage::ChannelInboundMessageState::{Pending, Presented};
+        let mut db = self.db.lock().await;
+        let parent_valid = db.turns.get(&parent_turn_id).is_some_and(|parent| {
+            parent.state == TurnState::Delegating
+                && parent.parent_turn_id.is_none()
+                && parent.thread_id == input.thread_id
+        }) && db
+            .threads
+            .get(&input.thread_id)
+            .is_some_and(|thread| thread.session_id == input.session_id);
+        let mut seen = std::collections::HashSet::new();
+        if !parent_valid
+            || input.channel_message_ids.iter().any(|id| {
+                !seen.insert(*id)
+                    || !db.channel_messages.iter().any(|row| {
+                        row.id == *id
+                            && row.state == Presented
+                            && row.turn_id == Some(parent_turn_id)
+                    })
+                    || db
+                        .turn_queue
+                        .iter()
+                        .any(|queued| queued.channel_message_ids.contains(id))
+            })
+        {
+            return Err(StorageError::QueryFailed(
+                "continuation could not claim parent or inbox rows".into(),
+            ));
+        }
+        for row in &mut db.channel_messages {
+            if seen.contains(&row.id) {
+                row.state = Pending;
+                row.turn_id = None;
+                row.presented_at = None;
+            }
+        }
+        let parent = db.turns.get_mut(&parent_turn_id).unwrap();
+        parent.state = TurnState::Interrupted;
+        parent.completed_at = Some(chrono::Utc::now());
+        Ok(enqueue_mock_turn_input(&mut db, input))
     }
 
     async fn list_queued_turn_inputs(
@@ -5387,7 +5863,7 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
             .filter(|queued| queued.session_id == session_id)
             .cloned()
             .collect();
-        queued.sort_by_key(|queued| queued.seq);
+        queued.sort_by_key(|queued| (queued.created_at, queued.seq));
         Ok(queued)
     }
 
@@ -5415,6 +5891,24 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
                 parent_turn_id: None,
             })
             .await?;
+        // The drain records how the batch was started on the turn, as the
+        // real one does.
+        let attribution = swage_storage::model::TurnAttribution {
+            attended: queued.iter().any(|input| input.attended),
+            delivery_targets: queued
+                .iter()
+                .flat_map(|input| input.delivery_targets.clone())
+                .collect(),
+        };
+        let turn = {
+            let mut db = self.db.lock().await;
+            let stored = db
+                .turns
+                .get_mut(&turn.id)
+                .expect("the turn was just created");
+            stored.attribution = Some(attribution.clone());
+            stored.clone()
+        };
         let mut messages = Vec::new();
         for item in &queued {
             messages.push(
@@ -5431,18 +5925,45 @@ impl swage_storage::store::TurnQueueStore for MockStorage {
             );
         }
         let queued_ids = queued.iter().map(|item| item.id).collect();
-        self.db
-            .lock()
-            .await
-            .turn_queue
-            .retain(|item| item.session_id != session_id);
+        // The inbox rows the inputs name are presented by this turn, as the
+        // real drain presents them, and their chats are the turn's
+        // destinations.
+        let mut channel_origins: Vec<swage_storage::PendingChannelOrigin> = Vec::new();
+        {
+            let mut db = self.db.lock().await;
+            for item in &queued {
+                for message_id in &item.channel_message_ids {
+                    if let Some(row) = db
+                        .channel_messages
+                        .iter_mut()
+                        .find(|row| row.id == *message_id)
+                    {
+                        let origin = swage_storage::PendingChannelOrigin {
+                            integration: row.integration.clone(),
+                            account: row.account.clone(),
+                            conversation: row.conversation.clone(),
+                        };
+                        if !channel_origins.contains(&origin) {
+                            channel_origins.push(origin);
+                        }
+                        if row.state == swage_storage::ChannelInboundMessageState::Pending {
+                            row.state = swage_storage::ChannelInboundMessageState::Presented;
+                            row.turn_id = Some(turn.id);
+                            row.presented_at = Some(chrono::Utc::now());
+                        }
+                    }
+                }
+            }
+            db.turn_queue.retain(|item| item.session_id != session_id);
+        }
         Ok(Some(swage_storage::DrainedTurnQueue {
-            attended: queued.iter().any(|input| input.attended),
+            delivery_targets: attribution.delivery_targets,
+            attended: attribution.attended,
             turn,
             messages,
             queued_ids,
             schedule_run_ids: Vec::new(),
-            channel_origins: Vec::new(),
+            channel_origins,
         }))
     }
 
@@ -5861,6 +6382,48 @@ impl swage_storage::store::AgentMessageStore for MockStorage {
         message.payload = payload;
         Ok(())
     }
+    async fn reissue_agent_message(
+        &self,
+        id: Uuid,
+        payload: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let mut db = self.db.lock().await;
+        let message = db
+            .agent_messages
+            .get_mut(&id)
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "agent_message".into(),
+                id: id.to_string(),
+            })?;
+        message.payload = payload;
+        message.status = swage_core::MessageStatus::Pending;
+        message.failure_reason = None;
+        message.created_at = chrono::Utc::now();
+        Ok(())
+    }
+    async fn find_delegate_for_thread(
+        &self,
+        thread_id: Uuid,
+        started_by: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<AgentMessage>, StorageError> {
+        let thread = thread_id.to_string();
+        let mut delegates: Vec<_> = self
+            .db
+            .lock()
+            .await
+            .agent_messages
+            .values()
+            .filter(|message| {
+                message.kind == swage_core::MessageKind::Delegate
+                    && message.payload.get("_thread_id").and_then(|v| v.as_str()) == Some(&thread)
+                    && message.created_at <= started_by
+            })
+            .cloned()
+            .collect();
+        delegates.sort_by_key(|message| message.created_at);
+        Ok(delegates.pop())
+    }
+
     async fn list_by_correlation(
         &self,
         correlation_id: Uuid,
@@ -6228,7 +6791,7 @@ async fn make_state_with_provider_and_root(
             None,
             config_root,
         ),
-        None => AppState::new(
+        None => AppState::for_test(
             storage_backend,
             topic_store,
             provider,
@@ -6275,7 +6838,7 @@ async fn make_state_with_config_and_storage(
     .expect("create default thread");
 
     let provider = Arc::new(MockProvider::new(provider_chunks));
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         provider as Arc<dyn LlmProvider>,
@@ -6675,7 +7238,7 @@ async fn cancelled_turn_stores_partial_and_marks_interrupted() {
     .await
     .expect("create default thread");
 
-    let state = Arc::new(AppState::new(
+    let state = Arc::new(AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(PendingProvider) as Arc<dyn LlmProvider>,
@@ -6774,7 +7337,7 @@ async fn cancelled_turn_without_partial_stores_no_assistant_response() {
     .expect("create default thread");
 
     let stream_polled = Arc::new(Notify::new());
-    let state = Arc::new(AppState::new(
+    let state = Arc::new(AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(EmptyPendingProvider {
@@ -7160,7 +7723,7 @@ async fn provider_retry_events_name_the_requested_turn_model() {
             },
         );
     }
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
@@ -8163,7 +8726,7 @@ async fn make_state_with_tool_provider_and_storage(
     .await
     .expect("create default thread");
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         provider,
@@ -8205,7 +8768,7 @@ pub(crate) async fn make_state_with_capturing_tools(
 
     let (provider, captured) = CapturingMultiRoundProvider::new(rounds);
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -8217,6 +8780,350 @@ pub(crate) async fn make_state_with_capturing_tools(
     );
 
     (state, session_id, captured)
+}
+
+/// A state registering file tools and `memory_read`, filtered by the chosen
+/// allow and deny lists, with the given session metadata and origin. The
+/// provider captures its one request.
+async fn make_state_offering_memory_read(
+    allow: &[&str],
+    deny: &[&str],
+    session_metadata: Option<serde_json::Value>,
+    origin: Option<swage_storage::SessionOrigin>,
+) -> (
+    AppState,
+    Uuid,
+    Arc<std::sync::Mutex<Option<CompletionRequest>>>,
+) {
+    let storage = Arc::new(MockStorage::new());
+    let topic = storage.general_scope().await.expect("create default topic");
+    let session = storage
+        .create_session(NewSession {
+            metadata: session_metadata,
+            origin: origin.unwrap_or(swage_storage::SessionOrigin::Direct),
+            ..new_session(topic.id)
+        })
+        .await
+        .expect("create session");
+    let session_id = session.id;
+    ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id,
+            agent_id: "gateway".to_string(),
+        },
+    )
+    .await
+    .expect("create default thread");
+
+    let (provider, captured) = CapturingProvider::new(vec![
+        StreamChunk::Delta {
+            content: "noted".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]);
+    let mut config = swage_config::ResolvedConfig::default();
+    config.tools.permissions.allow = allow.iter().map(|tool| tool.to_string()).collect();
+    config.tools.permissions.deny = deny.iter().map(|tool| tool.to_string()).collect();
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        config,
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(crate::tool::memory::MemoryReadTool) as Arc<dyn crate::tool::Tool>,
+            Arc::new(crate::tool::file_read::FileReadTool {
+                max_output_bytes: 64 * 1024,
+            }),
+            Arc::new(crate::tool::file_list::FileListTool),
+            Arc::new(crate::tool::file_write::FileWriteTool),
+            Arc::new(crate::tool::file_edit::FileEditTool),
+        ]),
+        None,
+    );
+    (state, session_id, captured)
+}
+
+/// All system text of the one captured provider request, and whether it
+/// offered `memory_read`, so guidance in any system message is checked
+/// against the tools the model was actually given.
+fn memory_text_and_offer_of(
+    captured: &Arc<std::sync::Mutex<Option<CompletionRequest>>>,
+) -> (String, bool) {
+    let request = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the provider saw one request");
+    let offered = request
+        .tool_definitions
+        .iter()
+        .any(|definition| definition["name"] == crate::tool::memory::MEMORY_READ_TOOL);
+    let memory = request
+        .messages
+        .iter()
+        .filter(|message| message.role() == Role::System)
+        .map(ChatMessage::text_content)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    assert!(memory.contains("## Memory index"), "{memory}");
+    (memory, offered)
+}
+
+/// A scheduled turn reaches the same context assembly as a direct turn,
+/// with real entries indexed from the session's retained configuration root.
+async fn scheduled_memory_request(with_read_tool: bool) -> (String, bool) {
+    let allow = if with_read_tool {
+        vec![
+            "file_read",
+            "file_list",
+            "file_write",
+            "file_edit",
+            "memory_read",
+        ]
+    } else {
+        vec!["file_read", "file_list", "file_write", "file_edit"]
+    };
+    let (mut state, session_id, captured) = make_state_offering_memory_read(
+        &allow,
+        &[],
+        None,
+        Some(swage_storage::SessionOrigin::ScheduleRun {
+            schedule_id: Uuid::new_v4(),
+        }),
+    )
+    .await;
+    let root = tempfile::Builder::new()
+        .prefix("scheduled-memory-")
+        .tempdir_in(&state.config_root)
+        .expect("isolated memory root inside the test home");
+    state.config_root = root.path().to_path_buf();
+    crate::memory::write_entry(
+        root.path(),
+        &ScopeLocation::General,
+        &crate::memory::MemoryReference::parse("general/planning").unwrap(),
+        "The operator plans the following week on Friday.",
+        "Private entry detail beyond the summary.",
+    )
+    .await
+    .expect("populate the on-disk memory index");
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Review my weekly planning preference.".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("scheduled turn should complete");
+    {
+        let request = captured.lock().unwrap();
+        let request = request.as_ref().expect("provider received the turn");
+        let mut offered = request
+            .tool_definitions
+            .iter()
+            .map(|definition| definition["name"].as_str().expect("named tool"))
+            .collect::<Vec<_>>();
+        offered.sort_unstable();
+        let mut expected = allow;
+        expected.sort_unstable();
+        assert_eq!(offered, expected, "the scheduled request's exact tool list");
+    }
+    let (system, offered) = memory_text_and_offer_of(&captured);
+    assert!(
+        system.contains("general/planning — The operator plans the following week on Friday."),
+        "real index summary: {system}"
+    );
+    assert!(
+        !system.contains("Private entry detail beyond the summary."),
+        "entry bodies require a read: {system}"
+    );
+    println!(
+        "scheduled memory controls: populated summary present; body absent; exact tool list matches; memory_read offered={offered}"
+    );
+    (system, offered)
+}
+
+#[tokio::test]
+async fn memory_scheduled_file_only_receives_summaries_as_all_readable_memory() {
+    let (system, offered) = scheduled_memory_request(false).await;
+    assert!(!offered);
+    assert!(
+        !system.contains("memory_read"),
+        "no system message may direct an unavailable memory read: {system}"
+    );
+    assert!(
+        system.contains("the summaries are all of memory you can read"),
+        "summary-only guidance: {system}"
+    );
+}
+
+#[tokio::test]
+async fn memory_scheduled_with_read_tool_receives_entry_read_guidance() {
+    let (system, offered) = scheduled_memory_request(true).await;
+    assert!(offered);
+    assert!(
+        system.contains("read the entry with `memory_read`"),
+        "entry-read guidance: {system}"
+    );
+}
+
+/// The memory text names `memory_read` only in a session whose tools offer
+/// it: a file-only agent is told the index is all it can read, while a
+/// session with the tool is told to read an entry by its reference.
+#[tokio::test]
+async fn memory_guidance_names_the_read_tool_only_when_the_session_has_it() {
+    for (allow, deny, offered) in [
+        (&["file_read"][..], &[][..], false),
+        (&["*"][..], &["memory_read"][..], false),
+        (&["*"][..], &[][..], true),
+    ] {
+        let (state, session_id, captured) =
+            make_state_offering_memory_read(allow, deny, None, None).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "Hello".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("turn should complete");
+
+        let (memory, offered_to_model) = memory_text_and_offer_of(&captured);
+        assert_eq!(
+            offered_to_model, offered,
+            "allow {allow:?} deny {deny:?}: the request's tool list"
+        );
+        assert_eq!(
+            memory.contains("`memory_read`"),
+            offered_to_model,
+            "allow {allow:?} deny {deny:?}: {memory}"
+        );
+        if !offered {
+            assert!(
+                memory.contains("the summaries are all of memory you can read"),
+                "a session without the tool is told what it can read: {memory}"
+            );
+        }
+    }
+}
+
+/// A session hosted on a remote device is offered only the tools the device
+/// advertises, so a granted `memory_read` the device does not carry is
+/// withheld from the text as the dispatcher withholds it from the model.
+#[tokio::test]
+async fn memory_guidance_follows_the_device_hosts_advertised_tools() {
+    let (state, session_id, captured) = make_state_offering_memory_read(
+        &["*"],
+        &[],
+        Some(serde_json::json!({ "device_id": "bench" })),
+        None,
+    )
+    .await;
+    state.devices.lock().await.devices.insert(
+        "bench".into(),
+        crate::device::RegisteredDevice {
+            device_id: "bench".into(),
+            label: None,
+            kind: crate::device::DeviceKind::AttachedDevice,
+            shared_token_secret_ref: Some("secret://bench".into()),
+            workspace_root: std::path::PathBuf::from("/"),
+            workspace_roots: vec![std::path::PathBuf::from("/")],
+            capabilities: vec!["shell".into(), "file_read".into()],
+            registered_at: chrono::Utc::now(),
+        },
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Hello".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("turn should complete");
+
+    let (memory, offered_to_model) = memory_text_and_offer_of(&captured);
+    assert!(
+        !offered_to_model,
+        "the device host withholds memory_read from the request's tool list"
+    );
+    assert!(
+        !memory.contains("`memory_read`"),
+        "a tool the device does not advertise is not named: {memory}"
+    );
+    assert!(memory.contains("the summaries are all of memory you can read"));
+}
+
+/// The offering answer follows the runtime that will run the turn: a granted
+/// tool that still needs approval is offered by the agent runtime, which
+/// pauses for the approval, and withheld by the Codex runtime until a grant
+/// lifts the gate.
+#[tokio::test]
+async fn an_approval_gated_tool_is_offered_only_where_the_runtime_offers_it() {
+    use crate::tool::memory::MEMORY_READ_TOOL;
+    use crate::turn::dispatcher::turn_offered_tools;
+
+    let (state, _session_id, _captured) =
+        make_state_offering_memory_read(&["*"], &[], None, None).await;
+    let agent_config = swage_agent::AgentConfig::new("gateway");
+    let mut gated = swage_config::ResolvedConfig::default();
+    gated.tools.permissions.allow = vec!["*".into()];
+    gated.tools.permissions.require_approval =
+        vec![swage_config::model::RequireApprovalEntry::Simple(
+            MEMORY_READ_TOOL.into(),
+        )];
+    let no_grants = std::collections::HashSet::new();
+    assert!(
+        turn_offered_tools(&state, &gated, &agent_config, None, None, None, &no_grants,)
+            .await
+            .contains(MEMORY_READ_TOOL),
+        "the agent runtime offers a gated tool and pauses for the approval"
+    );
+
+    let mut codex = codex_turn_config();
+    codex.tools.permissions = gated.tools.permissions.clone();
+    assert!(
+        !turn_offered_tools(&state, &codex, &agent_config, None, None, None, &no_grants,)
+            .await
+            .contains(MEMORY_READ_TOOL),
+        "the Codex runtime withholds a gated tool"
+    );
+
+    let session_id = Uuid::new_v4();
+    let granted = std::collections::HashSet::from([crate::state::ApprovalGrantKey {
+        session_id: Some(session_id),
+        topic_id: None,
+        kind: swage_storage::model::ApprovalKind::Tool,
+        name: MEMORY_READ_TOOL.into(),
+        access: None,
+    }]);
+    assert!(
+        turn_offered_tools(
+            &state,
+            &codex,
+            &agent_config,
+            None,
+            None,
+            Some(session_id),
+            &granted,
+        )
+        .await
+        .contains(MEMORY_READ_TOOL),
+        "a session's grant lifts the gate and the Codex runtime offers the tool"
+    );
 }
 
 pub(crate) async fn make_state_with_approval_gated_echo(
@@ -8472,7 +9379,7 @@ async fn cancelled_during_tool_dispatch_persists_partial_without_waiting() {
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MultiRoundMockProvider::new(vec![round_1])) as Arc<dyn LlmProvider>,
@@ -8596,7 +9503,7 @@ async fn cancelled_dispatch_with_failed_record_remains_cancelled_and_marks_turn_
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MultiRoundMockProvider::new(vec![round_1])) as Arc<dyn LlmProvider>,
@@ -8786,15 +9693,16 @@ async fn second_tool_round_request_keeps_structured_tool_messages() {
     assert_eq!(requests.len(), 2, "expected two provider requests");
 
     let second = &requests[1];
-    // Orientation, working norms and the memory index stand before the
-    // conversation; then the user's turn, the tool call, and its result.
-    assert_eq!(second.messages.len(), 6);
+    // Orientation, working norms, the clock and the memory index stand
+    // before the user's turn, the tool call, and its result.
+    assert_eq!(second.messages.len(), 7);
     assert_eq!(second.messages[0].role(), Role::System);
     assert_eq!(second.messages[1].role(), Role::System);
     assert_eq!(second.messages[2].role(), Role::System);
-    assert_eq!(second.messages[3].role(), Role::User);
-    assert_eq!(second.messages[4].role(), Role::Assistant);
-    assert_eq!(second.messages[5].role(), Role::User);
+    assert_eq!(second.messages[3].role(), Role::System);
+    assert_eq!(second.messages[4].role(), Role::User);
+    assert_eq!(second.messages[5].role(), Role::Assistant);
+    assert_eq!(second.messages[6].role(), Role::User);
     assert!(
         second.messages.iter().any(|message| {
             message.role() == Role::System
@@ -8965,6 +9873,7 @@ async fn second_tool_round_request_replays_reasoning_when_model_capability_opts_
             capabilities: swage_config::ModelCapabilitiesConfig {
                 reasoning_replay: true,
                 effort: None,
+                output_limit: None,
             },
         },
     )]
@@ -9062,7 +9971,7 @@ async fn later_turn_rebuilds_tool_replay_from_persisted_compact_rows() {
         ],
     ]));
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         first_provider as Arc<dyn LlmProvider>,
@@ -9239,7 +10148,7 @@ async fn later_turn_rebuilds_multi_round_tool_replay_as_separate_pairs() {
         ],
     ]));
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         first_provider as Arc<dyn LlmProvider>,
@@ -9443,7 +10352,7 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
             finish_reason: None,
         },
     ]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -9617,7 +10526,7 @@ async fn later_turn_rebuilds_failed_tool_replay_as_error() {
             finish_reason: None,
         },
     ]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -10486,7 +11395,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         Arc::new(ShellMockTool) as Arc<dyn crate::tool::Tool>,
     ]);
 
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -10517,6 +11426,7 @@ async fn delegate_tool_executes_child_agent_and_resumes_parent_turn() {
         }),
         dispatcher,
         None,
+        swage_home.path().to_path_buf(),
     );
 
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -11067,7 +11977,7 @@ async fn delegated_child_snapshot_records_exact_non_empty_effective_tool_grant()
         Arc::new(ShellMockTool) as Arc<dyn crate::tool::Tool>,
         Arc::new(FileReadMockTool) as Arc<dyn crate::tool::Tool>,
     ]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -11186,6 +12096,114 @@ async fn delegated_snapshot_loss_records_degradation_and_double_failure_escalate
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn review_fix_2_detached_observation_includes_completion_time() {
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let topic = storage.general_scope().await.expect("default topic");
+    let session = storage
+        .create_session(new_session(topic.id))
+        .await
+        .expect("create session");
+    let session_id = session.id;
+    let root_thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id,
+            agent_id: "gateway".to_string(),
+        },
+    )
+    .await
+    .expect("create root thread");
+
+    let child_started = Arc::new(Notify::new());
+    let child_release = Arc::new(Notify::new());
+    let child_marker = Uuid::new_v4().to_string();
+    let (provider, _captured_requests) = DetachedGatedProvider::new(
+        child_started.clone(),
+        child_release.clone(),
+        child_marker.clone(),
+    );
+
+    let dispatcher =
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn crate::tool::Tool>
+        ]);
+    let root = tempfile::tempdir().unwrap();
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        dispatcher,
+        None,
+        root.path().to_path_buf(),
+    );
+
+    let pause =
+        crate::workflow::workflow_pause_test_hook::install("detached-snapshot-pending", session_id);
+    let parent_state = state.clone();
+    let parent = tokio::spawn(async move {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &parent_state,
+            session_id,
+            None,
+            "Delegate independently".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .unwrap();
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), pause.entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    child_release.notify_one();
+    let child_turn = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let children = state.storage.list_by_topic(topic.id).await.unwrap();
+            for child in children.into_iter().filter(|child| child.id != session_id) {
+                for thread in state.storage.list_by_session(child.id).await.unwrap() {
+                    for turn in state.storage.list_turns_by_thread(thread.id).await.unwrap() {
+                        if turn.state == TurnState::Completed {
+                            return turn;
+                        }
+                    }
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    pause.release.add_permits(1);
+    parent.await.unwrap();
+    let root_turn = state
+        .storage
+        .list_turns_by_thread(root_thread.id)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let calls = state
+        .storage
+        .list_tool_calls_by_turn(root_turn.id)
+        .await
+        .unwrap();
+    let call = calls.iter().find(|call| call.tool == "delegate").unwrap();
+    let output: serde_json::Value = serde_json::from_str(call.result.as_deref().unwrap()).unwrap();
+    assert_eq!(output["status"], "completed");
+    let observed =
+        chrono::DateTime::parse_from_rfc3339(output["status_as_of"].as_str().unwrap()).unwrap();
+    assert!(
+        observed >= child_turn.completed_at.unwrap(),
+        "a completed detached child observation must not precede its completion"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn completed_detached_result_reaches_parent_next_turn() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let topic = storage.general_scope().await.expect("default topic");
@@ -11217,7 +12235,7 @@ async fn completed_detached_result_reaches_parent_next_turn() {
         crate::tool::ToolDispatcher::allow_all(vec![
             Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn crate::tool::Tool>
         ]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -11272,10 +12290,22 @@ async fn completed_detached_result_reaches_parent_next_turn() {
             .expect("delegate tool result should be stored"),
     )
     .expect("delegate tool result should be JSON");
-    assert_eq!(detached_output["status"], "detached");
     assert_eq!(
-        detached_output["result_delivery"],
-        "The delegated work continues independently. Its durable result message will be stored with correlation_id equal to delegate_message_id when the child finishes."
+        detached_output["status"], "processing",
+        "the gated child is still awaiting its provider"
+    );
+    assert_eq!(detached_output["completion_mode"], "detach");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(
+            detached_output["status_as_of"]
+                .as_str()
+                .expect("observation time")
+        )
+        .is_ok()
+    );
+    assert!(
+        detached_output.get("result_delivery").is_none(),
+        "no static claim about continued execution may contradict the observed state"
     );
 
     let delegate_message_id = detached_output["delegate_message_id"]
@@ -11637,7 +12667,7 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
             },
         ],
     ]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -11682,6 +12712,33 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
         .expect("list child sessions");
     assert_eq!(sessions_after_first.len(), 1);
     let child_session_id = sessions_after_first[0].id;
+    let creation_draws = storage
+        .list_audit_events_by_session(child_session_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.entity_id == crate::experimentation::LOCATION_TASK_PROMPT)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        creation_draws.len(),
+        1,
+        "the creation draw belongs to the child session"
+    );
+    let creation_turn =
+        Uuid::parse_str(creation_draws[0].metadata["turn_id"].as_str().unwrap()).unwrap();
+    assert_ne!(
+        creation_turn, parent_turn.id,
+        "the child's draw must not activate its parent turn"
+    );
+    let recorded_turn = storage.get_turn(creation_turn).await.unwrap().unwrap();
+    let recorded_thread = ThreadStore::get(&*storage, recorded_turn.thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        recorded_thread.session_id, child_session_id,
+        "selection attribution uses an actual child turn"
+    );
     let child_thread = storage
         .list_by_session(child_session_id)
         .await
@@ -11771,13 +12828,18 @@ async fn a_named_child_is_delegated_to_again_with_everything_it_was_told_before(
         .list_audit_events_by_session(child_session_id)
         .await
         .unwrap();
+    let continued_draws = attributed
+        .iter()
+        .filter(|event| event.entity_id == crate::experimentation::LOCATION_TASK_PROMPT)
+        .collect::<Vec<_>>();
     assert_eq!(
-        attributed
-            .iter()
-            .filter(|event| event.entity_id == crate::experimentation::LOCATION_TASK_PROMPT)
-            .count(),
+        continued_draws.len(),
         1,
-        "the delegation to a known child must attribute its task draw to that child"
+        "continuation does not redraw the task prompt"
+    );
+    assert_eq!(
+        continued_draws[0].id, creation_draws[0].id,
+        "continuation reuses the creation decision instead of recording a parent turn as child activity"
     );
     let sessions_after_second = storage
         .list_sessions_by_agent_id("agent-b")
@@ -11992,7 +13054,7 @@ async fn workflow_call_tool_bound_survives_delegation_and_child_continuation() {
             },
         ],
     ]);
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -12128,7 +13190,7 @@ async fn delegated_skill_selection_is_carried_by_the_composition_once() {
         })
         .await
         .expect("target agent definition");
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MockProvider::new(vec![
@@ -12142,6 +13204,7 @@ async fn delegated_skill_selection_is_carried_by_the_composition_once() {
         swage_config::ResolvedConfig::default(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
+        swage_home.path().to_path_buf(),
     );
 
     let outcome = GatewayDelegationHandler::new(state)
@@ -13241,7 +14304,7 @@ async fn capture_provider_effort_for_selected_model(
             .await
             .expect("select session model");
     }
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -13417,11 +14480,12 @@ async fn process_turn_resolves_effort_against_the_declared_capability_and_record
                     levels: vec![swage_core::Effort::Low, swage_core::Effort::High],
                     can_disable: false,
                 }),
+                output_limit: None,
             },
             ..Default::default()
         },
     );
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -13522,6 +14586,135 @@ fn effort_capability_falls_back_from_the_catalogue_to_the_adapter() {
     );
 }
 
+/// The output limit resolves beside the effort: the caller's own value
+/// first, then the catalogue entry's declaration, then the adapter's account
+/// of the documented limit.
+#[test]
+fn output_limit_falls_back_from_the_caller_to_the_catalogue_to_the_adapter() {
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "claude".into();
+    config.models.entries.insert(
+        "claude".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "anthropic".into(),
+            model_id: "claude-opus-5-5".into(),
+            ..Default::default()
+        },
+    );
+    let anthropic = swage_provider::anthropic::AnthropicProvider::new("key", "claude-opus-5-5");
+    assert_eq!(
+        super::output_limit_for_model(None, &config, "claude", &anthropic),
+        Some(swage_core::ResolvedOutputLimit {
+            tokens: 128_000,
+            source: swage_core::OutputLimitSource::Adapter,
+        })
+    );
+
+    config
+        .models
+        .entries
+        .get_mut("claude")
+        .unwrap()
+        .capabilities
+        .output_limit = Some(50_000);
+    assert_eq!(
+        super::output_limit_for_model(None, &config, "claude", &anthropic),
+        Some(swage_core::ResolvedOutputLimit {
+            tokens: 50_000,
+            source: swage_core::OutputLimitSource::Catalogue,
+        }),
+        "the catalogue's own declaration wins over the adapter's"
+    );
+    assert_eq!(
+        super::output_limit_for_model(Some(512), &config, "claude", &anthropic),
+        Some(swage_core::ResolvedOutputLimit {
+            tokens: 512,
+            source: swage_core::OutputLimitSource::Caller,
+        }),
+        "a caller's own limit is sent as it is"
+    );
+
+    let mock = MockProvider::new(vec![]);
+    assert_eq!(
+        super::output_limit_for_model(None, &config, "unknown", &mock),
+        None
+    );
+}
+
+/// An interactive turn with no preset limit carries the model's declared
+/// output limit to the provider, and the turn's snapshot names its source.
+#[tokio::test]
+async fn process_turn_carries_the_declared_output_limit_and_records_its_source() {
+    let chunks = vec![
+        StreamChunk::Delta {
+            content: "Hello".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ];
+    let (provider, captured_request) = CapturingProvider::new(chunks);
+    let (storage, session_id) = make_storage_with_session().await;
+    let mut config = swage_config::ResolvedConfig::default();
+    config.models.default = "local".into();
+    config.models.entries.insert(
+        "local".into(),
+        swage_config::ModelEndpointConfig {
+            provider_id: "local".into(),
+            model_id: "local-model".into(),
+            capabilities: swage_config::ModelCapabilitiesConfig {
+                output_limit: Some(50_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        crate::test_support::with_mock_provider_entries(config),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("hi"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("turn ok");
+
+    let request = captured_request
+        .lock()
+        .unwrap()
+        .take()
+        .expect("provider request");
+    assert_eq!(request.max_tokens, Some(50_000));
+
+    let snapshot = storage
+        .db
+        .lock()
+        .await
+        .snapshots
+        .values()
+        .next()
+        .map(|(report, _)| report.clone())
+        .expect("context snapshot recorded");
+    let report: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+    assert_eq!(report["provider_visible"]["output_limit"]["tokens"], 50_000);
+    assert_eq!(
+        report["provider_visible"]["output_limit"]["source"],
+        "catalogue"
+    );
+}
+
 #[tokio::test]
 async fn process_turn_passes_tool_context_to_tools() {
     let captured = Arc::new(std::sync::Mutex::new(None));
@@ -13552,7 +14745,7 @@ async fn process_turn_passes_tool_context_to_tools() {
 
     let provider = Arc::new(MultiRoundMockProvider::new(vec![round_1, round_2]));
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         provider as Arc<dyn LlmProvider>,
@@ -13623,7 +14816,7 @@ async fn process_turn_resolves_config_per_topic_and_completes_turn() {
     .await
     .expect("thread");
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -13669,7 +14862,7 @@ async fn process_turn_uses_hot_swapped_runtime_config_for_next_turn() {
     let (provider, captured_request) = CapturingProvider::new(chunks);
     let (storage, session_id) = make_storage_with_session().await;
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
@@ -13758,7 +14951,7 @@ async fn invalid_call_scoped_assembly_is_rejected_before_provider_dispatch() {
     let _guard = SwageHomeGuard::isolate();
     let (provider, captured_request) = CapturingProvider::new(vec![]);
     let (storage, session_id) = make_storage_with_session().await;
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -13810,7 +15003,7 @@ async fn unknown_forced_context_assembly_rejects_call_scoped_override() {
             forced_variant: Some("missing".to_owned()),
         },
     );
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -13916,7 +15109,7 @@ async fn forced_default_context_assembly_runs_and_records_forced_reason() {
             forced_variant: Some("default".to_owned()),
         },
     );
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -14266,7 +15459,7 @@ async fn process_turn_uses_hot_swapped_runtime_tool_policy_for_next_turn() {
     let (provider, captured_request) = CapturingProvider::new(chunks);
     let (storage, session_id) = make_storage_with_session().await;
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
@@ -14322,7 +15515,7 @@ async fn process_turn_stream_request_includes_registered_tool_definitions() {
     let (provider, captured_request) = CapturingProvider::new(chunks);
     let (storage, session_id) = make_storage_with_session().await;
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -14455,7 +15648,7 @@ async fn turn_model_snapshot_records_the_effective_model_and_its_source() {
             ..Default::default()
         },
     );
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -14634,7 +15827,7 @@ async fn process_turn_stream_request_inherits_global_permissions_without_workspa
     let (provider, captured_request) = CapturingProvider::new(chunks);
     let (storage, session_id) = make_storage_with_session().await;
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -14865,7 +16058,7 @@ async fn tool_context_working_directory_is_passed_during_tool_execution() {
 
     let provider = Arc::new(MultiRoundMockProvider::new(vec![round_1, round_2]));
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         provider as Arc<dyn LlmProvider>,
@@ -15918,7 +17111,7 @@ async fn unattached_session_environment_identifies_resolved_scratch_root() {
     let (tool_root, _) =
         resolve_agent_tool_root_from_policy(root.path(), &policy, &topic.location(), session.id);
 
-    let environment = build_session_environment(&topic, &tool_root, &session);
+    let environment = build_session_environment(&topic, &tool_root, &session, &policy);
     assert_eq!(
         environment.tool_root,
         swage_context::orientation::ToolRoot::ManagedScratch(tool_root.path.display().to_string())
@@ -15954,10 +17147,14 @@ async fn placed_worker_orientation_keeps_its_working_directory() {
         session.id,
         worker_placement_path(session.metadata.as_ref()),
     );
-    let environment = build_session_environment(&topic, &tool_root, &session);
-    let text = swage_context::orientation::OrientationElement::new(environment, vec![]).content()
-        [0]
-    .text_content();
+    let environment = build_session_environment(&topic, &tool_root, &session, &policy);
+    let text = swage_context::orientation::OrientationElement::new(
+        environment,
+        vec![],
+        std::collections::BTreeSet::new(),
+    )
+    .content()[0]
+        .text_content();
     assert!(text.contains(&format!("Working directory: {}", placed.display())));
     assert!(!text.contains("No workspace is attached"));
     assert_eq!(tool_root.source, ToolRootSource::WorkerPlacement);
@@ -16161,6 +17358,7 @@ fn test_environment() -> swage_context::orientation::SessionEnvironment {
         topic_name: String::new(),
         topic_description: String::new(),
         tool_root: swage_context::orientation::ToolRoot::ManagedScratch("/scratch/session".into()),
+        workspaces: vec![],
         started_at: chrono::Utc::now(),
         channel: None,
     }
@@ -16179,21 +17377,26 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
 
     let elements = build_assembly_elements(
         instructions,
+        &[],
         vec![],
         vec![],
         history,
-        Some(MemoryIndexElement::new(None, Vec::new())),
+        Some(MemoryIndexElement::new(
+            None,
+            Vec::new(),
+            swage_context::memory::MemoryReach::EntriesByReference,
+        )),
         test_environment(),
         vec![],
+        std::collections::BTreeSet::new(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
         None,
     );
 
-    // Should produce six elements: orientation, working norms, prompts,
-    // skills (empty), memory, and history.
-    assert_eq!(elements.len(), 6);
+    // Baseline, clock, prompts, skills, memory, and history.
+    assert_eq!(elements.len(), 7);
     let names: Vec<&str> = elements.iter().map(|e| e.name()).collect();
     assert!(
         names.contains(&"orientation"),
@@ -16215,19 +17418,21 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
 fn elements_built_without_memory_omit_the_memory_element() {
     let elements = build_assembly_elements(
         "",
+        &[],
         vec![],
         vec![],
         vec![ChatMessage::new(Role::User, "Hello")],
         None,
         test_environment(),
         vec![],
+        std::collections::BTreeSet::new(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
         None,
     );
 
-    assert_eq!(elements.len(), 5);
+    assert_eq!(elements.len(), 6);
     // PromptsElement with empty rules produces no messages; the orientation
     // baseline is what keeps an unconfigured session's context non-empty.
     let orientation = elements.iter().find(|e| e.name() == "orientation").unwrap();
@@ -16266,15 +17471,21 @@ fn a_workflow_worker_session_does_not_carry_memory_but_every_other_does() {
 
 #[tokio::test]
 async fn named_assembly_composes_the_memory_element_like_any_other() {
-    let memory = MemoryIndexElement::new(Some("Important topic context".to_string()), Vec::new());
+    let memory = MemoryIndexElement::new(
+        Some("Important topic context".to_string()),
+        Vec::new(),
+        swage_context::memory::MemoryReach::EntriesByReference,
+    );
     let elements = build_assembly_elements(
         "Be helpful.",
+        &[],
         vec![],
         vec![],
         vec![],
         Some(memory),
         test_environment(),
         vec![],
+        std::collections::BTreeSet::new(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
@@ -16368,13 +17579,14 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
     let mut config = swage_config::ResolvedConfig::default();
     config.context.assembly = "default".into();
     config.instructions = "Task: {{task}}; owner: {{owner}}".into();
-    let state = AppState::new(
+    let state = AppState::new_with_config_root(
         Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::TopicStore>,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
         config.clone(),
         crate::tool::ToolDispatcher::allow_all(vec![]),
         None,
+        swage_home.path().to_path_buf(),
     );
     let host_context =
         swage_tool::context::MockToolContext::new("delegate", session.id.to_string());
@@ -16410,6 +17622,7 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
             assembly: Some("briefing".into()),
             skills: None,
         },
+        session_value_dispatcher.offered_tools(),
     );
 
     let output = assembler
@@ -16481,15 +17694,18 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
 fn build_assembly_elements_memory_element_contains_provided_content() {
     let elements = build_assembly_elements(
         "Be helpful.",
+        &[],
         vec![],
         vec![],
         vec![],
         Some(MemoryIndexElement::new(
             Some("Important topic context".to_string()),
             Vec::new(),
+            swage_context::memory::MemoryReach::EntriesByReference,
         )),
         test_environment(),
         vec![],
+        std::collections::BTreeSet::new(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
@@ -16718,6 +17934,115 @@ async fn active_workspace_file_access_tracks_trust_and_revocation() {
     }
 }
 
+/// File provenance survives resolution and overlays without parsing attribution
+/// comments from operator-authored text or changing the supplied system message.
+#[test]
+fn instruction_provenance_counts_configured_files_at_their_own_levels() {
+    let root = tempfile::tempdir().unwrap();
+    let scope = swage_core::ScopeLocation::topic("provenance");
+    let topic = scope.data_dir(root.path());
+    std::fs::create_dir_all(root.path().join("instructions")).unwrap();
+    std::fs::create_dir_all(topic.join("instructions")).unwrap();
+    // An attribution-shaped comment in file content is not another source.
+    let global = "Global file.\n<!-- level: Topic -->\nStill the global file.";
+    std::fs::write(root.path().join("instructions/01-global.md"), global).unwrap();
+    std::fs::write(topic.join("instructions/01-topic.md"), "Topic file.").unwrap();
+
+    for extra_global in [false, true] {
+        if extra_global {
+            std::fs::write(
+                root.path().join("instructions/02-global.md"),
+                "Second global.",
+            )
+            .unwrap();
+        }
+        let config =
+            swage_config::load_resolved_config_from(root.path(), &scope, "test-agent").unwrap();
+        let config = swage_config::apply_overlay(config, Default::default());
+        let mut expected = if extra_global {
+            format!(
+                "<!-- level: Global -->\n\n{global}\n\nSecond global.\n\n<!-- level: Topic -->\n\nTopic file."
+            )
+        } else {
+            format!("<!-- level: Global -->\n\n{global}\n\n<!-- level: Topic -->\n\nTopic file.")
+        };
+        let config = if extra_global {
+            let config = super::configuration::apply_agent_definition(
+                config,
+                &swage_storage::NewAgentDefinition {
+                    id: "test-agent".into(),
+                    topic_id: None,
+                    display_name: "Test agent".into(),
+                    description: String::new(),
+                    instructions: "Agent file.".into(),
+                    model_id: None,
+                    tool_permissions: None,
+                    skills: vec![],
+                    output_schema: None,
+                    output_max_retries: None,
+                },
+            );
+            expected.push_str("\n\nAgent file.\n\nTask file.");
+            super::configuration::apply_task_definition(
+                config,
+                &swage_storage::TaskDefinition {
+                    id: "test-task".into(),
+                    instructions: "Task file.".into(),
+                    model_id: None,
+                    tool_permissions: None,
+                    output_schema: None,
+                    output_max_retries: None,
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                },
+            )
+            .unwrap()
+        } else {
+            config
+        };
+        let elements = build_assembly_elements(
+            &config.instructions,
+            &config.instruction_sources,
+            vec![],
+            vec![],
+            vec![],
+            None,
+            test_environment(),
+            vec![],
+            std::collections::BTreeSet::new(),
+            "gpt-test-model",
+            swage_context::working_norms::WorkingNormsScaffold::Native,
+            &[],
+            None,
+        );
+        let output = swage_context::assembly::assemble(
+            &elements,
+            &config.context,
+            &swage_context::tokeniser::TiktokenTokeniser::new("gpt-test-model"),
+        );
+        let prompts = output
+            .report
+            .elements
+            .iter()
+            .find(|e| e.name == "prompts")
+            .unwrap();
+        assert_eq!(
+            prompts.full_text.as_deref(),
+            Some(expected.as_str()),
+            "provenance must not change the provider-visible instruction bytes"
+        );
+        assert_eq!(
+            prompts.source,
+            if extra_global {
+                "prompt rules (5 total: 2 Global, 1 Topic, 2 Agent)"
+            } else {
+                "prompt rules (2 total: 1 Global, 1 Topic)"
+            },
+            "count the files actually loaded, not the single merged string or comments in content"
+        );
+    }
+}
+
 /// Guidance rules extend the resolved instruction baseline rather than
 /// replacing it: the prompts element carries the resolved instructions
 /// first, then the guidance content, in one system message.
@@ -16730,12 +18055,14 @@ fn assembly_elements_layer_operator_guidance_after_instructions() {
 
     let elements = build_assembly_elements(
         "BASELINE INSTRUCTIONS",
+        &[],
         guidance,
         vec![],
         vec![],
         None,
         test_environment(),
         vec![],
+        std::collections::BTreeSet::new(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
@@ -18339,7 +19666,7 @@ async fn an_image_attachment_is_recorded_and_reaches_the_provider_as_a_content_p
     )
     .await
     .expect("thread");
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider) as Arc<dyn LlmProvider>,
@@ -18654,6 +19981,7 @@ async fn an_image_url_the_provider_cannot_resolve_is_refused_before_persistence(
     // The reference the adapter can inline is admitted by the same gate.
     crate::turn::check_attachment_support(
         &state.workflow_capabilities,
+        &swage_config::AttachmentsConfig::default(),
         &[MessageAttachment::ImageUrl {
             url: "data:image/png;base64,cG5nLWJ5dGVz".into(),
         }],
@@ -18759,7 +20087,7 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
     };
     use swage_storage::{NewSession, NewThread, NewToolCall, NewTurn, TurnState};
 
-    let storage = SqliteStorage::in_memory().expect("sqlite");
+    let storage = Arc::new(SqliteStorage::in_memory().expect("sqlite"));
     let topic = storage.general_scope().await.unwrap();
     let session = storage
         .create_session(NewSession {
@@ -18772,7 +20100,7 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
         .await
         .unwrap();
     let thread = ThreadStore::create(
-        &storage,
+        &*storage,
         NewThread {
             session_id: session.id,
             agent_id: "gateway".into(),
@@ -18844,9 +20172,13 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
         .await
         .unwrap();
 
-    crate::shutdown::recover_orphaned_turns(&storage, &storage)
-        .await
-        .expect("recovery");
+    crate::shutdown::recover_orphaned_turns(
+        &*storage,
+        &*storage,
+        &swage_agent::MessageRouter::new(storage.clone(), None),
+    )
+    .await
+    .expect("recovery");
 
     let calls = storage.list_tool_calls_by_turn(turn.id).await.unwrap();
     assert_eq!(calls[0].status.as_deref(), Some("success"));
@@ -18857,7 +20189,7 @@ async fn an_interrupted_turns_tool_round_is_settled_at_recovery_and_replayed() {
         Some(swage_storage::store::INTERRUPTED_TOOL_RESULT)
     );
 
-    let rebuilt = super::history::rebuild_thread_history_messages(&storage, thread.id)
+    let rebuilt = super::history::rebuild_thread_history_messages(&*storage, thread.id)
         .await
         .unwrap();
     let replay_parts: Vec<&swage_core::ToolReplayPart> = rebuilt
@@ -19386,6 +20718,7 @@ async fn selected_responses_entry_sharing_an_upstream_id_is_served_by_its_own_pr
         config.providers.entries.insert(
             provider_id.into(),
             swage_config::ProviderEndpointConfig {
+                display_name: None,
                 worker_staleness_threshold_ms: None,
                 protocol,
                 api_key_secret_ref: None,
@@ -19418,7 +20751,7 @@ async fn selected_responses_entry_sharing_an_upstream_id_is_served_by_its_own_pr
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
     );
     let runtime_provider = crate::startup::create_provider(&config, &secret_manager).await;
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         runtime_provider,
@@ -19707,6 +21040,7 @@ async fn turn_against_single_provider(
     config.providers.entries.insert(
         "configured-endpoint".into(),
         swage_config::ProviderEndpointConfig {
+            display_name: None,
             worker_staleness_threshold_ms: None,
             protocol,
             api_key_secret_ref: None,
@@ -19730,7 +21064,7 @@ async fn turn_against_single_provider(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
     );
     let runtime_provider = crate::startup::create_provider(&config, &secret_manager).await;
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         runtime_provider,
@@ -20282,4 +21616,2134 @@ async fn approval_scope_expired_live_waiter_interrupts_turn() {
 #[tokio::test]
 async fn approval_scope_expired_live_waiter_records_expired_feedback() {
     expired_live_waiter(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn orientation_environment_carries_every_readable_workspace_from_resolved_policy() {
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage.create_session(new_session(topic.id)).await.unwrap();
+    for (path, trusted, permissions, is_default) in [
+        ("/projects/source", true, vec!["read", "write"], true),
+        ("/references/pack", true, vec!["read"], false),
+        ("/references/other", true, vec!["read"], false),
+        ("/private/untrusted", false, vec!["read"], false),
+        ("/write-only", true, vec!["write"], false),
+    ] {
+        let attachment = storage
+            .create_workspace_attachment(NewWorkspaceAttachment {
+                topic_id: topic.id,
+                label: path.into(),
+                path: path.into(),
+                permissions: permissions.into_iter().map(str::to_string).collect(),
+                is_trusted: trusted,
+            })
+            .await
+            .unwrap();
+        if is_default {
+            storage
+                .set_topic_default_workspace(topic.id, Some(attachment.id))
+                .await
+                .unwrap();
+        }
+    }
+    let policy = load_trusted_workspace_policy(
+        &(storage as Arc<dyn swage_storage::store::Storage>),
+        topic.id,
+        None,
+    )
+    .await;
+    let tool_root = ResolvedToolRoot {
+        path: "/projects/source".into(),
+        source: ToolRootSource::AttachedWorkspace,
+    };
+    let environment = build_session_environment(&topic, &tool_root, &session, &policy);
+    let mut actual = environment
+        .workspaces
+        .iter()
+        .map(|workspace| {
+            (
+                workspace.path.as_str(),
+                workspace.can_write,
+                workspace.is_trusted,
+            )
+        })
+        .collect::<Vec<_>>();
+    actual.sort_unstable();
+    assert_eq!(
+        actual,
+        vec![
+            ("/projects/source", true, true),
+            ("/references/other", false, true),
+            ("/references/pack", false, true)
+        ]
+    );
+    let mut placed_session = session.clone();
+    placed_session.metadata = Some(serde_json::json!({ "worker_placement_can_write": false }));
+    let placement = ResolvedToolRoot::worker_placement("/projects/source".into());
+    let placed = build_session_environment(&topic, &placement, &placed_session, &policy);
+    assert_eq!(
+        placed.workspaces,
+        vec![swage_context::orientation::ReadableWorkspace {
+            path: "/projects/source".into(),
+            can_write: false,
+            is_trusted: true,
+        }],
+        "a placed worker must not advertise sibling topic workspaces"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn orientation_environment_includes_subdirectory_placement_with_its_write_grant() {
+    let root = tempfile::tempdir().unwrap();
+    let parent = root.path().join("repo");
+    let placement = parent.join("task");
+    std::fs::create_dir_all(&placement).unwrap();
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let mut session = storage.create_session(new_session(topic.id)).await.unwrap();
+    let policy = TrustedWorkspacePolicy {
+        attachments: vec![TrustedWorkspacePath {
+            path: parent,
+            is_trusted: true,
+            can_read: true,
+            can_write: false,
+        }],
+        ..Default::default()
+    };
+    for can_write in [true, false] {
+        session.metadata = Some(serde_json::json!({
+            "worker_placement_can_write": can_write,
+        }));
+        let environment = build_session_environment(
+            &topic,
+            &ResolvedToolRoot::worker_placement(placement.clone()),
+            &session,
+            &policy,
+        );
+        assert_eq!(
+            environment.workspaces,
+            vec![swage_context::orientation::ReadableWorkspace {
+                path: placement.display().to_string(),
+                can_write,
+                is_trusted: true,
+            }],
+            "the placement must inherit parent trust and advertise its own write grant"
+        );
+    }
+}
+
+#[tokio::test]
+async fn orientation_each_turn_carries_current_seconds_and_keeps_orientation_identical() {
+    let reply = vec![
+        StreamChunk::Delta {
+            content: "done".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ];
+    let (provider, captured) = CapturingMultiRoundProvider::new(vec![reply.clone(), reply]);
+    let (state, session_id, _) =
+        make_state_with_tool_provider_and_storage(Arc::new(provider)).await;
+    let mut times = Vec::new();
+    let mut orientations = Vec::new();
+    for index in 0..2 {
+        if index > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        }
+        let before = chrono::Utc::now();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "What time is it?".to_string(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .unwrap();
+        let after = chrono::Utc::now();
+        let requests = captured.lock().unwrap();
+        let request = requests.last().unwrap();
+        let texts = request
+            .messages
+            .iter()
+            .map(ChatMessage::text_content)
+            .collect::<Vec<_>>();
+        let text = texts.iter().find(|text| text.starts_with("Current time: "));
+        assert!(
+            text.is_some(),
+            "provider context has no current time: {texts:?}"
+        );
+        let time = chrono::NaiveDateTime::parse_from_str(
+            text.unwrap().trim_start_matches("Current time: "),
+            "%Y-%m-%d %H:%M:%S UTC",
+        )
+        .expect("UTC time to the second")
+        .and_utc();
+        assert!(
+            time >= before && time < after + chrono::Duration::seconds(1),
+            "{time} must be at or after {before} and less than one second after {after}"
+        );
+        times.push(time);
+        orientations.push(
+            texts
+                .into_iter()
+                .find(|text| text.contains("## Where you are"))
+                .expect("orientation"),
+        );
+    }
+    assert!(
+        times[1] > times[0],
+        "a later turn must refresh the clock: {times:?}"
+    );
+    assert_eq!(
+        orientations[0], orientations[1],
+        "orientation must remain byte-identical"
+    );
+}
+
+struct DelegationBoundsFixture {
+    state: AppState,
+    storage: Arc<swage_storage::SqliteStorage>,
+    topic: Uuid,
+    parent_turn: Uuid,
+    captured: Arc<std::sync::Mutex<Vec<CompletionRequest>>>,
+}
+
+async fn delegation_bounds_state(
+    rounds: Vec<Vec<StreamChunk>>,
+    config: swage_config::ResolvedConfig,
+) -> DelegationBoundsFixture {
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage
+        .create_session(NewSession {
+            agent_id: "root".into(),
+            ..new_session(topic.id)
+        })
+        .await
+        .unwrap();
+    let thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "root".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let turn = storage
+        .create_turn(NewTurn {
+            thread_id: thread.id,
+            agent_id: "root".into(),
+            state: TurnState::Processing,
+            user_input: Some("delegate".into()),
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+    for id in [
+        "a", "b", "child-1", "child-2", "child-3", "child-4", "child-5",
+    ] {
+        storage.upsert_agent_definition(swage_storage::NewAgentDefinition {
+            id: id.into(), topic_id: Some(topic.id), display_name: id.into(), description: String::new(),
+            instructions: String::new(), model_id: None,
+            tool_permissions: Some(serde_json::json!({"allow": ["delegate"], "deny": [], "bundles": {}, "require_approval": []})),
+            skills: vec![], output_schema: None, output_max_retries: None,
+        }).await.unwrap();
+    }
+    storage
+        .upsert_task_definition(swage_storage::NewTaskDefinition {
+            id: "retained".into(),
+            instructions: "Report the findings.".into(),
+            model_id: None,
+            tool_permissions: None,
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .unwrap();
+    let (provider, captured) = CapturingMultiRoundProvider::new(rounds);
+    let state = AppState::new(
+        storage.clone(),
+        storage.clone(),
+        Arc::new(provider),
+        config,
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn Tool>
+        ]),
+        None,
+    );
+    DelegationBoundsFixture {
+        state,
+        storage,
+        topic: topic.id,
+        parent_turn: turn.id,
+        captured,
+    }
+}
+
+fn delegation_answer() -> Vec<StreamChunk> {
+    vec![
+        StreamChunk::Delta {
+            content: "finished".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]
+}
+
+async fn continue_child_after_selection_change(invalid_pin: bool) {
+    let _home = SwageHomeGuard::isolate();
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    config.models.default = "original-route".into();
+    config.providers.entries.insert(
+        "test".into(),
+        swage_config::ProviderEndpointConfig::default(),
+    );
+    config.providers.entries.insert(
+        "second".into(),
+        swage_config::ProviderEndpointConfig::default(),
+    );
+    for id in ["original", "changed"] {
+        config.models.entries.insert(
+            format!("{id}-route"),
+            swage_config::ModelEndpointConfig {
+                provider_id: if id == "original" { "test" } else { "second" }.into(),
+                model_id: id.into(),
+                default_effort: Some(swage_core::Effort::Low),
+                capabilities: swage_config::ModelCapabilitiesConfig {
+                    effort: Some(swage_core::EffortCapability::Levels {
+                        levels: vec![swage_core::Effort::Low, swage_core::Effort::High],
+                        can_disable: false,
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+    }
+    let DelegationBoundsFixture {
+        state,
+        storage,
+        topic,
+        parent_turn,
+        captured,
+    } = delegation_bounds_state(
+        vec![
+            delegation_answer(),
+            delegation_answer(),
+            delegation_answer(),
+        ],
+        config,
+    )
+    .await;
+    storage
+        .upsert_task_definition(swage_storage::NewTaskDefinition {
+            id: "retained".into(),
+            instructions: "Report the findings.".into(),
+            model_id: Some("original-route".into()),
+            tool_permissions: None,
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .unwrap();
+    let handler = GatewayDelegationHandler::new(state.clone());
+    handler
+        .handle_delegation(
+            "a",
+            "first",
+            Some("retained"),
+            None,
+            None,
+            None,
+            None,
+            Some("held"),
+            DispatchContextComposition::default(),
+            "first",
+            "root",
+            parent_turn,
+            topic,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+        .unwrap();
+    {
+        let mut changed = state.runtime_config.write().unwrap();
+        changed.models.default = "changed-route".into();
+        changed
+            .models
+            .entries
+            .get_mut("original-route")
+            .unwrap()
+            .default_effort = Some(swage_core::Effort::High);
+        if invalid_pin {
+            changed.experimentation.enabled = true;
+            changed.experimentation.locations.insert(
+                crate::experimentation::LOCATION_TASK_PROMPT.into(),
+                swage_config::model::ExperimentLocationConfig {
+                    enabled: true,
+                    forced_variant: Some("unregistered".into()),
+                },
+            );
+        }
+    }
+    storage
+        .upsert_task_definition(swage_storage::NewTaskDefinition {
+            id: "retained".into(),
+            instructions: "Report the findings.".into(),
+            model_id: Some("changed-route".into()),
+            tool_permissions: None,
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .unwrap();
+    let result = handler
+        .handle_delegation(
+            "a",
+            "continue",
+            Some("retained"),
+            None,
+            None,
+            None,
+            None,
+            Some("held"),
+            DispatchContextComposition::default(),
+            "second",
+            "root",
+            parent_turn,
+            topic,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "an existing child ignores new forced pins: {:?}",
+        result.err()
+    );
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 2, "both child turns reached the provider");
+    assert_eq!(
+        requests[1].model, requests[0].model,
+        "continuation retains its creation model"
+    );
+    assert_eq!(
+        requests[0].effort.as_ref().map(|effort| effort.requested),
+        Some(swage_core::Effort::Low),
+        "creation applies the configured effort"
+    );
+    assert_eq!(
+        requests[1].effort, requests[0].effort,
+        "continuation retains its creation effort"
+    );
+    drop(requests);
+    if !invalid_pin {
+        handler
+            .handle_delegation(
+                "a",
+                "fresh",
+                Some("retained"),
+                None,
+                None,
+                None,
+                None,
+                Some("fresh"),
+                DispatchContextComposition::default(),
+                "fresh",
+                "root",
+                parent_turn,
+                topic,
+                CancellationToken::new(),
+                DelegateCompletionMode::Wait,
+            )
+            .await
+            .unwrap();
+        let requests = captured.lock().unwrap();
+        assert_eq!(
+            requests[2].model.as_deref(),
+            Some("changed"),
+            "fresh child uses the changed task model pin"
+        );
+        drop(requests);
+        let children = storage.list_sessions_by_agent_id("a").await.unwrap();
+        assert!(children.iter().any(|child| child.metadata.as_ref().unwrap()["delegated_child_selection"]["model"]["provider_id"] == "second"));
+    }
+    let child = storage
+        .list_sessions_by_agent_id("a")
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|child| {
+            child.metadata.as_ref().unwrap()["delegated_child_selection"]["model_id"] == "original"
+        })
+        .unwrap();
+    assert_eq!(
+        child.metadata.as_ref().unwrap()["delegated_child_selection"]["model"]["provider_id"],
+        "test"
+    );
+    let turns = storage.list_by_session(child.id).await.unwrap();
+    let turns = storage.list_turns_by_thread(turns[0].id).await.unwrap();
+    assert_eq!(turns.len(), 2);
+    for turn in turns {
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&storage.get_snapshot(turn.id).await.unwrap().unwrap()).unwrap();
+        assert_eq!(
+            snapshot["selection"]["model_id"], "original",
+            "the actual child snapshot carries its fixed selection"
+        );
+        assert_eq!(snapshot["selection"]["effort"]["requested"], "low");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn named_child_retains_model_and_effort_after_configuration_changes() {
+    continue_child_after_selection_change(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn named_child_continues_under_an_invalid_new_prompt_pin() {
+    continue_child_after_selection_change(true).await;
+}
+
+async fn exercise_delegation_bound(
+    limit: Option<u64>,
+    cycle: bool,
+    completion: DelegateCompletionMode,
+) {
+    let _home = SwageHomeGuard::isolate();
+    let expected_limit = limit.unwrap_or(4);
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    config.tools.permissions.allow = vec!["delegate".into()];
+    config.tools.permissions.require_approval = vec![];
+    if let Some(limit) = limit {
+        config.sessions = serde_json::from_value(
+            serde_json::json!({"archive_after_days": 7, "max_delegation_depth": limit}),
+        )
+        .unwrap();
+    }
+    let mut rounds = vec![];
+    // Supply one more callable level than the bound permits. Without the
+    // product's refusal the script completes normally with an extra child.
+    for depth in 1..=expected_limit {
+        let target = if cycle {
+            if depth % 2 == 1 {
+                "b".into()
+            } else {
+                "a".into()
+            }
+        } else {
+            format!("child-{}", depth + 1)
+        };
+        rounds.push(vec![StreamChunk::ToolUse {
+            call_id: format!("depth-{depth}"), name: "delegate".into(),
+            arguments: serde_json::json!({"target_agent": target, "task": "continue the chain"}),
+        }, StreamChunk::Done { finish_reason: Some(FinishReason::ToolUse) }]);
+    }
+    for _ in 0..=expected_limit {
+        rounds.push(delegation_answer());
+    }
+    let DelegationBoundsFixture {
+        state,
+        storage,
+        topic,
+        parent_turn,
+        captured,
+    } = delegation_bounds_state(rounds, config).await;
+    let root_session = storage
+        .list_by_topic(topic)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|session| session.agent_id == "root")
+        .unwrap()
+        .id;
+    let result = GatewayDelegationHandler::new(state.clone())
+        .handle_delegation(
+            if cycle { "a" } else { "child-1" },
+            "start chain",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            DispatchContextComposition::default(),
+            "root-call",
+            "root",
+            parent_turn,
+            topic,
+            CancellationToken::new(),
+            completion,
+        )
+        .await
+        .unwrap();
+    if let DelegationOutcome::Detached(child) = result {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let turns = storage
+                    .list_turns_by_thread(child.child_thread_id)
+                    .await
+                    .unwrap();
+                if !turns.is_empty() && turns.iter().all(|turn| turn.state.is_terminal()) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached chain settles");
+    }
+    let sessions = storage.list_by_topic(topic).await.unwrap();
+    assert_eq!(
+        sessions.len() as u64 - 1,
+        expected_limit,
+        "no child session exists past the configured depth"
+    );
+    let mut refusals = vec![];
+    for session in sessions {
+        refusals.extend(
+            storage
+                .list_audit_events_by_session(session.id)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.event_kind == "delegation_refused"),
+        );
+    }
+    assert_eq!(
+        refusals.len(),
+        1,
+        "the refused dispatch leaves exactly one durable record"
+    );
+    let refusal = &refusals[0];
+    assert_eq!(refusal.metadata["depth"], expected_limit + 1);
+    assert_eq!(refusal.metadata["limit"], expected_limit);
+    assert_ne!(
+        refusal.session_id,
+        Some(root_session),
+        "refusal belongs to the actual delegating child"
+    );
+    let refusal_turn = Uuid::parse_str(refusal.metadata["turn_id"].as_str().unwrap()).unwrap();
+    let turn = storage.get_turn(refusal_turn).await.unwrap().unwrap();
+    assert_eq!(
+        ThreadStore::get(&*storage, turn.thread_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .session_id,
+        refusal.session_id.unwrap()
+    );
+    let reason = format!(
+        "delegation depth {} exceeds the limit {expected_limit}",
+        expected_limit + 1
+    );
+    assert!(
+        captured
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.messages.iter().any(|message| message
+                .tool_replay()
+                .is_some_and(|parts| {
+                    parts.iter().any(|part| matches!(part,
+                ToolReplayPart::ToolResult { call_id, content, is_error: true }
+                    if call_id == &format!("depth-{expected_limit}") && content.contains(&reason)
+            ))
+                }))),
+        "the delegating model consumes the depth refusal reason"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delegation_chain_refuses_the_fifth_child_by_default() {
+    exercise_delegation_bound(None, false, DelegateCompletionMode::Wait).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delegation_chain_honours_a_configured_depth() {
+    exercise_delegation_bound(Some(2), false, DelegateCompletionMode::Wait).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delegation_cycle_stops_at_the_same_depth_bound() {
+    exercise_delegation_bound(None, true, DelegateCompletionMode::Wait).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn detached_delegation_cycle_honours_the_depth_bound() {
+    exercise_delegation_bound(Some(2), true, DelegateCompletionMode::Detach).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delegated_child_effort_uses_selected_provider() {
+    let _home = SwageHomeGuard::isolate();
+    let (url, bodies) = spawn_rejecting_capture_endpoint("/v1/chat/completions").await;
+    let agent_dir = swage_core::ScopeLocation::General.agent_dir(_home.path(), "a");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("config.toml"),
+        format!("[providers.entries.second]\nprotocol = \"openai\"\nbase_url = {url:?}\n"),
+    )
+    .unwrap();
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    config.models.default = "parent".into();
+    for id in ["parent", "second"] {
+        config.providers.entries.insert(
+            id.into(),
+            swage_config::ProviderEndpointConfig {
+                protocol: swage_config::Protocol::OpenAi,
+                base_url: Some(if id == "second" {
+                    format!("{url}/runtime")
+                } else {
+                    url.clone()
+                }),
+                ..Default::default()
+            },
+        );
+        config.models.entries.insert(
+            id.into(),
+            swage_config::ModelEndpointConfig {
+                provider_id: id.into(),
+                model_id: if id == "second" {
+                    "gpt-5.6-terra"
+                } else {
+                    "parent-model"
+                }
+                .into(),
+                default_effort: Some(swage_core::Effort::High),
+                ..Default::default()
+            },
+        );
+    }
+    config.providers.default = "parent".into();
+    std::fs::write(
+        _home.path().join("config.toml"),
+        toml::to_string(&swage_config::PartialConfig::from(config.clone())).unwrap(),
+    )
+    .unwrap();
+    let DelegationBoundsFixture {
+        state,
+        storage,
+        topic,
+        parent_turn,
+        ..
+    } = delegation_bounds_state(vec![], config).await;
+    storage
+        .upsert_task_definition(swage_storage::NewTaskDefinition {
+            id: "second-provider".into(),
+            instructions: "Report the findings.".into(),
+            model_id: Some("second".into()),
+            tool_permissions: None,
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .unwrap();
+    // The endpoint deliberately rejects after capturing the actual child request.
+    let result = GatewayDelegationHandler::new(state)
+        .handle_delegation(
+            "a",
+            "first",
+            Some("second-provider"),
+            None,
+            None,
+            None,
+            None,
+            Some("held"),
+            DispatchContextComposition::default(),
+            "first",
+            "root",
+            parent_turn,
+            topic,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await;
+    let child = storage
+        .list_sessions_by_agent_id("a")
+        .await
+        .unwrap()
+        .pop()
+        .unwrap_or_else(|| panic!("child did not start: {:?}", result.err()));
+    let metadata = child.metadata.unwrap();
+    let expected = swage_core::resolve_effort(
+        swage_core::Effort::High,
+        &swage_provider::openai::OpenAiProvider::from_config(
+            swage_provider::ProviderConfig::keyless("gpt-5.6-terra", "http://127.0.0.1"),
+        )
+        .effort_capability("gpt-5.6-terra")
+        .unwrap(),
+    );
+    assert_eq!(
+        metadata["delegated_child_selection"]["effort"],
+        serde_json::to_value(expected).unwrap(),
+        "retained effort must use the selected child provider adapter"
+    );
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["reasoning_effort"], "high");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delegated_prompt_audit_failure_still_runs_child() {
+    let _home = SwageHomeGuard::isolate();
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    let DelegationBoundsFixture {
+        state,
+        storage,
+        topic,
+        parent_turn,
+        captured,
+    } = delegation_bounds_state(vec![delegation_answer()], config).await;
+    storage
+        .with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER reject_task_prompt BEFORE INSERT ON audit_events
+            WHEN NEW.entity_kind = 'experiment_location' AND NEW.entity_id = 'task.prompt'
+            BEGIN SELECT RAISE(FAIL, 'injected task-prompt audit insert failure'); END;",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let result = GatewayDelegationHandler::new(state)
+        .handle_delegation(
+            "a",
+            "first",
+            Some("retained"),
+            None,
+            None,
+            None,
+            None,
+            Some("held"),
+            DispatchContextComposition::default(),
+            "first",
+            "root",
+            parent_turn,
+            topic,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "task-prompt audit insert failure must not abort the child: {:?}",
+        result.err()
+    );
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 1, "the child actually runs");
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.text_content().contains("Report the findings.")),
+        "the child serves the definition default prompt"
+    );
+    drop(requests);
+    let child = storage
+        .list_sessions_by_agent_id("a")
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(
+        storage
+            .list_audit_events_by_session(child.id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|event| event.entity_id != "task.prompt")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_child_turn_restores_its_delegation_bound() {
+    let _home = SwageHomeGuard::isolate();
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    config.sessions.max_delegation_depth = 1;
+    let DelegationBoundsFixture {
+        state,
+        storage,
+        topic,
+        parent_turn,
+        ..
+    } = delegation_bounds_state(vec![delegation_answer(), delegation_answer()], config).await;
+    let handler = GatewayDelegationHandler::new(state.clone());
+    handler
+        .handle_delegation(
+            "a",
+            "first",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            DispatchContextComposition::default(),
+            "first",
+            "root",
+            parent_turn,
+            topic,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+        .unwrap();
+    let child = storage
+        .list_sessions_by_agent_id("a")
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let thread = storage
+        .list_by_session(child.id)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let turn = storage
+        .create_turn(NewTurn {
+            thread_id: thread.id,
+            agent_id: "a".into(),
+            state: TurnState::Processing,
+            user_input: Some("later".into()),
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+    let result = GatewayDelegationHandler::new(state)
+        .handle_delegation(
+            "b",
+            "later",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            DispatchContextComposition::default(),
+            "later",
+            "a",
+            turn.id,
+            topic,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "an ordinary later child turn must keep its ancestor's depth bound"
+    );
+    assert!(
+        storage
+            .list_sessions_by_agent_id("b")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let events = storage
+        .list_audit_events_by_session(child.id)
+        .await
+        .unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_kind == "delegation_refused" && event.metadata["limit"] == 1)
+    );
+}
+
+async fn named_child_keeps_creation_bound(initial: u64, changed: u64) {
+    let _home = SwageHomeGuard::isolate();
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    config.sessions.max_delegation_depth = initial;
+    config.tools.permissions.allow = vec!["delegate".into()];
+    config.tools.permissions.require_approval = vec![];
+    let delegation = vec![
+        StreamChunk::ToolUse {
+            call_id: "nested".into(),
+            name: "delegate".into(),
+            arguments: serde_json::json!({"target_agent": "b", "task": "continue"}),
+        },
+        StreamChunk::Done {
+            finish_reason: Some(FinishReason::ToolUse),
+        },
+    ];
+    let DelegationBoundsFixture {
+        state,
+        storage,
+        topic,
+        parent_turn,
+        ..
+    } = delegation_bounds_state(
+        vec![
+            delegation_answer(),
+            delegation,
+            delegation_answer(),
+            delegation_answer(),
+            delegation_answer(),
+        ],
+        config,
+    )
+    .await;
+    GatewayDelegationHandler::new(state.clone())
+        .handle_delegation(
+            "a",
+            "first",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("held"),
+            DispatchContextComposition::default(),
+            "first",
+            "root",
+            parent_turn,
+            topic,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+        .unwrap();
+    state
+        .runtime_config
+        .write()
+        .unwrap()
+        .sessions
+        .max_delegation_depth = changed;
+    GatewayDelegationHandler::new(state.clone())
+        .handle_delegation(
+            "a",
+            "continue",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("held"),
+            DispatchContextComposition::default(),
+            "second",
+            "root",
+            parent_turn,
+            topic,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+        .unwrap();
+    let nested = storage.list_sessions_by_agent_id("b").await.unwrap();
+    assert_eq!(
+        !nested.is_empty(),
+        initial > 1,
+        "named continuation must use its creation limit rather than the current setting"
+    );
+    GatewayDelegationHandler::new(state)
+        .handle_delegation(
+            "a",
+            "fresh",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("fresh"),
+            DispatchContextComposition::default(),
+            "fresh",
+            "root",
+            parent_turn,
+            topic,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+        .unwrap();
+    let children = storage.list_sessions_by_agent_id("a").await.unwrap();
+    assert!(
+        children
+            .iter()
+            .any(|child| child.metadata.as_ref().unwrap()["delegation_bound"]["limit"] == changed),
+        "fresh chains use the changed setting"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn named_child_retains_limit_after_setting_is_raised() {
+    named_child_keeps_creation_bound(1, 3).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn named_child_retains_limit_after_setting_is_lowered() {
+    named_child_keeps_creation_bound(2, 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_child_invalid_prompt_pin_returns_readable_tool_error() {
+    let _home = SwageHomeGuard::isolate();
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    config.tools.permissions.allow = vec!["delegate".into()];
+    config.tools.permissions.require_approval = vec![];
+    config.experimentation.enabled = true;
+    config.experimentation.locations.insert(
+        crate::experimentation::LOCATION_TASK_PROMPT.into(),
+        swage_config::model::ExperimentLocationConfig {
+            enabled: true,
+            forced_variant: Some("unregistered".into()),
+        },
+    );
+    let rounds = vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "invalid-pin".into(),
+                name: "delegate".into(),
+                arguments: serde_json::json!({"target_agent": "b", "task": "work", "task_definition": "retained"}),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::ToolUse),
+            },
+        ],
+        delegation_answer(),
+    ];
+    let DelegationBoundsFixture {
+        state,
+        storage,
+        topic,
+        parent_turn,
+        captured,
+    } = delegation_bounds_state(rounds, config).await;
+    GatewayDelegationHandler::new(state)
+        .handle_delegation(
+            "a",
+            "start",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            DispatchContextComposition::default(),
+            "first",
+            "root",
+            parent_turn,
+            topic,
+            CancellationToken::new(),
+            DelegateCompletionMode::Wait,
+        )
+        .await
+        .unwrap();
+    assert!(
+        storage
+            .list_sessions_by_agent_id("b")
+            .await
+            .unwrap()
+            .is_empty(),
+        "invalid forced prompt pin refuses a fresh child"
+    );
+    assert!(captured.lock().unwrap().iter().any(|request| request.messages.iter().any(|message|
+        message.tool_replay().is_some_and(|parts| parts.iter().any(|part| matches!(part,
+            ToolReplayPart::ToolResult {call_id, content, is_error: true}
+                if call_id == "invalid-pin" && content.contains("forced unknown variant") && content.contains("unregistered")))))),
+        "delegating model receives the invalid prompt pin reason");
+}
+
+#[tokio::test]
+async fn inspector_snapshot_records_each_real_provider_attempt_and_redacts_its_error() {
+    let secret = "inspector-private-error-value";
+    let inner = MultiRoundMockProvider::new(vec![
+        vec![StreamChunk::Error {
+            message: format!("temporary failure {secret}"),
+        }],
+        vec![StreamChunk::Error {
+            message: "second temporary failure".into(),
+        }],
+        vec![
+            StreamChunk::Delta {
+                content: "recovered".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]);
+    let provider = swage_provider::retry::RetryProvider::new(
+        inner,
+        swage_provider::retry::RetryConfig {
+            max_retries: 2,
+            initial_backoff: Duration::ZERO,
+            max_backoff: Duration::ZERO,
+        },
+    );
+    let (state, session_id, storage) =
+        make_state_with_tool_provider_and_storage(Arc::new(provider)).await;
+    state
+        .secret_manager
+        .create_secret(crate::secret::CreateSecretRequest {
+            name: "Inspector test secret".into(),
+            material_kind: "plugin_secret".into(),
+            owner_kind: "service".into(),
+            backend_kind: "managed".into(),
+            scope_kind: "plugin".into(),
+            scope_id: Some("inspector-test".into()),
+            metadata: None,
+            value: Some(secret.into()),
+            external_reference: None,
+        })
+        .await
+        .unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from(format!("Read this {secret}")),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .unwrap();
+    let turn_id = std::iter::from_fn(|| rx.try_recv().ok())
+        .find_map(|e| match e {
+            ServerEvent::ContextAssembled { turn_id, .. } => Some(turn_id),
+            _ => None,
+        })
+        .unwrap();
+    let snapshot = storage.get_snapshot(turn_id).await.unwrap().unwrap();
+    let report: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+    let attempts = report["provider_attempts"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        attempts.len(),
+        3,
+        "the stored turn must account for all actual provider calls"
+    );
+    for (index, attempt) in attempts.iter().enumerate() {
+        assert_eq!(attempt["attempt"], index + 1);
+        assert!(
+            attempt["started_at_ms"].as_u64().unwrap() <= attempt["ended_at_ms"].as_u64().unwrap()
+        );
+        assert_eq!(
+            attempt["outcome"],
+            if index < 2 { "failed" } else { "succeeded" }
+        );
+    }
+    assert_eq!(attempts[0]["error"], "temporary failure [REDACTED_SECRET]");
+    assert_eq!(attempts[1]["error"], "second temporary failure");
+    assert!(attempts[2]["error"].is_null());
+    let history = report["elements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "history")
+        .unwrap();
+    assert!(
+        history["full_text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[REDACTED_SECRET]")
+    );
+    assert!(
+        !snapshot.contains(secret),
+        "element text and attempt errors share request redaction"
+    );
+}
+
+#[tokio::test]
+async fn inspector_records_real_norms_content_for_each_scaffold_without_exposing_its_assignment() {
+    use swage_context::working_norms::{WorkingNormsElement, WorkingNormsScaffold};
+    let tokeniser = swage_context::tokeniser::TiktokenTokeniser::new("gpt-6.1-sol");
+    let mut records = Vec::new();
+    for scaffold in [
+        WorkingNormsScaffold::FamilyFallback,
+        WorkingNormsScaffold::Native,
+    ] {
+        let norms = WorkingNormsElement::for_model("gpt-6.1-sol", scaffold);
+        let expected = norms.content()[0].text_content();
+        let output = swage_context::assembly::default_assembly(
+            &[Box::new(norms)],
+            &Default::default(),
+            &tokeniser,
+        );
+        let record = serde_json::to_value(&output.report.elements[0]).unwrap();
+        assert_eq!(record["full_text"], expected);
+        assert_eq!(record["token_count"], output.report.total_tokens);
+        assert_eq!(record["source"], "built-in working norms (GPT family)");
+        assert!(record.get("variant_id").is_none());
+        records.push(record);
+    }
+    assert_ne!(records[0]["full_text"], records[1]["full_text"]);
+    assert_ne!(records[0]["token_count"], records[1]["token_count"]);
+}
+
+#[tokio::test]
+async fn inspector_snapshot_keeps_attempts_across_provider_failover() {
+    let config = swage_provider::retry::RetryConfig {
+        max_retries: 1,
+        initial_backoff: Duration::ZERO,
+        max_backoff: Duration::ZERO,
+    };
+    let primary = swage_provider::retry::RetryProvider::new(
+        MultiRoundMockProvider::new(vec![
+            vec![StreamChunk::Error {
+                message: "primary unavailable".into(),
+            }],
+            vec![StreamChunk::Error {
+                message: "primary still unavailable".into(),
+            }],
+        ]),
+        config.clone(),
+    );
+    let secondary = swage_provider::retry::RetryProvider::new(
+        MultiRoundMockProvider::new(vec![vec![
+            StreamChunk::Delta {
+                content: "secondary answer".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]]),
+        config,
+    );
+    let failover = swage_provider::failover::FailoverProvider::with_defaults(vec![
+        Arc::new(primary),
+        Arc::new(secondary),
+    ]);
+    let (state, session_id, storage) =
+        make_state_with_tool_provider_and_storage(Arc::new(failover)).await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("answer through failover"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .unwrap();
+    let turn_id = std::iter::from_fn(|| rx.try_recv().ok())
+        .find_map(|e| match e {
+            ServerEvent::ContextAssembled { turn_id, .. } => Some(turn_id),
+            _ => None,
+        })
+        .unwrap();
+    let snapshot = storage.get_snapshot(turn_id).await.unwrap().unwrap();
+    let report: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+    let attempts = report["provider_attempts"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        attempts.len(),
+        3,
+        "changing providers must not overwrite the first provider's attempts"
+    );
+    assert_eq!(attempts[0]["outcome"], "failed");
+    assert_eq!(attempts[1]["outcome"], "failed");
+    assert_eq!(attempts[2]["outcome"], "succeeded");
+    assert_eq!(attempts[0]["attempt"], attempts[2]["attempt"]);
+    assert_ne!(attempts[0]["id"], attempts[2]["id"]);
+    assert_eq!(attempts[0]["route_id"], attempts[1]["route_id"]);
+    assert_eq!(attempts[0]["route_id"], "0");
+    assert_eq!(attempts[2]["route_id"], "1");
+}
+
+#[tokio::test]
+async fn inspector_snapshot_settles_an_attempt_when_the_turn_is_cancelled() {
+    let provider = swage_provider::retry::RetryProvider::new(
+        PendingFinalRoundProvider::new(vec![vec![StreamChunk::Delta {
+            content: "partial".into(),
+        }]]),
+        swage_provider::retry::RetryConfig {
+            max_retries: 1,
+            initial_backoff: Duration::ZERO,
+            max_backoff: Duration::ZERO,
+        },
+    );
+    let (state, session_id, storage) =
+        make_state_with_tool_provider_and_storage(Arc::new(provider)).await;
+    let state = Arc::new(state);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let running_state = Arc::clone(&state);
+    let running = tokio::spawn(async move {
+        process_turn(
+            &running_state,
+            session_id,
+            None,
+            TurnInput::from("begin"),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+    let mut turn_id = None;
+    loop {
+        match rx.recv().await.unwrap() {
+            ServerEvent::ContextAssembled { turn_id: id, .. } => turn_id = Some(id),
+            ServerEvent::Token { .. } => break,
+            _ => {}
+        }
+    }
+    cancel_turn(&state, session_id).await.unwrap();
+    running.await.unwrap().unwrap();
+    let snapshot = storage
+        .get_snapshot(turn_id.unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+    let attempts = report["provider_attempts"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        attempts.len(),
+        1,
+        "the interrupted request remains in the turn's record"
+    );
+    assert_eq!(attempts[0]["outcome"], "interrupted");
+    assert!(
+        attempts[0]["ended_at_ms"].as_u64().unwrap()
+            >= attempts[0]["started_at_ms"].as_u64().unwrap()
+    );
+}
+
+/// Real protocol conversion with controlled stream outcomes; no network calls.
+struct InspectorProtocolProvider {
+    adapter: Box<dyn LlmProvider>,
+    stream: MultiRoundMockProvider,
+}
+
+#[async_trait]
+impl LlmProvider for InspectorProtocolProvider {
+    fn model_id(&self) -> &str {
+        self.adapter.model_id()
+    }
+    fn provider_request_snapshot(
+        &self,
+        request: &CompletionRequest,
+        stream: bool,
+    ) -> serde_json::Value {
+        self.adapter.provider_request_snapshot(request, stream)
+    }
+    async fn complete(&self, _: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        unreachable!()
+    }
+    async fn complete_with_tools(
+        &self,
+        _: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        unreachable!()
+    }
+    fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = StreamChunk> + Send>> {
+        self.stream.stream(request)
+    }
+}
+
+async fn inspector_cross_protocol_failover_report() -> serde_json::Value {
+    let primary = InspectorProtocolProvider {
+        adapter: Box::new(swage_provider::openai::OpenAiProvider::from_config(
+            swage_provider::ProviderConfig::keyless("primary-model", "http://unused.invalid/v1"),
+        )),
+        stream: MultiRoundMockProvider::new(vec![vec![StreamChunk::Error {
+            message: "primary unavailable".into(),
+        }]]),
+    };
+    let secondary = InspectorProtocolProvider {
+        adapter: Box::new(swage_provider::anthropic::AnthropicProvider::new(
+            "unused-key",
+            "secondary-model",
+        )),
+        stream: MultiRoundMockProvider::new(vec![vec![
+            StreamChunk::Delta {
+                content: "secondary answer".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ]]),
+    };
+    let retry = swage_provider::retry::RetryConfig {
+        max_retries: 0,
+        initial_backoff: Duration::ZERO,
+        max_backoff: Duration::ZERO,
+    };
+    let failover = swage_provider::failover::FailoverProvider::with_defaults(vec![
+        Arc::new(swage_provider::retry::RetryProvider::new(
+            primary,
+            retry.clone(),
+        )),
+        Arc::new(swage_provider::retry::RetryProvider::new(secondary, retry)),
+    ]);
+    let (state, session_id, storage) =
+        make_state_with_tool_provider_and_storage(Arc::new(failover)).await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("answer through failover"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .unwrap();
+    let turn_id = std::iter::from_fn(|| rx.try_recv().ok())
+        .find_map(|e| match e {
+            ServerEvent::ContextAssembled { turn_id, .. } => Some(turn_id),
+            _ => None,
+        })
+        .unwrap();
+    serde_json::from_str(&storage.get_snapshot(turn_id).await.unwrap().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn inspector_cross_protocol_failover_identifies_each_attempt() {
+    let report = inspector_cross_protocol_failover_report().await;
+    let attempts = report["provider_attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(
+        attempts[0]["provider"], "openai",
+        "the primary attempt must identify its provider"
+    );
+    assert_eq!(attempts[1]["provider"], "anthropic");
+    assert_eq!(attempts[0]["model_id"], "primary-model");
+    assert_eq!(attempts[1]["model_id"], "secondary-model");
+    assert_ne!(attempts[0]["route_id"], attempts[1]["route_id"]);
+    assert!(attempts[0]["route_id"].is_string());
+    assert!(attempts[1]["route_id"].is_string());
+}
+
+#[tokio::test]
+async fn inspector_cross_protocol_failover_records_each_request() {
+    let report = inspector_cross_protocol_failover_report().await;
+    let requests = report["provider_visible"]["requests"].as_array().unwrap();
+    assert_eq!(
+        requests.len(),
+        2,
+        "both concrete provider requests must be recorded"
+    );
+    assert_eq!(requests[0]["request"]["provider"], "openai");
+    assert_eq!(requests[1]["request"]["provider"], "anthropic");
+    assert_eq!(requests[0]["request"]["body"]["model"], "primary-model");
+    assert_eq!(requests[1]["request"]["body"]["model"], "secondary-model");
+    let attempts = report["provider_attempts"].as_array().unwrap();
+    for (attempt, request) in attempts.iter().zip(requests) {
+        assert_eq!(attempt["request"], request["request"]);
+        assert_eq!(attempt["id"], request["attempt_id"]);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn image_scheme_refusals_are_audited_before_returning_without_a_provider_request() {
+    use swage_storage::AuditStore;
+    let storage = Arc::new(MockStorage::new());
+    let (provider, requests) = CapturingMultiRoundProvider::new(vec![
+        vec![
+            StreamChunk::Delta {
+                content: "seen".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "seen".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]);
+    let (_, session_id) =
+        make_state_with_config_and_storage(vec![], vision_capable_config(), Arc::clone(&storage))
+            .await;
+    let state = AppState::new(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(provider) as Arc<dyn LlmProvider>,
+        vision_capable_config(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    for (url, scheme) in [
+        ("http://example.test/a.png", "http"),
+        ("file:///private/image.png", "file"),
+        ("ftp://example.test/a.png", "ftp"),
+    ] {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let error = process_turn(
+            &state,
+            session_id,
+            None,
+            TurnInput::with_attachments(
+                "look",
+                vec![MessageAttachment::ImageUrl { url: url.into() }],
+            ),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect_err("scheme must refuse the turn");
+        assert!(
+            matches!(&error, GatewayError::ValidationError(reason) if reason.contains(scheme) && reason.contains("https, data")),
+            "{error}"
+        );
+        let events = storage
+            .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                session_id: Some(session_id),
+                event_kind: Some("image_reference_refused".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let event = events
+            .first()
+            .expect("refusal is recorded before returning");
+        assert_eq!(event.session_id, Some(session_id));
+        assert_eq!(event.entity_kind, "session");
+        assert_eq!(event.entity_id, session_id.to_string());
+        assert_eq!(event.metadata["scheme"], scheme);
+        if let GatewayError::ValidationError(reason) = &error {
+            assert_eq!(event.metadata["reason"], *reason);
+        }
+        assert!(
+            !event.metadata.to_string().contains(url),
+            "do not record the reference itself"
+        );
+    }
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "refused turns never call the provider"
+    );
+    let db = storage.db.lock().await;
+    assert!(
+        db.messages.is_empty() && db.turns.is_empty(),
+        "refused inputs are not persisted"
+    );
+    drop(db);
+    for url in ["https://example.test/a.png", "data:image/png;base64,cG5n"] {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            TurnInput::with_attachments(
+                "look",
+                vec![MessageAttachment::ImageUrl { url: url.into() }],
+            ),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .expect("default scheme reaches the provider");
+        let captured = requests.lock().unwrap();
+        let user = captured
+            .last()
+            .unwrap()
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role() == Role::User)
+            .unwrap();
+        assert!(
+            user.content()
+                .contains(&ContentPart::ImageUrl { url: url.into() }),
+            "accepted reference reaches provider intact"
+        );
+    }
+    assert_eq!(requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn image_scheme_refusal_survives_an_audit_write_failure() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) =
+        make_state_with_config_and_storage(vec![], vision_capable_config(), Arc::clone(&storage))
+            .await;
+    storage.fail_audit_writes.store(true, Ordering::SeqCst);
+    let error = resolve_turn_model_and_attachments(
+        &state,
+        state.active_config(),
+        None,
+        None,
+        session_id,
+        &[MessageAttachment::ImageUrl {
+            url: "http://example.test/a.png".into(),
+        }],
+    )
+    .await
+    .expect_err("audit failure cannot admit the reference");
+    assert!(
+        matches!(&error, GatewayError::ValidationError(reason) if reason.contains("http") && reason.contains("https, data")),
+        "{error}"
+    );
+    assert!(storage.db.lock().await.audit_events.is_empty());
+}
+
+/// A child's result is read from its fate, the error before any text it
+/// carries: a refusal that carried text reads as refused, a failure as
+/// failed, and only a result with no error as completed.
+#[tokio::test]
+async fn a_delegation_result_reads_its_fate_before_its_text() {
+    use swage_core::MessageKind;
+    use swage_storage::model::NewAgentMessage;
+    use swage_storage::store::AgentMessageStore;
+
+    let storage = MockStorage::new();
+    let result = |payload: serde_json::Value| async {
+        storage
+            .create_agent_message(NewAgentMessage {
+                sender_agent_id: "worker".to_string(),
+                recipient_agent_id: "lead".to_string(),
+                kind: MessageKind::Result,
+                correlation_id: Some(Uuid::new_v4()),
+                payload,
+            })
+            .await
+            .unwrap()
+    };
+    let refused = result(serde_json::json!({
+        "error": "the delegated agent refused the task",
+        "refused": true,
+        "response": "I will not do that.",
+    }))
+    .await;
+    let rendered = super::detached_delivery::render_delegation_result(&refused);
+    assert!(
+        rendered.starts_with("Delegated agent worker refused the task:\nI will not do that."),
+        "{rendered}"
+    );
+    let failed =
+        result(serde_json::json!({ "error": "the tool broke", "response": "partial" })).await;
+    let rendered = super::detached_delivery::render_delegation_result(&failed);
+    assert!(
+        rendered.starts_with("Delegated agent worker failed: the tool broke:\npartial"),
+        "{rendered}"
+    );
+    let completed = result(serde_json::json!({ "response": "done" })).await;
+    assert!(
+        super::detached_delivery::render_delegation_result(&completed)
+            .starts_with("Delegated agent worker completed:\ndone")
+    );
+}
+
+/// A child's Result readdressed to its parent's session after a restart is
+/// delivered by that session's next turn and by no other session of the
+/// same agent: the other session's turn leaves it in the mailbox.
+/// A recovered Result names the parent's thread as well as its session: a
+/// sibling thread of the same session turning first — a queued message on
+/// it drains before the continuation — takes nothing, and the parent's
+/// thread takes it.
+#[tokio::test]
+async fn a_readdressed_result_is_delivered_only_on_the_parents_thread() {
+    use swage_core::{MessageKind, MessageStatus};
+    use swage_storage::model::NewAgentMessage;
+    use swage_storage::store::AgentMessageStore;
+
+    let storage = Arc::new(MockStorage::new());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage
+        .create_session(NewSession {
+            agent_id: "lead".to_string(),
+            ..new_session(topic.id)
+        })
+        .await
+        .unwrap();
+    let mut threads = Vec::new();
+    for _ in 0..2 {
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "lead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "lead".to_string(),
+                state: TurnState::Pending,
+                user_input: Some("next".to_string()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        threads.push((thread.id, turn.id));
+    }
+    let (parent_thread, parent_turn) = threads[0];
+    let (sibling_thread, sibling_turn) = threads[1];
+    let delegate = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "lead".to_string(),
+            recipient_agent_id: "scout".to_string(),
+            kind: MessageKind::Delegate,
+            correlation_id: None,
+            payload: serde_json::json!({ "task": "work" }),
+        })
+        .await
+        .unwrap();
+    let result = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "scout".to_string(),
+            recipient_agent_id: "lead".to_string(),
+            kind: MessageKind::Result,
+            correlation_id: Some(delegate.id),
+            payload: serde_json::json!({
+                "response": "Scouted.",
+                "parent_session_id": session.id,
+                "parent_thread_id": parent_thread,
+            }),
+        })
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+
+    super::detached_delivery::deliver_detached_results(
+        &state,
+        session.id,
+        "lead",
+        sibling_thread,
+        sibling_turn,
+    )
+    .await
+    .unwrap();
+    assert!(
+        storage
+            .list_messages_by_thread(sibling_thread)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the sibling thread's turn takes nothing"
+    );
+    assert_eq!(
+        storage
+            .get_agent_message(result.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MessageStatus::Pending
+    );
+
+    super::detached_delivery::deliver_detached_results(
+        &state,
+        session.id,
+        "lead",
+        parent_thread,
+        parent_turn,
+    )
+    .await
+    .unwrap();
+    let delivered = storage
+        .list_messages_by_thread(parent_thread)
+        .await
+        .unwrap();
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert!(delivered[0].content.contains("Scouted."));
+    assert_eq!(
+        storage
+            .get_agent_message(result.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MessageStatus::Delivered
+    );
+}
+
+/// A Result carried from the mailbox into a thread is put to the same
+/// delivery hooks as one handed straight to its parent: a receive hook
+/// that blocks it fails it with the reason, nothing of it enters the
+/// thread, and the thread is told the result was blocked.
+#[tokio::test]
+async fn a_mailbox_result_a_receive_hook_blocks_is_failed_and_named_not_delivered() {
+    use swage_core::{MessageKind, MessageStatus};
+    use swage_storage::model::NewAgentMessage;
+    use swage_storage::store::AgentMessageStore;
+
+    struct BlockResultReceipt;
+
+    #[async_trait]
+    impl Hook for BlockResultReceipt {
+        fn name(&self) -> &str {
+            "block-result-receipt"
+        }
+
+        async fn execute(&self, event: &HookEvent) -> HookOutcome {
+            match event {
+                HookEvent::MessageReceive { kind, .. } if kind == "result" => {
+                    HookOutcome::Block("results from scouts are quarantined".into())
+                }
+                _ => HookOutcome::Continue,
+            }
+        }
+    }
+
+    let storage = Arc::new(MockStorage::new());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage
+        .create_session(NewSession {
+            agent_id: "lead".to_string(),
+            ..new_session(topic.id)
+        })
+        .await
+        .unwrap();
+    let thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "lead".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let turn = storage
+        .create_turn(NewTurn {
+            thread_id: thread.id,
+            agent_id: "lead".to_string(),
+            state: TurnState::Pending,
+            user_input: Some("next".to_string()),
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+    let delegate = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "lead".to_string(),
+            recipient_agent_id: "scout".to_string(),
+            kind: MessageKind::Delegate,
+            correlation_id: None,
+            payload: serde_json::json!({ "task": "work" }),
+        })
+        .await
+        .unwrap();
+    let result = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "scout".to_string(),
+            recipient_agent_id: "lead".to_string(),
+            kind: MessageKind::Result,
+            correlation_id: Some(delegate.id),
+            payload: serde_json::json!({ "response": "The quarantined text." }),
+        })
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    let mut hook_registry = HookRegistry::new();
+    hook_registry.register(HookRegistration::new(Arc::new(BlockResultReceipt)));
+    state.hook_registry = Some(Arc::new(hook_registry));
+
+    super::detached_delivery::deliver_detached_results(
+        &state, session.id, "lead", thread.id, turn.id,
+    )
+    .await
+    .unwrap();
+
+    let delivered = storage.list_messages_by_thread(thread.id).await.unwrap();
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert_eq!(
+        delivered[0].origin,
+        swage_storage::MessageOrigin::Delegation
+    );
+    assert!(
+        delivered[0]
+            .content
+            .contains("Delegated agent scout's result was blocked before delivery (results from scouts are quarantined)"),
+        "{}",
+        delivered[0].content
+    );
+    assert!(!delivered[0].content.contains("The quarantined text."));
+    let blocked = storage.get_agent_message(result.id).await.unwrap().unwrap();
+    assert_eq!(blocked.status, MessageStatus::Failed);
+    assert_eq!(
+        blocked.failure_reason.as_deref(),
+        Some("results from scouts are quarantined")
+    );
+    // Nothing waits: a second turn delivers nothing more.
+    super::detached_delivery::deliver_detached_results(
+        &state, session.id, "lead", thread.id, turn.id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        storage
+            .list_messages_by_thread(thread.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_readdressed_result_is_delivered_only_in_the_parents_session() {
+    use swage_core::{MessageKind, MessageStatus};
+    use swage_storage::model::NewAgentMessage;
+    use swage_storage::store::AgentMessageStore;
+
+    let storage = Arc::new(MockStorage::new());
+    let topic = storage.general_scope().await.unwrap();
+    let mut sessions = Vec::new();
+    for _ in 0..2 {
+        let session = storage
+            .create_session(NewSession {
+                agent_id: "lead".to_string(),
+                ..new_session(topic.id)
+            })
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &*storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: "lead".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: "lead".to_string(),
+                state: TurnState::Pending,
+                user_input: Some("next".to_string()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        sessions.push((session.id, thread.id, turn.id));
+    }
+    let (parent_session, parent_thread, parent_turn) = sessions[0];
+    let (other_session, other_thread, other_turn) = sessions[1];
+    let delegate = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "lead".to_string(),
+            recipient_agent_id: "scout".to_string(),
+            kind: MessageKind::Delegate,
+            correlation_id: None,
+            payload: serde_json::json!({ "task": "work" }),
+        })
+        .await
+        .unwrap();
+    let result = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "scout".to_string(),
+            recipient_agent_id: "lead".to_string(),
+            kind: MessageKind::Result,
+            correlation_id: Some(delegate.id),
+            payload: serde_json::json!({
+                "response": "Scouted.",
+                "parent_session_id": parent_session,
+            }),
+        })
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+
+    super::detached_delivery::deliver_detached_results(
+        &state,
+        other_session,
+        "lead",
+        other_thread,
+        other_turn,
+    )
+    .await
+    .unwrap();
+    assert!(
+        storage
+            .list_messages_by_thread(other_thread)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the other session's turn takes nothing"
+    );
+    assert_eq!(
+        storage
+            .get_agent_message(result.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MessageStatus::Pending
+    );
+
+    super::detached_delivery::deliver_detached_results(
+        &state,
+        parent_session,
+        "lead",
+        parent_thread,
+        parent_turn,
+    )
+    .await
+    .unwrap();
+    let delivered = storage
+        .list_messages_by_thread(parent_thread)
+        .await
+        .unwrap();
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert!(delivered[0].content.contains("Scouted."));
+    assert_eq!(
+        storage
+            .get_agent_message(result.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MessageStatus::Delivered
+    );
 }

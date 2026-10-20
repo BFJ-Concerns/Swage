@@ -16,7 +16,7 @@ use crate::sqlite::message::encode_attachments;
 use crate::store::TurnQueueStore;
 use swage_core::Role;
 
-const COLUMNS: &str = "id, session_id, thread_id, seq, origin, content, attachments, created_at, schedule_run_id, attended, client_id";
+const COLUMNS: &str = "id, session_id, thread_id, seq, origin, content, attachments, created_at, schedule_run_id, attended, client_id, delivery_targets";
 
 fn parse_uuid(value: &str) -> rusqlite::Result<Uuid> {
     value.parse::<Uuid>().map_err(|error| {
@@ -44,6 +44,13 @@ fn row_to_queued(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedTurnInput> {
     let attachments: String = row.get(6)?;
     let created_at: String = row.get(7)?;
     Ok(QueuedTurnInput {
+        delivery_targets: serde_json::from_str(&row.get::<_, String>(11)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                11,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
         attended: row.get(9)?,
         client_id: row
             .get::<_, Option<String>>(10)?
@@ -87,28 +94,38 @@ fn channel_message_ids(
     rows.collect()
 }
 
-#[async_trait]
-impl TurnQueueStore for SqliteStorage {
-    async fn enqueue_turn_input(
-        &self,
-        input: NewQueuedTurnInput,
-    ) -> Result<QueuedTurnInput, StorageError> {
-        self.with_conn(move |conn| {
-            let tx = conn.unchecked_transaction()?;
-            let id = Uuid::new_v4();
-            let now = Utc::now();
-            let attachments = serde_json::to_string(&input.attachments)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-            // The sequence is allocated inside the connection's lock, so two
-            // arrivals never share a place in the queue.
-            let seq: i64 = tx.query_row(
-                "SELECT COALESCE(MAX(seq) + 1, 0) FROM turn_queue WHERE session_id = ?1",
-                params![input.session_id.to_string()],
+fn enqueue_inputs(
+    tx: &rusqlite::Transaction<'_>,
+    inputs: Vec<NewQueuedTurnInput>,
+) -> rusqlite::Result<Vec<QueuedTurnInput>> {
+    let mut queued = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let id = Uuid::new_v4();
+        // Destination resolution can finish after a newer direct input has
+        // queued. Inbox arrival, rather than resolution, determines its place.
+        let mut inbox_arrival: Option<DateTime<Utc>> = None;
+        for message_id in &input.channel_message_ids {
+            let received: String = tx.query_row(
+                "SELECT received_at FROM channel_inbound_messages WHERE id = ?1",
+                params![message_id.to_string()],
                 |row| row.get(0),
             )?;
-            tx.execute(
+            let received = parse_dt(&received)?;
+            inbox_arrival = Some(inbox_arrival.map_or(received, |first| first.min(received)));
+        }
+        let arrived_at = inbox_arrival.unwrap_or_else(Utc::now);
+        let attachments = serde_json::to_string(&input.attachments)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        // Allocate under the connection's lock for a stable tie-breaker
+        // when arrivals share the same instant.
+        let seq: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(seq) + 1, 0) FROM turn_queue WHERE session_id = ?1",
+            params![input.session_id.to_string()],
+            |row| row.get(0),
+        )?;
+        tx.execute(
                 &format!(
-                    "INSERT INTO turn_queue ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+                    "INSERT INTO turn_queue ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
                 ),
                 params![
                     id.to_string(),
@@ -118,39 +135,104 @@ impl TurnQueueStore for SqliteStorage {
                     input.origin.as_str(),
                     &input.content,
                     attachments,
-                    now.to_rfc3339(),
+                    arrived_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
                     input.schedule_run_id.map(|id| id.to_string()),
                     input.attended,
                     input.client_id.map(|id| id.to_string()),
+                    serde_json::to_string(&input.delivery_targets).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
                 ],
             )?;
-            for message_id in &input.channel_message_ids {
-                let claimed = tx.execute(
+        for message_id in &input.channel_message_ids {
+            let claimed = tx.execute(
                     "INSERT INTO turn_queue_channel_messages (queued_id, message_id)
                      SELECT ?1, id FROM channel_inbound_messages WHERE id = ?2 AND state = 'pending'",
                     params![id.to_string(), message_id.to_string()],
                 )?;
-                if claimed != 1 {
+            if claimed != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+        }
+        queued.push(QueuedTurnInput {
+            delivery_targets: input.delivery_targets,
+            attended: input.attended,
+            client_id: input.client_id,
+            id,
+            session_id: input.session_id,
+            thread_id: input.thread_id,
+            seq,
+            origin: input.origin,
+            content: input.content,
+            attachments: input.attachments,
+            created_at: arrived_at,
+            schedule_run_id: input.schedule_run_id,
+            channel_message_ids: input.channel_message_ids,
+        });
+    }
+    Ok(queued)
+}
+
+#[async_trait]
+impl TurnQueueStore for SqliteStorage {
+    async fn enqueue_turn_input(
+        &self,
+        input: NewQueuedTurnInput,
+    ) -> Result<QueuedTurnInput, StorageError> {
+        self.enqueue_turn_inputs(vec![input])
+            .await?
+            .pop()
+            .ok_or_else(|| StorageError::QueryFailed("enqueue returned no input".into()))
+    }
+
+    async fn enqueue_turn_inputs(
+        &self,
+        inputs: Vec<NewQueuedTurnInput>,
+    ) -> Result<Vec<QueuedTurnInput>, StorageError> {
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let queued = enqueue_inputs(&tx, inputs)?;
+            tx.commit()?;
+            Ok(queued)
+        })
+        .await
+    }
+
+    async fn enqueue_delegation_continuation(
+        &self,
+        parent_turn_id: Uuid,
+        input: NewQueuedTurnInput,
+    ) -> Result<QueuedTurnInput, StorageError> {
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            // Consume the recovery mark in the same transaction as the queue
+            // write, so a second startup cannot enqueue this parent again.
+            let interrupted = tx.execute(
+                "UPDATE turns SET state = 'interrupted', completed_at = ?2
+                 WHERE id = ?1 AND state = 'delegating' AND parent_turn_id IS NULL
+                   AND thread_id = ?3
+                   AND EXISTS (SELECT 1 FROM threads WHERE id = ?3 AND session_id = ?4)",
+                params![parent_turn_id.to_string(), Utc::now().to_rfc3339(),
+                    input.thread_id.to_string(), input.session_id.to_string()],
+            )?;
+            if interrupted != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            for message_id in &input.channel_message_ids {
+                let transferred = tx.execute(
+                    "UPDATE channel_inbound_messages
+                     SET state = 'pending', turn_id = NULL, presented_at = NULL
+                     WHERE id = ?1 AND state = 'presented' AND turn_id = ?2
+                       AND NOT EXISTS (SELECT 1 FROM turn_queue_channel_messages WHERE message_id = ?1)",
+                    params![message_id.to_string(), parent_turn_id.to_string()],
+                )?;
+                if transferred != 1 {
                     return Err(rusqlite::Error::QueryReturnedNoRows);
                 }
             }
+            let queued = enqueue_inputs(&tx, vec![input])?
+                .pop().ok_or(rusqlite::Error::QueryReturnedNoRows)?;
             tx.commit()?;
-            Ok(QueuedTurnInput {
-                attended: input.attended,
-                client_id: input.client_id,
-                id,
-                session_id: input.session_id,
-                thread_id: input.thread_id,
-                seq,
-                origin: input.origin,
-                content: input.content,
-                attachments: input.attachments,
-                created_at: now,
-                schedule_run_id: input.schedule_run_id,
-                channel_message_ids: input.channel_message_ids,
-            })
-        })
-        .await
+            Ok(queued)
+        }).await
     }
 
     async fn list_queued_turn_inputs(
@@ -159,7 +241,7 @@ impl TurnQueueStore for SqliteStorage {
     ) -> Result<Vec<QueuedTurnInput>, StorageError> {
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(&format!(
-                "SELECT {COLUMNS} FROM turn_queue WHERE session_id = ?1 ORDER BY seq ASC"
+                "SELECT {COLUMNS} FROM turn_queue WHERE session_id = ?1 ORDER BY created_at ASC, seq ASC"
             ))?;
             let rows = stmt.query_map(params![session_id.to_string()], row_to_queued)?;
             let mut queued = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -181,7 +263,7 @@ impl TurnQueueStore for SqliteStorage {
             let tx = conn.unchecked_transaction()?;
             let mut queued = {
                 let mut stmt = tx.prepare(&format!(
-                    "SELECT {COLUMNS} FROM turn_queue WHERE session_id = ?1 ORDER BY seq ASC"
+                    "SELECT {COLUMNS} FROM turn_queue WHERE session_id = ?1 ORDER BY created_at ASC, seq ASC"
                 ))?;
                 let rows = stmt.query_map(params![session_id.to_string()], row_to_queued)?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -193,6 +275,11 @@ impl TurnQueueStore for SqliteStorage {
                 return Ok(None);
             };
             let thread_id = first.thread_id;
+            // A session has one active turn, including on a sibling thread.
+            let live: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM turns JOIN threads ON threads.id = turns.thread_id WHERE threads.session_id = ?1 AND turns.state IN ('pending', 'processing', 'awaiting_approval', 'delegating'))", params![session_id.to_string()], |row| row.get(0))?;
+            if live { return Ok(None); }
+            let group_len = queued.iter().take_while(|item| item.thread_id == thread_id).count();
+            queued.truncate(group_len);
             let now = Utc::now();
             let now_str = now.to_rfc3339();
 
@@ -204,9 +291,18 @@ impl TurnQueueStore for SqliteStorage {
                 .map(|item| item.content.as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n");
+            let attribution = crate::model::TurnAttribution {
+                attended: queued.iter().any(|input| input.attended),
+                delivery_targets: queued
+                    .iter()
+                    .flat_map(|input| input.delivery_targets.clone())
+                    .collect(),
+            };
+            let delivery_targets_json = serde_json::to_string(&attribution.delivery_targets)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             match tx.execute(
-                "INSERT INTO turns (id, thread_id, agent_id, user_input, state, created_at, parent_turn_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
+                "INSERT INTO turns (id, thread_id, agent_id, user_input, state, created_at, parent_turn_id, attended, delivery_targets)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8)",
                 params![
                     turn_id.to_string(),
                     thread_id.to_string(),
@@ -214,6 +310,8 @@ impl TurnQueueStore for SqliteStorage {
                     &user_input,
                     TurnState::Pending.to_string(),
                     &now_str,
+                    attribution.attended,
+                    &delivery_targets_json,
                 ],
             ) {
                 Ok(_) => {}
@@ -289,14 +387,14 @@ impl TurnQueueStore for SqliteStorage {
                         params![message_id.to_string(), turn_id.to_string(), &now_str])?;
                 }
             }
-            tx.execute(
-                "DELETE FROM turn_queue WHERE session_id = ?1",
-                params![session_id.to_string()],
-            )?;
+            for item in &queued {
+                tx.execute("DELETE FROM turn_queue WHERE id = ?1", params![item.id.to_string()])?;
+            }
             tx.commit()?;
             let queued_ids = queued.iter().map(|item| item.id).collect();
             Ok(Some(DrainedTurnQueue {
-                attended: queued.iter().any(|input| input.attended),
+                delivery_targets: attribution.delivery_targets.clone(),
+                attended: attribution.attended,
                 turn: Turn {
                     id: turn_id,
                     thread_id,
@@ -316,7 +414,8 @@ impl TurnQueueStore for SqliteStorage {
                     delegated_output_tokens: None,
                     execution_isolation: None,
                     failure_message: None,
-                },
+                                    attribution: Some(attribution),
+},
                 messages,
                 queued_ids,
                 schedule_run_ids,
@@ -376,6 +475,7 @@ mod tests {
 
     fn queued(session_id: Uuid, thread_id: Uuid, content: &str) -> NewQueuedTurnInput {
         NewQueuedTurnInput {
+            delivery_targets: Vec::new(),
             attended: true,
             client_id: None,
             session_id,
@@ -386,6 +486,340 @@ mod tests {
             schedule_run_id: None,
             channel_message_ids: Vec::new(),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn continuation_handover_is_atomic_and_exclusive() {
+        use crate::model::{NewChannelInboundMessage, NewTurn};
+        use crate::store::{ChannelQueueStore, TurnStore};
+
+        let (storage, session, thread) = session_and_thread().await;
+        storage
+            .ingest_channel_inbound(
+                (0..4)
+                    .map(|n| NewChannelInboundMessage {
+                        integration: "telegram".into(),
+                        account: "ops".into(),
+                        conversation: "chat".into(),
+                        external_id: n.to_string(),
+                        sender: "ben".into(),
+                        content: format!("message {n}"),
+                    })
+                    .collect(),
+                "telegram",
+                "ops",
+                "4",
+            )
+            .await
+            .unwrap();
+        let rows = storage.list_pending_channel_messages().await.unwrap();
+        let parent = storage
+            .begin_channel_turn(thread, "gateway", "delegate", vec![rows[0].id, rows[1].id])
+            .await
+            .unwrap();
+        storage
+            .update_turn_state(parent.id, TurnState::Delegating)
+            .await
+            .unwrap();
+        let other_thread = ThreadStore::create(
+            &storage,
+            NewThread {
+                session_id: session,
+                agent_id: "other".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let other = storage
+            .begin_channel_turn(other_thread.id, "other", "unrelated", vec![rows[2].id])
+            .await
+            .unwrap();
+        storage
+            .update_turn_state(other.id, TurnState::Completed)
+            .await
+            .unwrap();
+        let snapshot = serde_json::to_value(
+            storage
+                .list_channel_messages_by_turn(parent.id)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let unrelated = serde_json::to_value(
+            storage
+                .list_channel_messages_by_turn(other.id)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let continuation = NewQueuedTurnInput {
+            origin: MessageOrigin::Delegation,
+            channel_message_ids: vec![rows[0].id, rows[1].id],
+            ..queued(session, thread, "continue")
+        };
+        // Each invalid claim fails after touching a valid first row. The
+        // parent's recovery mark, row states and queue must all roll back.
+        for invalid in [rows[2].id, rows[3].id, Uuid::new_v4(), rows[0].id] {
+            assert!(
+                storage
+                    .enqueue_delegation_continuation(
+                        parent.id,
+                        NewQueuedTurnInput {
+                            channel_message_ids: vec![rows[0].id, invalid],
+                            ..continuation.clone()
+                        }
+                    )
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                storage.get_turn(parent.id).await.unwrap().unwrap().state,
+                TurnState::Delegating
+            );
+            assert_eq!(
+                serde_json::to_value(
+                    storage
+                        .list_channel_messages_by_turn(parent.id)
+                        .await
+                        .unwrap()
+                )
+                .unwrap(),
+                snapshot
+            );
+            assert!(
+                storage
+                    .list_queued_turn_inputs(session)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        // A queue insertion failure also rolls back the hand-over.
+        assert!(
+            storage
+                .enqueue_delegation_continuation(
+                    parent.id,
+                    NewQueuedTurnInput {
+                        schedule_run_id: Some(Uuid::new_v4()),
+                        ..continuation.clone()
+                    }
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::to_value(
+                storage
+                    .list_channel_messages_by_turn(parent.id)
+                    .await
+                    .unwrap()
+            )
+            .unwrap(),
+            snapshot
+        );
+        assert_eq!(
+            storage.get_turn(parent.id).await.unwrap().unwrap().state,
+            TurnState::Delegating
+        );
+        assert!(
+            storage
+                .list_queued_turn_inputs(session)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let held = storage
+            .enqueue_delegation_continuation(parent.id, continuation.clone())
+            .await
+            .unwrap();
+        assert_eq!(held.channel_message_ids, vec![rows[0].id, rows[1].id]);
+        assert_eq!(
+            storage.get_turn(parent.id).await.unwrap().unwrap().state,
+            TurnState::Interrupted
+        );
+        assert!(
+            storage
+                .list_channel_messages_by_turn(parent.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            storage
+                .enqueue_delegation_continuation(parent.id, continuation.clone())
+                .await
+                .is_err()
+        );
+        // Both ordinary and recovery callers are unable to link a row to
+        // another queued input, even though the row is pending again.
+        assert!(
+            storage
+                .enqueue_turn_input(continuation.clone())
+                .await
+                .is_err()
+        );
+        let another_parent = storage
+            .create_turn(NewTurn {
+                thread_id: thread,
+                agent_id: "gateway".into(),
+                state: TurnState::Delegating,
+                user_input: None,
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .enqueue_delegation_continuation(another_parent.id, continuation)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            storage.list_queued_turn_inputs(session).await.unwrap(),
+            vec![held]
+        );
+        assert_eq!(
+            serde_json::to_value(
+                storage
+                    .list_channel_messages_by_turn(other.id)
+                    .await
+                    .unwrap()
+            )
+            .unwrap(),
+            unrelated
+        );
+        assert_eq!(
+            serde_json::to_value(storage.list_pending_channel_messages().await.unwrap()).unwrap(),
+            serde_json::json!([rows[3]])
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_arrival_batch_is_not_partially_enqueued() {
+        let (storage, session, thread) = session_and_thread().await;
+        let result = storage
+            .enqueue_turn_inputs(vec![
+                queued(session, thread, "first"),
+                queued(session, Uuid::new_v4(), "invalid destination"),
+            ])
+            .await;
+        assert!(result.is_err());
+        assert!(
+            storage
+                .list_queued_turn_inputs(session)
+                .await
+                .unwrap()
+                .is_empty(),
+            "an invalid arrival batch must leave no partially queued input"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mixed_threads_drain_consecutive_groups_without_moving_messages() {
+        use crate::store::TurnStore;
+        let (storage, session, first_thread) = session_and_thread().await;
+        let second_thread = ThreadStore::create(
+            &storage,
+            NewThread {
+                session_id: session,
+                agent_id: "gateway".into(),
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+        for (thread, text) in [
+            (first_thread, "a"),
+            (first_thread, "b"),
+            (second_thread, "c"),
+            (first_thread, "d"),
+        ] {
+            storage
+                .enqueue_turn_input(queued(session, thread, text))
+                .await
+                .unwrap();
+        }
+        for (thread, expected) in [
+            (first_thread, vec!["a", "b"]),
+            (second_thread, vec!["c"]),
+            (first_thread, vec!["d"]),
+        ] {
+            let drained = storage
+                .drain_queued_turn_inputs(session, "gateway")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                drained
+                    .messages
+                    .iter()
+                    .map(|row| (row.thread_id, row.content.as_str()))
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|text| (thread, *text))
+                    .collect::<Vec<_>>(),
+                "a drain must take only the consecutive inputs for its thread"
+            );
+            storage
+                .update_turn_state(drained.turn.id, TurnState::Completed)
+                .await
+                .unwrap();
+        }
+        assert!(
+            storage
+                .list_queued_turn_inputs(session)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_live_sibling_thread_prevents_a_session_drain() {
+        use crate::model::NewTurn;
+        use crate::store::TurnStore;
+        let (storage, session, thread) = session_and_thread().await;
+        let sibling = ThreadStore::create(
+            &storage,
+            NewThread {
+                session_id: session,
+                agent_id: "gateway".into(),
+            },
+        )
+        .await
+        .unwrap();
+        storage
+            .create_turn(NewTurn {
+                thread_id: sibling.id,
+                agent_id: "gateway".into(),
+                state: TurnState::Processing,
+                user_input: None,
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        storage
+            .enqueue_turn_input(queued(session, thread, "waiting"))
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .drain_queued_turn_inputs(session, "gateway")
+                .await
+                .unwrap()
+                .is_none(),
+            "a sibling's actual active turn must hold the whole session"
+        );
+        assert_eq!(
+            storage
+                .list_queued_turn_inputs(session)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -483,6 +917,85 @@ mod tests {
             ),
             (true, true, vec!["person message"]),
             "schedule deletion must succeed, cancelling its run and brief while retaining a person's queued input: {deleted:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deleting_a_session_settles_its_pending_scheduled_work() {
+        use crate::model::{
+            NewSchedule, NewScheduleRun, ScheduleCreator, ScheduleKind, ScheduleRunTrigger,
+            ScheduleStatus, SessionPolicy,
+        };
+        use crate::store::{ScheduleStore, SessionStore};
+        let (storage, session_id, thread_id) = session_and_thread().await;
+        let topic_id = storage
+            .get_session(session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .topic_id;
+        let schedule = storage
+            .create_schedule(NewSchedule {
+                id: Uuid::new_v4(),
+                message: "scheduled brief".into(),
+                status: ScheduleStatus::Active,
+                kind: ScheduleKind::Interval,
+                expression: "every 5 seconds".into(),
+                session_policy: SessionPolicy::Fresh {
+                    topic_id: Some(topic_id),
+                    agent_id: "gateway".into(),
+                },
+                creator: ScheduleCreator::User,
+                delivery_routing: serde_json::json!({}),
+                gate: None,
+                next_run_at: None,
+                last_run_at: None,
+            })
+            .await
+            .unwrap();
+        let run = storage
+            .create_schedule_run(NewScheduleRun::pending(
+                schedule.id,
+                ScheduleRunTrigger::Tick,
+                None,
+            ))
+            .await
+            .unwrap();
+        storage
+            .enqueue_turn_input(NewQueuedTurnInput {
+                schedule_run_id: Some(run.id),
+                origin: MessageOrigin::Schedule,
+                ..queued(session_id, thread_id, "scheduled brief")
+            })
+            .await
+            .unwrap();
+        storage
+            .enqueue_turn_input(queued(session_id, thread_id, "person message"))
+            .await
+            .unwrap();
+        storage
+            .update_schedule_run(
+                run.id,
+                crate::model::ScheduleRunUpdate {
+                    session_id: Some(session_id),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        storage.delete_session(session_id).await.unwrap();
+        let settled = storage.get_schedule_run(run.id).await.unwrap().unwrap();
+        assert_eq!(
+            settled.state,
+            crate::model::ScheduleRunState::Failed,
+            "deleting a session must settle its pending scheduled work"
+        );
+        assert!(
+            storage
+                .list_queued_turn_inputs(session_id)
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 

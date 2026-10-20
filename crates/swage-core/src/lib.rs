@@ -14,10 +14,12 @@ pub mod error;
 pub mod message;
 pub mod message_rendering;
 pub mod messaging;
+pub mod output_limit;
 pub mod request;
 pub mod runtime;
 pub mod scope;
 pub mod secret;
+pub mod tags;
 pub mod tool;
 
 /// Whether a value is a non-empty lowercase ASCII slug.
@@ -48,6 +50,7 @@ pub use error::{
 pub use message::{ChatMessage, ContentPart, Role, ToolReplayPart};
 pub use message_rendering::{render_message_for_model_context, role_label_for_model_context};
 pub use messaging::{ContextTransferMode, MessageKind, MessageStatus};
+pub use output_limit::{OutputLimitSource, ResolvedOutputLimit, resolve_output_limit};
 pub use request::{
     CompletionRequest, CompletionResponse, FinishReason, LlmRequest, LlmResponse,
     ProviderContentBlockWitness, ProviderResponseWitness, StreamChunk, TokenUsage,
@@ -62,3 +65,5 @@ pub use tool::{
     compact_tool_result_for_model_with_reference, extract_tool_result_metadata,
     parse_tool_result_reference, tool_result_reference,
 };
+
+pub use swage_protocol::client::context::{ProviderAttemptOutcome, ProviderAttemptRecord};

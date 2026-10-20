@@ -199,6 +199,29 @@ impl ToolDispatcher {
         self
     }
 
+    /// The tools this dispatcher offers the model, by name: registered,
+    /// permitted (an approval requirement keeps a granted tool offered), and
+    /// admitted by the advertisement filter — the names `tool_definitions`
+    /// advertises, for a caller that composes text around tools and must not
+    /// name one the model cannot call.
+    pub fn offered_tools(&self) -> std::collections::BTreeSet<String> {
+        self.registry
+            .list()
+            .into_iter()
+            .filter(|name| self.offered_tool(name).is_some())
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn offered_tool(&self, tool_name: &str) -> Option<Arc<dyn crate::tool::Tool>> {
+        check_permission(&self.permissions, tool_name).ok()?;
+        let tool = self.registry.get(tool_name)?;
+        self.advertisement_filter
+            .as_ref()
+            .is_none_or(|filter| filter(tool.as_ref()))
+            .then_some(tool)
+    }
+
     /// Returns tool schemas suitable for `ToolCompletionRequest.tool_definitions`.
     ///
     /// Only tools that the dispatcher would permit the agent to invoke are
@@ -209,13 +232,7 @@ impl ToolDispatcher {
         self.registry
             .list()
             .into_iter()
-            .filter(|name| check_permission(&self.permissions, name).is_ok())
-            .filter_map(|name| self.registry.get(name))
-            .filter(|tool| {
-                self.advertisement_filter
-                    .as_ref()
-                    .is_none_or(|filter| filter(tool.as_ref()))
-            })
+            .filter_map(|name| self.offered_tool(name))
             .map(|tool| {
                 serde_json::json!({
                     "name": tool.name(),
