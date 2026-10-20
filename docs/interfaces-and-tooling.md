@@ -917,8 +917,16 @@ session topic: a run in another topic reads as absent rather than forbidden.
 
 **Scheduling** — `schedule` and `wake_me_later`.
 
+**Definition authoring** — `agent_definition` creates, edits, lists and deletes
+named agents you can choose for future sessions. `task_definition` manages
+reusable work contracts for delegated children, which do not appear in the
+new-session picker; saving one replaces its whole definition, so omitted fields
+are cleared. See [Creating and editing
+definitions](agents-and-permissions.md#creating-and-editing-definitions) for
+the conversational route and its grant.
+
 **Session and memory** — `session_values`, `agent_memory`, `tool_result_read`,
-`task_definition`, and `memory`. The `memory` tool reads and writes the
+and `memory`. The `memory` tool reads and writes the
 shared memory files of the session's scope — the topic's memory when a
 topic is selected, the general memory otherwise. It is one of the two
 sandbox-eligible tools.

@@ -14,6 +14,7 @@
   through to reach their work.
 -->
 <script lang="ts">
+  import { untrack } from "svelte";
   import ConversationChannel from "./ConversationChannel.svelte";
   import ConversationList from "./ConversationList.svelte";
   import OperatorDashboard from "./OperatorDashboard.svelte";
@@ -116,7 +117,7 @@
   // The agent the composer starts the next session under. Seeded from the
   // front door's choice, and reset when the scope changes so an agent from
   // another scope never lingers.
-  let selectedAgentId = $state(pendingStart?.agentId ?? "");
+  let selectedAgentId = $state(untrack(() => pendingStart?.agentId ?? ""));
   let selectedAgentTopicId = $state<string | null | undefined>(undefined);
   $effect(() => {
     const currentTopicId = currentTopic?.id ?? null;
@@ -134,7 +135,7 @@
   });
   // A new pending start (not the one seeded above) brings its own agent
   // choice; the user's later change in the composer is left alone.
-  let seededStart = pendingStart;
+  let seededStart = untrack(() => pendingStart);
   $effect(() => {
     if (pendingStart === seededStart) return;
     seededStart = pendingStart;

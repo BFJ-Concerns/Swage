@@ -760,11 +760,12 @@ pub(crate) fn build_tool_dispatcher_with_browser(
     config_root: &std::path::Path,
 ) -> crate::tool::ToolDispatcher {
     use crate::tool::{
-        Tool, browser::browser_tools, docs_read::DocsReadTool, hold::WorkflowHoldTool,
-        knowledge::KnowledgeCiteTool, knowledge::KnowledgeCurateOrientationTool,
-        knowledge::KnowledgeCurateTool, knowledge::KnowledgeOrientTool,
-        knowledge::KnowledgeRecordTool, knowledge::KnowledgeSearchTool, memory::MemoryReadTool,
-        memory::MemoryWriteTool, plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
+        Tool, agent_definition::AgentDefinitionTool, browser::browser_tools,
+        docs_read::DocsReadTool, hold::WorkflowHoldTool, knowledge::KnowledgeCiteTool,
+        knowledge::KnowledgeCurateOrientationTool, knowledge::KnowledgeCurateTool,
+        knowledge::KnowledgeOrientTool, knowledge::KnowledgeRecordTool,
+        knowledge::KnowledgeSearchTool, memory::MemoryReadTool, memory::MemoryWriteTool,
+        plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
         run_event::RunEventPostTool, schedule::ScheduleTool, schedule::WakeMeLaterTool,
         session_variable::SessionVariableTool, surface::SurfaceLibraryTool,
         surface::SurfaceReadTool, surface::SurfaceWriteTool, task_definition::TaskDefinitionTool,
@@ -805,6 +806,10 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         // Schedule tools reach the gateway's schedule service through the host
         // tool context; both are host-only (requires_device_execution).
         Arc::new(ScheduleTool),
+        // The two definition kinds a conversation can author: the agents a
+        // person picks for a session, and the contracts a delegated child
+        // runs under. Both host-only, both audited through their service.
+        Arc::new(AgentDefinitionTool),
         Arc::new(TaskDefinitionTool),
         Arc::new(WakeMeLaterTool),
         Arc::new(RunEventPostTool),

@@ -2099,6 +2099,16 @@
             "type": "string"
           },
           {
+            "const": "delivery_failed",
+            "description": "The gateway could not deliver output to its destination.",
+            "type": "string"
+          },
+          {
+            "const": "runtime_error",
+            "description": "Automated execution did not produce its required result.",
+            "type": "string"
+          },
+          {
             "const": "internal_error",
             "description": "An unexpected failure inside the gateway.",
             "type": "string"

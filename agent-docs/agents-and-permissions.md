@@ -1,14 +1,14 @@
 ---
-description: Agent definitions, operator guidance (AGENTS.md), tool permissions, approval mechanics, dispatch-bound grant intersection, effort resolution, topic-targeted session creation, context configuration, voice configuration, experimentation controls, and succession compaction
+description: Conversational and API agent-definition authoring, operator guidance (AGENTS.md), tool permissions, approval mechanics, dispatch-bound grant intersection, effort resolution, topic-targeted session creation, context configuration, voice configuration, experimentation controls, and succession compaction
 ---
 
 # Agents and permissions
 
 ## Agent definitions
 
-An agent definition is a durable record that gives a session its character —
-its instructions, model preference, tool permissions, skills, and optional
-output schema. Each definition carries a stable `id` that sessions reference.
+An agent definition is a reusable configuration that gives a session its
+character — its instructions, model preference, tool permissions, skills,
+and optional output schema. Each definition carries a stable `id` that sessions reference.
 
 | Field | Purpose |
 |---|---|
@@ -17,7 +17,7 @@ output schema. Each definition carries a stable `id` that sessions reference.
 | `display_name` | Human-readable label |
 | `description` | Required free-text description |
 | `instructions` | Appended after operator instructions; replaces outright when operator instructions are empty |
-| `model_id` | Model preference; applied only when the named model id exists in the configured model entries, otherwise ignored with a warning |
+| `model_id` | Optional model preference; saving requires an id in the configured model catalogue. Choose the model when starting a session. |
 | `tool_permissions` | Optional JSON permission overlay; intersects with the resolved config's grants — narrows, never widens |
 | `skills` | Skill ids this definition activates |
 | `output_schema` | Optional JSON Schema enforced on every final response |
@@ -30,18 +30,54 @@ cascade (Global → Topic → Agent `.toml` files) into a resolved config, then
 overlays the agent definition on top:
 
 1. Instructions are appended after operator instructions.
-2. Model preference takes effect only when the named model id exists in the
-   configured model entries; an unrecognised model is logged as a warning and
-   ignored.
-3. Tool permissions are intersected — allow sets are intersected, deny sets are
+2. Tool permissions are intersected — allow sets are intersected, deny sets are
    unioned. A malformed overlay is logged and ignored (the config's own grants
    stand).
-4. Skills, output schema, and output retry limit are set directly from the
+3. Skills, output schema, and output retry limit are set directly from the
    definition.
 
 ### Creating and editing definitions
 
 Definitions can be created and edited through two surfaces:
+
+**Conversation.** Ask an agent with the `agent_definition` tool granted to
+create or edit an agent for future sessions. The shipped
+`definition-authoring` bundle contains `agent_definition` and `task_definition`.
+Under **Settings → Automation**, add `definition-authoring` to **Tool allow
+rules** if the rules are restricted; the default `*` already allows it.
+**Tool bundles** must map that name to `["agent_definition", "task_definition"]`
+if the shipped mapping has been overridden. Denies and narrower agent or
+delegation grants still apply; this tool cannot grant itself access.
+
+| Operation or field | Behaviour |
+|---|---|
+| `action` | `create`, `update`, `delete`, or `list` |
+| `create` | Requires `id`, `display_name`, `description`, and `instructions`; refuses an existing id at the chosen scope |
+| `update` | Requires `id` at the chosen scope; changes only supplied fields and refuses a missing definition. Supplied text replaces the whole field. |
+| `delete` | Requires `id` at the chosen scope; permanently removes the definition and refuses a missing one |
+| `list` | Returns the session's effective definitions, including built-ins and whether each is selectable |
+| `scope` | `global` by default; `topic` targets the calling session's topic (or the general scope when no topic is selected), never another topic. Topic definitions shadow global definitions with the same id. Update and delete address the specified scope. |
+| `model_id`, `tool_permissions`, `skills`, `output_schema`, `output_max_retries` | Optional on create. On update, omission preserves the field; `null` clears it (`skills` becomes empty). |
+
+`display_name`, `description`, and `instructions` cannot be cleared with
+`null` on update. Agent ids use lowercase ASCII letters, digits and hyphens;
+the display name must not be blank. Skill names must be non-empty and unique,
+permission overlays must be valid, and output contracts must be valid JSON
+Schemas. Saving an unknown model id is refused with the configured ids.
+At run time, a saved model preference no longer in the catalogue leaves the
+resolved default model in place. Tool grants can only narrow the configuration's
+grants; `require_approval` is refused even
+as an empty list. Set approval requirements in configuration files. The shipped
+**Swage default** (`gateway`) and **Memory curator** (`memory-curator`) cannot
+be changed or deleted through this tool.
+
+After creating or editing, reload the page. **Settings → Agents** shows the
+definition's instructions, model preference, tool permissions, skills and output
+contract; **Agent** in the new-session picker offers selectable definitions
+visible in that scope. Creating a definition does not switch the current session
+to it. In the operator view, choose **View history**, then **Configuration
+changes**. Each create, update and delete records the whole prior and new state;
+expand **Whole prior and new state** to read them.
 
 **API.** `POST /api/operator/agent-definitions` creates a definition;
 `PUT /api/operator/agent-definitions/{agent_id}` replaces one. A complete
@@ -72,9 +108,6 @@ optional.
 
 A definition request whose `tool_permissions` contains `require_approval`
 is refused with HTTP 422, including when its value is an empty list.
-
-Conversational authoring of agent definitions is not yet available. The
-API routes above are the supported surface.
 
 ## Effort
 
@@ -185,14 +218,18 @@ does not yet render it.
 
 ## Effective agent registry
 
-A fresh installation's effective agent registry holds one entry: the
-shipped default (`"gateway"`, display name "Swage default"). No other
-agent definitions ship with the gateway. The start-conversation picker
-lists this default plus any operator-authored definitions visible to
-the topic (via `GET /api/topics/{topicId}/agent-definitions`).
-`CreateConversationRequest`'s `agent_id` field selects one of these:
-`"gateway"` or an operator-authored definition visible to the target
-topic; the gateway rejects anything else with a validation error.
+A fresh installation includes **Swage default** (`gateway`) and **Memory
+curator** (`memory-curator`). The curator is visible in agent settings but
+is not selectable for a new session. The new-session picker offers the default
+and authored definitions visible in the selected scope. Global definitions
+are visible without a topic; a topic also sees its own definitions, which
+shadow global ones with the same id.
+
+`GET /api/agent-definitions` lists the general scope;
+`GET /api/topics/{topicId}/agent-definitions` lists a topic's effective
+registry. `POST /api/conversations` accepts `agent_id` for the default or a
+selectable authored definition visible to the target scope; other choices
+are refused.
 
 A shipped workflow's roles (the research sweep's researcher, organiser,
 and synthesist) are bare dispatches inside the workflow script, not
@@ -311,6 +348,7 @@ The file-config default (`ToolPermissionConfig::default()` in
   level replaces this list (`merge.rs`), so
   `require_approval = []` removes the prompts.
 - Default bundles: `browsing`, `browser_actions`, `scheduling`,
+  `session-authoring`, `definition-authoring`, `surfaces-read`, `surfaces-write`,
   `knowledge-read`, `knowledge-write`, `knowledge-curation`,
   `knowledge-citation`, `knowledge-orientation-curation`
 
@@ -331,17 +369,10 @@ intersection of its own config and every ancestor dispatcher's grants.
 
 ### Lineage
 
-`GatewayDelegationHandler.handle_delegation` (in `turn/delegation.rs`):
-
-1. Loads the target agent's file config and overlays its durable definition
-   (`apply_agent_definition`).
-2. Fetches the sender's dispatch-bound lineage from session metadata
-   (`dispatch_bound_agent_ids`), then appends the sender's own agent id.
-3. Calls `apply_dispatch_bounds` with the full lineage — each ancestor's
-   resolved config (file config + its own definition) is loaded and applied
-   in order via `apply_dispatch_bound`.
-4. Stores the lineage in the child's session metadata so further delegation
-   continues to narrow.
+Each delegation records the sender's agent id alongside the existing chain
+in the child's session metadata (`dispatch_bound_agent_ids`). The child's
+effective grants intersect its file config and definition with each
+ancestor's resolved grants. Further delegation carries the chain forward.
 
 ### Intersection mechanics
 

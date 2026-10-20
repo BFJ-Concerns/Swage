@@ -179,6 +179,7 @@ pub async fn upsert_agent_definition(
     session_id: Option<Uuid>,
 ) -> Result<AgentDefinitionChange, GatewayError> {
     validate_definition(&definition)?;
+    require_configured_model(state, definition.model_id.as_deref())?;
 
     let prior = snapshot_definition(state, &definition.id, definition.topic_id).await?;
     let action_word = if prior.is_some() {
@@ -340,6 +341,31 @@ pub fn validate_definition(definition: &NewAgentDefinition) -> Result<(), Gatewa
     Ok(())
 }
 
+/// A model preference names an entry of the live catalogue. A definition
+/// preferring a model nobody configured would be applied as the default
+/// with only a log line to say so, which is how an agent asked for on one
+/// model quietly runs on another; refusing here, with the ids that would
+/// be accepted, keeps the preference honest at every authoring surface.
+fn require_configured_model(state: &AppState, model_id: Option<&str>) -> Result<(), GatewayError> {
+    let Some(model_id) = model_id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return Ok(());
+    };
+    let catalogue = state.active_config().models;
+    if catalogue.entries.contains_key(model_id) {
+        return Ok(());
+    }
+    let mut configured: Vec<&str> = catalogue.entries.keys().map(String::as_str).collect();
+    configured.sort_unstable();
+    Err(GatewayError::ValidationError(format!(
+        "model '{model_id}' is not in the configured catalogue; configured models: {}",
+        if configured.is_empty() {
+            "none".to_string()
+        } else {
+            configured.join(", ")
+        }
+    )))
+}
+
 /// The definition's current stored state, `None` when absent.
 async fn snapshot_definition(
     state: &AppState,
@@ -385,6 +411,53 @@ mod validation_tests {
             output_schema: None,
             output_max_retries: None,
         }
+    }
+
+    /// A preference for a model the catalogue does not configure is refused
+    /// before anything is written, naming the models that would be accepted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refuses_a_model_outside_the_catalogue_before_saving() {
+        let storage = std::sync::Arc::new(SqliteStorage::in_memory().unwrap());
+        let state = crate::test_support::state(storage.clone());
+        let mut config = state.active_config();
+        config.models.entries.insert(
+            "local-small".into(),
+            swage_config::model::ModelEndpointConfig {
+                provider_id: "local".into(),
+                model_id: "small".into(),
+                aliases: vec![],
+                context_window: None,
+                generation_preset: None,
+                default_effort: None,
+                capabilities: swage_config::model::ModelCapabilitiesConfig::default(),
+            },
+        );
+        *state.runtime_config.write().unwrap() = config;
+
+        let mut elsewhere = definition("roamer");
+        elsewhere.model_id = Some("nowhere".into());
+        let error = upsert_agent_definition(&state, elsewhere, "test", None)
+            .await
+            .err()
+            .expect("an unconfigured model must be refused");
+        assert!(
+            error.to_string().contains("nowhere") && error.to_string().contains("local-small"),
+            "{error}"
+        );
+        assert!(
+            storage
+                .list_agent_definitions(None)
+                .await
+                .unwrap()
+                .is_empty(),
+            "refused definition was persisted"
+        );
+
+        let mut configured = definition("roamer");
+        configured.model_id = Some("local-small".into());
+        upsert_agent_definition(&state, configured, "test", None)
+            .await
+            .expect("a configured model is accepted");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

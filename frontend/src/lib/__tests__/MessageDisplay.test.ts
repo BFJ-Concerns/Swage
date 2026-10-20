@@ -25,6 +25,7 @@ vi.mock("../api/turns", () => ({
 
 import { fetchTurnContext } from "../api/turns";
 import MessageDisplay from "../components/MessageDisplay.svelte";
+import { renderedStyles } from "./rendered-styles";
 import messageDisplaySource from "../components/MessageDisplay.svelte?raw";
 import type { ConversationStore } from "../stores/conversations";
 import {
@@ -1207,11 +1208,29 @@ describe("assistant message width", () => {
       css: "external",
       cssHash: () => scope,
     });
-    const style = document.createElement("style");
-    style.textContent = css!.code;
-    document.head.append(style);
+    const style = renderedStyles(css!.code);
     onTestFinished(() => style.remove());
   }
+
+  it.each([false, true])("caps plain reply prose while streaming=%s", (live) => {
+    const text = "A long plain reply. ".repeat(100);
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: {
+        store: makeConversationStore(live ? [] : [makeAssistantMessage(text)]),
+        streamingStore: { ...makeStreamingStore([], live), streamedContent: live ? text : "" },
+        displayPreferences: {
+          theme: "system", density: "compact", message_model_display: "off",
+          conversation_rendering: "plain", print_marks: "full",
+        },
+      },
+    });
+    applyComponentStyles();
+    const body = document.querySelector<HTMLElement>(".plain-body")!;
+    expect(body.textContent).toBe(text);
+    expect(getComputedStyle(body).maxWidth).toBe("80ch");
+    expect(getComputedStyle(body).whiteSpace).toBe("pre-wrap");
+  });
 
   const wideReply = [
     "Here is the comparison.",
