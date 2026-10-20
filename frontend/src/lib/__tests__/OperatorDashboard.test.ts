@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+// @ts-expect-error Vitest supplies Node APIs; the application has browser types.
+import { env, stderr } from "node:process";
 import { afterEach, beforeEach, describe, expect, it, vi, type TestContext } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 
@@ -36,17 +38,17 @@ async function launchLayoutBrowser(context: TestContext) {
   try {
     return await chromium.launch({
       headless: true,
-      executablePath: process.env.SWAGE_BROWSER_BIN || undefined,
+      executablePath: env.SWAGE_BROWSER_BIN || undefined,
     });
   } catch (error) {
     if (!(error instanceof Error) || !error.message.includes("Executable doesn't exist")) {
       throw error;
     }
     const reason = "no Chromium binary was found for OperatorDashboard layout tests";
-    if (process.env.SWAGE_BROWSER_TESTS === "required") {
+    if (env.SWAGE_BROWSER_TESTS === "required") {
       throw new Error(`SWAGE_BROWSER_TESTS=required but ${reason}`, { cause: error });
     }
-    process.stderr.write(`Skipping browser layout test: ${reason}\n`);
+    stderr.write(`Skipping browser layout test: ${reason}\n`);
     context.skip(reason);
   }
 }
