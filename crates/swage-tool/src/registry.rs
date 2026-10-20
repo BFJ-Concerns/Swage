@@ -33,6 +33,8 @@ const PROTECTED_NAMES: &[&str] = &[
     "delegate",
     "schedule",
     "wake_me_later",
+    "agent_definition",
+    "task_definition",
 ];
 
 /// Registry of tools available for dispatch.
