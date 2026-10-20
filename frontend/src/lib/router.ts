@@ -84,6 +84,7 @@ export interface RouterOptions {
     selectConversation(id: string): Promise<void>;
   };
   onRouteChange?: (route: Route) => void;
+  onNavigationError?: (error: unknown) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +226,12 @@ export function createRouter(options?: RouterOptions): Router {
           // A transient existence-check failure must not evict a working
           // conversation or reject from the asynchronous popstate listener.
           return;
+        } else if (options?.onNavigationError) {
+          options.onNavigationError(error);
+          const fallback = options.conversationStore.activeConversationId;
+          const fallbackPath = fallback ? conversationPath(fallback) : "/";
+          window.history.replaceState(null, "", fallbackPath);
+          updateRoute(parseRoute(fallbackPath));
         } else {
           throw error;
         }
