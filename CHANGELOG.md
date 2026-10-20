@@ -30,6 +30,11 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- Anthropic turns without an explicit output limit use the model's documented limit instead of a fixed 4,096 tokens. A limit the request sets is kept, and a model Anthropic does not document falls back to the catalogue's limit.
+- Session orientation lists every readable attached workspace with its path, access and trust. A worker placed inside one sees its placement root, the trust it inherits and its own write access.
+- Each turn tells the agent the current time to the second, separately from the session's start time.
+- Provider settings keep chosen names and unsaved edits, show save status and whether the default model is ready, list model choices in a stable order, and offer existing governed credentials beside a pasted key, explaining when to use each provider kind.
+- Provider settings label each credential by where it is stored. A pasted key rotates only a credential Swage manages, while file and environment credentials say where to update them, and a provider-scoped key appears only for its own provider.
 - The README names Debian/Ubuntu build prerequisites, supported Node versions, and the binary path setup, with frontend install and build commands.
 
 - Provider setup documentation uses governed credentials through Settings → Providers, distinguishes GPT Responses from Chat Completions, and explains model-bound routing and the disabled Codex integration.
@@ -61,6 +66,15 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- A chat turn interrupted while it waits for a delegated agent, or while recording that agent's result, resumes after a gateway restart instead of losing its reply or stopping the gateway from starting. The resumed reply stays in its originating chat and survives further restarts when batched with a scheduled brief, and later tool results no longer clear the pending delegation. A reconstructed child result still passes the gateway's message-send hooks; if one refuses it, the parent resumes with a notice of the child's fate that carries neither the refused output nor the hook's reason, which stays in the gateway log.
+- Memory notice links open their page even when a curator instruction finishes while the page is loading.
+- Links to app pages in conversation messages navigate within the app instead of reloading it.
+- Topic workspace lists no longer show an empty-folder message while an attached folder is still loading.
+- Retry in topic settings reloads an unavailable surface library.
+- Tool-result displays keep all of a JSON file's content when it contains an `output` key.
+- Conversation failure notices name the model and provider of the turn that failed, including a turn queued behind a running response, keep identifiers' case, put diagnostics behind a disclosure, and offer Retry and a link to provider settings.
+- Opening provider settings directly keeps the app's navigation, and unsaved provider edits stay protected after switching settings tabs.
+- A newly stored provider key is labelled correctly, and can be rotated, without reloading Settings.
 - Speech synthesis is advertised only after a successful speech request, and a failed request makes it unavailable with a reason. Voice Settings offers a speech-model check and a retry after correcting the model or provider.
 - New topic sessions select the topic’s configured default model, including API requests without a model; topic settings show the effective default and fresh composers preselect it.
 - A topic whose configuration cannot be read still appears in the topic list, and its composer offers no model, instead of the whole list failing and the web UI failing to load.
