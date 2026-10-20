@@ -13,6 +13,7 @@ use swage_core::ToolError;
 use swage_tool::context::ToolContext;
 
 use crate::tool::Tool;
+use crate::tool::exact_text_replacement::{ReplacementError, replace_exact_text};
 use crate::tool::workspace::{
     FileContent, binary_size_description, location_approval_error, read_file_content,
     require_workspace_write_access, resolve_context_path,
@@ -406,29 +407,28 @@ fn replace_text(
     replace_all: bool,
     tool_name: &str,
 ) -> Result<AppliedEdit, ToolError> {
-    let match_count = content.matches(old_text).count();
-    if match_count == 0 {
-        return Err(ToolError::ExecutionFailed {
-            name: tool_name.to_string(),
-            message: "edit.old_text did not match the current file. Use file_read, then retry with current text.".to_string(),
-        });
-    }
-    if !replace_all && match_count > 1 {
-        return Err(ToolError::ExecutionFailed {
-            name: tool_name.to_string(),
-            message: format!(
-                "edit.old_text matched {match_count} places. Use a larger unique old_text or set replace_all=true."
-            ),
-        });
-    }
-    let content = if replace_all {
-        content.replace(old_text, new_text)
+    let (content, replacements) = if replace_all {
+        let count = content.match_indices(old_text).count();
+        if count == 0 {
+            Err(ReplacementError::Missing)
+        } else {
+            Ok((content.replace(old_text, new_text), count))
+        }
     } else {
-        content.replacen(old_text, new_text, 1)
-    };
+        replace_exact_text(content, old_text, new_text).map(|content| (content, 1))
+    }
+    .map_err(|error| ToolError::ExecutionFailed {
+        name: tool_name.to_string(),
+        message: match error {
+            ReplacementError::Missing => "edit.old_text did not match the current file. Use file_read, then retry with current text.".to_string(),
+            ReplacementError::Ambiguous(count) => format!(
+                "edit.old_text matched {count} places. Use a larger unique old_text or set replace_all=true."
+            ),
+        },
+    })?;
     Ok(AppliedEdit {
         content,
-        replacements: if replace_all { match_count } else { 1 },
+        replacements,
     })
 }
 
@@ -764,6 +764,32 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("note.txt")).unwrap(),
             "one fish, one dish"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn replace_rejects_overlapping_matches() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("note.txt"), "aaa").unwrap();
+
+        let result = tool()
+            .execute(
+                edit(
+                    "note.txt",
+                    vec![json!({"type": "replace", "old_text": "aa", "new_text": "b"})],
+                ),
+                &ctx(&dir),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "overlapping matches must be refused: {result:?}"
+        );
+        assert!(result.unwrap_err().to_string().contains("matched 2 places"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("note.txt")).unwrap(),
+            "aaa"
         );
     }
 
