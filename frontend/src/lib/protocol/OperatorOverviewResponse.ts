@@ -4,6 +4,7 @@ import type { ChannelStatusListResponse } from "./ChannelStatusListResponse";
 import type { OperatorDeviceSummary } from "./OperatorDeviceSummary";
 import type { OperatorGatewaySummary } from "./OperatorGatewaySummary";
 import type { OperatorSessionSummary } from "./OperatorSessionSummary";
+import type { OperatorWorkflowRunSummary } from "./OperatorWorkflowRunSummary";
 import type { ScheduleListResponse } from "./ScheduleListResponse";
 
-export type OperatorOverviewResponse = { gateway: OperatorGatewaySummary, sessions: Array<OperatorSessionSummary>, approvals: Array<ApprovalSummary>, schedules: ScheduleListResponse, channels: ChannelStatusListResponse, devices: Array<OperatorDeviceSummary>, };
+export type OperatorOverviewResponse = { gateway: OperatorGatewaySummary, sessions: Array<OperatorSessionSummary>, workflow_runs: Array<OperatorWorkflowRunSummary>, approvals: Array<ApprovalSummary>, schedules: ScheduleListResponse, channels: ChannelStatusListResponse, devices: Array<OperatorDeviceSummary>, };

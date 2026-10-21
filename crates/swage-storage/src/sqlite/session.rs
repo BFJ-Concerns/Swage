@@ -5,7 +5,9 @@ use uuid::Uuid;
 
 use swage_core::StorageError;
 
-use crate::model::{NewSession, Session, SessionActivity, SessionListing, SessionOrigin};
+use crate::model::{
+    NewSession, Session, SessionActivity, SessionListing, SessionOrigin, SessionTurnActivity,
+};
 use crate::sqlite::SqliteStorage;
 use crate::store::SessionStore;
 
@@ -58,13 +60,38 @@ pub(crate) fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessio
     })
 }
 
-/// A session row joined with its latest user-or-assistant message.
+/// A session row joined with its message and turn activity.
 fn row_to_session_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionActivity> {
     let session = row_to_session(row)?;
     let last_activity: String = row.get(11)?;
     let latest_message: Option<String> = row.get(12)?;
     let has_interrupted_turn: bool = row.get(13)?;
+    let read_turn = |id_column: usize, state_column: usize| {
+        row.get::<_, Option<String>>(id_column)?
+            .map(|id| {
+                let state: String = row.get(state_column)?;
+                Ok::<_, rusqlite::Error>(SessionTurnActivity {
+                    id: parse_uuid(&id)?,
+                    state: state.parse().map_err(|error: String| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            state_column,
+                            rusqlite::types::Type::Text,
+                            error.into(),
+                        )
+                    })?,
+                })
+            })
+            .transpose()
+    };
+    let has_processing_turn = row.get(16)?;
     Ok(SessionActivity {
+        latest_turn: read_turn(14, 15)?,
+        active_turn: if has_processing_turn {
+            read_turn(17, 18)?
+        } else {
+            None
+        },
+        has_processing_turn,
         last_activity: parse_dt(&last_activity)?,
         latest_message,
         has_interrupted_turn,
@@ -74,18 +101,22 @@ fn row_to_session_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionA
 
 /// The activity columns appended to `SESSION_COLUMNS` for the recent list:
 /// the latest user-or-assistant message's time and text (creation time and
-/// no text for a session with none), and whether any turn was interrupted.
+/// no text for a session with none), plus the latest turn and session-wide
+/// interrupted and processing flags.
 /// Tool, system and platform messages, and assistant rows containing only tool
 /// effects, are excluded so the list reflects what a person or the agent said.
 const SESSION_ACTIVITY_COLUMNS: &str = "
     COALESCE(latest.created_at, sessions.created_at) AS last_activity,
     latest.content AS latest_message,
-    EXISTS (
-        SELECT 1 FROM turns
-        JOIN threads ON threads.id = turns.thread_id
-        WHERE threads.session_id = sessions.id AND turns.state = 'interrupted'
-    ) AS has_interrupted_turn";
+    COALESCE(turn_activity.has_interrupted_turn, 0) AS has_interrupted_turn,
+    turn_activity.id AS latest_turn_id,
+    turn_activity.state AS latest_turn_state,
+    COALESCE(turn_activity.has_processing_turn, 0) AS has_processing_turn,
+    turn_activity.active_turn_id,
+    turn_activity.active_turn_state";
 
+// Equal-time turns retain the first encountered in thread-creation order,
+// then insertion order within that thread.
 const SESSION_ACTIVITY_JOIN: &str = "
     LEFT JOIN (
         SELECT threads.session_id, messages.created_at, messages.content,
@@ -98,7 +129,31 @@ const SESSION_ACTIVITY_JOIN: &str = "
         WHERE messages.role IN ('user', 'assistant')
           AND messages.origin != 'platform'
           AND messages.content != ''
-    ) AS latest ON latest.session_id = sessions.id AND latest.recency = 1";
+    ) AS latest ON latest.session_id = sessions.id AND latest.recency = 1
+    LEFT JOIN (
+        SELECT threads.session_id, turns.id, turns.state,
+               FIRST_VALUE(turns.id) OVER active_first AS active_turn_id,
+               FIRST_VALUE(turns.state) OVER active_first AS active_turn_state,
+               MAX(turns.state = 'interrupted') OVER (
+                   PARTITION BY threads.session_id
+               ) AS has_interrupted_turn,
+               MAX(turns.state IN ('processing', 'delegating', 'awaiting_approval')) OVER (
+                   PARTITION BY threads.session_id
+               ) AS has_processing_turn,
+               ROW_NUMBER() OVER (
+                   PARTITION BY threads.session_id
+                   ORDER BY turns.created_at DESC, threads.created_at ASC,
+                            threads.rowid ASC, turns.rowid ASC
+               ) AS recency
+        FROM turns
+        JOIN threads ON threads.id = turns.thread_id
+        WINDOW active_first AS (
+            PARTITION BY threads.session_id
+            ORDER BY (turns.state IN ('processing', 'delegating', 'awaiting_approval')) DESC,
+                     turns.created_at DESC, threads.created_at ASC,
+                     threads.rowid ASC, turns.rowid ASC
+        )
+    ) AS turn_activity ON turn_activity.session_id = sessions.id AND turn_activity.recency = 1";
 
 fn parse_uuid(s: &str) -> rusqlite::Result<Uuid> {
     s.parse::<Uuid>().map_err(|e| {
@@ -675,6 +730,90 @@ mod tests {
         let tooled_entry = &listing[0];
         assert_eq!(tooled_entry.last_activity, tooled.created_at);
         assert_eq!(tooled_entry.latest_message, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_activity_reads_turn_facts_across_threads_without_mixing_sessions() {
+        use crate::model::{NewTurn, TurnState};
+        use crate::store::{ThreadStore, TurnStore};
+
+        let (storage, topic_id) = make_storage_with_topic().await;
+        let busy = storage.create_session(new_session(topic_id)).await.unwrap();
+        let empty = storage.create_session(new_session(topic_id)).await.unwrap();
+        let mut turns = Vec::new();
+        for state in [
+            TurnState::AwaitingApproval,
+            TurnState::Interrupted,
+            TurnState::Failed,
+        ] {
+            let thread = ThreadStore::create(
+                &storage,
+                NewThread {
+                    session_id: busy.id,
+                    agent_id: busy.agent_id.clone(),
+                },
+            )
+            .await
+            .unwrap();
+            turns.push(
+                storage
+                    .create_turn(NewTurn {
+                        thread_id: thread.id,
+                        agent_id: busy.agent_id.clone(),
+                        state,
+                        user_input: None,
+                        parent_turn_id: None,
+                    })
+                    .await
+                    .unwrap(),
+            );
+        }
+        let latest = turns.last().unwrap();
+        let expected = Some(SessionTurnActivity {
+            id: latest.id,
+            state: TurnState::Failed,
+        });
+        let listed = storage
+            .list_recent_sessions(SessionListing::default())
+            .await
+            .unwrap();
+        let busy_row = listed.iter().find(|row| row.session.id == busy.id).unwrap();
+        assert_eq!(busy_row.latest_turn, expected);
+        assert!(busy_row.has_processing_turn);
+        assert!(busy_row.has_interrupted_turn);
+        let empty_row = listed
+            .iter()
+            .find(|row| row.session.id == empty.id)
+            .unwrap();
+        assert_eq!(empty_row.latest_turn, None);
+        assert!(!empty_row.has_processing_turn);
+        assert!(!empty_row.has_interrupted_turn);
+        let fetched = storage
+            .get_session_activity(busy.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched.latest_turn, expected);
+        assert!(fetched.has_processing_turn && fetched.has_interrupted_turn);
+
+        // Equal creation times keep the first turn from the earliest thread.
+        let first_id = turns[0].id;
+        storage
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE turns SET created_at = '2026-01-01T00:00:00+00:00'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let tied = storage
+            .get_session_activity(busy.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(tied.latest_turn.unwrap().id, first_id);
     }
 
     #[tokio::test(flavor = "multi_thread")]

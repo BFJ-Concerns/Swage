@@ -437,3 +437,18 @@ describe("connection explanations", () => {
     expect(store.errorMessage).toBeNull();
   });
 });
+
+describe("Stop during reconnect", () => {
+  it("reconnects before sending cancellation during backoff", () => {
+    const mock = createMockWsClient();
+    const store = createConnectionStore({ wsClientFactory: () => mock });
+    store.connectTo("child");
+    mock.triggerStatus("connected");
+    mock.triggerStatus("reconnecting");
+    vi.mocked(mock.connect).mockClear();
+    store.cancelTurn("child");
+    expect(mock.connect).toHaveBeenCalledWith("child");
+    expect(mock.send).toHaveBeenCalledWith({ type: "cancel" });
+    expect(vi.mocked(mock.connect).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(mock.send).mock.invocationCallOrder[0]);
+  });
+});

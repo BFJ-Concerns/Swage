@@ -31,12 +31,12 @@ pub use model::{
     ProviderRoundRecord, RemovedSurfaceModule, Schedule, ScheduleCreator, ScheduleKind,
     ScheduleRun, ScheduleRunState, ScheduleRunTrigger, ScheduleRunUpdate, ScheduleStatus,
     SecretRecord, Session, SessionActivity, SessionListing, SessionOrigin, SessionPolicy,
-    SessionVariable, SkipReason, SourceCapture, SourceObservation, Surface, SurfaceAnnotation,
-    SurfaceModule, TaskDefinition, Thread, ThreadBranch, ThreadState, ToolCallRecord, Topic,
-    TopicSlug, Turn, TurnIsolation, TurnState, UpdateSchedule, WorkflowHoldSettlement,
-    WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunHoldAnswer, WorkflowRunHoldRecord,
-    WorkflowRunHoldRejectionRecord, WorkflowRunRecord, WorkflowRunWorkerPlacement,
-    WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
+    SessionTurnActivity, SessionVariable, SkipReason, SourceCapture, SourceObservation, Surface,
+    SurfaceAnnotation, SurfaceModule, TaskDefinition, Thread, ThreadBranch, ThreadState,
+    ToolCallRecord, Topic, TopicSlug, Turn, TurnIsolation, TurnState, UpdateSchedule,
+    WorkflowHoldSettlement, WorkflowJournalRecord, WorkflowRunEventRecord, WorkflowRunHoldAnswer,
+    WorkflowRunHoldRecord, WorkflowRunHoldRejectionRecord, WorkflowRunRecord,
+    WorkflowRunWorkerPlacement, WorkflowScriptRecord, WorkflowScriptVersion, WorkspaceAttachment,
 };
 pub use sqlite::SqliteStorage;
 pub use store::{

@@ -1467,3 +1467,21 @@ describe("queued turn model identity", () => {
     expect(store.turnError?.selectedModelId).toBeUndefined();
   });
 });
+
+describe("opened delegated view settlement", () => {
+  it.each([
+    [{ type: "turn_complete", turn_id: "child-turn" } as const, "completed"],
+    [{ type: "error", code: "agent_error", message: "child failed" } as const, "failed"],
+  ])("settles the loaded processing request on %s", (event, expected) => {
+    const messages: MessageView[] = [{ role: "user", origin: "user", content: "Delegated request", timestamp: "2026-10-20T10:00:00Z", turn_id: "child-turn", turn_state: "processing" }];
+    const store = createStreamingStore({ conversationStore: {
+      activeConversation: { id: "child", messages },
+      appendOptimisticUserMessage: vi.fn(), appendAssistantMessage: vi.fn(),
+      settleUnansweredRequest: (ending) => { Object.assign(messages[0], ending); },
+    } });
+    expect(store.streamFor!("child").isStreaming).toBe(true);
+    store.handleServerEvent(event, "child");
+    expect(store.streamFor!("child").isStreaming).toBe(false);
+    expect(messages[0].turn_state).toBe(expected);
+  });
+});

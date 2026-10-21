@@ -1,8 +1,16 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+// @ts-expect-error Vitest supplies Node APIs; the application has browser types.
+import { env, stderr } from "node:process";
+import { afterEach, beforeEach, describe, expect, it, vi, type TestContext } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 
 import { compile } from "svelte/compiler";
+
+import { chromium } from "@playwright/test";
+import appCss from "../../app.css?raw";
+
+import { createConnectionStore } from "../stores/connection";
+import risoCss from "../styles/riso.css?raw";
 
 import OperatorDashboard from "../components/OperatorDashboard.svelte";
 import operatorDashboardSource from "../components/OperatorDashboard.svelte?raw";
@@ -26,6 +34,25 @@ vi.mock("../api/operator", () => ({
   triggerSchedule: vi.fn(),
 }));
 
+async function launchLayoutBrowser(context: TestContext) {
+  try {
+    return await chromium.launch({
+      headless: true,
+      executablePath: env.SWAGE_BROWSER_BIN || undefined,
+    });
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("Executable doesn't exist")) {
+      throw error;
+    }
+    const reason = "no Chromium binary was found for OperatorDashboard layout tests";
+    if (env.SWAGE_BROWSER_TESTS === "required") {
+      throw new Error(`SWAGE_BROWSER_TESTS=required but ${reason}`, { cause: error });
+    }
+    stderr.write(`Skipping browser layout test: ${reason}\n`);
+    context.skip(reason);
+  }
+}
+
 function makeOverview(overrides: Partial<OperatorOverview> = {}): OperatorOverview {
   return {
     gateway: {
@@ -36,6 +63,7 @@ function makeOverview(overrides: Partial<OperatorOverview> = {}): OperatorOvervi
       active_turn_count: 2,
       active_connection_count: 1,
     },
+    workflow_runs: [],
     sessions: [
       {
         id: "conv-1",
@@ -47,6 +75,8 @@ function makeOverview(overrides: Partial<OperatorOverview> = {}): OperatorOvervi
         has_interrupted_turn: false,
         has_active_connection: true,
         has_running_turn: true,
+        agent_id: "gateway",
+        activity: "processing",
       },
     ],
     approvals: [
@@ -124,6 +154,135 @@ describe("OperatorDashboard", () => {
     document.head.querySelectorAll("style").forEach((style) => style.remove());
     while (document.body.firstChild) {
       document.body.removeChild(document.body.firstChild);
+    }
+  });
+
+  it("keeps the heading within 80px and supervision panels in the first viewport at 1440x1000", async (context) => {
+    const overview = makeOverview();
+    overview.sessions = Array.from({ length: 8 }, (_, index) => ({
+      ...overview.sessions[0], id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    }));
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(overview);
+    component = mount(OperatorDashboard, { target: document.body });
+    await settleUi();
+    const scope = Array.from(document.querySelector(".ops-deck")!.classList)
+      .find((name) => name.startsWith("svelte-"))!;
+    const { css } = compile(operatorDashboardSource, { filename: "OperatorDashboard.svelte" });
+    const browser = await launchLayoutBrowser(context);
+    try {
+      const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+      await page.setContent(`<style>${risoCss}\n${appCss.replace(/@import[^;]+;/g, "")}\n${(css?.code ?? "").replace(/svelte-[a-z0-9]+/g, scope)}</style>${document.body.innerHTML}`);
+      const header = await page.locator(".ops-header").boundingBox();
+      expect(header).not.toBeNull();
+      expect(header!.height).toBeLessThanOrEqual(80);
+      for (const selector of [".ledger-row", ".control-card", ".panel:nth-child(3) .control-card"]) {
+        const box = await page.locator(selector).first().boundingBox();
+        expect(box, selector).not.toBeNull();
+        expect(box!.y + box!.height, selector).toBeLessThanOrEqual(1000);
+      }
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it("keeps Channels and Devices lists uncapped while the fleet scrolls", async (context) => {
+    const overview = makeOverview();
+    overview.sessions = Array.from({ length: 20 }, (_, index) => ({ ...overview.sessions[0], id: `session-${index}` }));
+    overview.channels.channels = Array.from({ length: 20 }, (_, index) => ({ ...overview.channels.channels[0], integration: `channel-${index}` }));
+    overview.devices = Array.from({ length: 20 }, (_, index) => ({ ...overview.devices[0], device_id: `device-${index}` }));
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(overview);
+    component = mount(OperatorDashboard, { target: document.body });
+    await settleUi();
+    const scope = Array.from(document.querySelector(".ops-deck")!.classList)
+      .find((name) => name.startsWith("svelte-"))!;
+    const { css } = compile(operatorDashboardSource, { filename: "OperatorDashboard.svelte" });
+    const browser = await launchLayoutBrowser(context);
+    try {
+      const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+      await page.setContent(`<style>${risoCss}\n${appCss.replace(/@import[^;]+;/g, "")}\n${(css?.code ?? "").replace(/svelte-[a-z0-9]+/g, scope)}</style>${document.body.innerHTML}`);
+      for (const heading of ["Observed delivery lanes", "Attached devices"]) {
+        const list = page.locator(".panel").filter({ has: page.getByRole("heading", { name: heading }) }).locator(".ledger");
+        const dimensions = await list.evaluate((element) => ({
+          visible: element.clientHeight, content: element.scrollHeight,
+          overflow: getComputedStyle(element).overflowY,
+        }));
+        expect.soft(dimensions.visible, `${heading} must show its full list`).toBe(dimensions.content);
+        expect.soft(dimensions.overflow, heading).toBe("visible");
+      }
+      const fleet = page.locator(".panel").first().locator(".ledger");
+      const dimensions = await fleet.evaluate((element) => ({ visible: element.clientHeight, content: element.scrollHeight }));
+      expect(dimensions.visible).toBeLessThanOrEqual(420);
+      expect(dimensions.content).toBeGreaterThan(dimensions.visible);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it.each(["cancelled", "failed", "interrupted"] as const)("renders the %s session ending badge", async (ending) => {
+    const overview = makeOverview();
+    overview.sessions[0] = { ...overview.sessions[0], has_running_turn: false, has_interrupted_turn: false, ending };
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(overview);
+    component = mount(OperatorDashboard, { target: document.body });
+    await settleUi();
+    const labels = Array.from(document.querySelectorAll(".session-summary .badge")).map((badge) => badge.textContent?.trim());
+    expect(labels).toContain(ending === "cancelled" ? "cancelled (cut short)" : ending);
+    if (ending !== "interrupted") expect(labels).not.toContain("interrupted");
+  });
+
+  it("attributes live runs and child sessions and sends their wind-down commands", async () => {
+    vi.useFakeTimers();
+    const overview = makeOverview();
+    overview.sessions[0] = { ...overview.sessions[0], id: "child-1", agent_id: "researcher", parent_session_id: "parent-1" };
+    overview.workflow_runs = [{ id: "run-1", name: "Research sweep", state: "running", agent_id: "researcher", parent_session_id: "parent-1", activity: "Executing" }];
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(overview);
+    const onNavigate = vi.fn();
+    const client = { connect: vi.fn(), send: vi.fn(), disconnect: vi.fn(), onEvent: vi.fn(), onStatusChange: vi.fn() };
+    const connections = createConnectionStore({ wsClientFactory: () => client });
+    const fetch = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    try {
+      component = mount(OperatorDashboard, { target: document.body, props: { onNavigate, onStopSession: (id) => connections.cancelTurn(id) } });
+      await vi.advanceTimersByTimeAsync(0);
+      const rows = Array.from(document.querySelectorAll<HTMLElement>(".ledger-row"));
+      const run = rows.find((row) => row.textContent?.includes("Research sweep"));
+      expect(run, "workflow run is rendered on the fleet").toBeDefined();
+      expect(run!.textContent).toContain("Agent researcher");
+      expect(run?.textContent).toContain("Parent parent-1");
+      expect(run?.textContent).toContain("Executing");
+      expect(run?.querySelector("a")?.getAttribute("href")).toBe("/workflow-runs/run-1");
+      const child = rows.find((row) => row.textContent?.includes("child-1"))!;
+      expect(child, "processing child is rendered on the fleet").toBeDefined();
+      expect(child.textContent).toContain("Agent researcher");
+      expect(child.textContent).toContain("Parent parent-1");
+      expect(child.querySelector("a")?.getAttribute("href")).toBe("/conversations/child-1");
+      const stop = child.querySelector<HTMLButtonElement>("button");
+      expect(stop?.textContent).toBe("Stop");
+      flushSync(() => stop!.click());
+      expect(client.connect).toHaveBeenCalledWith("child-1");
+      expect(client.send).toHaveBeenCalledWith({ type: "cancel" });
+      await vi.advanceTimersByTimeAsync(0);
+      const cancel = run!.querySelector<HTMLButtonElement>("button");
+      expect(cancel?.textContent).toBe("Cancel");
+      flushSync(() => cancel!.click());
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/workflow-runs/run-1/cancel", { method: "POST" }));
+      await vi.advanceTimersByTimeAsync(0);
+      vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue({ ...overview, sessions: [], workflow_runs: [] });
+      const reads = vi.mocked(operatorApi.fetchOperatorOverview).mock.calls.length;
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS * 2);
+      expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledTimes(reads);
+      expect(document.querySelector('.ledger a[href="/workflow-runs/run-1"]')).not.toBeNull();
+      flushSync(() => [...document.querySelectorAll<HTMLButtonElement>(".header-actions button")].find((button) => button.textContent?.trim() === "Refresh")!.click());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(document.querySelector('.ledger a[href="/workflow-runs/run-1"]')).toBeNull();
+      const accountLink = Array.from(document.querySelectorAll("a"))
+        .find((link) => link.textContent?.trim() === "View run account");
+      expect(accountLink?.getAttribute("href")).toBe("/workflow-runs/run-1");
+      flushSync(() => accountLink!.click());
+      expect(onNavigate).toHaveBeenCalledWith("/workflow-runs/run-1");
+      expect(document.querySelector('a[href="/conversations/child-1"]')).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
     }
   });
 
