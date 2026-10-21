@@ -2844,50 +2844,6 @@ struct StreamRoundOutcome {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Lifecycle hook helpers
-// ---------------------------------------------------------------------------
-
-impl Agent {
-    /// Spawn a fire-and-forget hook dispatch.
-    ///
-    /// Common plumbing for all non-blocking lifecycle hooks: clone the registry,
-    /// short-circuit when none is configured, then dispatch on a background task.
-    fn fire_hook(&self, event: HookEvent) {
-        let Some(registry) = self.hook_registry.clone() else {
-            return;
-        };
-        tokio::spawn(async move {
-            registry.dispatch(event).await;
-        });
-    }
-
-    /// Fire `SessionStart` — non-blocking fire-and-forget.
-    #[allow(dead_code)] // Part of hook lifecycle API; wired when gateway fires session events
-    pub(crate) fn fire_session_start(&self, session_id: &str) {
-        self.fire_hook(HookEvent::SessionStart {
-            session_id: session_id.to_owned(),
-        });
-    }
-
-    /// Fire `PreCompact` and return the outcome for the caller to inspect.
-    ///
-    /// Unlike the other lifecycle hooks, `PreCompact` is blocking — the
-    /// outcome can flag content for preservation before the compaction runs.
-    /// When no registry is configured, returns `HookOutcome::Continue`.
-    #[allow(dead_code)] // Part of hook lifecycle API; wired when compaction invokes hooks
-    pub(crate) async fn fire_pre_compact(&self, context: &serde_json::Value) -> HookOutcome {
-        let Some(registry) = &self.hook_registry else {
-            return HookOutcome::Continue;
-        };
-        registry
-            .dispatch(HookEvent::PreCompact {
-                context: context.clone(),
-            })
-            .await
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Pre/post tool hook helpers
 // ---------------------------------------------------------------------------
 
