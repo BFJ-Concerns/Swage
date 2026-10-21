@@ -59,7 +59,7 @@ pub use request::{
 pub use scope::ScopeLocation;
 pub use swage_protocol::client::settings::{Effort, EffortCapability};
 pub use tool::{
-    CompactToolReplay, ToolCall, ToolDefinition, ToolReplayReasoning, ToolResult,
+    CompactToolReplay, ReplayRetrieval, ToolCall, ToolDefinition, ToolReplayReasoning, ToolResult,
     build_tool_round_messages, build_tool_round_messages_with_reasoning,
     compact_tool_arguments_for_model, compact_tool_result_for_model,
     compact_tool_result_for_model_with_reference, extract_tool_result_metadata,

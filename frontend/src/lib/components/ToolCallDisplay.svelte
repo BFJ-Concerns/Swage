@@ -226,6 +226,10 @@
     {/if}
   </div>
 
+  {#if typeof toolCall.model_replay_truncated === "boolean"}
+    <p class="model-delivery">{toolCall.model_replay_truncated ? "Later turns receive a preview." : "Later turns receive the full result."}</p>
+  {/if}
+
   {#if toolCall.status === "expired"}
     <p role="status">Approval expired. Retry the operation.</p>
   {/if}
@@ -272,6 +276,11 @@
       </button>
     {/if}
   {/if}
+
+  <details class="tool-arguments">
+    <summary>Arguments</summary>
+    <pre class="argument-content">{JSON.stringify(toolCall.arguments, null, 2)}</pre>
+  </details>
 
   <!-- ---- Sub-calls: tools invoked within this call (e.g. from python_execute) ---- -->
   {#if toolCall.sub_calls && toolCall.sub_calls.length > 0}
@@ -392,7 +401,8 @@
     gap: 4px;
   }
 
-  .result-content {
+  .result-content,
+  .argument-content {
     margin: 0;
     font-family: var(--font-mono);
     font-size: 11.5px;
@@ -405,6 +415,13 @@
     border-left: 2px solid var(--ink);
     max-height: 300px;
     overflow-y: auto;
+  }
+
+  .model-delivery {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--ink-soft);
   }
 
   .result-preview {
