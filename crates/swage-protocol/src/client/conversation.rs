@@ -252,6 +252,11 @@ pub struct ToolCallView {
     pub status: Option<String>,
     #[ts(optional, type = "number | null")]
     pub duration_ms: Option<u64>,
+    /// Whether later turns receive only a preview of this result. Absent when
+    /// there is no completed, recognised model replay to account for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_replay_truncated: Option<bool>,
     pub truncated: bool,
     #[ts(optional, type = "number | null")]
     pub total_bytes: Option<u64>,

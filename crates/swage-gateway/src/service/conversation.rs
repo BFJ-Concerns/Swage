@@ -871,6 +871,17 @@ fn conversation_summary(activity: SessionActivity) -> ConversationSummary {
 }
 
 fn tool_call_record_to_view(record: swage_storage::model::ToolCallRecord) -> ToolCallView {
+    let model_replay_truncated = if crate::tool::tool_result_read::recovered_model_result(&record)
+        .is_some()
+    {
+        Some(false)
+    } else {
+        record
+            .model_result
+            .as_deref()
+            .and_then(|result| serde_json::from_str::<swage_core::CompactToolReplay>(result).ok())
+            .map(|replay| replay.truncated)
+    };
     let arguments =
         serde_json::from_str(&record.arguments).unwrap_or(JsonValue::String(record.arguments));
     let result = record
@@ -885,6 +896,7 @@ fn tool_call_record_to_view(record: swage_storage::model::ToolCallRecord) -> Too
         result,
         status: record.status,
         duration_ms: record.duration_ms.map(|ms| ms.max(0) as u64),
+        model_replay_truncated,
         truncated: record.truncated,
         total_bytes: record.total_bytes.map(|bytes| bytes.max(0) as u64),
         parent_call_id: record.parent_call_id,

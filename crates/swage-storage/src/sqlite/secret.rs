@@ -348,60 +348,95 @@ pub(crate) fn migrate_managed_secret_storage(conn: &Connection) -> Result<(), St
     Ok(())
 }
 
+fn create_secret_record(
+    conn: &Connection,
+    secret: NewSecretRecord,
+) -> rusqlite::Result<SecretRecord> {
+    let now = Utc::now();
+    let now_str = now.to_rfc3339();
+    let metadata_json = serde_json::to_string(&secret.metadata)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let reference = format!("secret://{}/{}", secret.backend_kind, secret.id);
+
+    conn.execute(
+        "INSERT INTO secrets (
+            id, name, material_kind, owner_kind, backend_kind, scope_kind, scope_id,
+            reference, external_reference, metadata_json, status, created_at, updated_at, revoked_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'active', ?11, ?12, NULL)",
+        params![
+            secret.id.to_string(),
+            secret.name,
+            secret.material_kind,
+            secret.owner_kind,
+            secret.backend_kind,
+            secret.scope_kind,
+            secret.scope_id,
+            reference,
+            secret.external_reference,
+            metadata_json,
+            now_str,
+            now_str,
+        ],
+    )?;
+
+    if let Some(value) = secret.value.as_deref() {
+        store_managed_secret_value(conn, secret.id, value, &now_str)?;
+    }
+
+    Ok(SecretRecord {
+        id: secret.id,
+        name: secret.name,
+        material_kind: secret.material_kind,
+        owner_kind: secret.owner_kind,
+        backend_kind: secret.backend_kind.clone(),
+        scope_kind: secret.scope_kind,
+        scope_id: secret.scope_id,
+        reference,
+        external_reference: secret.external_reference,
+        metadata: secret.metadata,
+        status: "active".to_string(),
+        created_at: now,
+        updated_at: now,
+        revoked_at: None,
+    })
+}
+
 #[async_trait]
 impl SecretStore for SqliteStorage {
+    async fn write_credentials_with_audit(
+        &self,
+        creations: Vec<NewSecretRecord>,
+        rotations: Vec<(Uuid, String)>,
+        events: Vec<crate::model::NewAuditEvent>,
+    ) -> Result<(), StorageError> {
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            for secret in creations {
+                create_secret_record(&tx, secret)?;
+            }
+            let now = Utc::now().to_rfc3339();
+            for (id, value) in rotations {
+                tx.execute(
+                    "UPDATE secrets SET updated_at = ?2 WHERE id = ?1",
+                    params![id.to_string(), now],
+                )?;
+                if tx.changes() != 1 {
+                    return Err(rusqlite::Error::QueryReturnedNoRows);
+                }
+                store_managed_secret_value(&tx, id, &value, &now)?;
+            }
+            for event in events {
+                super::audit::insert_audit_event(&tx, event)?;
+            }
+            tx.commit()
+        })
+        .await
+    }
+
     async fn create_secret(&self, secret: NewSecretRecord) -> Result<SecretRecord, StorageError> {
         self.with_conn(move |conn| {
-            let now = Utc::now();
-            let now_str = now.to_rfc3339();
-            let metadata_json = serde_json::to_string(&secret.metadata)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-            let reference = format!("secret://{}/{}", secret.backend_kind, secret.id);
-
             conn.execute_batch("BEGIN IMMEDIATE")?;
-            let result = (|| -> Result<SecretRecord, rusqlite::Error> {
-                conn.execute(
-                    "INSERT INTO secrets (
-                        id, name, material_kind, owner_kind, backend_kind, scope_kind, scope_id,
-                        reference, external_reference, metadata_json, status, created_at, updated_at, revoked_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'active', ?11, ?12, NULL)",
-                    params![
-                        secret.id.to_string(),
-                        secret.name,
-                        secret.material_kind,
-                        secret.owner_kind,
-                        secret.backend_kind,
-                        secret.scope_kind,
-                        secret.scope_id,
-                        reference,
-                        secret.external_reference,
-                        metadata_json,
-                        now_str,
-                        now_str,
-                    ],
-                )?;
-
-                if let Some(value) = secret.value.as_deref() {
-                    store_managed_secret_value(conn, secret.id, value, &now_str)?;
-                }
-
-                Ok(SecretRecord {
-                    id: secret.id,
-                    name: secret.name,
-                    material_kind: secret.material_kind,
-                    owner_kind: secret.owner_kind,
-                    backend_kind: secret.backend_kind.clone(),
-                    scope_kind: secret.scope_kind,
-                    scope_id: secret.scope_id,
-                    reference,
-                    external_reference: secret.external_reference,
-                    metadata: secret.metadata,
-                    status: "active".to_string(),
-                    created_at: now,
-                    updated_at: now,
-                    revoked_at: None,
-                })
-            })();
+            let result = create_secret_record(conn, secret);
             match result {
                 Ok(record) => {
                     conn.execute_batch("COMMIT")?;
