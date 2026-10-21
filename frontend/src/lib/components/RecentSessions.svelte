@@ -15,6 +15,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { listRecentSessions } from "../api/sessions";
+  import { sessionOutcomeLabel } from "../session-outcome";
   import { messagePreview } from "../message-preview";
   import { relativeTime } from "../utils/relative-time";
   import type { RecentSession } from "../protocol/RecentSession";
@@ -55,6 +56,7 @@
       const loaded = await listRecentSessions(topicFilter, showArchived);
       if (generation !== loadGeneration) return;
       entries = loaded;
+      errorMessage = "";
       loadState = "loaded";
     } catch (error) {
       if (generation !== loadGeneration) return;
@@ -102,6 +104,7 @@
   }
 
   function isExpanded(entry: RecentSessionsEntry): boolean {
+    if (entry.automated.length === 0) return false;
     return groupExpanded[entryKey(entry)] ?? entry.source.kind !== "schedule";
   }
 
@@ -120,13 +123,17 @@
     return `${count} ${noun}${count === 1 ? "" : "s"}`;
   }
 
-  // Only what the session flags establish: a run with neither flag may have
-  // succeeded or failed, so it is reported as ended, never as completed.
   function latestOutcome(entry: RecentSessionsEntry): string {
     const latest = entry.automated[0];
     if (latest.has_running_turn) return "Running";
-    if (latest.has_interrupted_turn) return "Interrupted";
+    const outcome = sessionOutcomeLabel(latest.latest_turn_state);
+    if (outcome) return outcome;
+    if (latest.latest_turn_state === "completed") return "Completed";
     return `Last run ended ${relativeTime(latest.last_activity)}`;
+  }
+
+  function hasInterruptionHistory(entry: RecentSessionsEntry): boolean {
+    return entry.automated.some((session, index) => session.has_interrupted_turn && (index > 0 || session.latest_turn_state !== "interrupted"));
   }
 
   // A schedule's brief can run to paragraphs and paths; the heading takes its
@@ -215,6 +222,7 @@
     <ul class="entries">
       {#each entries as entry (entryKey(entry))}
         {@const session = sourceSession(entry)}
+        {@const outcome = sessionOutcomeLabel(session?.latest_turn_state)}
         <li class="entry" class:archived={session?.archived_at != null}>
           <button
             type="button"
@@ -225,19 +233,21 @@
             disabled={entry.source.kind === "schedule" && entry.automated.length === 0}
             onclick={() => (entry.source.kind === "schedule" ? toggleGroup(entry) : openSource(entry))}
           >
-            <span class="preview">{sourceLabel(entry)}</span>
-            <span class="meta">
-              {#if session}
-                {session.topic_name}
-                {#if session.has_running_turn}<span class="running">running</span>{/if}
-                {#if session.has_interrupted_turn}<span class="interrupted" title="A previous response was interrupted">⚠</span>{/if}
-              {:else if entry.source.kind === "schedule"}
-                schedule
-              {:else}
-                workflow run
-              {/if}
+            <span class="session-text">
+              <span class="preview">{sourceLabel(entry)}</span>
+              <span class="meta">
+                {#if session}
+                  <span class="topic-label" title={session.topic_name}>{session.topic_name}</span>
+                  {#if session.has_running_turn}<span class="running">running</span>{/if}
+                  {#if outcome}<span class="interrupted"><span aria-hidden="true">⚠</span> {outcome}</span>{/if}
+                {:else if entry.source.kind === "schedule"}
+                  schedule
+                {:else}
+                  workflow run
+                {/if}
+              </span>
+              <span class="timestamp">{relativeTime(entry.last_activity)}</span>
             </span>
-            <span class="timestamp">{relativeTime(entry.last_activity)}</span>
           </button>
 
           {#if entry.automated.length > 0}
@@ -249,20 +259,25 @@
             >
               <span class="disclosure" aria-hidden="true">{isExpanded(entry) ? "▾" : "▸"}</span>
               {groupCount(entry)} · {latestOutcome(entry)}
+              {#if hasInterruptionHistory(entry)}<span>· Previous response interrupted</span>{/if}
             </button>
           {/if}
 
           {#if entry.automated.length > 0 && isExpanded(entry)}
             <ul class="automated" aria-label="Automated sessions">
               {#each entry.automated as automated (automated.id)}
+                {@const outcome = sessionOutcomeLabel(automated.latest_turn_state)}
                 <li>
                   <button type="button" class="row nested" onclick={() => onSelectSession?.(automated.id)}>
-                    <span class="preview">{messagePreview(automated.message_preview ?? originLabel(automated))}</span>
-                    <span class="meta">
-                      {originLabel(automated)} · {automated.agent_id}
-                      {#if automated.has_running_turn}<span class="running">running</span>{/if}
+                    <span class="session-text">
+                      <span class="preview">{messagePreview(automated.message_preview ?? originLabel(automated))}</span>
+                      <span class="meta">
+                        {originLabel(automated)} · {automated.agent_id}
+                        {#if outcome}<span class="interrupted"><span aria-hidden="true">⚠</span> {outcome}</span>{/if}
+                        {#if automated.has_running_turn}<span class="running">running</span>{/if}
+                      </span>
+                      <span class="timestamp">{relativeTime(automated.last_activity)}</span>
                     </span>
-                    <span class="timestamp">{relativeTime(automated.last_activity)}</span>
                   </button>
                 </li>
               {/each}
@@ -371,8 +386,7 @@
 
   .row {
     width: 100%;
-    display: grid;
-    grid-template-columns: 1fr auto auto;
+    display: flex;
     gap: 12px;
     align-items: baseline;
     padding: 7px 0;
@@ -384,7 +398,38 @@
     cursor: pointer;
   }
 
+  .session-text {
+    flex: 1;
+    display: grid;
+    grid-template-columns: minmax(8ch, 1fr) minmax(0, auto) auto;
+    align-items: baseline;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .meta {
+    display: inline-flex;
+    flex-wrap: wrap;
+    overflow: hidden;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .topic-label {
+    min-width: 0;
+    max-width: 24ch;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .timestamp {
+    flex-shrink: 0;
+  }
+
   .row:disabled {
+    opacity: 0.6;
     cursor: default;
   }
 

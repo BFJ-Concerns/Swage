@@ -7,6 +7,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, tick, unmount } from "svelte";
 
+import { compile } from "svelte/compiler";
+import recentSessionsSource from "../components/RecentSessions.svelte?raw";
 import RecentSessions from "../components/RecentSessions.svelte";
 import * as sessionsApi from "../api/sessions";
 import type { RecentSession } from "../protocol/RecentSession";
@@ -17,6 +19,20 @@ vi.mock("../api/sessions", () => ({
 }));
 
 type MountedComponent = ReturnType<typeof mount>;
+
+function installRecentSessionsStyles(): HTMLStyleElement {
+  // Match Vite's scope on the mounted DOM when installing the external CSS.
+  const scope = Array.from(document.querySelector(".recent-sessions")!.classList).find(name => name.startsWith("svelte-"))!;
+  const compiled = compile(recentSessionsSource, {
+    cssHash: () => scope,
+    filename: decodeURIComponent(new URL("../components/RecentSessions.svelte", import.meta.url).pathname),
+    generate: "client",
+  });
+  const style = document.createElement("style");
+  style.textContent = compiled.css?.code ?? "";
+  document.head.append(style);
+  return style;
+}
 
 function makeSession(overrides: Partial<RecentSession> = {}): RecentSession {
   return {
@@ -74,6 +90,39 @@ describe("RecentSessions", () => {
       component = undefined;
     }
     document.body.replaceChildren();
+  });
+
+  it("labels the latest failed and interrupted responses and clears markers after recovery", async () => {
+    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValue([
+      conversationEntry(makeSession({ id: "failed", message_preview: "Failed direct reply", latest_turn_state: "failed" })),
+      conversationEntry(makeSession({ id: "interrupted", message_preview: "Interrupted direct reply", latest_turn_state: "interrupted" })),
+      conversationEntry(makeSession({ id: "recovered", message_preview: "Recovered direct reply", has_interrupted_turn: true, latest_turn_state: "completed" })),
+      { source: { kind: "schedule", id: "schedule", message: "Nightly" }, last_activity: "2026-10-01T00:00:00Z",
+        automated: [makeSession({ id: "scheduled-failure", message_preview: "Failed scheduled reply", latest_turn_state: "failed", origin: { kind: "schedule_run", schedule_id: "schedule" } })] },
+    ]);
+    component = mount(RecentSessions, { target: document.body });
+    await settle();
+    const rows = Array.from(document.querySelectorAll<HTMLButtonElement>('.row.source'));
+    for (const [preview, label, opposite] of [
+      ["Failed direct reply", "Last response failed", "Interrupted"],
+      ["Interrupted direct reply", "Interrupted", "Last response failed"],
+    ]) {
+      const row = rows.find(row => row.querySelector('.preview')?.textContent?.trim() === preview);
+      expect(row).toBeDefined();
+      const marker = row!.querySelector<HTMLElement>(".interrupted");
+      expect(marker?.textContent?.replace("⚠", "").trim()).toBe(label);
+      expect(marker?.textContent).not.toContain(opposite);
+    }
+    const recovered = rows.find(row => row.querySelector('.preview')?.textContent?.trim() === "Recovered direct reply");
+    expect(recovered).toBeDefined();
+    expect(recovered!.querySelector(".interrupted")).toBeNull();
+    const schedule = rows.find(row => row.querySelector('.preview')?.textContent?.trim() === "Nightly");
+    expect(schedule).toBeDefined();
+    schedule!.click();
+    flushSync();
+    const scheduled = Array.from(document.querySelectorAll('.row.nested')).find(row => row.querySelector('.preview')?.textContent?.trim() === "Failed scheduled reply");
+    expect(scheduled).toBeDefined();
+    expect(scheduled!.querySelector(".interrupted")?.textContent?.replace("⚠", "").trim()).toBe("Last response failed");
   });
 
   it("lists every scope's sessions in the order the gateway gave, automated ones nested beneath their source", async () => {
@@ -282,7 +331,7 @@ describe("RecentSessions schedule groups", () => {
   });
 
   it("reports a run with neither flag as ended, not completed", async () => {
-    component = await render([scheduleEntry({ has_interrupted_turn: true })]);
+    component = await render([scheduleEntry({ has_interrupted_turn: true, latest_turn_state: "interrupted" })]);
     expect(summaryText()).toBe("▸ 11 runs · Interrupted");
     unmount(component);
     document.body.replaceChildren();
@@ -353,5 +402,111 @@ describe("RecentSessions message previews", () => {
     component = mount(RecentSessions, { target: document.body, props: { onSelectSession: vi.fn() } });
     await settle();
     expect(document.querySelector(".row.nested .preview")?.textContent).toBe("Open child");
+  });
+});
+
+describe("RecentSessions outcome history and empty schedules", () => {
+  let component: MountedComponent | undefined;
+  let stylesheet: HTMLStyleElement | undefined;
+
+  async function flushRender(): Promise<void> {
+    await tick();
+    await Promise.resolve();
+    flushSync();
+  }
+
+  beforeEach(() => {
+    vi.mocked(sessionsApi.listRecentSessions).mockReset();
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    if (component) unmount(component);
+    component = undefined;
+    stylesheet?.remove();
+    stylesheet = undefined;
+    document.body.replaceChildren();
+  });
+
+  it("labels earlier interruptions as history rather than the latest run state", async () => {
+    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValue([{
+      source: { kind: "schedule", id: "schedule", message: "Nightly" },
+      last_activity: "2026-10-01T00:00:00Z",
+      automated: [makeSession({ latest_turn_state: "completed", has_interrupted_turn: true })],
+    }]);
+    component = mount(RecentSessions, { target: document.body });
+    await flushRender();
+    expect(document.querySelector('.group-summary')?.textContent).toContain("Completed");
+    expect(document.querySelector('.group-summary')?.textContent).toContain("Previous response interrupted");
+  });
+
+  it("keeps an empty schedule disabled and collapsed even with a saved expansion", async () => {
+    localStorage.setItem("swage:recent-session-groups", JSON.stringify({ "schedule:empty": true }));
+    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValue([{
+      source: { kind: "schedule", id: "empty", message: "No runs yet" },
+      last_activity: "2026-10-01T00:00:00Z", automated: [],
+    }]);
+    component = mount(RecentSessions, { target: document.body });
+    await flushRender();
+    stylesheet = installRecentSessionsStyles();
+    const heading = document.querySelector<HTMLButtonElement>('.row.source')!;
+    expect(heading.disabled).toBe(true);
+    expect(getComputedStyle(heading).opacity).toBe("0.6");
+    expect(heading.getAttribute("aria-expanded")).toBe("false");
+    heading.click();
+    flushSync();
+    expect(document.querySelector('.group-summary')).toBeNull();
+    expect(document.querySelector('.automated')).toBeNull();
+  });
+});
+
+
+describe("RecentSessions row layout", () => {
+  let component: MountedComponent | undefined;
+  let stylesheet: HTMLStyleElement | undefined;
+  afterEach(() => {
+    if (component) unmount(component);
+    component = undefined;
+    stylesheet?.remove();
+    stylesheet = undefined;
+    document.body.replaceChildren();
+  });
+
+  it("declares preview minimum and metadata truncation with long topics in both filters", async () => {
+    const label = "A".repeat(217);
+    vi.mocked(sessionsApi.listRecentSessions).mockReset().mockResolvedValue([
+      conversationEntry(makeSession({ topic_name: label, topic_id: "long-topic", message_preview: "Visible preview", latest_turn_state: "failed" })),
+    ]);
+    component = mount(RecentSessions, { target: document.body, props: {
+      topics: [{ id: "long-topic", name: label, slug: "long-topic", description: "", created_at: "" }],
+    } });
+    await settle();
+    stylesheet = installRecentSessionsStyles();
+    for (const filtered of [false, true]) {
+      if (filtered) {
+        buttonNamed(label).click();
+        await settle();
+      }
+      const topic = document.querySelector<HTMLElement>('.row.source .topic-label');
+      expect(topic?.title).toBe(label);
+      const style = getComputedStyle(topic!);
+      expect(style.minWidth).toBe("0px");
+      expect(style.maxWidth).toBe("24ch");
+      expect(style.overflow).toBe("hidden");
+      expect(style.textOverflow).toBe("ellipsis");
+      const group = topic!.closest('.session-text')!;
+      expect(group.querySelector('.preview')?.textContent).toBe("Visible preview");
+      expect(group.querySelector('.timestamp')?.textContent?.trim()).toBeTruthy();
+      expect(getComputedStyle(group).display).toBe("grid");
+      expect(getComputedStyle(group).gridTemplateColumns).toBe("minmax(8ch, 1fr) minmax(0, auto) auto");
+      const metaStyle = getComputedStyle(group.querySelector('.meta')!);
+      expect(metaStyle.minWidth).toBe("0px");
+      expect(metaStyle.overflow).toBe("hidden");
+      expect(metaStyle.flexWrap).toBe("wrap");
+      expect(group.querySelector('.interrupted')?.textContent).toContain("Last response failed");
+      expect(getComputedStyle(group.querySelector('.preview')!).minWidth).toBe("0px");
+      expect(getComputedStyle(group.querySelector('.timestamp')!).flexShrink).toBe("0");
+    }
+    expect(sessionsApi.listRecentSessions).toHaveBeenLastCalledWith("long-topic", false);
   });
 });

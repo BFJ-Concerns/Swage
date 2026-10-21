@@ -575,7 +575,9 @@ describe("durable local updates", () => {
     expect.soft(store.conversations.find(conversation => conversation.id === "conv-1")!.last_activity).toBe(lastActivity);
     expect.soft(store.conversations.map(conversation => conversation.id)).toEqual(["conv-2", "conv-1"]);
     expect.soft(store.activeConversation!.last_activity).toBe(lastActivity);
-    expect.soft(store.conversations).toEqual(summaries);
+    expect.soft(store.conversations).toEqual(summaries.map(summary =>
+      summary.id === "conv-1" ? { ...summary, latest_turn_state: "refused" } : summary,
+    ));
   });
 
   it("preserves the existing preview for a tool-only assistant message", async () => {
@@ -620,6 +622,71 @@ describe("durable local updates", () => {
       "conv-1",
       "conv-2",
     ]);
+  });
+
+  it("replaces the latest recorded outcome while retaining interruption history", async () => {
+    const store = createConversationStore();
+    vi.mocked(api.listConversations).mockResolvedValueOnce([makeSummary("conv-1")]);
+    await store.loadConversations("proj-1");
+    vi.mocked(api.getConversation).mockResolvedValueOnce(makeDetail("conv-1"));
+    await store.selectConversation("conv-1");
+    for (const turn_state of ["failed", "interrupted", "completed"] as const) {
+      store.appendAssistantMessage({ content: "Reply", timestamp: "2026-10-01T00:00:00Z", turn_state });
+      expect(store.conversations[0].latest_turn_state).toBe(turn_state);
+    }
+    expect(store.conversations[0].has_interrupted_turn).toBe(true);
+  });
+
+  it("updates the session summary when approval times out before assistant text", async () => {
+    const store = createConversationStore();
+    vi.mocked(api.listConversations).mockResolvedValueOnce([makeSummary("conv-1")]);
+    await store.loadConversations("proj-1");
+    vi.mocked(api.getConversation).mockResolvedValueOnce(makeDetail("conv-1"));
+    await store.selectConversation("conv-1");
+    store.appendOptimisticUserMessage({
+      content: "Use echo", timestamp: "2026-01-01T00:02:00Z",
+    });
+    expect(store.conversations[0].latest_turn_state).toBe("pending");
+    const stream = createStreamingStore({ conversationStore: store });
+
+    stream.handleServerEvent({
+      type: "error", code: "approval_timeout",
+      message: "approval timed out before tool execution; turn interrupted",
+    });
+
+    expect(store.conversations[0].latest_turn_state).toBe("interrupted");
+    expect(store.conversations[0].has_interrupted_turn).toBe(true);
+    expect(store.conversations[0].message_preview).toBe("Use echo");
+    expect(store.conversations[0].last_activity).toBe("2026-01-01T00:02:00Z");
+    expect(store.activeConversation!.messages).toHaveLength(1);
+    expect(store.activeConversation!.messages[0].turn_state).toBe("interrupted");
+  });
+
+  it("settles approval timeout after switching conversations without changing the displayed thread", async () => {
+    const store = createConversationStore();
+    vi.mocked(api.listConversations).mockResolvedValueOnce([makeSummary("conv-1"), makeSummary("conv-2")]);
+    await store.loadConversations("proj-1");
+    vi.mocked(api.getConversation).mockResolvedValueOnce(makeDetail("conv-1"));
+    await store.selectConversation("conv-1");
+    store.appendOptimisticUserMessage({ content: "Use echo", timestamp: "2026-01-01T00:02:00Z" });
+    const stream = createStreamingStore({ conversationStore: store });
+    stream.handleServerEvent({
+      type: "approval_required", approval_id: "approval-1", turn_id: "turn-1",
+      agent_id: "gateway", kind: "tool", tool_name: "echo", prompt: "Allow echo?",
+      timeout_at: "2026-01-01T00:03:00Z", timeout_policy: "deny",
+    }, "conv-1");
+    expect(stream.streamFor!("conv-1").pendingApproval).not.toBeNull();
+    const displayed = { ...makeDetail("conv-2"), messages: [{ role: "user" as const, content: "Other request", timestamp: "2026-01-01T00:02:30Z", turn_state: "pending" as const }] };
+    vi.mocked(api.getConversation).mockResolvedValueOnce(displayed);
+    await store.selectConversation("conv-2");
+    stream.handleServerEvent({ type: "error", code: "approval_timeout", message: "approval timed out before tool execution; turn interrupted" }, "conv-1");
+    const summary = store.conversations.find(conversation => conversation.id === "conv-1")!;
+    expect(summary.latest_turn_state).toBe("interrupted");
+    expect(summary.has_interrupted_turn).toBe(true);
+    expect(summary.message_preview).toBe("Use echo");
+    expect(summary.last_activity).toBe("2026-01-01T00:02:00Z");
+    expect(store.activeConversation).toEqual(displayed);
+    expect(store.conversations.find(conversation => conversation.id === "conv-2")!.latest_turn_state).toBeUndefined();
   });
 
   it("marks the summary as interrupted when an interrupted assistant message is appended", async () => {
@@ -975,5 +1042,22 @@ describe("queued thread replies", () => {
 
     expect(append).toHaveBeenLastCalledWith(expect.objectContaining({ content: "main reply", thread_id: "main-thread" }), "conv-queue");
     expect(conversations.activeConversation?.messages.map(message => message.content)).toEqual(["main reply"]);
+  });
+});
+
+describe("empty provider failure", () => {
+  it("marks the session summary failed when a send fails before any output", async () => {
+    vi.mocked(api.listConversations).mockResolvedValue([makeSummary("empty-failure")]);
+    vi.mocked(api.getConversation).mockResolvedValue(makeDetail("empty-failure"));
+    const conversations = createConversationStore();
+    await conversations.loadConversations(null);
+    await conversations.selectConversation("empty-failure");
+    const streaming = createStreamingStore({ conversationStore: conversations });
+    streaming.startTurn("Answer this");
+    expect(conversations.conversations[0].latest_turn_state).toBe("pending");
+    streaming.handleServerEvent({ type: "error", code: "provider_error", message: "Provider unavailable" });
+    expect(conversations.conversations[0].latest_turn_state).toBe("failed");
+    expect(conversations.activeConversation?.messages).toHaveLength(1);
+    expect(streaming.isStreaming).toBe(false);
   });
 });

@@ -3,7 +3,8 @@
      attached workspaces (including relinking a folder that has moved), its
      default surfaces and tags, and its sessions. -->
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { sessionOutcomeLabel } from "../session-outcome";
+  import { onMount, untrack } from "svelte";
   import WorkspaceAccessOptions from "./WorkspaceAccessOptions.svelte";
   import {
     attachTopicWorkspace,
@@ -84,6 +85,14 @@
   });
 
   onMount(loadTopicSettings);
+
+  let previousTab: TopicSettingsTab | undefined;
+  $effect(() => {
+    if (previousTab !== undefined && previousTab !== tab && tab === "sessions") {
+      untrack(() => { void loadTopicSettings(); });
+    }
+    previousTab = tab;
+  });
 
   // The surfaces tab loads its library and defaults when it is shown,
   // whether the page mounted on it or the user moved to it.
@@ -476,8 +485,10 @@
         <h2 class="shell-section-title">Sessions</h2>
         <div class="record-list">
           {#each sessions as session (session.id)}
+            {@const outcome = sessionOutcomeLabel(session.latest_turn_state)}
             <article class="record-row">
               <strong>{session.message_preview || "Untitled session"}</strong>
+              {#if outcome}<span><span aria-hidden="true">⚠</span> {outcome}</span>{/if}
               <span>{session.agent_id} · {new Date(session.last_activity).toLocaleString()}</span>
               {#if onNavigate}
                 <button type="button" onclick={() => onNavigate?.(`/conversations/${encodeURIComponent(session.id)}`)}>Open</button>

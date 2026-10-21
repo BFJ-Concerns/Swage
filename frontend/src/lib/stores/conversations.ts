@@ -178,6 +178,7 @@ export function createConversationStore(): ConversationStore {
       ...(message.content && message.origin !== "platform" ? { message_preview: message.content } : {}),
       has_interrupted_turn:
         updatedSummary.has_interrupted_turn || message.turn_state === "interrupted",
+      ...(message.turn_state ? { latest_turn_state: message.turn_state } : {}),
     };
 
     conversationsStore.set(
@@ -335,6 +336,7 @@ export function createConversationStore(): ConversationStore {
         last_activity: resp.last_activity,
         message_preview: null,
         has_interrupted_turn: false,
+        latest_turn_state: null,
       };
 
       // Prepend: the freshly created conversation is the most recent.
@@ -394,20 +396,31 @@ export function createConversationStore(): ConversationStore {
 
     settleUnansweredRequest(settlement, conversationId) {
       const activeConversation = get(activeConversationStore);
+      const settledConversationId = conversationId ?? activeConversation?.id;
+      const summary = get(conversationsStore).find(conversation => conversation.id === settledConversationId);
+      if (summary) {
+        updateConversationSummary(summary.id, {
+          content: "",
+          timestamp: summary.last_activity,
+          turn_state: settlement.turn_state,
+        });
+      }
       if (!activeConversation || (conversationId && activeConversation.id !== conversationId)) return;
       const index = activeConversation.messages.findLastIndex(
         (message) => message.role === "user" && message.turn_state === "pending",
       );
       if (index < 0) return;
       const messages = [...activeConversation.messages];
-      messages[index] = {
+      const settledMessage = {
         ...messages[index],
         turn_state: settlement.turn_state,
         ...(settlement.tool_calls && settlement.tool_calls.length > 0
           ? { tool_calls: settlement.tool_calls }
           : {}),
       };
+      messages[index] = settledMessage;
       activeConversationStore.set({ ...activeConversation, messages });
+      updateConversationSummary(activeConversation.id, settledMessage);
     },
 
     appendQueuedMessage(queued, conversationId) {

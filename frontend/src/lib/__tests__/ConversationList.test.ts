@@ -60,6 +60,36 @@ describe("ConversationList", () => {
     }
   });
 
+  it("labels failed and interrupted latest responses without marking recovered conversations", () => {
+    const store = makeStore([
+      makeConversationSummary({ id: "failed", message_preview: "Failed reply", latest_turn_state: "failed" }),
+      makeConversationSummary({ id: "interrupted", message_preview: "Interrupted reply", latest_turn_state: "interrupted" }),
+      makeConversationSummary({ id: "recovered", message_preview: "Recovered reply", latest_turn_state: "completed", has_interrupted_turn: true }),
+    ]);
+    component = mount(ConversationList, { target: document.body, props: { store } });
+    flushSync();
+    const rows = Array.from(document.querySelectorAll('.conversation-item'));
+    for (const [preview, label, opposite] of [
+      ["Failed reply", "Last response failed", "Interrupted"],
+      ["Interrupted reply", "Interrupted", "Last response failed"],
+    ]) {
+      const row = rows.find(row => row.querySelector('.preview')?.textContent?.trim() === preview);
+      expect(row).toBeDefined();
+      const marker = row!.querySelector(`[aria-label="${label}"]`) ?? Array.from(row!.querySelectorAll("span")).find(span => span.textContent?.replace("⚠", "").trim() === label);
+      expect(marker?.textContent?.replace("⚠", "").trim()).toBe(label);
+      expect(marker?.querySelector('[aria-hidden="true"]')?.textContent).toBe("⚠");
+      expect(marker?.hasAttribute("aria-label")).toBe(false);
+      expect(row!.querySelector(`[aria-label="${opposite}"]`)).toBeNull();
+    }
+    const recovered = rows.find(row => row.querySelector('.preview')?.textContent?.trim() === "Recovered reply");
+    expect(recovered).toBeDefined();
+    expect(Array.from(recovered!.querySelectorAll('[aria-hidden="true"]'))
+      .filter(marker => marker.textContent === "⚠")).toHaveLength(0);
+    expect(recovered!.textContent).not.toContain("⚠");
+    expect(recovered!.textContent).not.toContain("Last response failed");
+    expect(recovered!.textContent).not.toContain("Interrupted");
+  });
+
   // --- Empty state ---
 
   it("shows empty state message when there are no conversations", () => {
@@ -138,22 +168,6 @@ describe("ConversationList", () => {
   });
 
   // --- Interrupted turn indicator ---
-
-  it("shows an interrupted turn indicator when has_interrupted_turn is true", () => {
-    const store = makeStore([
-      makeConversationSummary({ has_interrupted_turn: true }),
-    ]);
-    component = mount(ConversationList, {
-      target: document.body,
-      props: { store },
-    });
-
-    const entry = document.querySelector(".conversation-item");
-    const hasIndicator =
-      entry!.querySelector(".interrupted") !== null ||
-      entry!.classList.contains("interrupted");
-    expect(hasIndicator).toBe(true);
-  });
 
   it("does not show the interrupted indicator for normal conversations", () => {
     const store = makeStore([

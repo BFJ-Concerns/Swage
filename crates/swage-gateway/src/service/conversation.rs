@@ -867,6 +867,7 @@ fn conversation_summary(activity: SessionActivity) -> ConversationSummary {
         last_activity: session.updated_at,
         message_preview: activity.latest_message,
         has_interrupted_turn: activity.has_interrupted_turn,
+        latest_turn_state: activity.latest_turn_state.as_ref().map(turn_state_to_wire),
     }
 }
 
