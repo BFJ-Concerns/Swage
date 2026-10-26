@@ -73,7 +73,7 @@ export interface ConversationStore {
    */
   settleUnansweredRequest?(
     settlement: {
-      turn_state: Extract<MessageView["turn_state"], "failed" | "interrupted" | "cancelled">;
+      turn_state: Extract<MessageView["turn_state"], "completed" | "refused" | "incomplete" | "failed" | "interrupted" | "cancelled">;
       tool_calls: MessageView["tool_calls"];
     },
     conversationId?: string | null,
@@ -240,13 +240,17 @@ export function createConversationStore(): ConversationStore {
       return;
     }
 
+    const messages = [...activeConversation.messages];
+    const recordedIndex = message.id === undefined
+      ? -1
+      : messages.findIndex((existing) => existing.id === message.id);
+    if (recordedIndex < 0) messages.push(appendedMessage);
+    else messages[recordedIndex] = appendedMessage;
+
     activeConversationStore.set({
       ...activeConversation,
       last_activity: message.origin === "platform" ? activeConversation.last_activity : message.timestamp,
-      messages: [
-        ...activeConversation.messages,
-        appendedMessage,
-      ],
+      messages,
     });
 
     updateConversationSummary(ownerId, message);
@@ -396,7 +400,7 @@ export function createConversationStore(): ConversationStore {
       const activeConversation = get(activeConversationStore);
       if (!activeConversation || (conversationId && activeConversation.id !== conversationId)) return;
       const index = activeConversation.messages.findLastIndex(
-        (message) => message.role === "user" && message.turn_state === "pending",
+        (message) => message.role === "user" && ["pending", "processing", "delegating", "awaiting_approval"].includes(message.turn_state ?? ""),
       );
       if (index < 0) return;
       const messages = [...activeConversation.messages];

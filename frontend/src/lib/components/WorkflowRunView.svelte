@@ -7,6 +7,7 @@
   because it is the record of an ending rather than a progress reading.
 -->
 <script lang="ts">
+  import { cancelWorkflowRun, fetchWorkflowRun } from "../api/workflow-runs";
   import { formatRunTime } from "../run-times";
   import { conversationPath } from "../router";
   import type { WorkflowRunDetailResponse } from "../protocol/WorkflowRunDetailResponse";
@@ -22,7 +23,29 @@
 
   let { detail, loadState, errorMessage, onNavigate }: Props = $props();
 
+  let cancellingRunId = $state<string | null>(null);
+  let cancelError = $state("");
+  async function cancel() {
+    if (!run || cancelling) return;
+    const runId = run.id;
+    cancellingRunId = runId;
+    let requested = false;
+    cancelError = "";
+    try {
+      await cancelWorkflowRun(runId);
+      requested = true;
+      const refreshed = await fetchWorkflowRun(runId);
+      if (run?.id === runId && refreshed) detail = refreshed;
+    } catch (error) {
+      if (run?.id === runId) {
+        cancelError = error instanceof Error ? error.message : String(error);
+        if (!requested && cancellingRunId === runId) cancellingRunId = null;
+      }
+    }
+  }
+
   const run = $derived(detail?.run ?? null);
+  const cancelling = $derived(cancellingRunId === run?.id && (run?.state === "running" || run?.state === "parked"));
   const account = $derived(run?.terminal_account ?? null);
 
   // The four standings, in the order a reader wants them: what came back,
@@ -134,8 +157,12 @@
   {:else if run}
     <header>
       <h2>{run.script_name ?? "Inline workflow"}</h2>
-      <p class="state">{run.state}</p>
+      <p class="state">{cancelling ? "Cancelling…" : run.state}</p>
       <p class="identity">Run {run.id}</p>
+      {#if run.state === "running" || run.state === "parked"}
+        <button onclick={cancel} disabled={cancelling}>{cancelling ? "Cancelling…" : "Cancel"}</button>
+      {/if}
+      {#if cancelError}<p role="alert">{cancelError}</p>{/if}
       <p>Started {@render recordedTime(run.created_at)}{#if run.completed_at} · Ended {@render recordedTime(run.completed_at)}{/if}</p>
       {#if run.dispatching_session_id}
         <a href={conversationPath(run.dispatching_session_id)} onclick={(event) => navigate(event, conversationPath(run.dispatching_session_id!))}>Launching conversation</a>

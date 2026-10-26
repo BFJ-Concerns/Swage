@@ -301,6 +301,7 @@ describe("AppLayout shell navigation", () => {
         active_turn_count: 0,
         active_connection_count: 0,
       },
+      workflow_runs: [],
       sessions: [],
       approvals: [],
       schedules: { schedules: [] },
@@ -844,7 +845,7 @@ describe("AppLayout shell navigation", () => {
     component = mountLayout({ activeSurface: "operator" });
 
     expect(document.querySelector("main.operator h1")?.textContent).toContain(
-      "Live control surface for the running gateway",
+      "Gateway supervision",
     );
     expect(surfaceButton("Operator").getAttribute("aria-pressed")).toBe("true");
   });

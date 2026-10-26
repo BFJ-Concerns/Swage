@@ -361,7 +361,7 @@
     />
   </main>
 {:else if activeSurface === "operator"}
-  <main class="operator"><OperatorDashboard /></main>
+  <main class="operator"><OperatorDashboard {onNavigate} onStopSession={(id) => connectionStore.cancelTurn(id)} stopErrorFor={(id) => streamingStore.streamFor?.(id).turnError?.message ?? null} /></main>
 {:else if activeSurface === "surfaces"}
   <!--
     The work surface carries the control channel: the same channel markup and

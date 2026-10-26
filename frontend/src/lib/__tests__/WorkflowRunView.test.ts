@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest";
-import { mount, unmount } from "svelte";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { flushSync, mount, unmount } from "svelte";
+import { writable, fromStore } from "svelte/store";
 import WorkflowRunView from "../components/WorkflowRunView.svelte";
 import type { WorkflowRun } from "../protocol/WorkflowRun";
 import type { WorkflowRunDetailResponse } from "../protocol/WorkflowRunDetailResponse";
@@ -66,6 +67,74 @@ function emptyAccount(ending: WorkflowRunEnding): WorkflowRunTerminalAccount {
 
 describe("WorkflowRunView", () => {
   let component: MountedComponent | undefined;
+
+  it.each(["running", "parked"] as const)("cancels a %s run through its route and keeps the terminal account visible", async (state) => {
+    const fetch = vi.fn().mockResolvedValueOnce(new Response("{}", { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(detail(run(emptyAccount({ ending: "cancelled" })))), { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    try {
+      component = render({ ...run(null), state });
+      const button = document.querySelector<HTMLButtonElement>("header button");
+      expect(button?.textContent).toBe("Cancel");
+      flushSync(() => button!.click());
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/workflow-runs/run-1/cancel", { method: "POST" }));
+      await vi.waitFor(() => expect(document.querySelector(".ending-line")?.textContent).toContain("Cancelled"));
+      expect(document.querySelector("header button")).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps cancellation pending until the received detail is terminal", async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(new Response("{}", { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(detail(run(null))), { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    try {
+      const updates = writable(detail(run(null)));
+      const current = fromStore(updates);
+      component = mount(WorkflowRunView, { target: document.body, props: {
+        get detail() { return current.current; }, loadState: "loaded", errorMessage: "",
+      } });
+      flushSync(() => document.querySelector<HTMLButtonElement>("header button")!.click());
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(document.querySelector<HTMLButtonElement>("header button")?.disabled).toBe(true));
+      expect(document.querySelector("header button")?.textContent).toBe("Cancelling…");
+      flushSync(() => { updates.set(detail(run(emptyAccount({ ending: "cancelled" })))); });
+      expect(document.querySelector(".ending-line")?.textContent).toContain("Cancelled");
+      expect(document.querySelector("header button")).toBeNull();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("keeps a second run cancelling when an earlier cancellation fails", async () => {
+    let rejectFirst!: (error: Error) => void;
+    const first = new Promise<Response>((_, reject) => { rejectFirst = reject; });
+    const fetch = vi.fn().mockReturnValueOnce(first)
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(detail(run(null, "run-2"))), { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    try {
+      const updates = writable(detail(run(null)));
+      const current = fromStore(updates);
+      component = mount(WorkflowRunView, { target: document.body, props: {
+        get detail() { return current.current; }, loadState: "loaded", errorMessage: "",
+      } });
+      flushSync(() => document.querySelector<HTMLButtonElement>("header button")!.click());
+      flushSync(() => updates.set(detail(run(null, "run-2"))));
+      expect(document.querySelector<HTMLButtonElement>("header button")?.disabled).toBe(false);
+      flushSync(() => document.querySelector<HTMLButtonElement>("header button")!.click());
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
+      rejectFirst(new Error("Earlier cancellation failed"));
+      await first.catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      flushSync();
+      expect(document.querySelector<HTMLButtonElement>("header button")?.disabled).toBe(true);
+      expect(document.body.textContent).not.toContain("Earlier cancellation failed");
+    } finally {
+      rejectFirst(new Error("Earlier cancellation failed"));
+      await first.catch(() => {});
+      vi.unstubAllGlobals();
+    }
+  });
 
   it("renders run, interruption and cancellation times locally with exact stamps", () => {
     const start = "2026-10-01T19:28:49.393288230Z";
