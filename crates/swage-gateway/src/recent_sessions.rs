@@ -70,6 +70,10 @@ pub async fn list_recent_sessions(
             last_activity: activity.last_activity,
             message_preview: activity.latest_message.clone(),
             has_interrupted_turn: activity.has_interrupted_turn,
+            latest_turn_state: activity
+                .latest_turn_state
+                .as_ref()
+                .map(crate::service::turn_state_to_wire),
             has_running_turn: running.contains(&activity.session.id),
             archived_at: activity.session.archived_at,
         }
@@ -375,6 +379,47 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_recent_list_projects_a_failed_schedule_turn_and_its_recovery() {
+        use swage_storage::{NewThread, NewTurn, ThreadStore, TurnState, TurnStore};
+        let (state, storage) = make_state();
+        let general = storage.general_scope().await.unwrap();
+        let session = open(
+            &storage,
+            general.id,
+            SessionOrigin::ScheduleRun {
+                schedule_id: Uuid::new_v4(),
+            },
+        )
+        .await;
+        let thread = ThreadStore::create(
+            storage.as_ref(),
+            NewThread {
+                session_id: session,
+                agent_id: "test-agent".into(),
+            },
+        )
+        .await
+        .unwrap();
+        for outcome in [TurnState::Failed, TurnState::Completed] {
+            storage
+                .create_turn(NewTurn {
+                    thread_id: thread.id,
+                    agent_id: "test-agent".into(),
+                    state: outcome.clone(),
+                    user_input: None,
+                    parent_turn_id: None,
+                })
+                .await
+                .unwrap();
+            let response = list_recent_sessions(&state, SessionListing::default())
+                .await
+                .unwrap();
+            let projected = serde_json::to_value(&response.entries[0].automated[0]).unwrap();
+            assert_eq!(projected["latest_turn_state"], outcome.to_string());
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

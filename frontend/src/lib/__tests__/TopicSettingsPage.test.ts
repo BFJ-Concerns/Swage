@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, unmount } from "svelte";
+import { fromStore, writable } from "svelte/store";
 
 import TopicSettingsPage from "../components/TopicSettingsPage.svelte";
 import * as topicsApi from "../api/topics";
@@ -75,6 +76,52 @@ describe("TopicSettingsPage", () => {
     component = undefined;
     document.body.innerHTML = "";
     vi.clearAllMocks();
+  });
+
+  it("labels latest failures and interruptions in topic sessions and leaves recovery unmarked", async () => {
+    vi.mocked(topicsApi.listTopicSessions).mockResolvedValue([
+      { id: "failed", agent_id: "gateway", created_at: "2026-10-01T00:00:00Z", last_activity: "2026-10-01T00:00:00Z", message_preview: "Failed reply", has_interrupted_turn: false, latest_turn_state: "failed" },
+      { id: "interrupted", agent_id: "gateway", created_at: "2026-10-01T00:00:00Z", last_activity: "2026-10-01T00:00:00Z", message_preview: "Interrupted reply", has_interrupted_turn: true, latest_turn_state: "interrupted" },
+      { id: "recovered", agent_id: "gateway", created_at: "2026-10-01T00:00:00Z", last_activity: "2026-10-01T00:00:00Z", message_preview: "Recovered reply", has_interrupted_turn: true, latest_turn_state: "completed" },
+    ]);
+    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "sessions" } });
+    await flushUi();
+    const rows = Array.from(document.querySelectorAll('.record-row'));
+    for (const [preview, label, opposite] of [
+      ["Failed reply", "Last response failed", "Interrupted"],
+      ["Interrupted reply", "Interrupted", "Last response failed"],
+    ]) {
+      const row = rows.find(row => row.querySelector('strong')?.textContent?.trim() === preview);
+      expect(row).toBeDefined();
+      const marker = row!.querySelector(`[aria-label="${label}"]`) ?? Array.from(row!.querySelectorAll("span")).find(span => span.textContent?.replace("⚠", "").trim() === label);
+      expect(marker?.textContent?.replace("⚠", "").trim()).toBe(label);
+      expect(marker?.querySelector('[aria-hidden="true"]')?.textContent).toBe("⚠");
+      expect(marker?.hasAttribute("aria-label")).toBe(false);
+      expect(row!.querySelector(`[aria-label="${opposite}"]`)).toBeNull();
+    }
+    const recovered = rows.find(row => row.querySelector('strong')?.textContent?.trim() === "Recovered reply");
+    expect(recovered).toBeDefined();
+    expect(Array.from(recovered!.querySelectorAll('[aria-hidden="true"]'))
+      .filter(marker => marker.textContent === "⚠")).toHaveLength(0);
+    expect(recovered!.textContent).not.toContain("⚠");
+    expect(recovered!.textContent).not.toContain("Last response failed");
+    expect(recovered!.textContent).not.toContain("Interrupted");
+  });
+
+  it("refreshes outcomes when opening the Sessions tab", async () => {
+    const tab = writable<import("../router").TopicSettingsTab>("overview");
+    const currentTab = fromStore(tab);
+    const props = { topic, get tab() { return currentTab.current; } };
+    component = mount(TopicSettingsPage, { target: document.body, props });
+    await flushUi();
+    vi.mocked(topicsApi.listTopicSessions).mockResolvedValue([
+      { id: "session-1", agent_id: "gateway", created_at: "2026-10-01T00:00:00Z", last_activity: "2026-10-01T00:00:00Z", message_preview: "Review the release", has_interrupted_turn: false, latest_turn_state: "failed" },
+    ]);
+    tab.set("sessions");
+    await flushUi();
+    const row = document.querySelector(".record-row");
+    expect(row?.textContent).toContain("Last response failed");
+    expect(topicsApi.listTopicSessions).toHaveBeenCalledTimes(2);
   });
 
   it("waits for the workspace load before showing an empty list", async () => {
