@@ -209,6 +209,22 @@ fn detects_lowercase_bearer() {
 // -- High-entropy credential context detection ------------------------------
 
 #[test]
+fn secret_references_stay_visible_beside_redacted_values() {
+    let detector = LeakDetector::default();
+    let reference = "secret://deploy-token-abcdefghijklmnop";
+    assert_eq!(detector.scan(reference), reference);
+
+    for assignment in ["secret: ", "secret=", "token:", "password=", "api_key="] {
+        for value in ["abcdefghijklmnop1234", "//abcdefghijklmnop1234"] {
+            let input = format!("before {reference} {assignment}{value} after {reference}");
+            let expected =
+                format!("before {reference} {assignment}[REDACTED:high_entropy] after {reference}");
+            assert_eq!(detector.scan(&input), expected, "{input}");
+        }
+    }
+}
+
+#[test]
 fn detects_password_assignment() {
     let detector = LeakDetector::default();
     let input = r#"password = "SuperSecretPassword123456""#;

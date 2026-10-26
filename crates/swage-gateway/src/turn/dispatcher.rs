@@ -593,7 +593,7 @@ pub(crate) async fn turn_offered_tools(
     topic_id: Option<Uuid>,
     session_id: Option<Uuid>,
     session_approval_grants: &std::collections::HashSet<crate::state::ApprovalGrantKey>,
-) -> std::collections::BTreeSet<String> {
+) -> swage_tool::registry::OfferedTools {
     use swage_tool::permission::{PermissionCheckResult, check_permission};
 
     let registry = state
@@ -610,7 +610,7 @@ pub(crate) async fn turn_offered_tools(
     let approval_offers = config.default_provider_protocol() != swage_config::Protocol::Codex;
     let device = crate::device::resolve_device(state, session_metadata).await;
     let filter = build_gateway_advertisement_filter(device.as_ref(), agent_config);
-    registry
+    let names = registry
         .list()
         .into_iter()
         .filter(|name| match check_permission(&permissions, name) {
@@ -624,7 +624,8 @@ pub(crate) async fn turn_offered_tools(
                 .is_some_and(|tool| filter.as_ref().is_none_or(|filter| filter(tool.as_ref())))
         })
         .map(str::to_string)
-        .collect()
+        .collect();
+    registry.offered(names)
 }
 
 pub(crate) async fn build_gateway_dispatcher_for_unattended_execution(
