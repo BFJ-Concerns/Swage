@@ -787,22 +787,23 @@ a workspace crate that orchestrates the gate. Most logic is Rust, but `xtask`
 shells out for some checks — for example, the tracked-local-state check runs
 `scripts/check-tracked-local-state.sh`.
 
-The gate runs eight stages in order. The first six abort immediately on
+The gate runs nine stages in order. The first seven abort immediately on
 failure — a formatting problem or a type error is not worth running the
 full test suite against. The last two always run, and their results are
 combined:
 
 1. **Tracked-local-state check** — catches runtime state directories that were
    accidentally committed.
-2. **Format check** — Rust formatting and Justfile formatting.
-3. **Type check** — `cargo check` across the workspace plus the frontend's
+2. **Tracker-tag check** — rejects bracketed tracker tags in source comments.
+3. **Format check** — Rust formatting and Justfile formatting.
+4. **Type check** — `cargo check` across the workspace plus the frontend's
    type checker.
-4. **Frontend design-token check** — rejects literal visual values in
+5. **Frontend design-token check** — rejects literal visual values in
    components where a semantic design token is required.
-5. **Shipped-workflow parse check** — verifies that every shipped workflow
+6. **Shipped-workflow parse check** — verifies that every shipped workflow
    script parses without error.
-6. **Clippy** — with warnings treated as errors.
-7. **Test suite** — Rust tests, frontend tests, and the desktop smoke test.
+7. **Clippy** — with warnings treated as errors.
+8. **Test suite** — Rust tests, frontend tests, and the desktop smoke test.
    Individual failures are collected rather than aborting on the first. The
    Rust test runner is selected by the `SWAGE_TEST_RUNNER` environment
    variable, which the Justfile defaults to `nextest`. Under `nextest`
@@ -810,7 +811,7 @@ combined:
    (which retries flaky tests) plus a separate doctest stage; setting
    `SWAGE_TEST_RUNNER=cargo` runs `cargo test --workspace --no-fail-fast`
    instead.
-8. **Projection freshness** — a `git diff` that verifies the committed
+9. **Projection freshness** — a `git diff` that verifies the committed
    TypeScript bindings and JSON Schemas match what the tests just regenerated.
 
 When both the test suite and the projection check fail, the gate reports both
@@ -824,7 +825,7 @@ is too small for that state.
 
 Other useful recipes:
 
-- `just check-gate` — the first six static stages above, before any tests.
+- `just check-gate` — the first seven static stages above, before any tests.
 - `just check` — the narrower Rust and frontend type check only.
 - `just test` — the test suite alone, with the same failure-aggregation
   behaviour as the verify gate.

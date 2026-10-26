@@ -49,6 +49,7 @@ fn run() -> Result<()> {
         Some("fmt-check") => fmt_check(),
         Some("check") => check(),
         Some("check-gate") => check_gate(),
+        Some("check-tracker-tags") => check_tracker_tags(),
         Some("check-design-tokens") => check_frontend_design_tokens(),
         Some("clippy") => clippy(),
         Some("test") => test(),
@@ -399,6 +400,7 @@ fn clippy() -> Result<()> {
 /// command that catches branch drift before the full verification gate.
 fn check_gate() -> Result<()> {
     check_tracked_local_state()?;
+    check_tracker_tags()?;
     fmt_check()?;
     check()?;
     check_frontend_design_tokens()?;
@@ -573,6 +575,262 @@ fn verify() -> Result<()> {
     })
 }
 
+const TRACKER_TAG_ALLOWED_WORDS: &[&str] = &["utf8"];
+
+fn check_tracker_tags() -> Result<()> {
+    let output = Command::new("git")
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    let listing = String::from_utf8(output.stdout)?;
+    let mut files: Vec<_> = listing
+        .split('\0')
+        .filter(|file| !file.is_empty())
+        .map(PathBuf::from)
+        .collect();
+    files.sort();
+    files.dedup();
+    let mut violations = Vec::new();
+    for file in files {
+        let syntax = match file.extension().and_then(|extension| extension.to_str()) {
+            Some("rs") => SourceSyntax::Rust,
+            Some("ts" | "js" | "mjs" | "cjs") => SourceSyntax::TypeScript,
+            Some("svelte") => SourceSyntax::Svelte,
+            _ => continue,
+        };
+        let contents = match fs::read_to_string(&file) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        for (line, column) in source_tracker_tag_locations(&contents, syntax) {
+            violations.push(format!("{}:{line}:{column}", file.display()));
+        }
+    }
+    if violations.is_empty() {
+        println!("==> Source comments contain no tracker tags");
+        Ok(())
+    } else {
+        Err(format!(
+            "tracker tags found in source comments:\n  {}\nRemove the bracketed tracker tag; keep any useful explanation as prose.",
+            violations.join("\n  ")
+        ).into())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceSyntax {
+    Rust,
+    TypeScript,
+    Svelte,
+}
+
+/// Locate tracker tags in source comments, with Svelte prose outside script code.
+/// Columns are one-based byte offsets, like the other static scans.
+fn source_tracker_tag_locations(contents: &str, syntax: SourceSyntax) -> Vec<(usize, usize)> {
+    enum Region {
+        Markup,
+        Code,
+        Quoted(u8),
+        RawString(usize),
+        BlockComment(usize),
+        HtmlComment,
+    }
+
+    fn tag_name_ends(rest: &[u8]) -> bool {
+        rest.first()
+            .is_some_and(|byte| byte.is_ascii_whitespace() || *byte == b'>')
+    }
+
+    let mut region = if syntax == SourceSyntax::Svelte {
+        Region::Markup
+    } else {
+        Region::Code
+    };
+    let mut locations = Vec::new();
+    let mut line_offset = 0;
+    let mut skip_until: usize = 0;
+    for (line_number, line) in contents.split_inclusive('\n').enumerate() {
+        let line_start = line_offset;
+        line_offset += line.len();
+        let bytes = line.as_bytes();
+        let mut index = skip_until.saturating_sub(line_start);
+        while index < bytes.len() {
+            let tail = &bytes[index..];
+            match region {
+                Region::Markup => {
+                    let remaining = &line[index..];
+                    let comment = remaining.find("<!--");
+                    let script = remaining.match_indices("<script").find_map(|(offset, _)| {
+                        tag_name_ends(&remaining.as_bytes()[offset + "<script".len()..])
+                            .then_some(offset)
+                    });
+                    if let Some(start) =
+                        comment.filter(|&start| script.is_none_or(|script| start < script))
+                    {
+                        region = Region::HtmlComment;
+                        index += start + "<!--".len();
+                        continue;
+                    }
+                    if let Some(start) = script {
+                        let after_name = line_start + index + start + "<script".len();
+                        if let (Some(end), _) = opening_tag_end(&contents[after_name..], None) {
+                            skip_until = after_name + end + 1;
+                            region = Region::Code;
+                            index = skip_until - line_start;
+                        } else {
+                            index += start + "<script".len();
+                        }
+                        continue;
+                    }
+                    break;
+                }
+                Region::Quoted(quote) => {
+                    if bytes[index] == b'\\' {
+                        index += 2;
+                        continue;
+                    }
+                    if bytes[index] == quote {
+                        region = Region::Code;
+                    }
+                }
+                Region::RawString(hashes) => {
+                    if tail.starts_with(b"\"")
+                        && tail
+                            .get(1..1 + hashes)
+                            .is_some_and(|suffix| suffix.iter().all(|&byte| byte == b'#'))
+                    {
+                        index += hashes;
+                        region = Region::Code;
+                    }
+                }
+                Region::BlockComment(depth) => {
+                    if tracker_tag_at(line, index) {
+                        locations.push((line_number + 1, index + 1));
+                    }
+                    if syntax == SourceSyntax::Rust && tail.starts_with(b"/*") {
+                        region = Region::BlockComment(depth + 1);
+                        index += 1;
+                    } else if tail.starts_with(b"*/") {
+                        region = if depth == 1 {
+                            Region::Code
+                        } else {
+                            Region::BlockComment(depth - 1)
+                        };
+                        index += 1;
+                    }
+                }
+                Region::HtmlComment => {
+                    let closing = line[index..].find("-->").map(|offset| index + offset);
+                    let end = closing.unwrap_or(bytes.len());
+                    for column in index..end {
+                        if tracker_tag_at(line, column) {
+                            locations.push((line_number + 1, column + 1));
+                        }
+                    }
+                    if closing.is_none() {
+                        break;
+                    }
+                    region = if syntax == SourceSyntax::Svelte {
+                        Region::Markup
+                    } else {
+                        Region::Code
+                    };
+                    index = end + "-->".len();
+                    continue;
+                }
+                Region::Code => {
+                    if syntax == SourceSyntax::Svelte
+                        && tail.strip_prefix(b"</script").is_some_and(tag_name_ends)
+                        && let (Some(end), _) =
+                            opening_tag_end(&contents[line_start + index..], None)
+                    {
+                        skip_until = line_start + index + end + 1;
+                        region = Region::Markup;
+                        index = skip_until - line_start;
+                        continue;
+                    }
+                    if tail.starts_with(b"//") {
+                        for column in index + 2..bytes.len() {
+                            if tracker_tag_at(line, column) {
+                                locations.push((line_number + 1, column + 1));
+                            }
+                        }
+                        break;
+                    }
+                    if syntax == SourceSyntax::TypeScript && tail.starts_with(b"<!--") {
+                        region = Region::HtmlComment;
+                        index += 4;
+                        continue;
+                    }
+                    if tail.starts_with(b"/*") {
+                        region = Region::BlockComment(1);
+                        index += 2;
+                        continue;
+                    }
+                    if syntax == SourceSyntax::Rust && bytes[index] == b'r' {
+                        let hashes = tail[1..].iter().take_while(|&&byte| byte == b'#').count();
+                        if tail.get(hashes + 1) == Some(&b'"') {
+                            region = Region::RawString(hashes);
+                            index += hashes + 2;
+                            continue;
+                        }
+                    }
+                    if bytes[index] == b'"'
+                        || (syntax != SourceSyntax::Rust && matches!(bytes[index], b'\'' | b'`'))
+                    {
+                        region = Region::Quoted(bytes[index]);
+                    } else if syntax == SourceSyntax::Rust && bytes[index] == b'\'' {
+                        // A Rust character literal ends after one character or escape;
+                        // a lifetime's apostrophe must not hide a trailing comment.
+                        let end = if tail.get(1) == Some(&b'\\') {
+                            tail[2..]
+                                .iter()
+                                .position(|&byte| byte == b'\'')
+                                .map(|offset| offset + 2)
+                        } else {
+                            line[index + 1..].chars().next().map(|ch| 1 + ch.len_utf8())
+                        };
+                        if let Some(end) = end.filter(|&end| tail.get(end) == Some(&b'\'')) {
+                            index += end;
+                        }
+                    }
+                }
+            }
+            index += 1;
+        }
+    }
+    locations
+}
+
+fn tracker_tag_at(line: &str, index: usize) -> bool {
+    let Some(token) = line.as_bytes().get(index..index + 6) else {
+        return false;
+    };
+    token[0] == b'['
+        && token[5] == b']'
+        && token[1..5]
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && token[1..5].iter().any(u8::is_ascii_lowercase)
+        && token[1..5].iter().any(u8::is_ascii_digit)
+        && !TRACKER_TAG_ALLOWED_WORDS
+            .iter()
+            .any(|word| word.as_bytes() == &token[1..5])
+}
+
 fn check_frontend_design_tokens() -> Result<()> {
     let mut files = Vec::new();
     collect_files(Path::new(FRONTEND_SRC_DIR), &mut files)?;
@@ -621,6 +879,20 @@ fn check_frontend_design_tokens() -> Result<()> {
     }
 }
 
+fn opening_tag_end(line: &str, mut quote: Option<char>) -> (Option<usize>, Option<char>) {
+    for (index, character) in line.char_indices() {
+        match quote {
+            Some(delimiter) if character == delimiter => quote = None,
+            Some(_) => {}
+            None if matches!(character, '\'' | '\"') => quote = Some(character),
+            None if character == '>' => return (Some(index), None),
+            None => {}
+        }
+    }
+
+    (None, quote)
+}
+
 fn component_style_lines(contents: &str) -> impl Iterator<Item = (usize, &str, usize)> {
     enum StyleRegion {
         Outside,
@@ -635,20 +907,6 @@ fn component_style_lines(contents: &str) -> impl Iterator<Item = (usize, &str, u
 
         matches!(after_name.chars().next(), None | Some('>'))
             || after_name.chars().next().is_some_and(char::is_whitespace)
-    }
-
-    fn opening_tag_end(line: &str, mut quote: Option<char>) -> (Option<usize>, Option<char>) {
-        for (index, character) in line.char_indices() {
-            match quote {
-                Some(delimiter) if character == delimiter => quote = None,
-                Some(_) => {}
-                None if matches!(character, '\'' | '\"') => quote = Some(character),
-                None if character == '>' => return (Some(index), None),
-                None => {}
-            }
-        }
-
-        (None, quote)
     }
 
     fn style_before_closing_tag(line: &str) -> Option<usize> {
@@ -1112,7 +1370,7 @@ fn collect_files(path: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("");
-            if name != "node_modules" && name != "dist" {
+            if !matches!(name, ".git" | "target" | "node_modules" | "dist") {
                 collect_files(&path, files)?;
             }
         } else if path.is_file() {
@@ -1533,7 +1791,7 @@ fn option_value(arg: &str) -> &str {
 
 fn print_help() {
     println!(
-        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check (workspace and frontend type check only)\n  check-gate (full static rung)\n  check-design-tokens\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan] [--host HOST] [--port PORT]"
+        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check (workspace and frontend type check only)\n  check-gate (full static rung)\n  check-tracker-tags\n  check-design-tokens\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan] [--host HOST] [--port PORT]"
     );
 }
 
@@ -1553,6 +1811,7 @@ mod tests {
     fn gate_stage_name(call: &str) -> &str {
         match call {
             "check_tracked_local_state" => "Tracked-local-state check",
+            "check_tracker_tags" => "Tracker-tag check",
             "fmt_check" => "Format check",
             "check" => "Type check",
             "check_frontend_design_tokens" => "Frontend design-token check",
@@ -1986,6 +2245,184 @@ mod tests {
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
             ["gateway", "start", "--foreground", "--port", "32143"],
+        );
+    }
+
+    #[test]
+    fn tracker_tags_report_line_comment_columns() {
+        assert_eq!(
+            super::source_tracker_tag_locations("  // [a1b2] [8uce]", super::SourceSyntax::Rust),
+            vec![(1, 6), (1, 13)]
+        );
+    }
+
+    #[test]
+    fn tracker_tags_report_doc_comment_columns() {
+        assert_eq!(
+            super::source_tracker_tag_locations(
+                "/// [a1b2]\n//! [8uce]",
+                super::SourceSyntax::Rust
+            ),
+            vec![(1, 5), (2, 5)]
+        );
+    }
+
+    #[test]
+    fn tracker_tags_report_block_comment_columns() {
+        assert_eq!(
+            super::source_tracker_tag_locations(
+                "/* [a1b2] */\n/** [8uce] */",
+                super::SourceSyntax::Rust
+            ),
+            vec![(1, 4), (2, 5)]
+        );
+    }
+
+    #[test]
+    fn tracker_tags_report_typescript_block_comment_columns() {
+        assert_eq!(
+            super::source_tracker_tag_locations(
+                "/* [a1b2] */\n/** [8uce] */",
+                super::SourceSyntax::TypeScript
+            ),
+            vec![(1, 4), (2, 5)]
+        );
+    }
+
+    #[test]
+    fn tracker_tags_scan_nested_rust_block_comments_and_close_them() {
+        assert_eq!(
+            super::source_tracker_tag_locations(
+                "/* outer\n /* [a1b2] */ [8uce] */ let text = \"[c3d4]\"; // [e5f6]",
+                super::SourceSyntax::Rust,
+            ),
+            vec![(2, 5), (2, 15), (2, 49)]
+        );
+    }
+
+    #[test]
+    fn tracker_tags_close_non_rust_block_comments_at_first_terminator() {
+        let source = "/* example /* text */ const value = \"[a1b2]\";";
+        assert!(
+            super::source_tracker_tag_locations(source, super::SourceSyntax::TypeScript).is_empty()
+        );
+        assert!(
+            super::source_tracker_tag_locations(
+                &format!("<script>{source}</script>"),
+                super::SourceSyntax::Svelte
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn tracker_tags_keep_rust_nested_block_comments_open() {
+        assert_eq!(
+            super::source_tracker_tag_locations(
+                "/* example /* text */ [a1b2] */",
+                super::SourceSyntax::Rust
+            ),
+            vec![(1, 23)]
+        );
+    }
+
+    #[test]
+    fn tracker_tags_report_html_comment_columns() {
+        assert_eq!(
+            super::source_tracker_tag_locations(
+                "<p><!-- [a1b2] --> [8uce]</p>\n<!--\n [v7qg]\n-->",
+                super::SourceSyntax::Svelte
+            ),
+            vec![(1, 9), (3, 2)]
+        );
+    }
+
+    #[test]
+    fn tracker_tags_require_exact_mixed_lowercase_tokens() {
+        assert_eq!(
+            super::source_tracker_tag_locations(
+                "// [test] [hitl] [1234] [A1b2] [a1b] [a1b23] [a1b2]",
+                super::SourceSyntax::Rust
+            ),
+            vec![(1, 46)]
+        );
+    }
+
+    #[test]
+    fn tracker_tags_allow_named_words() {
+        assert!(
+            super::source_tracker_tag_locations("// [utf8]", super::SourceSyntax::Rust).is_empty()
+        );
+    }
+
+    #[test]
+    fn tracker_tags_ignore_strings_and_scan_trailing_comments() {
+        let source = "let text = \"// [a1b2]\"; // [8uce]";
+        assert_eq!(
+            super::source_tracker_tag_locations(source, super::SourceSyntax::Rust),
+            vec![(1, 28)]
+        );
+        assert!(
+            super::source_tracker_tag_locations(
+                "const text = '<!-- [a1b2] -->';",
+                super::SourceSyntax::TypeScript
+            )
+            .is_empty()
+        );
+        assert!(
+            super::source_tracker_tag_locations(
+                "let text = r#\"// [a1b2]\"#;",
+                super::SourceSyntax::Rust
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn tracker_tags_find_html_comments_after_svelte_contractions() {
+        assert_eq!(
+            super::source_tracker_tag_locations(
+                "<p>It's ready</p>\n<!-- [a1b2] seeded -->",
+                super::SourceSyntax::Svelte
+            ),
+            vec![(2, 6)]
+        );
+        assert_eq!(
+            super::source_tracker_tag_locations(
+                "<p>1 < 2 and it's ready</p>\n<!-- [a1b2] seeded -->",
+                super::SourceSyntax::Svelte
+            ),
+            vec![(2, 6)]
+        );
+    }
+
+    #[test]
+    fn tracker_tags_keep_svelte_script_strings_outside_comments() {
+        let source = "<script lang=\"ts\">\nconst text = \"It's // [8uce] ready\";\n// [a1b2] seeded\n</script>\n<p>It's ready</p>\n<!-- [v7qg] seeded -->";
+        assert_eq!(
+            super::source_tracker_tag_locations(source, super::SourceSyntax::Svelte),
+            vec![(3, 4), (6, 6)]
+        );
+        assert_eq!(
+            super::source_tracker_tag_locations(
+                "const text = \"It's // [8uce] ready\";\n// [a1b2] seeded",
+                super::SourceSyntax::TypeScript
+            ),
+            vec![(2, 4)]
+        );
+    }
+
+    #[test]
+    fn tracker_tags_find_comments_after_svelte_compact_comparisons() {
+        let source = "<script>let a = 1, b = 2;</script>\n{#if a<b}\n<!-- [a1b2] seeded -->\n<p>Ready</p>\n{/if}\n";
+        assert_eq!(
+            super::source_tracker_tag_locations(source, super::SourceSyntax::Svelte),
+            vec![(3, 6)]
+        );
+        let multiline_script = "<script\n data-label=\"a > b\"\n lang=\"ts\">\nconst text = \"It's // [8uce] ready\";\n// [a1b2] seeded\n</script>\n{#if a<b}\n<!-- [v7qg] seeded -->\n{/if}";
+        assert_eq!(
+            super::source_tracker_tag_locations(multiline_script, super::SourceSyntax::Svelte),
+            vec![(5, 4), (8, 6)]
         );
     }
 
