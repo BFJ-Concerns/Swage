@@ -489,6 +489,160 @@ async fn streaming_turn_continues_past_ten_tool_rounds() {
     assert_eq!(turns[0].state, TurnState::Completed);
 }
 
+/// A final round that returns no text after tool rounds is answered with the
+/// closing-account request, once, with the tools still offered: the reply is
+/// the account that round gives, never the interim narration alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_final_round_after_tools_is_asked_for_a_closing_account() {
+    let (storage, topic, session, thread) = setup_conversation("agent-a").await;
+    let provider = Arc::new(StreamingProvider::new(vec![
+        vec![
+            StreamChunk::Delta {
+                content: "Next I'll update the queue risks. ".into(),
+            },
+            StreamChunk::ToolUse {
+                call_id: "call-1".into(),
+                name: "counting".into(),
+                arguments: json!({}),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::ToolUse),
+            },
+        ],
+        vec![StreamChunk::Done {
+            finish_reason: Some(FinishReason::Stop),
+        }],
+        vec![
+            StreamChunk::Delta {
+                content: "Done: the queue risks are updated; the budget module is unchanged."
+                    .into(),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::Stop),
+            },
+        ],
+    ]));
+    let counting_tool = Arc::new(CountingTool::new());
+    let dispatcher = ToolDispatcher::allow_all([counting_tool.clone() as Arc<dyn Tool>]);
+    let agent = AgentBuilder::new()
+        .config(resolved_config("agent-a"))
+        .provider(provider.clone())
+        .storage(storage.clone())
+        .tool_dispatcher(dispatcher)
+        .build()
+        .expect("agent");
+
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let outbound = agent
+        .process_turn_streaming(
+            test_request(
+                topic.id,
+                session.id,
+                thread.id,
+                "Update the queue risks",
+                None,
+            ),
+            event_tx,
+        )
+        .await
+        .expect("the turn settles on the closing round");
+
+    assert_eq!(
+        provider.call_count(),
+        3,
+        "one closing round after the empty one"
+    );
+    let requests = provider.requests();
+    let closing = requests[2]
+        .messages
+        .last()
+        .expect("the closing request is the last message");
+    assert_eq!(closing.role(), Role::User);
+    assert_eq!(
+        closing.text_content(),
+        swage_agent::closing_account::CLOSING_ACCOUNT_REQUEST
+    );
+    assert!(
+        !requests[2].tool_definitions.is_empty(),
+        "the tools stay offered on the closing round"
+    );
+    assert_eq!(
+        outbound.response,
+        "Next I'll update the queue risks. Done: the queue risks are updated; the budget module is unchanged."
+    );
+    let turns = storage
+        .list_turns_by_thread(thread.id)
+        .await
+        .expect("turn list");
+    assert_eq!(turns[0].state, TurnState::Completed);
+}
+
+/// The closing request is made once: a second empty round settles the turn,
+/// its reply stating that no account was given rather than ending on the
+/// narration.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_empty_round_settles_with_the_statement_that_no_account_was_given() {
+    let (storage, topic, session, thread) = setup_conversation("agent-a").await;
+    let provider = Arc::new(StreamingProvider::new(vec![
+        vec![
+            StreamChunk::Delta {
+                content: "Next I'll update the queue risks. ".into(),
+            },
+            StreamChunk::ToolUse {
+                call_id: "call-1".into(),
+                name: "counting".into(),
+                arguments: json!({}),
+            },
+            StreamChunk::Done {
+                finish_reason: Some(FinishReason::ToolUse),
+            },
+        ],
+        vec![StreamChunk::Done {
+            finish_reason: Some(FinishReason::Stop),
+        }],
+        vec![StreamChunk::Done {
+            finish_reason: Some(FinishReason::Stop),
+        }],
+    ]));
+    let counting_tool = Arc::new(CountingTool::new());
+    let dispatcher = ToolDispatcher::allow_all([counting_tool.clone() as Arc<dyn Tool>]);
+    let agent = AgentBuilder::new()
+        .config(resolved_config("agent-a"))
+        .provider(provider.clone())
+        .storage(storage.clone())
+        .tool_dispatcher(dispatcher)
+        .build()
+        .expect("agent");
+
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let outbound = agent
+        .process_turn_streaming(
+            test_request(
+                topic.id,
+                session.id,
+                thread.id,
+                "Update the queue risks",
+                None,
+            ),
+            event_tx,
+        )
+        .await
+        .expect("the turn settles after the second empty round");
+
+    assert_eq!(
+        provider.call_count(),
+        3,
+        "the request is made once per turn"
+    );
+    assert_eq!(
+        outbound.response,
+        format!(
+            "Next I'll update the queue risks. {}",
+            swage_agent::closing_account::ENDED_WITHOUT_ACCOUNT
+        )
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn streaming_turn_persists_completed_response_and_raw_input() {
     let (storage, topic, session, thread) = setup_conversation("agent-a").await;
