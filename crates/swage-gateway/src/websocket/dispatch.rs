@@ -110,16 +110,20 @@ fn spawn_person_turn(
                 {
                     Ok(thread) => thread,
                     Err(e) => {
-                        let (code, message) = classify_gateway_error(&e);
-                        let _ = tx.send(ServerEvent::Error { code, message });
+                        let _ = tx.send(ServerEvent::Error {
+                            code: error_codes::REQUEST_FAILED.to_string(),
+                            message: e.to_string(),
+                        });
                         return;
                     }
                 };
                 if let Err(e) =
                     crate::turn_queue::queue_input(&state, session_id, thread.id, queued_copy).await
                 {
-                    let (code, message) = classify_gateway_error(&e);
-                    let _ = tx.send(ServerEvent::Error { code, message });
+                    let _ = tx.send(ServerEvent::Error {
+                        code: error_codes::REQUEST_FAILED.to_string(),
+                        message: e.to_string(),
+                    });
                 }
             }
             Err(e) => {
@@ -145,7 +149,7 @@ pub(crate) async fn dispatch_client_message(
         Err(e) => {
             tracing::warn!(%session_id, error = %e, raw = text, "unparseable client event");
             let _ = tx.send(ServerEvent::Error {
-                code: error_codes::INTERNAL_ERROR.to_string(),
+                code: error_codes::REQUEST_FAILED.to_string(),
                 message: format!("invalid event: {e}"),
             });
             return;
@@ -296,7 +300,7 @@ pub(crate) async fn dispatch_client_message(
                 Err(message) => {
                     tracing::warn!(%session_id, skill = %name, %message, "skill discovery failed");
                     let _ = tx.send(ServerEvent::Error {
-                        code: error_codes::INTERNAL_ERROR.to_string(),
+                        code: error_codes::REQUEST_FAILED.to_string(),
                         message,
                     });
                     return;
@@ -339,7 +343,7 @@ pub(crate) async fn dispatch_client_message(
                 Err(e) => {
                     tracing::error!(%session_id, skill = %name, error = ?e, "skill activation error");
                     let _ = tx.send(ServerEvent::Error {
-                        code: error_codes::INTERNAL_ERROR.to_string(),
+                        code: error_codes::REQUEST_FAILED.to_string(),
                         message: "skill activation failed".to_string(),
                     });
                 }
@@ -352,7 +356,7 @@ pub(crate) async fn dispatch_client_message(
                 Err(message) => {
                     tracing::warn!(%session_id, skill = %name, %message, "skill discovery failed");
                     let _ = tx.send(ServerEvent::Error {
-                        code: error_codes::INTERNAL_ERROR.to_string(),
+                        code: error_codes::REQUEST_FAILED.to_string(),
                         message,
                     });
                     return;
@@ -367,14 +371,14 @@ pub(crate) async fn dispatch_client_message(
                 }
                 Err(SkillError::AgentLevelCannotDeactivate(n)) => {
                     let _ = tx.send(ServerEvent::Error {
-                        code: error_codes::INTERNAL_ERROR.to_string(),
+                        code: error_codes::REQUEST_FAILED.to_string(),
                         message: format!("Cannot deactivate agent-level skill '{n}'"),
                     });
                 }
                 Err(e) => {
                     tracing::error!(%session_id, skill = %name, error = ?e, "skill deactivation error");
                     let _ = tx.send(ServerEvent::Error {
-                        code: error_codes::INTERNAL_ERROR.to_string(),
+                        code: error_codes::REQUEST_FAILED.to_string(),
                         message: "skill deactivation failed".to_string(),
                     });
                 }
@@ -419,7 +423,7 @@ pub(crate) async fn dispatch_client_message(
                 Err(e) => {
                     tracing::error!(%session_id, %approval_uuid, err = %e, "storage error looking up approval");
                     let _ = tx.send(ServerEvent::Error {
-                        code: error_codes::INTERNAL_ERROR.to_string(),
+                        code: error_codes::REQUEST_FAILED.to_string(),
                         message: "Failed to look up approval request.".to_string(),
                     });
                     return;
@@ -429,7 +433,7 @@ pub(crate) async fn dispatch_client_message(
             let Ok(decision_value) = ApprovalDecisionValue::from_str(&decision) else {
                 tracing::error!(%session_id, %approval_uuid, decision = %decision, "invalid approval decision after validation");
                 let _ = tx.send(ServerEvent::Error {
-                    code: error_codes::INTERNAL_ERROR.to_string(),
+                    code: error_codes::REQUEST_FAILED.to_string(),
                     message: "Failed to record approval decision.".to_string(),
                 });
                 return;
@@ -448,7 +452,7 @@ pub(crate) async fn dispatch_client_message(
                 if error.code() != swage_protocol::client::error::ErrorCode::Conflict {
                     tracing::error!(%approval_uuid, %error, "failed to record approval decision");
                     let _ = tx.send(ServerEvent::Error {
-                        code: error_codes::INTERNAL_ERROR.to_string(),
+                        code: error_codes::REQUEST_FAILED.to_string(),
                         message: "Failed to record approval decision.".to_string(),
                     });
                     return;
@@ -458,7 +462,7 @@ pub(crate) async fn dispatch_client_message(
                     Err(storage_error) => {
                         tracing::error!(%approval_uuid, %storage_error, "failed to read approval outcome");
                         let _ = tx.send(ServerEvent::Error {
-                            code: error_codes::INTERNAL_ERROR.to_string(),
+                            code: error_codes::REQUEST_FAILED.to_string(),
                             message: "Failed to look up approval request.".to_string(),
                         });
                         return;

@@ -286,6 +286,7 @@ function makeOperatorOverview(
         has_interrupted_turn: false,
         has_active_connection: true,
         has_running_turn: true,
+        awaiting_approval: false,
         agent_id: "gateway",
         activity: "processing",
       },

@@ -718,7 +718,7 @@ describe("error events", () => {
     store.handleServerEvent(event, "conv-a");
 
     expect(appendAssistantMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ content: "Partial A", turn_state: "failed" }),
+      expect.objectContaining({ content: "Partial A", turn_state: event.type === "shutdown" ? "interrupted" : "failed" }),
       "conv-a",
     );
     expect(store.streamFor?.("conv-a").streamedContent).toBe("");
@@ -1462,6 +1462,41 @@ describe("interrupted turns", () => {
     }
     expect(store.turnError?.message).toBe(message);
     expect(store.isStreaming).toBe(false);
+  });
+});
+
+describe("errors that end no turn", () => {
+  it.each(["request_failed", "invalid_frame"])("leaves the running request and its stream alone for %s", (code) => {
+    const conv = createMockConversationStore();
+    const settleUnansweredRequest = vi.fn();
+    const store = createStreamingStore({ conversationStore: { ...conv, settleUnansweredRequest } });
+    store.startTurn("Long task");
+    store.handleServerEvent({ type: "error", code, message: "The message could not be queued." });
+    expect(settleUnansweredRequest).not.toHaveBeenCalled();
+    expect(store.isStreaming).toBe(true);
+    expect(store.turnError?.message).toBe("The message could not be queued.");
+    store.handleServerEvent({ type: "token", content: "still answering" });
+    expect(store.streamedContent).toBe("still answering");
+  });
+});
+
+describe("gateway shutdown", () => {
+  it("settles an unanswered request as interrupted, as the gateway records it", () => {
+    const conv = createMockConversationStore();
+    const settleUnansweredRequest = vi.fn();
+    const store = createStreamingStore({ conversationStore: { ...conv, settleUnansweredRequest } });
+    store.startTurn("question");
+    store.handleServerEvent({ type: "shutdown", reason: "admin shutdown request" });
+    expect(settleUnansweredRequest).toHaveBeenCalledWith({ turn_state: "interrupted", tool_calls: [] }, "test-conversation");
+  });
+
+  it("keeps a partial reply as interrupted", () => {
+    const conv = createMockConversationStore();
+    const store = createStreamingStore({ conversationStore: conv });
+    store.startTurn("question");
+    store.handleServerEvent({ type: "token", content: "partial" });
+    store.handleServerEvent({ type: "shutdown", reason: "admin shutdown request" });
+    expect(conv.getMessages().find((m) => m.role === "assistant")?.turn_state).toBe("interrupted");
   });
 });
 

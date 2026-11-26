@@ -477,6 +477,12 @@ export function createStreamingStore(
           break;
 
         case "error": {
+          if (event.code === "request_failed" || event.code === "invalid_frame") {
+            // A request this client sent failed, or a frame could not be
+            // read; any running turn carries on, so only the reason is shown.
+            stream.turnErrorStore.set({ code: event.code, message: event.message });
+            break;
+          }
           // Preserve the terminal reason beside whatever the user saw.
           // An expired approval and an interruption the gateway names
           // (a shutdown stopping a delegated child) end the turn
@@ -545,10 +551,11 @@ export function createStreamingStore(
         }
 
         case "shutdown":
-          // The gateway is shutting down. Preserve any partial content and
-          // surface the shutdown as a turn error so the UI can notify the user.
-          // The WebSocket will close shortly after this event arrives.
-          settleResponse(ownerId, stream, "failed");
+          // The gateway is shutting down and records a running turn as
+          // interrupted. Preserve any partial content and surface the shutdown
+          // as a turn error so the UI can notify the user. The WebSocket will
+          // close shortly after this event arrives.
+          settleResponse(ownerId, stream, "interrupted");
           stream.turnErrorStore.set({ code: "gateway_shutdown", message: event.reason });
           setStreamActive(ownerId, stream, false);
           stream.turnStartedAtStore.set(null);

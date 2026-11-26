@@ -398,7 +398,7 @@ async fn activate_skill_with_missing_session_surfaces_discovery_error() {
     let event = rx.recv().await.expect("should receive an event");
     match event {
         ServerEvent::Error { code, message } => {
-            assert_eq!(code, error_codes::INTERNAL_ERROR);
+            assert_eq!(code, error_codes::REQUEST_FAILED);
             assert!(message.contains("skill discovery failed"));
             assert!(message.contains("session"));
         }
@@ -1049,7 +1049,7 @@ async fn approval_decision_invalid_uuid_sends_error() {
     let event = rx.recv().await.expect("should receive an error event");
     match event {
         ServerEvent::Error { code, message } => {
-            assert_eq!(code, "internal_error");
+            assert_eq!(code, "request_failed");
             assert!(message.contains("invalid event"));
         }
         other => panic!("expected Error, got {other:?}"),
