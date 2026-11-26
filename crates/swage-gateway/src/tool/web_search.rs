@@ -116,7 +116,12 @@ impl Tool for WebSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search the web for information. Returns titles, URLs, and snippets."
+        "Search the web and return the results as text in `output`: for each, its title, its \
+         address and a short excerpt. The results come from the search service the operator \
+         has configured, and where none is configured the call fails saying so. An excerpt \
+         is the search service's own and seldom the whole of what a page says; `url_fetch` \
+         reads a result's page. A search that finds nothing is a result that says so, not a \
+         failure."
     }
 
     fn parameters(&self) -> Value {
@@ -125,11 +130,11 @@ impl Tool for WebSearchTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "The search query."
+                    "description": "What to search for, worded as for a search engine."
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "Maximum number of results to return (default 10).",
+                    "description": "The most results to return. Ten when omitted.",
                     "default": 10
                 }
             },

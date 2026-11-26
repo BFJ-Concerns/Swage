@@ -64,13 +64,34 @@ impl Tool for ToolResultReadTool {
                 message: "reference must be a non-empty string".to_owned(),
             })?;
         let call = stored_tool_call_in_current_thread(ctx, self.name(), reference).await?;
-        let result = call
+        let mut result = call
             .result
-            .as_deref()
+            .clone()
             .ok_or_else(|| ToolError::ExecutionFailed {
                 name: self.name().to_owned(),
                 message: "Referenced tool call has not completed".to_owned(),
             })?;
+        // The stored result is the tool's raw output. Mask registered values
+        // before it is cut to size, as a replay of the same result is, so a
+        // value masked in the conversation's history is not read back whole.
+        let gateway_ctx = super::require_gateway_context(
+            ctx,
+            self.name(),
+            "reading a stored tool result requires gateway execution context",
+        )?;
+        let secret_values = crate::turn::registered_secret_values(
+            &crate::secret::SecretManager::new(gateway_ctx.storage().clone()),
+        )
+        .await
+        .map_err(|error| ToolError::ExecutionFailed {
+            name: self.name().to_owned(),
+            message: format!(
+                "the stored result cannot be read while registered secrets cannot be \
+                 checked: {error}"
+            ),
+        })?;
+        crate::turn::redact_serialised_text(&mut result, &secret_values);
+        let result = result.as_str();
 
         let mut value = truncated_output_value(result, self.max_output_bytes);
         let object = value
@@ -338,6 +359,53 @@ mod tests {
         assert_eq!(output["tool"], "shell");
         assert_eq!(output["call_id"], "call_1");
         assert_eq!(output["bytes"], "full stored result".len());
+    }
+
+    /// A registered value in the stored result is masked as a replay of it
+    /// is, in the escaped form the serialised output carries it in too.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn masks_registered_secret_values_in_the_stored_result() {
+        let (storage, session_id, current_turn_id, referenced_turn_id) = test_turns().await;
+        let secret = r#"tool-read-"secret"-value"#;
+        unsafe { std::env::set_var("SWAGE_TOOL_RESULT_READ_SECRET_TEST", secret) };
+        crate::secret::SecretManager::new(Arc::clone(&storage) as Arc<dyn Storage>)
+            .create_secret(crate::secret::CreateSecretRequest {
+                name: "Tool read key".into(),
+                material_kind: "provider_key".into(),
+                owner_kind: "service".into(),
+                backend_kind: "env".into(),
+                scope_kind: "gateway".into(),
+                scope_id: None,
+                metadata: None,
+                value: None,
+                external_reference: Some("SWAGE_TOOL_RESULT_READ_SECRET_TEST".into()),
+            })
+            .await
+            .unwrap();
+        let stored = json!({ "output": format!("key {secret} end") }).to_string();
+        assert!(
+            !stored.contains(secret),
+            "the stored result carries it escaped"
+        );
+        storage
+            .create_tool_call(new_call(referenced_turn_id, "call_1", Some(stored)))
+            .await
+            .unwrap();
+        let ctx = gateway_context(Arc::clone(&storage), session_id, current_turn_id).await;
+        let reference = tool_result_reference(&referenced_turn_id.to_string(), "call_1");
+
+        let output = ToolResultReadTool {
+            max_output_bytes: 1_000,
+        }
+        .execute(json!({ "reference": reference }), &ctx)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            output["output"],
+            r#"{"output":"key [REDACTED_SECRET] end"}"#
+        );
+        assert!(!output.to_string().contains("tool-read-"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
