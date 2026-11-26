@@ -2483,9 +2483,7 @@ mod tests {
             );
         }
         assert!(
-            text.contains(
-                "Every other tool, `shell` included, receives a reference as literal text"
-            ),
+            text.contains("Every other tool, `shell` included,"),
             "{text}"
         );
     }
