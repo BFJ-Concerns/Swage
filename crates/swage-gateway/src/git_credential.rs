@@ -208,12 +208,14 @@ fn empty_response() -> GitCredentialResponse {
 /// never prompting — the gateway has no terminal, and a helper that would
 /// ask a person answers nothing. Configuration and a repository carried in
 /// the gateway's own environment are not the operator's configuration and
-/// are left out, as the sandboxed git leaves them out. So is the repository
-/// path, as git leaves it out unless `credential.useHttpPath` asks for it.
+/// are left out, as the sandboxed git leaves them out. The repository path
+/// goes with the request, and the host's git keeps it for the operator's
+/// helpers only where their `credential.useHttpPath` asks for it.
 async fn operator_helper(request: &GitCredentialRequest) -> GitCredentialResponse {
     let fields = [
         ("protocol", Some(request.protocol.as_str())),
         ("host", Some(request.host.as_str())),
+        ("path", request.path.as_deref()),
         ("username", request.username.as_deref()),
     ];
     if fields

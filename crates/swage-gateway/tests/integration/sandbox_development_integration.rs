@@ -1451,3 +1451,82 @@ async fn sandboxed_git_commits_are_signed_with_the_operators_openpgp_key() {
         "{events:?}"
     );
 }
+
+/// An operator whose helper keys credentials by repository path
+/// (`credential.useHttpPath`) is answered for the repository the sandboxed
+/// git asks about, and only for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_path_scoped_operator_helper_answers_the_sandboxed_git() {
+    use std::os::unix::fs::PermissionsExt;
+    use swage_sandbox::Sandbox;
+
+    let mut env = ProcessEnvGuard::new();
+    env.set_var("GIT_CONFIG_NOSYSTEM", "1");
+    env.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    let root = tempfile::Builder::new()
+        .prefix("t")
+        .tempdir_in(
+            std::env::var_os("XDG_RUNTIME_DIR")
+                .unwrap_or_else(|| std::env::temp_dir().into_os_string()),
+        )
+        .unwrap();
+    let runtime_root = root.path().join("r");
+    std::fs::create_dir(&runtime_root).unwrap();
+    env.set_var("XDG_RUNTIME_DIR", &runtime_root);
+    let helper = root.path().join("path-helper");
+    std::fs::write(
+        &helper,
+        "#!/bin/sh\n[ \"$1\" = get ] || exit 0\ngrep -qx 'path=owner/repo.git' && printf 'username=operator\\npassword=path-scoped-token\\n'\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = root.path().join("operator-gitconfig");
+    std::fs::write(
+        &config,
+        format!(
+            "[credential]\n\thelper = !{}\n\tuseHttpPath = true\n",
+            helper.display()
+        ),
+    )
+    .unwrap();
+    env.set_var("GIT_CONFIG_GLOBAL", &config);
+
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let server = CredentialServer::start(storage, None, None).unwrap();
+    let mut policy = SandboxConfig::builder()
+        .working_directory(root.path())
+        .write_path(root.path())
+        .masked_path(&runtime_root)
+        .build()
+        .unwrap();
+    server.configure(&mut policy).unwrap();
+    policy
+        .environment
+        .insert("HOME".into(), root.path().display().to_string());
+    let mut sandbox = swage_sandbox::BubblewrapSandbox::new(
+        policy,
+        swage_sandbox::llm_handler::HostLlmHandler::new(|_| async {
+            unreachable!("git uses no model")
+        }),
+    );
+    sandbox.spawn_agent().await.unwrap();
+    for (path, expected) in [("owner/repo.git", true), ("owner/other.git", false)] {
+        let result = sandbox
+            .execute_tool(
+                "shell",
+                json!({"command": format!(
+                    "printf 'protocol=https\\nhost=fixture.example\\npath={path}\\n\\n' | GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git credential fill"
+                )}),
+            )
+            .await
+            .unwrap();
+        let output = result.output["output"].as_str().unwrap_or_default();
+        assert_eq!(
+            output.contains("password=path-scoped-token"),
+            expected,
+            "{path}: {:?}",
+            result.output
+        );
+    }
+    sandbox.shutdown().await.unwrap();
+}
