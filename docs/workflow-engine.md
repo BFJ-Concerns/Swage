@@ -46,15 +46,15 @@ or the handover depending on the outcome.
 
 ## Scripts
 
-Scripts run in a caged V8 isolate. The language is all there — JSON,
-promises, Map/Set, regular expressions, BigInt — but the isolate has no
-ambient capability: `Date`, `eval`, `Intl`, WebAssembly, shared memory,
-`setTimeout`, `fetch` and `process` are absent, and `Math.random` throws to
-prevent non-deterministic branching, since replay depends on the script
-producing the same host-call sequence. Each isolate carries a heap limit and
-a limit on how long the script may execute without yielding to the host; a
-script that crosses either is terminated, the run fails with the reason, and
-the audit trail records an `engine_terminated` event naming it.
+Each workflow runs in its own V8 isolate. Scripts use the workflow API to
+wait on timers and obtain external values. `Math.random`
+and host-locale methods such as `toLocaleString()` throw
+`NondeterministicCallError`. Replay uses the journal to repeat the same
+sequence of host calls.
+
+Reaching the isolate's heap or uninterrupted execution limit stops the
+script and fails the run. The audit trail records the reason in an
+`engine_terminated` event.
 
 A script may open with a `export const meta = { ... };` header declaring
 portable metadata: `name`, `description`, `task` (an opaque identity for
@@ -406,9 +406,8 @@ hash would change and replay would fail with a non-deterministic-call error.
 
 ## Cancellation
 
-Cancellation propagates through a `CancellationToken` the isolate's watchdog
-reads — it terminates even a loop that never yields — and that is raced
-against the execution future. The engine returns `Cancelled` and the run transitions to `cancelled`.
+Cancelling a workflow stops the script while it runs or waits for a host
+call. The workflow record moves to `cancelled`.
 
 For parked runs, which have no engine to signal, `cancel_run` directly sets
 the state to `cancelled` in storage.

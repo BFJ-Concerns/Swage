@@ -4,10 +4,9 @@ description: Run lifecycle, journal/replay, budget partitions (including per-rou
 
 # Workflow engine
 
-The workflow engine executes front-loaded JavaScript scripts inside a
-caged V8 isolate of their own (`swage-isolate`). Each run is a single script evaluation; the host
-(the gateway) journals every non-deterministic call so a crashed or parked
-run replays from its journal.
+Each workflow run evaluates its script in a separate V8 isolate
+(`swage-isolate`). The gateway journals calls to the host so an interrupted
+or parked run can replay them.
 
 Primary sources: `crates/swage-workflow/src/engine.rs` (the JS sandbox and
 host bindings), `crates/swage-workflow/src/host.rs` (the `WorkflowHost`
@@ -62,15 +61,14 @@ Terminal state resolution:
 
 ## Scripts
 
-Scripts are JavaScript evaluated in a caged V8 isolate: `Deno`, `eval`,
-`Date`, `Intl`, `WebAssembly`, `SharedArrayBuffer`, `Atomics`, `WeakRef` and
-`FinalizationRegistry` are deleted from the global object before any script
-source is compiled, the isolate has a heap limit and a limit on uninterrupted
-execution (`EngineLimits`; crossing one is `WorkflowEngineError::Terminated`,
-recorded by the gateway as an `engine_terminated` audit event), and
-`Math.random` throws
-`NondeterministicCallError`. `Date`, `setTimeout`, `fetch`, `process` are
-absent.
+The isolate has no ambient access to I/O, timers, or clocks. `Math.random`
+and host-locale methods such as `toLocaleString()` throw
+`NondeterministicCallError`. Workflows obtain external values through the
+host API so replay can reproduce them.
+
+`EngineLimits` sets the heap and uninterrupted execution limits. Crossing
+either returns `WorkflowEngineError::Terminated` and the gateway records
+an `engine_terminated` audit event.
 
 ### Meta header
 
@@ -547,9 +545,9 @@ would change and replay would fail.
 
 ## Cancellation
 
-The `CancellationToken` is read by the isolate's watchdog thread, which
-terminates execution when it fires (a loop that never yields included), and
-raced against the execution future via `tokio::select!`. Result: `WorkflowEngineError::Cancelled`.
+The isolate checks the cancellation token while waiting on a host call.
+Its watchdog checks the same token to stop running JavaScript, including a
+loop that never yields. The engine returns `WorkflowEngineError::Cancelled`.
 
 `cancel_run` cancels the token. For parked runs (no engine to signal),
 it directly sets state to `cancelled` in storage.
