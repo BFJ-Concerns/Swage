@@ -1,7 +1,7 @@
 <script lang="ts">
   import { cancelWorkflowRun } from "../api/workflow-runs";
   import { stopConversationTurn } from "../api/conversations";
-  import { createWorkSurfaceChannel, type WorkSurfaceChannel } from "../api/work-surface";
+  import { openSharedWorkSurfaceChannel, type WorkSurfaceChannel } from "../api/work-surface";
   import { conversationPath } from "../router";
   import { messagePreview } from "../message-preview";
   import { onMount } from "svelte";
@@ -21,15 +21,19 @@
   import type { ScheduleRun } from "../protocol/ScheduleRun";
   import { passedOneShot, runUnsettled, UNSETTLED_RUN_REFRESH_MS } from "../one-shot-runs";
 
-  let { onNavigate, channelFactory = createWorkSurfaceChannel }: {
+  let { onNavigate, channelFactory = openSharedWorkSurfaceChannel }: {
     onNavigate?: (path: string) => void;
-    // The gateway's signal channel; tests supply a fake.
+    // The page's gateway signal channel; tests supply a fake.
     channelFactory?: () => WorkSurfaceChannel;
   } = $props();
 
   let overview = $state<OperatorOverview | null>(null);
   let isLoading = $state(true);
-  let errorMessage = $state<string | null>(null);
+  // Why the overview could not be read; the next read replaces it.
+  let loadError = $state<string | null>(null);
+  // Why the person's last action failed. It stays through the reloads the
+  // gateway's signals cause, until the person acts again.
+  let actionError = $state<string | null>(null);
   let activeActionKey = $state<string | null>(null);
   let openScheduleId = $state<string | null>(null);
   let scheduleRuns = $state<Record<string, ScheduleRun[]>>({});
@@ -108,7 +112,7 @@
       try {
         scheduleRuns = { ...scheduleRuns, ...(await readRuns(watched)) };
       } catch (error) {
-        errorMessage =
+        loadError =
           error instanceof Error ? error.message : "Failed to refresh schedule runs";
         runRefreshFailures += 1;
       }
@@ -134,26 +138,28 @@
   async function loadOverview(): Promise<void> {
     const generation = ++loadGeneration;
     isLoading = true;
-    errorMessage = null;
 
     try {
       const next = await fetchOperatorOverview();
       if (generation !== loadGeneration) return;
       overview = next;
+      loadError = null;
       const passed = overview.schedules.schedules.filter(passedOneShot).map((schedule) => schedule.id);
       scheduleRuns = { ...scheduleRuns, ...(await readRuns(passed)) };
     } catch (error) {
-      errorMessage =
-        error instanceof Error ? error.message : "Failed to load operator overview";
+      if (generation === loadGeneration) {
+        loadError = error instanceof Error ? error.message : "Failed to load operator overview";
+      }
     } finally {
       if (generation === loadGeneration) isLoading = false;
     }
   }
 
-  // The gateway signals when a session's turn begins or settles and when a
-  // run starts, parks or ends; signals come in bursts, so one read answers each.
+  // The gateway signals when a session's turn begins, waits on the person or
+  // settles and when a run starts, parks or ends; signals come in bursts, so
+  // one read answers each.
   const SIGNAL_COALESCE_MS = 100;
-  const FLEET_SIGNALS = new Set(["session_updated", "workflow_run_started", "workflow_run_updated", "workflow_run_completed", "lagged"]);
+  const FLEET_SIGNALS = new Set(["session_updated", "workflow_run_updated", "lagged"]);
   let signalTimer: ReturnType<typeof setTimeout> | null = null;
 
   function reloadOnSignal(): void {
@@ -169,13 +175,13 @@
     task: () => Promise<void>,
   ): Promise<void> {
     activeActionKey = actionKey;
-    errorMessage = null;
+    actionError = null;
 
     try {
       await task();
       await loadOverview();
     } catch (error) {
-      errorMessage =
+      actionError =
         error instanceof Error ? error.message : "Operator action failed";
     } finally {
       activeActionKey = null;
@@ -253,8 +259,11 @@
 
   {#if showHistory}<OperatorHistoryPane />{/if}
 
-  {#if errorMessage}
-    <div class="ops-alert" role="alert">{errorMessage}</div>
+  {#if actionError}
+    <div class="ops-alert" role="alert">{actionError}</div>
+  {/if}
+  {#if loadError}
+    <div class="ops-alert" role="alert">{loadError}</div>
   {/if}
 
   {#if isLoading && !overview}
@@ -327,7 +336,9 @@
                   {#if session.has_active_connection}
                     <StatusBadge register="calm" label="connected" />
                   {/if}
-                  {#if session.has_running_turn}
+                  {#if session.awaiting_approval}
+                    <StatusBadge register="wants-a-human" label="waiting on you" />
+                  {:else if session.has_running_turn}
                     <StatusBadge register="in-motion" label="running" />
                   {/if}
                   {#if session.ending}

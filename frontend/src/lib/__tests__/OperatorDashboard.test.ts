@@ -51,7 +51,7 @@ function fakeChannel(): FakeChannel {
 }
 
 vi.mock("../api/work-surface", () => ({
-  createWorkSurfaceChannel: () => fakeChannel(),
+  openSharedWorkSurfaceChannel: () => fakeChannel(),
 }));
 
 function makeOverview(overrides: Partial<OperatorOverview> = {}): OperatorOverview {
@@ -76,6 +76,7 @@ function makeOverview(overrides: Partial<OperatorOverview> = {}): OperatorOvervi
         has_interrupted_turn: false,
         has_active_connection: true,
         has_running_turn: true,
+        awaiting_approval: false,
         agent_id: "gateway",
         activity: "processing",
       },
@@ -289,7 +290,7 @@ describe("OperatorDashboard", () => {
       // A run ending, a run parking, a dropped burst and a reconnect each
       // re-read the fleet.
       vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue({ ...overview, workflow_runs: [] });
-      channel.signal({ type: "workflow_run_completed", run: { id: "run-1" } } as unknown as ServerEvent);
+      channel.signal({ type: "workflow_run_updated", run_id: "run-1" });
       await vi.advanceTimersByTimeAsync(100);
       expect(document.querySelector('.ledger a[href="/workflow-runs/run-1"]')).toBeNull();
       channel.signal({ type: "workflow_run_updated", run_id: "run-2" });
@@ -308,6 +309,55 @@ describe("OperatorDashboard", () => {
       unmount(component);
       component = undefined;
       expect(channel.closed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a refused Cancel's reason through the reloads signals cause", async () => {
+    vi.useFakeTimers();
+    const channel = fakeChannel();
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(liveFleet());
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 409 })));
+    try {
+      component = mount(OperatorDashboard, { target: document.body, props: { channelFactory: () => channel } });
+      await vi.advanceTimersByTimeAsync(0);
+      flushSync(() => fleetRow("Research sweep").querySelector<HTMLButtonElement>("button")!.click());
+      await vi.advanceTimersByTimeAsync(0);
+      const alert = () => document.querySelector(".ops-alert")?.textContent ?? "";
+      expect(alert()).toContain("HTTP 409");
+
+      channel.signal({ type: "session_updated", session_id: "child-1" });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledTimes(2);
+      expect(alert()).toContain("HTTP 409");
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows a request waiting on the person as it arrives, and its session as waiting on them", async () => {
+    vi.useFakeTimers();
+    const channel = fakeChannel();
+    const overview = { ...liveFleet(), approvals: [] };
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(overview);
+    try {
+      component = mount(OperatorDashboard, { target: document.body, props: { channelFactory: () => channel } });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(document.body.textContent).toContain("Nothing is waiting for operator approval.");
+
+      vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue({
+        ...overview,
+        sessions: [{ ...overview.sessions[0], awaiting_approval: true, activity: "awaiting_approval" }],
+        approvals: makeOverview().approvals,
+      });
+      channel.signal({ type: "session_updated", session_id: "child-1" });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(document.body.textContent).not.toContain("Nothing is waiting for operator approval.");
+      const labels = Array.from(fleetRow("child-1").querySelectorAll(".badge")).map((badge) => badge.textContent?.trim());
+      expect(labels).toContain("waiting on you");
+      expect(labels).not.toContain("running");
     } finally {
       vi.useRealTimers();
     }
