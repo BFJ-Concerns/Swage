@@ -267,12 +267,17 @@ fn on_path(command: &str) -> bool {
 
 /// Where a workspace's git metadata lives when it is not under the
 /// workspace: a linked worktree's `.git` is a file naming its gitdir, whose
-/// `commondir` names the repository the worktree belongs to. Both must be
-/// writable for the worktree to commit. The pointer is content of the
-/// workspace, which the sandbox writes, so only a directory that is git
-/// metadata — one holding a `HEAD`, and for the common directory its
-/// `objects` too — and that does not contain the workspace is listed; a
-/// pointer at anything else names nothing.
+/// `commondir` names the repository the worktree belongs to, and a
+/// submodule's names its directory under the superproject's `.git/modules`.
+/// The gitdir, and a worktree's common directory, must be writable for the
+/// workspace to commit.
+///
+/// The pointer is content of the workspace, which the sandbox writes, so
+/// it is trusted only as far as the metadata it names points back: a
+/// gitdir is listed only when it names this workspace — a worktree's
+/// `gitdir` file, or a submodule's `core.worktree` — and a common directory
+/// only when the gitdir is one of its `worktrees`. A pointer at another
+/// repository's metadata names nothing.
 pub(crate) fn git_metadata_outside(workspace: &Path) -> Vec<PathBuf> {
     let dot_git = workspace.join(".git");
     let Ok(pointer) = std::fs::read_to_string(&dot_git) else {
@@ -282,17 +287,18 @@ pub(crate) fn git_metadata_outside(workspace: &Path) -> Vec<PathBuf> {
         return Vec::new();
     };
     let gitdir = sandbox_path(&workspace.join(gitdir.trim()));
+    let workspace = sandbox_path(workspace);
     let is_git_metadata = |path: &Path, common: bool| {
         path.join("HEAD").is_file()
             && (!common || path.join("objects").is_dir())
             && !workspace.starts_with(path)
     };
     let mut paths = Vec::new();
-    if !gitdir.starts_with(workspace) {
-        if !is_git_metadata(&gitdir, false) {
+    if !gitdir.starts_with(&workspace) {
+        if !is_git_metadata(&gitdir, false) || !names_workspace(&gitdir, &workspace) {
             tracing::warn!(
                 path = %gitdir.display(),
-                "ignoring a workspace .git pointer at a directory that is not git metadata"
+                "ignoring a workspace .git pointer at git metadata that does not name this workspace"
             );
             return paths;
         }
@@ -300,11 +306,13 @@ pub(crate) fn git_metadata_outside(workspace: &Path) -> Vec<PathBuf> {
     }
     if let Ok(common) = std::fs::read_to_string(gitdir.join("commondir")) {
         let common = sandbox_path(&gitdir.join(common.trim()));
-        if !common.starts_with(workspace) && !paths.contains(&common) {
-            if !is_git_metadata(&common, true) {
+        if !common.starts_with(&workspace) && !paths.contains(&common) {
+            if !is_git_metadata(&common, true)
+                || gitdir.parent() != Some(common.join("worktrees").as_path())
+            {
                 tracing::warn!(
                     path = %common.display(),
-                    "ignoring a worktree's commondir at a directory that is not a repository"
+                    "ignoring a worktree's commondir at a directory that is not its repository"
                 );
                 return paths;
             }
@@ -312,6 +320,27 @@ pub(crate) fn git_metadata_outside(workspace: &Path) -> Vec<PathBuf> {
         }
     }
     paths
+}
+
+/// Whether git metadata outside a workspace points back at it: a linked
+/// worktree's gitdir holds a `gitdir` file naming the workspace's `.git`,
+/// and a submodule's sets `core.worktree` to the workspace.
+fn names_workspace(gitdir: &Path, workspace: &Path) -> bool {
+    if let Ok(back) = std::fs::read_to_string(gitdir.join("gitdir")) {
+        return sandbox_path(&gitdir.join(back.trim())) == workspace.join(".git");
+    }
+    std::process::Command::new("git")
+        .arg("config")
+        .arg("--file")
+        .arg(gitdir.join("config"))
+        .args(["--get", "core.worktree"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| {
+            let worktree = String::from_utf8_lossy(&output.stdout);
+            sandbox_path(&gitdir.join(worktree.trim())) == workspace
+        })
 }
 
 /// The masked private path a placement would reopen, when it would: a

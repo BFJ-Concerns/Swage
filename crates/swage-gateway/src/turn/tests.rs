@@ -18282,6 +18282,75 @@ fn a_grant_equal_to_a_masked_path_is_carried_beside_its_mask() {
 /// A `.git` pointer names git metadata or nothing: a directory with no
 /// `HEAD` — the home, say — is not granted, and neither is a directory
 /// above a masked path, however it is dressed.
+/// A `.git` pointer the sandbox wrote at another repository's metadata
+/// grants nothing, and neither does a worktree's `commondir` rewritten to
+/// name another repository: the metadata must point back at the workspace.
+#[test]
+fn a_pointer_at_another_repositorys_metadata_grants_nothing() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str], cwd: &std::path::Path| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("HOME", temp_dir.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "{args:?}");
+    };
+    let mut repos = Vec::new();
+    for name in ["ours", "theirs"] {
+        let repo = temp_dir.path().join(name);
+        std::fs::create_dir(&repo).unwrap();
+        git(&["init", "-q", "-b", "main"], &repo);
+        git(
+            &[
+                "-c",
+                "user.email=t@example.invalid",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "root",
+            ],
+            &repo,
+        );
+        let worktree = temp_dir.path().join(format!("{name}-worktree"));
+        git(
+            &["worktree", "add", "-q", worktree.to_str().unwrap()],
+            &repo,
+        );
+        repos.push((repo, worktree));
+    }
+    let (_, our_worktree) = &repos[0];
+    let (their_repo, _) = &repos[1];
+    let their_git = sandbox_path(&their_repo.join(".git"));
+    let their_gitdir = their_git.join("worktrees").join("theirs-worktree");
+    assert!(their_gitdir.join("gitdir").is_file());
+
+    // Our worktree's pointer rewritten at their worktree's gitdir.
+    let pointer = our_worktree.join(".git");
+    let original = std::fs::read_to_string(&pointer).unwrap();
+    std::fs::write(&pointer, format!("gitdir: {}\n", their_gitdir.display())).unwrap();
+    assert!(
+        git_metadata_outside(&sandbox_path(our_worktree)).is_empty(),
+        "another repository's worktree metadata does not name this workspace"
+    );
+
+    // Our own gitdir, with its commondir rewritten at their repository.
+    std::fs::write(&pointer, original).unwrap();
+    let our_gitdir = sandbox_path(&repos[0].0.join(".git/worktrees/ours-worktree"));
+    std::fs::write(
+        our_gitdir.join("commondir"),
+        format!("{}\n", their_git.display()),
+    )
+    .unwrap();
+    let outside = git_metadata_outside(&sandbox_path(our_worktree));
+    assert_eq!(outside, vec![our_gitdir], "their repository is not granted");
+}
+
 #[test]
 fn a_git_pointer_at_a_directory_that_is_not_git_metadata_grants_nothing() {
     let temp_dir = tempfile::tempdir().unwrap();
