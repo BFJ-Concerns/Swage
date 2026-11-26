@@ -96,6 +96,17 @@ All notable changes to Swage are documented in this file.
 - Unattended turns stop after repeated identical failing tool calls and keep the cause. Configure `[tools] max_identical_failures` (default 3, bounded to 1–100).
 - The web UI serves a favicon.
 
+- Long-running orchestration runs can now coordinate dependent tasks with bounded parallelism, worker restatement, iterative verification, and explicit acceptance before results are adopted.
+- Runs now carry decisions and outstanding events between short lead sessions, re-evaluate stale decisions against changed state, and produce a handover when the work budget is exhausted.
+- Workflow runs now retain completion, failure, and escalation updates until a lead wake delivers them, including across gateway restarts, with wake decisions and pending-update counts exposed in run details.
+- Workflow runs can now park during long timer waits, free gateway resources while parked, and resume automatically when due or after a gateway restart.
+- Workflow scripts can now record budget snapshots so budget-based decisions remain consistent when runs replay.
+- Workflow budgets can reserve tokens for closing work, and budget snapshots now show separate working and closing allowances together with whether wind-down has begun.
+- Delegated runs now retain context and effective-permission audit records for later inspection.
+- Workflow scripts can now continue a worker in the same session by reusing the handle returned by an earlier worker call.
+- Turn records now include redacted provider response metadata, including status, request identifiers, stop reasons, usage, and content-block sizes, without retaining response content.
+- Sessions now receive working guidance tailored to the configured model family, with common guidance retained for unrecognised models.
+
 ### Changed
 
 - The supplied and hosted guides explain creating and editing agent definitions in conversation, including the required tool grant, limits and configuration history, alongside the operator API.
@@ -143,6 +154,10 @@ All notable changes to Swage are documented in this file.
 - Unknown keys under `[generation.presets.*]` and `[models.entries.*.capabilities]` now fail configuration loading instead of being ignored. Most other sections already rejected unknown keys through validation and still do; per-model pricing entries remain lenient.
 - Tool approval prompting now defaults to disabled and remains available through explicit operator configuration.
 - Succession records every diagnosis and summary model call, including its stage, usage, cost and failure, in the compaction report.
+
+- Structured-output turns now provide the configured JSON Schema to the model on initial requests and validation retries, keeping responses aligned with the declared shape.
+- Session orientation now explains what activity is recorded and that managed secret values are redacted from the local record.
+- Interrupted timer waits now resume with their remaining duration instead of restarting from the full delay.
 
 ### Removed
 
@@ -452,29 +467,6 @@ All notable changes to Swage are documented in this file.
 - Long sessions no longer fail ordinary file and shell calls with "missing required field" after the model copies earlier tool calls from its history.
 - Interrupted sandbox IPC reads retain partial frames, so the next call can complete the frame without corrupting the connection.
 - Sandboxed shell commands honour `shell_timeout_secs` even after closing their output streams, report that limit when they time out, and leave later calls receiving their own replies.
-
-## 0.2.0 — 2026-08-13
-
-### Added
-
-- Long-running orchestration runs can now coordinate dependent tasks with bounded parallelism, worker restatement, iterative verification, and explicit acceptance before results are adopted.
-- Runs now carry decisions and outstanding events between short lead sessions, re-evaluate stale decisions against changed state, and produce a handover when the work budget is exhausted.
-- Workflow runs now retain completion, failure, and escalation updates until a lead wake delivers them, including across gateway restarts, with wake decisions and pending-update counts exposed in run details.
-- Workflow runs can now park during long timer waits, free gateway resources while parked, and resume automatically when due or after a gateway restart.
-- Workflow scripts can now record budget snapshots so budget-based decisions remain consistent when runs replay.
-- Workflow budgets can reserve tokens for closing work, and budget snapshots now show separate working and closing allowances together with whether wind-down has begun.
-- Delegated runs now retain context and effective-permission audit records for later inspection.
-- Workflow scripts can now continue a worker in the same session by reusing the handle returned by an earlier worker call.
-- Turn records now include redacted provider response metadata, including status, request identifiers, stop reasons, usage, and content-block sizes, without retaining response content.
-- Sessions now receive working guidance tailored to the configured model family, with common guidance retained for unrecognised models.
-
-### Changed
-
-- Structured-output turns now provide the configured JSON Schema to the model on initial requests and validation retries, keeping responses aligned with the declared shape.
-- Session orientation now explains what activity is recorded and that managed secret values are redacted from the local record.
-- Interrupted timer waits now resume with their remaining duration instead of restarting from the full delay.
-
-### Fixed
 
 - The conversation composer now reflects newly saved provider and model settings without requiring a surface reload.
 - Fresh-session schedules can now use the calling conversation's topic without requiring its UUID.
