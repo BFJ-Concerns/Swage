@@ -12525,7 +12525,11 @@ async fn ordinary_failed_agent_call_keeps_interrupted_handover_event_accounting(
         .expect("failed call error");
     assert!(call_error.starts_with("AgentCallError:"));
     let terminal_error = run.error_message.as_deref().expect("terminal error");
-    assert!(terminal_error.contains(call_error));
+    assert_eq!(
+        terminal_error.matches(call_error).count(),
+        1,
+        "{terminal_error}"
+    );
     assert!(!terminal_error.contains("AgentCallError: AgentCallError:"));
 
     let journal = storage

@@ -8736,7 +8736,17 @@ async fn launch_existing_run(
             }
             _ => None,
         };
+        // Stop requests record and signal cancellation under this lock.
+        // Take the terminal decision under the same lock, then close the
+        // token to further requests while the terminal account is written.
+        let stopped = {
+            let _active = active.lock().await;
+            let stopped = cancellation.is_cancelled();
+            cancellation.cancel();
+            stopped
+        };
         let (run_state, output, error) = match engine_result {
+            _ if stopped => ("cancelled", None, None),
             Ok(Ok(json)) => match serde_json::from_str(&json) {
                 Ok(value) => ("completed", Some(value), None),
                 Err(problem) => ("failed", None, Some(problem.to_string())),
@@ -8746,8 +8756,15 @@ async fn launch_existing_run(
                 "failed",
                 None,
                 Some(match stack {
-                    Some(stack) => format!("{message}\n{stack}"),
-                    None => message,
+                    Some(stack)
+                        if stack
+                            .strip_prefix(&message)
+                            .is_some_and(|rest| rest.is_empty() || rest.starts_with('\n')) =>
+                    {
+                        stack
+                    }
+                    Some(stack) if !stack.is_empty() => format!("{message}\n{stack}"),
+                    _ => message,
                 }),
             ),
             Ok(Err(problem)) => ("failed", None, Some(problem.to_string())),
@@ -8819,9 +8836,8 @@ async fn launch_existing_run(
             }
             None => (run_state, output, handover, error),
         };
-        // Stop in-process watchers; the state write closes open holds in
-        // the same transaction that publishes the terminal run.
-        cancellation.cancel();
+        // The state write closes open holds in the same transaction that
+        // publishes the terminal run.
         let state_update = storage
             .update_workflow_run_state(run_id, run_state, output, handover, error.as_deref())
             .await;
