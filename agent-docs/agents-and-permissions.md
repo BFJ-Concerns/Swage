@@ -436,17 +436,41 @@ not found.
 Sandboxing is on by default: eligible local tool calls run inside a two-layer
 sandbox (`swage-sandbox`):
 
-1. **Bubblewrap (bwrap)** — Linux namespace isolation (PID, network, mount,
-   user, IPC, UTS). `--unshare-all` with `--die-with-parent`. Read-only
-   root bind with read-write overlays for the working directory and
-   configured mounts.
+1. **Bubblewrap (bwrap)** — Linux namespace isolation (PID, mount, user,
+   IPC, UTS, and the network unless the policy shares the host's), with
+   `--die-with-parent`. The sandbox reads broadly and writes narrowly:
+   the root is bound read-only, private paths are masked (SSH and GnuPG
+   key material, cloud and cluster credentials, plaintext token files,
+   package-registry tokens, keyrings, the gateway's data root), and the
+   write set is the workspace (when its grant allows), a linked
+   worktree's git metadata, temporary space, the shared caches under the
+   home (created first where their tool is installed) and attachments
+   granted write. Of `~/.ssh`, `config`, `known_hosts` and the `.pub`
+   files reopen read-only; the shipped skills' directory under the data
+   root reopens read-only. A grant naming the data root reopens it.
 2. **Landlock** — kernel-enforced per-path filesystem access control,
-   applied inside the child process. Supports ABI 1 (Linux 5.13+), ABI 2
+   applied inside the child process with the same write set; everything
+   else is readable and executable. Supports ABI 1 (Linux 5.13+), ABI 2
    (5.19+, adds `REFER`), ABI 3 (6.2+, adds `TRUNCATE`). Degrades
-   gracefully on older kernels. Read-only system paths: `/bin`, `/lib`,
-   `/lib64`, `/usr/bin`, `/usr/lib`, `/usr/lib64`, `/etc/ld.so.cache`.
-   Always-writable paths: the working directory and `/tmp`, plus any
-   configured write paths. Restrictions are irrevocable within the process.
+   gracefully on older kernels. Restrictions are irrevocable within the
+   process.
+
+The policy is built per turn in `build_sandbox_config`
+(`crates/swage-gateway/src/turn/dispatcher.rs`) and carried to the child as
+`SandboxPolicy` (`swage-protocol/src/hosting/sandbox.rs`).
+
+Git in the sandbox runs on the operator's own system and global
+configuration; command-scope configuration and repository selectors in
+the gateway's environment do not cross. Authentication goes through the
+operator's agent and helpers: `SSH_AUTH_SOCK` is bound in, and git's ssh
+reads only `~/.ssh/config` (`ssh -F`) unless the operator sets
+`core.sshCommand`, since the system's root-owned ssh configuration shows
+as owned by nobody inside the user namespace. Over HTTPS the sandboxed
+git's one credential helper asks the gateway (`git_credential.rs`): a git
+credential registered with the gateway for the host, else `git credential
+fill` run on the host with the operator's helpers, never prompting. Commit
+signing (SSH or OpenPGP) is forwarded to the host by `git_signer.rs`,
+which signs with the operator's configured key and records each signing.
 
 The execution boundary is selected before this sandbox path. When a session
 targets a non-local device, tool calls go to that device. On a local device,
@@ -455,12 +479,11 @@ gateway process; tools with resolved secret parameters also stay on the host
 so their raw values do not cross sandbox IPC. These host/device executions
 are not confined by the bubblewrap and Landlock layers described here.
 
-Credential isolation strips `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and
-`GOOGLE_API_KEY` from the sandbox child environment. Provider
-`api_key_env` names are configurable, however, and any differently named
-environment variable is not stripped by this mechanism. LLM completions use
-the host IPC proxy, so the child does not need provider credentials for
-completion requests.
+The bubblewrap child's environment is cleared and rebuilt from a named
+list (`PATH`, `HOME`, the locale, the XDG directories, `CARGO_HOME`, the
+`RUSTUP_*` settings, git's configuration-file selectors) plus what the
+policy adds; no provider credential crosses. LLM completions use the host
+IPC proxy, so the child does not need provider credentials.
 
 ### Sandbox configuration
 
@@ -468,6 +491,16 @@ completion requests.
 |---|---|---|
 | `sandbox.enabled` | bool | `true` |
 | `sandbox.allow_degraded_execution` | bool | `false` |
+| `sandbox.network` | `"open"`, `"none"` or `"proxy"` | `"open"` |
+| `sandbox.egress_hosts` | list of hosts (`*.suffix` allowed) | `[]` |
+
+`network = "open"` shares the host's network, with the operator's proxy
+variables. `"none"` leaves the sandbox its own network namespace. `"proxy"`
+routes every connection through the gateway's recording proxy
+(`swage-sandbox/src/egress.rs`, policy in `swage-gateway/src/egress.rs`):
+each is recorded as an `egress_connection` audit event, hosts in
+`egress_hosts` are reached, and any other host goes to the request judge
+(`[judge] model`), refused without its yes.
 
 With no sandbox setting in the configuration cascade, per-turn sandboxing is
 on (`SandboxConfig::default()` in `swage-protocol/src/client/settings.rs`). A
@@ -502,6 +535,20 @@ attendance:
 without the approval prompt when sandbox setup fails at runtime, for both
 attended and unattended turns. The degradation is recorded in the audit
 trail regardless of how it was authorised.
+
+### Requests beyond the grants
+
+A file tool's request for a location outside the session's granted
+locations goes to the request judge (`swage-agent/src/judge.rs`, the
+gateway's `request_judge.rs`) before it runs. Unattended, the judge decides
+alone and anything but a clear yes refuses, the reason told to the agent;
+with no `[judge] model` configured every such request is refused. Attended,
+a confident verdict stands and the rest go to the person. Each judgement is
+a `request_judged` audit event (tool, arguments, justification, task,
+verdict, confidence, reason). The judge's instruction is the
+`prompts.request_judge` experiment location, with variants `default` and
+`reach-tiers`; its completion is capped at 4096 tokens so a judge that
+reasons first still answers.
 
 ### Approval channel
 
