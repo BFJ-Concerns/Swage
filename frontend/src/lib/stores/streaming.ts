@@ -479,7 +479,8 @@ export function createStreamingStore(
         }
 
         case "output_schema_failed": {
-          settleResponse(ownerId, stream, "failed");
+          settleResponse(ownerId, stream, "failed", event.turn_id, get(stream.activeToolCallsStore));
+          stream.activeToolCallsStore.set([]);
           stream.turnErrorStore.set({
             code: "output_schema_failed",
             message: event.failure_message,

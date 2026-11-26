@@ -1214,12 +1214,17 @@ describe("output_schema_failed events", () => {
     });
   });
 
-  it("preserves partial response in the conversation store", () => {
+  it("keeps the tool calls beside the failed reply", () => {
     const conv = createMockConversationStore();
     const store = createStreamingStore({ conversationStore: conv });
 
     store.startTurn("question");
     store.handleServerEvent({ type: "token", content: "partial" });
+    store.handleServerEvent({ type: "tool_start", call_id: "echo-1", tool: "echo", arguments: {} });
+    store.handleServerEvent({
+      type: "tool_end", call_id: "echo-1", tool: "echo",
+      status: "success", result: "echoed", duration_ms: 1, truncated: false,
+    });
     store.handleServerEvent({
       type: "output_schema_failed", failure_message: "Structured output validation failed after 3 attempts: /answer: is required",
       turn_id: "t-1",
@@ -1231,7 +1236,13 @@ describe("output_schema_failed events", () => {
       .getMessages()
       .filter((m) => m.role === "assistant");
     expect(assistantMessages).toHaveLength(1);
-    expect(assistantMessages[0].content).toBe("partial");
+    expect(assistantMessages[0]).toMatchObject({
+      turn_id: "t-1",
+      turn_state: "failed",
+      content: "partial",
+      tool_calls: [{ call_id: "echo-1", status: "success", result: "echoed" }],
+    });
+    expect(store.activeToolCalls).toEqual([]);
   });
 });
 

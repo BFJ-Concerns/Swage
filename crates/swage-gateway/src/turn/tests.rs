@@ -8078,6 +8078,14 @@ async fn read_failed_reply(
                     "one terminal error"
                 );
             }
+            ServerEvent::OutputSchemaFailed {
+                failure_message, ..
+            } => {
+                assert!(
+                    live_failure.replace(failure_message).is_none(),
+                    "one terminal error"
+                );
+            }
             ServerEvent::TurnComplete { .. } => panic!("the failed turn must not complete"),
             _ => {}
         }
@@ -22296,16 +22304,25 @@ async fn approval_scope_expired_live_waiter_records_expired_feedback() {
 }
 
 #[tokio::test]
-async fn settlement_schema_exhaustion_keeps_reason_in_poll_and_history() {
-    let (state, session_id) = make_state_with_session(vec![
+async fn settlement_schema_exhaustion_keeps_streamed_reply_and_reason_in_history() {
+    let mut rounds = vec![vec![
         StreamChunk::Delta {
-            content: "not json".into(),
+            content: "I will use echo. ".into(),
         },
-        StreamChunk::Done {
-            finish_reason: None,
+        StreamChunk::ToolUse {
+            call_id: "echo-before-schema-failure".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({"text": "echoed"}),
         },
-    ])
-    .await;
+    ]];
+    rounds.extend(
+        ["bad one ", "bad two ", "bad three ", "bad four"].map(|content| {
+            vec![StreamChunk::Delta {
+                content: content.into(),
+            }]
+        }),
+    );
+    let (state, session_id) = make_state_with_tools(rounds).await;
     let (tx, mut rx) = mpsc::unbounded_channel();
     process_turn(
         &state,
@@ -22318,42 +22335,24 @@ async fn settlement_schema_exhaustion_keeps_reason_in_poll_and_history() {
     )
     .await
     .unwrap();
-    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, ServerEvent::OutputSchemaFailed { .. })),
-        "real schema exhaustion: {events:?}"
+
+    let reply = read_failed_reply(&state, session_id, &mut rx).await;
+    assert_eq!(
+        reply.content,
+        "I will use echo. bad one bad two bad three bad four"
     );
-    let thread = state
-        .storage
-        .list_by_session(session_id)
-        .await
-        .unwrap()
-        .remove(0);
-    let turn = state
-        .storage
-        .list_turns_by_thread(thread.id)
-        .await
-        .unwrap()
-        .remove(0);
-    let reason = turn
+    assert_eq!(reply.tool_calls.len(), 1);
+    assert_eq!(reply.tool_calls[0].call_id, "echo-before-schema-failure");
+    let reason = reply
         .failure_message
         .expect("schema exhaustion must persist its reason");
-    let live = events
-        .iter()
-        .find_map(|event| {
-            let value = serde_json::to_value(event).unwrap();
-            (value["type"] == "output_schema_failed").then_some(value)
-        })
-        .unwrap();
     assert_eq!(
-        live["failure_message"], reason,
-        "live and stored schema causes must match"
+        reason,
+        "Structured output validation failed after 4 attempts: no JSON found in response"
     );
     let poll = crate::handlers::get_turn(
         axum::extract::State(state.clone()),
-        crate::error::Path(turn.id),
+        crate::error::Path(reply.turn_id.unwrap()),
     )
     .await
     .unwrap()
@@ -22361,20 +22360,6 @@ async fn settlement_schema_exhaustion_keeps_reason_in_poll_and_history() {
     assert_eq!(
         serde_json::to_value(poll).unwrap()["failure_message"],
         reason
-    );
-    let history = crate::service::ConversationService::new(
-        Arc::clone(&state.storage),
-        Arc::clone(&state.topic_store),
-    )
-    .get_conversation(session_id)
-    .await
-    .unwrap();
-    assert!(
-        history
-            .messages
-            .iter()
-            .any(|m| m.failure_message.as_deref() == Some(reason.as_str())),
-        "history must keep the same cause"
     );
 }
 

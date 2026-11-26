@@ -2366,8 +2366,16 @@ impl Agent {
                             reason: format!("failed turn's started tool calls could not be settled: {storage_error}"),
                         });
                     }
-                    self.record_failed_reply(&execution, &accumulated, &error, &event_tx)
-                        .await;
+                    self.record_failed_reply(
+                        &execution,
+                        &accumulated,
+                        AgentEvent::Error {
+                            message: error.to_string(),
+                            provider_failure: false,
+                        },
+                        &event_tx,
+                    )
+                    .await;
                     return Err(error);
                 }
             };
@@ -2442,32 +2450,26 @@ impl Agent {
                     }]
                 });
 
-                // Step 4/5: validation failed.
+                // Each attempt is validated on its own. A failed turn keeps
+                // all the text already sent, excluding any unsent closing notice.
+                let streamed = closing_notice
+                    .take()
+                    .and_then(|notice| accumulated.strip_suffix(&notice))
+                    .unwrap_or(&accumulated);
+                streamed_before_schema_retry.push_str(streamed);
+
                 if attempt > max_retries {
-                    // Step 5: all retries exhausted.
-                    let _ = event_tx.send(AgentEvent::OutputSchemaFailed {
-                        turn_id: turn.id,
-                        attempts: attempt,
-                        errors: validation_errors,
-                    });
-
-                    // Persist the failed response for debugging.
-                    let _ = self
-                        .storage
-                        .append_message(swage_storage::model::AppendMessage {
-                            thread_id,
-                            attachments: Vec::new(),
-                            turn_id: Some(turn.id),
-                            role: Role::Assistant,
-                            origin: swage_storage::MessageOrigin::Assistant,
-                            content: accumulated.clone(),
-                            agent_id: self.config.agent_id.clone(),
-                        })
-                        .await;
-
-                    // Mark turn Failed, thread Idle.
-                    self.fail_turn_and_idle(turn.id, thread_id).await;
-
+                    self.record_failed_reply(
+                        &execution,
+                        &streamed_before_schema_retry,
+                        AgentEvent::OutputSchemaFailed {
+                            turn_id: turn.id,
+                            attempts: attempt,
+                            errors: validation_errors,
+                        },
+                        &event_tx,
+                    )
+                    .await;
                     return Err(AgentError::OutputSchemaFailed { attempts: attempt });
                 }
 
@@ -2512,14 +2514,6 @@ impl Agent {
                     ..llm_request.clone()
                 };
 
-                // Validate the next answer on its own. Keep what the caller already
-                // saw in case the turn ends without an accepted response.
-                let streamed = closing_notice
-                    .take()
-                    .and_then(|notice| accumulated.strip_suffix(&notice))
-                    .unwrap_or(&accumulated);
-                streamed_before_schema_retry.push_str(streamed);
-
                 let retry_outcome = self
                     .consume_provider_stream(
                         llm_request.clone(),
@@ -2557,7 +2551,10 @@ impl Agent {
                 self.record_failed_reply(
                     &execution,
                     &streamed_before_schema_retry,
-                    &error,
+                    AgentEvent::Error {
+                        message: error.to_string(),
+                        provider_failure: false,
+                    },
                     &event_tx,
                 )
                 .await;
@@ -4139,16 +4136,13 @@ impl Agent {
         &self,
         execution: &TurnExecutionContext,
         text: &str,
-        error: &AgentError,
+        failure: AgentEvent,
         event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
     ) {
         let persisted = self.persist_terminal_response(execution, text).await;
         self.fail_turn_and_idle(execution.turn_id, execution.thread_id)
             .await;
-        let _ = event_tx.send(AgentEvent::Error {
-            message: error.to_string(),
-            provider_failure: false,
-        });
+        let _ = event_tx.send(failure);
         if let Err(error) = persisted {
             let _ = event_tx.send(AgentEvent::RecordIntegrityLost {
                 turn_id: execution.turn_id,
