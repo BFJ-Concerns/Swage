@@ -294,6 +294,25 @@ describe("provider failure notice", () => {
     expect(document.querySelector(".turn-error p")?.textContent).toBe(reason);
   });
 
+  it.each([
+    ["assistant", "The gateway shut down while the turn was running."],
+    ["user", "approval timed out before tool execution; turn interrupted"],
+  ] as const)("shows the recorded interruption on a reloaded %s message", (role, reason) => {
+    const message: MessageView = {
+      role,
+      content: role === "assistant" ? "Partial reply" : "Write the file",
+      timestamp: "2026-10-15T12:00:00Z",
+      turn_state: "interrupted",
+      failure_message: reason,
+    };
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store: makeConversationStore([message]) },
+    });
+    flushSync();
+    expect(document.querySelector(".turn-error p")?.textContent).toBe(reason);
+  });
+
   it("offers generic recovery without inventing a provider or error category", () => {
     const streaming = makeStreamingStore();
     Object.defineProperty(streaming, "turnError", { get: () => ({ code: "provider_error", message: "opaque diagnostic" }) });
