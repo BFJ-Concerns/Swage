@@ -1296,6 +1296,17 @@ describe("SettingsPage", () => {
     expect(settingsApi.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ attachments: { accepted_schemes: ["https", "http", "custom+image"] } }));
   });
 
+  it("autosaves the judge model edited on its own from Automation", async () => {
+    component = mount(SettingsPage, { target: document.body, props: { tab: "automation" } });
+    await flushUi();
+    const field = document.querySelector<HTMLInputElement>('input[aria-label="Judge model"]');
+    if (!field) throw new Error("Judge model input was not rendered");
+    field.value = "haiku";
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    expect(settingsApi.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ judge: { model: "haiku" } }));
+  });
+
   it("saves the session archive delay from the automation tab", async () => {
     component = mount(SettingsPage, {
       target: document.body,
