@@ -910,11 +910,11 @@ audio. `GET /api/voice/capabilities` returns:
 
 - **`transcription`** and **`synthesis`** — booleans for whether speech-to-text
   and text-to-speech are available.
-- **`unavailable_reason`** — when either capability is off, the reason and
-  what to address: the default provider may be absent, its credentials
-  unavailable, its protocol incompatible (only OpenAI-protocol providers
-  serve audio), or a `[voice]` model id may be unset. Absent when both
-  capabilities are available.
+- **`unavailable_reason`** — why either capability is unavailable. It can
+  identify a missing default provider, unavailable credentials, an
+  incompatible provider protocol, an unset `[voice]` model id or a speech
+  model that has yet to be checked. After a speech request fails, it reports
+  the provider error. The field is absent when both capabilities are available.
 - **`default_voice`** and **`supported_voices`** — the default synthesis
   voice and the available voice list. The OpenAI provider reports both
   regardless of whether synthesis is configured.
@@ -922,8 +922,11 @@ audio. `GET /api/voice/capabilities` returns:
 The two audio routes — `POST /api/voice/transcriptions` and
 `POST /api/voice/speech` — send requests to the default provider's
 OpenAI-protocol audio endpoints using the model ids configured in `[voice]`.
-A request to an unavailable capability returns a 422 validation error. See
-[Agents and permissions — Voice configuration](agents-and-permissions.md#voice-configuration)
+The transcription route returns a 422 validation error when transcription
+is unavailable. The speech route accepts requests before synthesis is
+advertised, so a caller can check the model or retry after a failure.
+A successful speech request makes synthesis available.
+See [Agents and permissions — Voice configuration](agents-and-permissions.md#voice-configuration)
 for the configuration keys.
 
 ## Gateway tools
