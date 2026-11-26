@@ -115,11 +115,13 @@ description says otherwise.";
 /// that reaches a tool as literal text is reported as unresolved rather
 /// than as used.
 const SECRETS_HEADING: &str = "## Registered secrets";
-const SECRETS_OPENING: &str = "A registered secret is used by reference — `secret://<id>` in place of \
-its value — and only a tool that resolves references turns one into the value.";
-const SECRETS_CLOSING: &str = "receives a reference as literal text and nothing is resolved: say so when \
-it happens, and never report a secret as used on the strength of a command \
-that only saw its reference.";
+const SECRETS_OPENING: &str = "A registered secret is used by its reference, written \
+`secret://<backend>/<id>`, in the place its value would go. Only a tool that \
+resolves references exchanges one for the value, and it does so as the call \
+runs.";
+const SECRETS_CLOSING: &str = "is given a reference as the plain text it is and resolves nothing: a \
+call that passed it one did not use the secret, whatever the call returned. \
+Where that happens, say that the secret was not used.";
 
 /// The sentence naming which offered tools resolve a reference and in which
 /// parameters, then the tools that do not — `shell` by name when offered,
