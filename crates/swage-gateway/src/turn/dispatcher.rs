@@ -397,6 +397,9 @@ pub(crate) fn build_sandbox_config(
             .environment
             .insert("SSH_AUTH_SOCK".into(), socket.display().to_string());
     }
+    if let Some(command) = sandboxed_git_ssh_command(&working_directory, &roots.home) {
+        policy.environment.insert("GIT_SSH_COMMAND".into(), command);
+    }
     // On the host's network a command uses the operator's own proxy, as it
     // would unsandboxed.
     if host_network {
@@ -421,6 +424,33 @@ const PROXY_ENVIRONMENT: &[&str] = &[
     "all_proxy",
     "no_proxy",
 ];
+
+/// The ssh command sandboxed git runs, unless the operator names their own
+/// (`core.sshCommand`, as the workspace's git configuration reads it).
+///
+/// Inside the sandbox's user namespace the host's root-owned files show as
+/// owned by nobody, and OpenSSH refuses a configuration file, the system's
+/// included ones among them, owned by anyone but root or the user. So git's
+/// ssh reads the operator's own configuration alone (`-F`), which is theirs
+/// and passes, or none where they have none.
+fn sandboxed_git_ssh_command(working_directory: &Path, home: &Path) -> Option<String> {
+    let configured = std::process::Command::new("git")
+        .args(["config", "--get", "core.sshCommand"])
+        .current_dir(working_directory)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .is_ok_and(|output| output.status.success() && !output.stdout.trim_ascii().is_empty());
+    if configured {
+        return None;
+    }
+    let user_config = home.join(".ssh").join("config");
+    let file = if user_config.is_file() {
+        user_config.display().to_string()
+    } else {
+        "/dev/null".to_owned()
+    };
+    Some(format!("ssh -F '{}'", file.replace('\'', "'\\''")))
+}
 
 /// The operator's SSH agent socket, when one is running: a sandboxed ssh
 /// authenticates through it and never reads a key.
@@ -1409,6 +1439,41 @@ mod tests {
 
     /// An egress setup for tests of backend selection: nothing is reachable
     /// and nothing is recorded, since no command runs.
+    /// Git's ssh in the sandbox reads the operator's own configuration
+    /// alone, unless the operator names their own ssh command.
+    #[test]
+    fn sandboxed_git_ssh_reads_the_operators_configuration_unless_they_name_a_command() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        let workspace = root.path().join("o'brien");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&workspace)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        git(&["init", "-q"]);
+
+        assert_eq!(
+            sandboxed_git_ssh_command(&workspace, &home).as_deref(),
+            Some("ssh -F '/dev/null'"),
+            "an operator with no ssh configuration has none read"
+        );
+        std::fs::write(home.join(".ssh/config"), "Host forge\n").unwrap();
+        assert_eq!(
+            sandboxed_git_ssh_command(&workspace, &home),
+            Some(format!("ssh -F '{}'", home.join(".ssh/config").display()))
+        );
+        git(&["config", "core.sshCommand", "ssh -i key"]);
+        assert_eq!(sandboxed_git_ssh_command(&workspace, &home), None);
+    }
+
     fn test_egress() -> Option<swage_sandbox::EgressSetup> {
         struct Closed;
         #[async_trait::async_trait]

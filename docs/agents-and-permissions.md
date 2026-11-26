@@ -459,7 +459,11 @@ selectors (`GIT_DIR`, `GIT_WORK_TREE`) do not cross into the sandbox.
 
 Authentication goes through the operator's agent and credential helpers,
 never through key or token files inside the sandbox. Over SSH, the sandbox
-is given the operator's SSH agent (`SSH_AUTH_SOCK`). Over HTTPS, the
+is given the operator's SSH agent (`SSH_AUTH_SOCK`), and git's ssh reads
+the operator's own `~/.ssh/config` alone (`ssh -F`) unless they set
+`core.sshCommand`: inside the sandbox's user namespace the system's
+root-owned ssh configuration shows as owned by nobody, which OpenSSH
+refuses. Over HTTPS, the
 sandboxed git's one credential helper asks the gateway through the turn's
 private socket: a git credential registered with the gateway for the host
 answers first, and otherwise the gateway runs `git credential fill` on the

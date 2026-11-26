@@ -109,11 +109,13 @@ impl CredentialServer {
         // The sandboxed git reads the operator's own configuration; the
         // gateway adds only command-scope entries, which take precedence.
         // Inherited selectors are dropped before they are supplied (the
-        // sandbox separately allowlists the host environment); the
-        // command-scope entries another host service appended (the
-        // signer's) are kept and composed with.
+        // sandbox separately allowlists the host environment); the ssh
+        // command the policy chose, and the command-scope entries another
+        // host service appended (the signer's), are kept and composed with.
         let appended: Vec<(String, String)> = git_config_entries(config);
-        config.environment.retain(|key, _| !key.starts_with("GIT_"));
+        config
+            .environment
+            .retain(|key, _| !key.starts_with("GIT_") || key == "GIT_SSH_COMMAND");
         let binary = swage_sandbox::resolve_agent_binary()?;
         let quoted = format!("'{}'", binary.display().to_string().replace('\'', "'\\''"));
         // Command scope resets the operator's helpers, which would read
