@@ -458,9 +458,9 @@ options govern sandbox behaviour:
 | `sandbox.allow_degraded_execution` | `false` | Whether to allow unsandboxed execution after sandbox setup fails |
 
 With sandboxing disabled, local gateway turns run without sandbox isolation
-and record a degraded boundary with reason
-`sandbox_disabled_by_configuration`. `allow_degraded_execution` is not
-required for this configuration choice.
+and record that the sandbox was switched off (`sandbox_disabled`), which is
+distinct from degraded execution after a sandbox failed to start.
+`allow_degraded_execution` is not required for this configuration choice.
 
 To turn sandboxing off for a topic, add this to its `config.toml`:
 
@@ -554,7 +554,7 @@ the global setting, and an agent-level file can override the topic's.
 |---|---|---|
 | `assembly` | `"default"` | Which named context assembly to use |
 | `alternatives` | `[]` | Hidden alternative assemblies available for local selection |
-| `timeout` | `5` (seconds, 1–60) | How long assembly may take before timing out |
+| `timeout` | `5` (seconds, at least 1) | How long assembly may take before timing out |
 | `budget` | unset | Token budget for the assembled context; must be positive when set |
 | `compaction_threshold` | unset (100 messages) | When to compact — `{ messages = N }` or `{ tokens = N }` |
 | `diagnosis_reader_model` | unset (session's model) | Model for the diagnosis readers during wall succession |
@@ -654,7 +654,9 @@ forced_variant = "family-fallback"
 Restart the gateway after changing either key.
 
 The shipped locations are `context.assembly`, `context.working_norms`,
-`task.prompt`, and `prompts.memory_curator`.
+`task.prompt`, `prompts.memory_curator`, and `prompts.succession_summary`
+(the instruction a conversation summary is written under, selected when a
+session first needs a summary).
 
 ### Alternatives
 
@@ -704,7 +706,7 @@ baseline element was declared omitted and the script added nothing else),
 the assembly also falls back to the default.
 
 The other shipped locations (`context.working_norms`, `task.prompt`,
-`prompts.memory_curator`) have their alternatives defined in the gateway
+`prompts.memory_curator`, `prompts.succession_summary`) have their alternatives defined in the gateway
 source. For `context.working_norms`, the registered variants are
 `authored-v1` (the default) and `family-fallback`. These cannot be extended
 through configuration.

@@ -107,8 +107,13 @@ impl ContextElement for SkillsElement {
             .sorted_skills()
             .iter()
             .map(|s| {
+                // The lead-in names the skill, since its instructions need
+                // not, and says where its own files are: a relative path in
+                // a skill is relative to the skill, not to the directory
+                // tool paths resolve against.
                 format!(
-                    "Skill directory: {}\nResolve relative paths in these instructions against this directory.\n\n{}",
+                    "Active skill: {}. A relative path in its instructions names a file in the skill's own directory, {}; join the two to open it.\n\n{}",
+                    s.name,
                     s.source_directory.display(),
                     s.instructions
                 )
@@ -237,8 +242,15 @@ mod tests {
         match &messages[0].content()[0] {
             swage_core::ContentPart::Text { text } => {
                 assert!(text.contains("You are a friendly assistant."));
-                assert!(text.contains("Skill directory: /skills/persona"));
-                assert!(text.contains("Resolve relative paths"));
+                assert!(
+                    text.starts_with("Active skill: persona."),
+                    "the lead-in names the skill: {text}"
+                );
+                let lead_in = text
+                    .split_once("\n\n")
+                    .expect("a lead-in, then the instructions")
+                    .0;
+                assert!(lead_in.contains("/skills/persona"), "{lead_in}");
             }
             _ => panic!("expected text content"),
         }

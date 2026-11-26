@@ -327,9 +327,11 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         let memory_index = Some(
             crate::memory::load_memory_index(&self.swage_root, &self.topic.location())
                 .await
-                .into_element(swage_context::memory::MemoryReach::with_read_tool(
+                .into_element(swage_context::memory::MemoryReach::for_tools(
                     self.offered_tools
                         .is_offered(crate::tool::memory::MEMORY_READ_TOOL),
+                    self.offered_tools
+                        .is_offered(crate::tool::memory::MEMORY_WRITE_TOOL),
                 )),
         );
         let mut session_variables: std::collections::BTreeMap<String, String> = self

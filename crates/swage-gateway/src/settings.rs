@@ -867,9 +867,9 @@ fn validate_settings_request(request: &SaveSettingsRequest) -> Result<(), ApiErr
                 "context assembly must not be empty".to_string(),
             ));
         }
-        if !(1..=60).contains(&context.timeout) {
+        if context.timeout == 0 {
             return Err(ApiError::validation(
-                "context timeout must be between 1 and 60".to_string(),
+                "context timeout must be positive".to_string(),
             ));
         }
         if matches!(context.budget, Some(0)) {
@@ -3650,14 +3650,14 @@ mod tests {
         request.context = Some(swage_protocol::client::settings::ContextConfig {
             assembly: "default".into(),
             alternatives: Vec::new(),
-            timeout: 61,
+            timeout: 0,
             budget: None,
             compaction_threshold: None,
             diagnosis_reader_model: None,
             diagnosis_synthesis_model: None,
         });
-        let error = validate_settings_request(&request)
-            .expect_err("context timeout above range is invalid");
+        let error =
+            validate_settings_request(&request).expect_err("zero context timeout is invalid");
         assert!(error.message().contains("context timeout"));
 
         request.context = Some(wire_from_config(swage_config::ContextConfig::default()));

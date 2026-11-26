@@ -1,3 +1,5 @@
+mod tracker_tags;
+
 use std::{
     env,
     fmt::Write as _,
@@ -10,6 +12,7 @@ use std::{
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tracker_tags::check_tracker_tags;
 
 const APP_PACKAGE: &str = "swage-gateway";
 const BINARY_NAME: &str = "swage";
@@ -49,6 +52,7 @@ fn run() -> Result<()> {
         Some("fmt-check") => fmt_check(),
         Some("check") => check(),
         Some("check-gate") => check_gate(),
+        Some("check-tracker-tags") => check_tracker_tags(),
         Some("check-design-tokens") => check_frontend_design_tokens(),
         Some("clippy") => clippy(),
         Some("test") => test(),
@@ -399,6 +403,7 @@ fn clippy() -> Result<()> {
 /// command that catches branch drift before the full verification gate.
 fn check_gate() -> Result<()> {
     check_tracked_local_state()?;
+    check_tracker_tags()?;
     fmt_check()?;
     check()?;
     check_frontend_design_tokens()?;
@@ -621,6 +626,20 @@ fn check_frontend_design_tokens() -> Result<()> {
     }
 }
 
+fn opening_tag_end(line: &str, mut quote: Option<char>) -> (Option<usize>, Option<char>) {
+    for (index, character) in line.char_indices() {
+        match quote {
+            Some(delimiter) if character == delimiter => quote = None,
+            Some(_) => {}
+            None if matches!(character, '\'' | '\"') => quote = Some(character),
+            None if character == '>' => return (Some(index), None),
+            None => {}
+        }
+    }
+
+    (None, quote)
+}
+
 fn component_style_lines(contents: &str) -> impl Iterator<Item = (usize, &str, usize)> {
     enum StyleRegion {
         Outside,
@@ -635,20 +654,6 @@ fn component_style_lines(contents: &str) -> impl Iterator<Item = (usize, &str, u
 
         matches!(after_name.chars().next(), None | Some('>'))
             || after_name.chars().next().is_some_and(char::is_whitespace)
-    }
-
-    fn opening_tag_end(line: &str, mut quote: Option<char>) -> (Option<usize>, Option<char>) {
-        for (index, character) in line.char_indices() {
-            match quote {
-                Some(delimiter) if character == delimiter => quote = None,
-                Some(_) => {}
-                None if matches!(character, '\'' | '\"') => quote = Some(character),
-                None if character == '>' => return (Some(index), None),
-                None => {}
-            }
-        }
-
-        (None, quote)
     }
 
     fn style_before_closing_tag(line: &str) -> Option<usize> {
@@ -1112,7 +1117,7 @@ fn collect_files(path: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("");
-            if name != "node_modules" && name != "dist" {
+            if !matches!(name, ".git" | "target" | "node_modules" | "dist") {
                 collect_files(&path, files)?;
             }
         } else if path.is_file() {
@@ -1533,7 +1538,7 @@ fn option_value(arg: &str) -> &str {
 
 fn print_help() {
     println!(
-        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check (workspace and frontend type check only)\n  check-gate (full static rung)\n  check-design-tokens\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan] [--host HOST] [--port PORT]"
+        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check (workspace and frontend type check only)\n  check-gate (full static rung)\n  check-tracker-tags\n  check-design-tokens\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan] [--host HOST] [--port PORT]"
     );
 }
 
@@ -1553,6 +1558,7 @@ mod tests {
     fn gate_stage_name(call: &str) -> &str {
         match call {
             "check_tracked_local_state" => "Tracked-local-state check",
+            "check_tracker_tags" => "Tracker-tag check",
             "fmt_check" => "Format check",
             "check" => "Type check",
             "check_frontend_design_tokens" => "Frontend design-token check",

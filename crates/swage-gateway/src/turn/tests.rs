@@ -552,7 +552,7 @@ async fn an_over_threshold_context_runs_on_a_successor_assembled_from_its_elemen
     let storage = Arc::new(MockStorage::new());
     let (state, session_id) =
         make_state_with_storage(provider_witness_chunks(), Arc::clone(&storage)).await;
-    seed_history_over_threshold(&storage, session_id).await;
+    let thread_id = seed_history_over_threshold(&storage, session_id).await;
 
     let (tx, _rx) = mpsc::unbounded_channel();
     process_turn(
@@ -603,6 +603,65 @@ async fn an_over_threshold_context_runs_on_a_successor_assembled_from_its_elemen
     assert!(
         succession_position < history_position,
         "the summary opens the conversation: {names:?}"
+    );
+    drop(db);
+
+    // The summary's instruction is the session's recorded variant, drawn by
+    // the turn whose pass asked for the summary.
+    let turn_id = storage
+        .list_turns_by_thread(thread_id)
+        .await
+        .expect("list turns")
+        .last()
+        .expect("the turn")
+        .id;
+    let draws = summary_instruction_draws(&storage, session_id).await;
+    assert_eq!(draws.len(), 1, "one selection for the session: {draws:?}");
+    assert_eq!(draws[0].event_kind, "variant_selected");
+    assert_eq!(draws[0].metadata["variant"], "default");
+    assert_eq!(draws[0].metadata["turn_id"], turn_id.to_string());
+}
+
+async fn summary_instruction_draws(
+    storage: &MockStorage,
+    session_id: Uuid,
+) -> Vec<swage_storage::AuditEvent> {
+    storage
+        .list_audit_events_by_session(session_id)
+        .await
+        .expect("list audit events")
+        .into_iter()
+        .filter(|event| {
+            event.entity_id == crate::experimentation::LOCATION_SUCCESSION_SUMMARY_PROMPT
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_turn_within_its_room_records_no_summary_instruction_selection() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) =
+        make_state_with_storage(provider_witness_chunks(), Arc::clone(&storage)).await;
+    seed_history(&storage, session_id, 4).await;
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("continue"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("the turn runs");
+
+    assert!(
+        summary_instruction_draws(&storage, session_id)
+            .await
+            .is_empty(),
+        "a session that has asked for no summary holds no selection"
     );
 }
 
@@ -1204,9 +1263,12 @@ impl LlmProvider for TranscriptSummarisingProvider {
             .map(ChatMessage::text_content)
             .collect::<Vec<_>>()
             .join("\n");
+        // A summary request carries the history in its own tags; echoing it
+        // back stands in for notes that keep what the conversation settled.
         let summary = material
-            .split_once("## Conversation to summarise\n\n")
-            .map(|(_, history)| history.to_owned())
+            .split_once("<conversation_to_summarise>\n")
+            .and_then(|(_, rest)| rest.split_once("\n</conversation_to_summarise>"))
+            .map(|(history, _)| history.to_owned())
             .unwrap_or_else(|| "The missing-file reads failed repeatedly.".into());
         Ok(CompletionResponse {
             content: summary,
@@ -7024,7 +7086,7 @@ async fn fresh_codex_turn_completes_without_degraded_execution_opt_in_or_audit()
     assert!(
         audit_events
             .iter()
-            .all(|event| { event.metadata["reason"] != "sandbox_disabled_by_configuration" }),
+            .all(|event| event.event_kind != "execution_isolation_degraded"),
         "App Server policy must not be recorded as degraded execution: {audit_events:?}"
     );
     server.abort();
@@ -9041,7 +9103,7 @@ async fn memory_scheduled_file_only_receives_summaries_as_all_readable_memory() 
         "no system message may direct an unavailable memory read: {system}"
     );
     assert!(
-        system.contains("the summaries are all of memory you can read"),
+        system.contains(swage_context::memory::INDEX_ONLY),
         "summary-only guidance: {system}"
     );
 }
@@ -9051,7 +9113,7 @@ async fn memory_scheduled_with_read_tool_receives_entry_read_guidance() {
     let (system, offered) = scheduled_memory_request(true).await;
     assert!(offered);
     assert!(
-        system.contains("read the entry with `memory_read`"),
+        system.contains(swage_context::memory::READ_ROUTE),
         "entry-read guidance: {system}"
     );
 }
@@ -13167,15 +13229,9 @@ async fn assert_named_child_replay_accounts_for_reads(offered: bool) {
         envelope["note"]
             .as_str()
             .unwrap()
-            .contains("call tool_result_read"),
-        offered
-    );
-    assert_eq!(
-        envelope["note"]
-            .as_str()
-            .unwrap()
-            .contains("No tool in this session"),
-        !offered
+            .contains("`tool_result_read`"),
+        offered,
+        "the note names the read tool only where the child is offered it"
     );
 }
 
@@ -25315,9 +25371,20 @@ async fn assert_later_replay_accounts_for_reads(offered: bool) {
     let note = envelope["note"]
         .as_str()
         .expect("later replay must account for the full earlier read");
-    assert!(note.contains("You received this result whole"));
-    assert_eq!(note.contains("call tool_result_read"), offered);
-    assert_eq!(note.contains("No tool in this session"), !offered);
+    let recorded: swage_core::CompactToolReplay =
+        serde_json::from_value(envelope.clone()).expect("the replay envelope");
+    assert_eq!(
+        Some(note),
+        swage_core::CompactToolReplay {
+            note: None,
+            ..recorded
+        }
+        .with_elision_note(swage_core::ReplayRetrieval::with_read_tool(offered))
+        .note
+        .as_deref(),
+        "the note is the one written for this turn's own tools"
+    );
+    assert_eq!(note.contains("`tool_result_read`"), offered);
     let offered_in_request = captured
         .tool_definitions
         .iter()

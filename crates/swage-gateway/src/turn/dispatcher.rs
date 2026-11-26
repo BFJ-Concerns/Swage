@@ -74,10 +74,13 @@ pub(crate) struct GatewayDispatcherBuild {
     pub(crate) isolation: ExecutionIsolation,
 }
 
-/// Whether a turn's tools run sandboxed or without isolation for a stated reason.
+/// Whether a turn's tools run sandboxed, unsandboxed because the
+/// configuration switched the sandbox off, or without the isolation a sandbox
+/// meant to run would have given, for a stated reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExecutionIsolation {
     Isolated,
+    SandboxDisabled,
     Degraded { reason: String },
 }
 
@@ -85,6 +88,7 @@ pub(crate) enum ExecutionIsolation {
 pub(crate) fn turn_isolation(isolation: &ExecutionIsolation) -> swage_storage::TurnIsolation {
     match isolation {
         ExecutionIsolation::Isolated => swage_storage::TurnIsolation::Isolated,
+        ExecutionIsolation::SandboxDisabled => swage_storage::TurnIsolation::SandboxDisabled,
         ExecutionIsolation::Degraded { reason } => swage_storage::TurnIsolation::Degraded {
             reason: reason.clone(),
         },
@@ -259,9 +263,7 @@ pub(super) async fn build_turn_sandbox(
     if !config.sandbox.enabled {
         return Ok(TurnSandboxBuild {
             sandbox: None,
-            isolation: ExecutionIsolation::Degraded {
-                reason: "sandbox_disabled_by_configuration".into(),
-            },
+            isolation: ExecutionIsolation::SandboxDisabled,
             backend: SandboxBackend::None,
         });
     }
@@ -534,15 +536,34 @@ pub(crate) async fn build_gateway_dispatcher(
     })
 }
 
-pub(crate) async fn record_degraded_execution(
+/// Record in the audit trail that a build's tools run without a sandbox:
+/// `execution_sandbox_disabled` where the configuration switched it off,
+/// `execution_isolation_degraded` with its reason where a sandbox meant to
+/// run could not. A sandboxed build records nothing here.
+pub(crate) async fn record_unsandboxed_execution(
     state: &AppState,
     isolation: &ExecutionIsolation,
     execution_context: &'static str,
     session_id: Option<Uuid>,
     turn_id: Option<Uuid>,
 ) -> Result<(), swage_core::GatewayError> {
-    let ExecutionIsolation::Degraded { reason } = isolation else {
-        return Ok(());
+    let (id_prefix, event_kind, summary, metadata) = match isolation {
+        ExecutionIsolation::Isolated => return Ok(()),
+        ExecutionIsolation::SandboxDisabled => (
+            "sandbox-disabled",
+            "execution_sandbox_disabled",
+            "Execution ran with the sandbox switched off by configuration",
+            serde_json::json!({ "execution_context": execution_context }),
+        ),
+        ExecutionIsolation::Degraded { reason } => (
+            "sandbox-degradation",
+            "execution_isolation_degraded",
+            "Execution isolation was degraded",
+            serde_json::json!({
+                "execution_context": execution_context,
+                "reason": reason,
+            }),
+        ),
     };
     let (entity_kind, entity_id) = turn_id.map_or_else(
         || {
@@ -556,16 +577,13 @@ pub(crate) async fn record_degraded_execution(
     state
         .storage
         .create_audit_event(swage_storage::NewAuditEvent {
-            id: format!("sandbox-degradation-{}", Uuid::new_v4()),
+            id: format!("{id_prefix}-{}", Uuid::new_v4()),
             session_id,
             entity_kind: entity_kind.into(),
             entity_id,
-            event_kind: "execution_isolation_degraded".into(),
-            summary: "Execution isolation was degraded".into(),
-            metadata: serde_json::json!({
-                "execution_context": execution_context,
-                "reason": reason,
-            }),
+            event_kind: event_kind.into(),
+            summary: summary.into(),
+            metadata,
         })
         .await?;
     Ok(())
@@ -642,7 +660,7 @@ pub(crate) async fn build_gateway_dispatcher_for_unattended_execution(
     // delegated child, the sender's — so no turn row is stamped here: a turn's
     // own boundary is written where its dispatcher settles for it
     // (dispatcher_settlement.rs), never from a build made on its behalf.
-    record_degraded_execution(
+    record_unsandboxed_execution(
         state,
         &build.isolation,
         execution_context,
@@ -703,7 +721,7 @@ mod tests {
     async fn degraded_execution_is_recorded_in_the_unified_audit_trail() {
         let (state, session_id) = make_state_with_session(Vec::new()).await;
         let turn_id = Uuid::new_v4();
-        record_degraded_execution(
+        record_unsandboxed_execution(
             &state,
             &ExecutionIsolation::Degraded {
                 reason: "fallback_sandbox_without_namespace_isolation".into(),
@@ -746,34 +764,27 @@ mod tests {
         let turn = state.storage.get_turn(turn_id).await.unwrap().unwrap();
         assert_eq!(
             turn.execution_isolation,
-            Some(swage_storage::TurnIsolation::Degraded {
-                reason: "sandbox_disabled_by_configuration".into(),
-            }),
-            "a disabled sandbox must record why the turn ran without isolation"
+            Some(swage_storage::TurnIsolation::SandboxDisabled),
+            "a sandbox switched off by configuration is recorded as that, not as degraded"
         );
         assert_eq!(build.backend, SandboxBackend::None);
     }
 
     #[tokio::test]
-    async fn disabled_gateway_sandbox_remains_degraded() {
+    async fn disabled_gateway_sandbox_needs_no_degraded_execution_opt_in() {
         let (state, _session_id) = make_state_with_session(Vec::new()).await;
         let workspace = tempfile::tempdir().unwrap();
         let agent_config = AgentConfig::new("gateway")
             .with_workspace(workspace.path(), vec![workspace.path().to_path_buf()]);
         let mut config = swage_config::ResolvedConfig::default();
         config.sandbox.enabled = false;
-        config.sandbox.allow_degraded_execution = true;
+        assert!(!config.sandbox.allow_degraded_execution);
 
         let build = build_turn_sandbox(&state, &config, &agent_config, None)
             .await
-            .expect("explicitly opted-in non-Codex execution should remain available");
+            .expect("switching the sandbox off is the choice itself; no opt-in is needed");
 
-        assert_eq!(
-            build.isolation,
-            ExecutionIsolation::Degraded {
-                reason: "sandbox_disabled_by_configuration".into(),
-            }
-        );
+        assert_eq!(build.isolation, ExecutionIsolation::SandboxDisabled);
     }
 
     #[tokio::test]
@@ -809,7 +820,7 @@ mod tests {
         );
 
         let turn_id = Uuid::new_v4();
-        record_degraded_execution(
+        record_unsandboxed_execution(
             &state,
             &build.isolation,
             "scheduled turn",
@@ -889,12 +900,15 @@ mod tests {
         .await;
 
         let build = result.expect("explicit sandbox disablement should construct a dispatcher");
+        assert_eq!(build.isolation, ExecutionIsolation::SandboxDisabled);
+        let events = state.storage.list_audit_events().await.unwrap();
         assert_eq!(
-            build.isolation,
-            ExecutionIsolation::Degraded {
-                reason: "sandbox_disabled_by_configuration".into(),
-            }
+            events
+                .iter()
+                .map(|event| event.event_kind.as_str())
+                .collect::<Vec<_>>(),
+            ["execution_sandbox_disabled"],
+            "a sandbox switched off on purpose is recorded as that and never as degraded"
         );
-        assert_eq!(state.storage.list_audit_events().await.unwrap().len(), 1);
     }
 }

@@ -1689,6 +1689,7 @@ pub async fn get_turn(
 fn isolation_view(isolation: swage_storage::TurnIsolation) -> TurnIsolationView {
     match isolation {
         swage_storage::TurnIsolation::Isolated => TurnIsolationView::Isolated,
+        swage_storage::TurnIsolation::SandboxDisabled => TurnIsolationView::SandboxDisabled,
         swage_storage::TurnIsolation::Degraded { reason } => TurnIsolationView::Degraded { reason },
     }
 }
