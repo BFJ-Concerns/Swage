@@ -67,8 +67,7 @@ use crate::element::ContextElement;
 use crate::report::{AssemblyError, AssemblyOutput, DeclaredOmission, ElementReport};
 use crate::tokeniser::Tokeniser;
 
-/// Heap cap for assembly scripts. Assemblies transform message lists; they
-/// get a fraction of the workflow engine's room.
+/// Separate limits on the heap and on buffer backing stores for an assembly.
 const MEMORY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
 /// Locate `<name>.js` in the hierarchy's `assemblies/` directories, most
@@ -1052,6 +1051,30 @@ mod tests {
 
     fn assemble_source(source: &str, elements: &[Box<dyn ContextElement>]) -> AssemblyOutput {
         assemble_source_under(source, elements, None)
+    }
+
+    #[test]
+    fn a_buffer_limit_termination_reports_why_the_assembly_fell_back() {
+        let bytes = MEMORY_LIMIT_BYTES + 1;
+        let output = assemble_source(
+            &format!(
+                "const result = new Uint8Array({bytes}); add([{{ role: 'system', text: String(result.length) }}]);"
+            ),
+            &baseline_bearing_elements(),
+        );
+
+        assert_eq!(output.report.assembly_name, "default");
+        let [error] = output.report.errors.as_slice() else {
+            panic!("expected one assembly error: {:?}", output.report.errors);
+        };
+        assert_eq!(error.assembly_name, "focus");
+        assert_eq!(error.fallback_used, "default");
+        assert!(
+            error
+                .message
+                .contains(&swage_isolate::Termination::BufferLimit.to_string()),
+            "{error:?}"
+        );
     }
 
     fn assemble_source_under(

@@ -430,6 +430,24 @@ async fn invalid_carried_workflow_metadata_does_not_hide_valid_workflows() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_terminated_at_the_isolate_heap_limit_fails_with_the_reason_recorded() {
+    assert_workflow_limit_is_recorded(
+        "const held = []; for (;;) { held.push(new Array(100000).fill('x')); }".into(),
+        swage_workflow::Termination::HeapLimit,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_terminated_at_the_buffer_limit_fails_with_the_reason_recorded() {
+    let bytes = swage_workflow::EngineLimits::default().memory_bytes + 1;
+    assert_workflow_limit_is_recorded(
+        format!("return new Uint8Array({bytes}).length;"),
+        swage_workflow::Termination::BufferLimit,
+    )
+    .await;
+}
+
+async fn assert_workflow_limit_is_recorded(source: String, reason: swage_workflow::Termination) {
     let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
     let topic = storage.general_scope().await.expect("topic");
     let state = AppState::new(
@@ -444,7 +462,7 @@ async fn a_run_terminated_at_the_isolate_heap_limit_fails_with_the_reason_record
         State(state.clone()),
         Path(topic.id),
         Json(StartInlineWorkflowRunRequest {
-            source: "const held = []; for (;;) { held.push(new Array(100000).fill('x')); }".into(),
+            source,
             args: Value::Null,
             budget: None,
         }),
@@ -458,12 +476,9 @@ async fn a_run_terminated_at_the_isolate_heap_limit_fails_with_the_reason_record
         .expect("run query")
         .expect("run");
     assert_eq!(run.state, "failed");
-    assert!(
-        run.error_message
-            .as_deref()
-            .is_some_and(|message| message.contains("heap limit")),
-        "{:?}",
-        run.error_message
+    assert_eq!(
+        run.error_message,
+        Some(swage_workflow::WorkflowEngineError::Terminated(reason).to_string())
     );
     let audit = storage.list_audit_events().await.expect("audit");
     assert!(
@@ -471,7 +486,7 @@ async fn a_run_terminated_at_the_isolate_heap_limit_fails_with_the_reason_record
             event.entity_kind == "workflow_run"
                 && event.entity_id == started.id.to_string()
                 && event.event_kind == "engine_terminated"
-                && event.metadata["reason"] == "heap_limit"
+                && event.metadata["reason"] == reason.reason()
         }),
         "no termination record: {audit:?}"
     );

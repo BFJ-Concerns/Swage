@@ -697,8 +697,11 @@ add(byName.prompts);
 add(byName.history);
 ```
 
-A script that errors (missing file, syntax error, runtime error) falls back
-to the built-in default assembly. A script that runs without error but
+Each assembly has separate 32 MiB ceilings for its heap and its
+fixed-length buffer backing stores. Resizable buffers are unavailable.
+
+When a script errors or reaches a limit, the built-in default assembly
+runs and the context report records the reason. A script that runs without error but
 leaves out baseline elements has them restored by the baseline floor, with
 warnings — except elements the script declares as omitted via `omit()`,
 which stay out. If the final composition ends up genuinely empty (every

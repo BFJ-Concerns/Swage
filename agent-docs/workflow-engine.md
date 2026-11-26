@@ -66,9 +66,12 @@ and host-locale methods such as `toLocaleString()` throw
 `NondeterministicCallError`. Workflows obtain external values through the
 host API so replay can reproduce them.
 
-`EngineLimits` sets the heap and uninterrupted execution limits. Crossing
-either returns `WorkflowEngineError::Terminated` and the gateway records
-an `engine_terminated` audit event.
+`EngineLimits::memory_bytes` independently caps the heap and the combined
+backing stores of live buffers. Programs can use fixed-length buffers and
+typed arrays. Resizable buffers are unavailable. Reaching the heap,
+buffer or uninterrupted execution limit returns
+`WorkflowEngineError::Terminated` and the gateway records an
+`engine_terminated` audit event.
 
 ### Meta header
 

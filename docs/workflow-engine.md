@@ -52,9 +52,14 @@ and host-locale methods such as `toLocaleString()` throw
 `NondeterministicCallError`. Replay uses the journal to repeat the same
 sequence of host calls.
 
-Reaching the isolate's heap or uninterrupted execution limit stops the
-script and fails the run. The audit trail records the reason in an
-`engine_terminated` event.
+The isolate limits its heap, its fixed-length buffers and its uninterrupted
+execution time. The heap and the combined backing stores of all live buffers
+each have a 64 MiB ceiling. Typed arrays and data views use those same backing
+stores. Resizable buffers are unavailable. To grow a buffer within the
+ceiling, allocate a new fixed-length buffer and copy the data into it.
+
+Reaching a limit stops the script and fails the run. The audit trail records
+the reason in an `engine_terminated` event.
 
 A script may open with a `export const meta = { ... };` header declaring
 portable metadata: `name`, `description`, `task` (an opaque identity for
