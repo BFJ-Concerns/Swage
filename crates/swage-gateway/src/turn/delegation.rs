@@ -692,6 +692,45 @@ async fn track_delegated_session(
     }
 }
 
+/// The approval registrar for a delegated child. A child's agent events reach
+/// no projection until it finishes, so its approval is announced here instead:
+/// views of running work hear the child's session change when a request starts
+/// waiting on the person and again when it is answered or expires.
+fn signalling_approval_registrar(state: AppState) -> swage_agent::ApprovalChannelRegistrar {
+    let register = build_approval_registrar(state.approval_channels.clone());
+    Arc::new(move |approval_id, sender| {
+        announce_approval_session(&state, approval_id);
+        let registration = register(approval_id, sender);
+        let state = state.clone();
+        swage_agent::approval::ApprovalChannelRegistration::new(move || {
+            drop(registration);
+            announce_approval_session(&state, approval_id);
+        })
+    })
+}
+
+/// Signal the session an approval's turn belongs to.
+fn announce_approval_session(state: &AppState, approval_id: Uuid) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        let session_id = async {
+            let approval = state.storage.get_approval(approval_id).await.ok()??;
+            let turn = state.storage.get_turn(approval.turn_id).await.ok()??;
+            let thread = state.storage.get(turn.thread_id).await.ok()??;
+            Some(thread.session_id)
+        }
+        .await;
+        match session_id {
+            Some(session_id) => {
+                crate::service::announce_session_updated(&state.broadcast, session_id)
+            }
+            None => {
+                tracing::warn!(%approval_id, "could not find the session of a delegated approval")
+            }
+        }
+    });
+}
+
 /// Start the child session's queued work once its delegated turn has settled,
 /// unless the turn was stopped or interrupted, which leaves the queue standing.
 async fn drain_queue_after_delegated_turn(state: &AppState, session_id: Uuid, turn_id: Uuid) {
@@ -1327,9 +1366,7 @@ impl DelegationHandler for GatewayDelegationHandler {
             provider: child_provider,
             hook_registry: self.state.hook_registry.clone(),
             leak_detector: None,
-            approval_registrar: Some(build_approval_registrar(
-                self.state.approval_channels.clone(),
-            )),
+            approval_registrar: Some(signalling_approval_registrar(self.state.clone())),
             delegation_handler: Some(Arc::new(child_handler)),
             router: router.clone(),
             active_delegations: self.active_delegations.clone(),
@@ -1998,6 +2035,66 @@ mod settlement_tests {
             matches!(events.try_recv(), Ok(crate::websocket::ServerEvent::Error { code, .. }) if code == "turn_interrupted"),
             "an interrupted delegation must tell the open child view it was interrupted"
         );
+    }
+
+    #[tokio::test]
+    async fn a_delegated_approval_signals_its_session_when_it_waits_and_when_it_ends() {
+        let (state, session_id) = super::super::tests::make_state_with_session(vec![]).await;
+        let thread_id = state.storage.list_by_session(session_id).await.unwrap()[0].id;
+        let turn = state
+            .storage
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "gateway".into(),
+                state: TurnState::AwaitingApproval,
+                user_input: Some("Delegated request".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let approval = state
+            .storage
+            .create_approval(swage_storage::NewApprovalRequest {
+                turn_id: turn.id,
+                agent_id: "gateway".into(),
+                kind: swage_storage::ApprovalKind::Hook,
+                tool_name: None,
+                tool_arguments: None,
+                hook_name: None,
+                prompt: "Allow?".into(),
+                context: None,
+                timeout_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+                timeout_policy: swage_core::ApprovalTimeoutPolicy::Interrupt,
+            })
+            .await
+            .unwrap();
+        let mut signals = state.broadcast.subscribe();
+        let next_signal = |signals: &mut tokio::sync::broadcast::Receiver<
+            crate::websocket::ServerEvent,
+        >| {
+            let mut signals = signals.resubscribe();
+            async move {
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    loop {
+                        if let Ok(crate::websocket::ServerEvent::SessionUpdated { session_id }) =
+                            signals.recv().await
+                        {
+                            return session_id;
+                        }
+                    }
+                })
+                .await
+                .expect("the child's session is signalled")
+            }
+        };
+        let registrar = signalling_approval_registrar(state.clone());
+        let waiting = next_signal(&mut signals);
+        let (sender, _receiver) = oneshot::channel();
+        let registration = registrar(approval.id, sender);
+        assert_eq!(waiting.await, session_id);
+        let ended = next_signal(&mut signals);
+        drop(registration);
+        assert_eq!(ended.await, session_id);
     }
 
     #[tokio::test]
