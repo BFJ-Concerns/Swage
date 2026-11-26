@@ -95,11 +95,6 @@ impl WorkerPool {
         policy: Option<swage_sandbox::SandboxConfig>,
         egress: Option<swage_sandbox::EgressSetup>,
     ) -> Result<WorkerLease, PythonWorkerError> {
-        if policy.is_none() && self.spawn_sandboxed {
-            return Err(PythonWorkerError::SandboxUnavailable(
-                "the calling turn supplied no sandbox policy".into(),
-            ));
-        }
         if self.warm_target > 0 {
             // Acquire through the pool so an in-flight warm-up cannot hold
             // the last permit while a scoped caller waits for it forever.

@@ -843,7 +843,13 @@ pub(crate) async fn build_gateway_dispatcher(
     )
     .await?;
     tracing::debug!(backend = ?sandbox_build.backend, "selected turn sandbox backend");
+    // Python runs under the turn's own policy wherever the turn is
+    // sandboxed, and wherever Python must be although the turn's sandbox
+    // degraded. A turn whose sandbox the person switched off runs Python on
+    // the host as it runs the shell; so does a degraded turn where Python
+    // need not be sandboxed.
     let python_config = if config.tools.python_execute.enabled
+        && sandbox_build.isolation != ExecutionIsolation::SandboxDisabled
         && (config.tools.python_execute.require_sandbox
             || sandbox_build.backend == SandboxBackend::Bubblewrap)
     {
@@ -904,9 +910,13 @@ pub(crate) async fn build_gateway_dispatcher(
         state.storage.clone(),
         Some(state.clone()),
     )));
+    // A turn the person runs without the sandbox confines nothing, its
+    // Python's network included.
+    let python_egress =
+        egress.filter(|_| sandbox_build.isolation != ExecutionIsolation::SandboxDisabled);
     let python_execution = crate::tool_executor::PythonExecution {
         sandbox: python_config,
-        egress,
+        egress: python_egress,
         dispatcher: Arc::new(nested_dispatcher),
         credentials,
         signer,
@@ -1187,6 +1197,29 @@ mod tests {
                 config.dangerously_skip_permissions = true;
                 environment_case_dispatcher(config, false).await;
             }
+        });
+    }
+
+    #[test]
+    fn sandbox_disabled_python_runs_without_bubblewrap() {
+        if !run_dispatcher_environment_case(
+            "turn::dispatcher::tests::sandbox_disabled_python_runs_without_bubblewrap",
+            false,
+        ) {
+            return;
+        }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            // The person switched the sandbox off: Python runs as the shell
+            // does, with the shipped `require_sandbox` left as it is.
+            let mut config = swage_config::ResolvedConfig::default();
+            config.sandbox.enabled = false;
+            assert!(config.tools.python_execute.require_sandbox);
+            config.tools.python_execute.enabled = true;
+            config.tools.python_execute.warm_target = 0;
+            config.tools.python_execute.runtime_path =
+                Some(std::env::var("SWAGE_TEST_PYTHON").unwrap());
+            config.dangerously_skip_permissions = true;
+            environment_case_dispatcher(config, true).await;
         });
     }
 

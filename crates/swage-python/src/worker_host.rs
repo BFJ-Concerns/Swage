@@ -93,20 +93,17 @@ impl PythonWorkerRuntime {
         self.spawn_worker(sandboxed, None, None).await
     }
 
-    /// A worker for one turn's call, sandboxed under the turn's policy when
-    /// it gives one. An egress setup puts the worker's network behind the
+    /// A worker for one turn's call. A policy runs the worker sandboxed
+    /// under it; none runs it on the host, which the calling turn decides:
+    /// its sandbox switched off, or a degraded host where Python need not be
+    /// sandboxed. An egress setup puts the worker's network behind the
     /// recording proxy.
     pub async fn spawn_worker_for_turn(
         &self,
         policy: Option<SandboxConfig>,
         egress: Option<EgressSetup>,
     ) -> Result<ReadyWorker, PythonWorkerError> {
-        self.spawn_worker(
-            policy.is_some() || self.config.require_sandbox,
-            policy,
-            egress,
-        )
-        .await
+        self.spawn_worker(policy.is_some(), policy, egress).await
     }
 
     async fn spawn_worker(
