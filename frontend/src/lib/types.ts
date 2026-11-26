@@ -219,7 +219,7 @@ export type KnownServerEventType = KnownServerEvent["type"];
 // Runtime validation needs event names as values; entries must belong to the
 // generated wire union.
 export const KNOWN_SERVER_EVENT_TYPES = [
-  "token", "tool_start", "tool_end", "surface_updated", "library_updated", "context_assembled", "turn_complete",
+  "token", "tool_start", "tool_end", "surface_updated", "library_updated", "session_updated", "context_assembled", "turn_complete",
   "output_schema_retry", "provider_retry_started", "provider_retry_settled",
   "output_schema_failed", "delegation_started", "delegation_completed",
   "workflow_run_started", "workflow_entry_started",

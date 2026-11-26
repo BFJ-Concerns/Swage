@@ -143,7 +143,7 @@ async fn say_in_session(storage: &SqliteStorage, session_id: Uuid, role: Role, t
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn session_lists_share_message_and_interruption_facts_without_changing_their_order() {
+async fn session_lists_share_message_and_interruption_facts_with_surface_specific_order() {
     let (router, storage) = make_test_router();
     let (_, topic) = http_json(
         &router,
@@ -175,11 +175,11 @@ async fn session_lists_share_message_and_interruption_facts_without_changing_the
     let t2: Uuid = topical_b["id"].as_str().unwrap().parse().unwrap();
 
     say_in_session(&storage, a, Role::User, "general user").await;
-    say_in_session(&storage, a, Role::Tool, "tool noise").await;
     say_in_session(&storage, b, Role::Assistant, "general assistant").await;
+    say_in_session(&storage, a, Role::Tool, "tool noise").await;
     say_in_session(&storage, t, Role::Assistant, "topic answer").await;
-    say_in_session(&storage, t, Role::System, "system noise").await;
     say_in_session(&storage, t2, Role::User, "newer topic message").await;
+    say_in_session(&storage, t, Role::System, "system noise").await;
     let thread = storage.list_by_session(t).await.unwrap()[0].id;
     storage
         .create_turn(NewTurn {
@@ -192,8 +192,8 @@ async fn session_lists_share_message_and_interruption_facts_without_changing_the
         .await
         .unwrap();
 
-    // The recent projection has a different order. These routes retain the
-    // older updated_at order and continue to show archived sessions.
+    // Give the operator overview a different recency order from the
+    // conversation lists, which follow the latest visible message.
     let now = chrono::Utc::now();
     storage
         .with_conn(move |conn| {
@@ -235,10 +235,10 @@ async fn session_lists_share_message_and_interruption_facts_without_changing_the
     let general = general["conversations"].as_array().unwrap();
     assert_eq!(
         general.iter().map(|item| &item["id"]).collect::<Vec<_>>(),
-        vec![&general_a["id"], &general_b["id"]]
+        vec![&general_b["id"], &general_a["id"]]
     );
-    assert_eq!(general[0]["message_preview"], "general user");
-    assert_eq!(general[1]["message_preview"], "general assistant");
+    assert_eq!(general[0]["message_preview"], "general assistant");
+    assert_eq!(general[1]["message_preview"], "general user");
     assert_eq!(general[0]["has_interrupted_turn"], false);
     assert_eq!(general[1]["has_interrupted_turn"], false);
 
@@ -255,11 +255,12 @@ async fn session_lists_share_message_and_interruption_facts_without_changing_the
         2,
         "archived topic session remains visible"
     );
-    assert_eq!(topic_list[0]["id"], topical["id"]);
-    assert_eq!(topic_list[1]["id"], topical_b["id"]);
-    assert_eq!(topic_list[0]["message_preview"], "topic answer");
-    assert_eq!(topic_list[0]["has_interrupted_turn"], true);
-    assert_eq!(topic_list[1]["has_interrupted_turn"], false);
+    assert_eq!(topic_list[0]["id"], topical_b["id"]);
+    assert_eq!(topic_list[1]["id"], topical["id"]);
+    assert_eq!(topic_list[0]["message_preview"], "newer topic message");
+    assert_eq!(topic_list[1]["message_preview"], "topic answer");
+    assert_eq!(topic_list[0]["has_interrupted_turn"], false);
+    assert_eq!(topic_list[1]["has_interrupted_turn"], true);
 
     let (_, overview) = http_json(&router, "GET", "/api/operator/overview", None).await;
     let sessions = overview["sessions"].as_array().unwrap();

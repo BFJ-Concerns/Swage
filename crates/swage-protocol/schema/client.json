@@ -1118,6 +1118,16 @@
           "format": "date-time",
           "type": "string"
         },
+        "latest_turn_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "message_preview": {
           "type": [
             "string",
@@ -3599,6 +3609,16 @@
           "format": "date-time",
           "type": "string"
         },
+        "latest_turn_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "message_preview": {
           "type": [
             "string",
@@ -4901,6 +4921,24 @@
           "required": [
             "type",
             "entry_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A session row may have changed or entered or left a list. Refetch\nsession lists to read the current rows from the gateway.",
+          "properties": {
+            "session_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "session_updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "session_id"
           ],
           "type": "object"
         },

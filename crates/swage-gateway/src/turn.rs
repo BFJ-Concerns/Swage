@@ -312,6 +312,8 @@ pub(super) async fn process_turn_with_composition_and_focus(
         Err(error) => tracing::warn!(%error, "failed to unarchive the session for its turn"),
     }
 
+    crate::service::announce_session_updated(&state.broadcast, session_id);
+
     // Step 6: Canonicalise inbound content before persisting any thread message.
     let before_inbound = match dispatch_before_inbound(state.hook_registry.as_ref(), &content).await
     {
@@ -384,6 +386,8 @@ pub(super) async fn process_turn_with_composition_and_focus(
             )
             .await?;
             crate::service::announce_appended_message(state, session_id, view);
+        } else {
+            crate::service::announce_session_updated(&state.broadcast, session_id);
         }
     }
 

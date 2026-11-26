@@ -45,6 +45,9 @@ pub async fn archive_inactive_sessions(
         .storage
         .archive_inactive_sessions(inactive_before, &executing)
         .await?;
+    for &session_id in &archived {
+        crate::service::announce_session_updated(&state.broadcast, session_id);
+    }
     for session_id in &archived {
         state
             .storage
@@ -173,11 +176,17 @@ mod tests {
             .await
             .insert(busy, CancellationToken::new());
 
+        let mut signals = state.broadcast.subscribe();
         let archived = archive_inactive_sessions(&state, Utc::now())
             .await
             .expect("sweep");
 
         assert_eq!(archived, vec![stale]);
+        assert!(matches!(
+            signals.try_recv().unwrap(),
+            swage_protocol::client::websocket::ServerEvent::SessionUpdated { session_id }
+                if session_id == stale
+        ));
         let live: Vec<Uuid> = storage
             .list_recent_sessions(SessionListing::default())
             .await

@@ -152,12 +152,6 @@ pub struct StartArgs {
     #[arg(long)]
     pub host: Option<String>,
 
-    /// Topic whose configuration layer the gateway runs under; the general
-    /// scope when absent. The data root itself comes from SWAGE_HOME, or
-    /// ~/.swage when that is unset.
-    #[arg(long)]
-    pub config: Option<String>,
-
     /// Run in the foreground, leaving output attached to this terminal.
     #[arg(long)]
     pub foreground: bool,
@@ -177,8 +171,6 @@ pub struct InstallArgs {
     pub port: Option<u16>,
     #[arg(long)]
     pub host: Option<String>,
-    #[arg(long)]
-    pub config: Option<String>,
 }
 
 /// Arguments for `swage gateway stop`.
@@ -200,8 +192,6 @@ pub struct RestartArgs {
     pub port: Option<u16>,
     #[arg(long)]
     pub host: Option<String>,
-    #[arg(long)]
-    pub config: Option<String>,
     #[arg(long)]
     pub foreground: bool,
     /// Write detached gateway output to this file.
@@ -248,7 +238,6 @@ mod tests {
         };
         assert!(args.port.is_none());
         assert!(args.host.is_none());
-        assert!(args.config.is_none());
         assert!(!args.foreground);
         assert!(args.log_file.is_none());
     }
@@ -308,8 +297,6 @@ mod tests {
             "8080",
             "--host",
             "0.0.0.0",
-            "--config",
-            "/tmp/config.toml",
             "--foreground",
             "--log-file",
             "/var/log/swage-gateway.log",
@@ -323,7 +310,6 @@ mod tests {
         };
         assert_eq!(args.port, Some(8080u16));
         assert_eq!(args.host.as_deref(), Some("0.0.0.0"));
-        assert_eq!(args.config.as_deref(), Some("/tmp/config.toml"));
         assert!(args.foreground);
         assert_eq!(args.log_file.as_deref(), Some("/var/log/swage-gateway.log"));
     }
@@ -352,7 +338,6 @@ mod tests {
         };
         assert!(args.port.is_none());
         assert!(args.host.is_none());
-        assert!(args.config.is_none());
     }
 
     #[test]
