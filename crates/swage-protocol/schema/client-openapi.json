@@ -10428,6 +10428,31 @@
         "summary": "Branch a conversation at an earlier message into a sibling thread."
       }
     },
+    "/api/conversations/{id}/cancel": {
+      "post": {
+        "operationId": "cancel_conversation_turn",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Success, no body."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Stop the conversation's running turn, whichever client holds its connection."
+      }
+    },
     "/api/docs": {
       "get": {
         "operationId": "list_documents",

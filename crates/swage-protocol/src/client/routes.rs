@@ -536,6 +536,24 @@ pub fn routes() -> Vec<Route> {
             },
         },
         Route {
+            operation_id: "cancel_conversation_turn",
+            method: Method::Post,
+            path: "/api/conversations/{id}/cancel",
+            path_parameters: vec![Parameter {
+                name: "id",
+                kind: ParameterType::Uuid,
+            }],
+            query_parameters: vec![],
+            summary: "Stop the conversation's running turn, whichever client holds its connection.",
+            request_optional: false,
+
+            request: None,
+            response: Response {
+                status: 204,
+                body: None,
+            },
+        },
+        Route {
             operation_id: "get_turn_context",
             method: Method::Get,
             path: "/api/turns/{id}/context",
