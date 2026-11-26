@@ -1244,6 +1244,33 @@ describe("SettingsPage", () => {
     expect(document.body.textContent).not.toContain("Saved automatically");
   });
 
+  it.each(["0", "1.5", ""])("refuses invalid memory curation idle minutes %s without saving", async (value) => {
+    component = mount(SettingsPage, { target: document.body, props: { tab: "automation", topicId: null } });
+    await flushUi();
+    const idle = document.querySelector<HTMLInputElement>('input[aria-label="Curate memory after idle minutes"]')!;
+    idle.value = value;
+    idle.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    await flushUi();
+    expect(settingsApi.saveSettings).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Memory curation idle minutes must be a whole number of at least 1.");
+  });
+
+  it("sends values above the field maximums as typed, for the gateway to refuse", async () => {
+    component = mount(SettingsPage, { target: document.body, props: { tab: "automation", topicId: null } });
+    await flushUi();
+    const idle = document.querySelector<HTMLInputElement>('input[aria-label="Curate memory after idle minutes"]')!;
+    idle.value = "20000";
+    idle.dispatchEvent(new Event("input", { bubbles: true }));
+    const delay = document.querySelector<HTMLInputElement>('input[aria-label="Archive sessions after days"]')!;
+    delay.value = "5000";
+    delay.dispatchEvent(new Event("input", { bubbles: true }));
+    await waitForSaveCall();
+    const [payload] = vi.mocked(settingsApi.saveSettings).mock.calls[0];
+    expect(payload.memory?.curator_idle_minutes).toBe(20000);
+    expect(payload.sessions?.archive_after_days).toBe(5000);
+  });
+
   it("saves the delegation depth from the automation control", async () => {
     component = mount(SettingsPage, { target: document.body, props: { tab: "automation", topicId: null } });
     await flushUi();

@@ -85,6 +85,15 @@ pub(crate) fn announce_appended_message(state: &AppState, session_id: Uuid, mess
         session_id,
         message,
     });
+    announce_session_updated(&state.broadcast, session_id);
+}
+
+/// Tell mounted session lists to re-read their snapshot after a change.
+pub(crate) fn announce_session_updated(
+    broadcast: &tokio::sync::broadcast::Sender<ServerEvent>,
+    session_id: Uuid,
+) {
+    let _ = broadcast.send(ServerEvent::SessionUpdated { session_id });
 }
 
 /// The wire state an inbound row's turn holds the moment it is recorded.

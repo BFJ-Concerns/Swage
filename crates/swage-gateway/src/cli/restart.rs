@@ -35,7 +35,6 @@ pub async fn run(args: &RestartArgs) -> Result<(), ClientError> {
     let start_args = StartArgs {
         port: args.port,
         host: args.host.clone(),
-        config: args.config.clone(),
         foreground: args.foreground,
         log_file: args.log_file.clone(),
     };
@@ -108,7 +107,6 @@ mod tests {
             force: true,
             port: None,
             host: None,
-            config: None,
             foreground: false,
             log_file: None,
         };

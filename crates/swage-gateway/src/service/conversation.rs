@@ -321,6 +321,7 @@ impl ConversationService {
             })
             .await?;
         self.open_default_surfaces(session.id).await?;
+        super::announce_session_updated(&self.broadcast, session.id);
 
         Ok(ConversationResponse {
             id: session.id,
@@ -381,7 +382,7 @@ impl ConversationService {
         }
     }
 
-    /// List the conversations of the general scope, newest session update first.
+    /// List the conversations of the general scope, newest visible activity first.
     pub async fn list_conversations(&self) -> Result<Vec<ConversationSummary>, GatewayError> {
         let topic = self.topic_store.general_scope().await?;
         self.list_conversation_summaries(topic.id).await
@@ -606,6 +607,7 @@ impl ConversationService {
         if person_opened {
             self.open_default_surfaces(session.id).await?;
         }
+        super::announce_session_updated(&self.broadcast, session.id);
 
         Ok(ConversationResponse {
             id: session.id,
@@ -631,7 +633,9 @@ impl ConversationService {
             .await?
             .ok_or(GatewayError::ConversationNotFound { id })?;
 
-        self.storage.delete_session(id).await?;
+        if self.storage.delete_session(id).await? {
+            super::announce_session_updated(&self.broadcast, id);
+        }
         Ok(())
     }
 
@@ -832,7 +836,7 @@ impl ConversationService {
                 ..SessionListing::default()
             })
             .await?;
-        activities.sort_by_key(|activity| std::cmp::Reverse(activity.session.updated_at));
+        activities.sort_by_key(|activity| std::cmp::Reverse(activity.last_activity));
         Ok(activities.into_iter().map(conversation_summary).collect())
     }
 
@@ -864,9 +868,10 @@ fn conversation_summary(activity: SessionActivity) -> ConversationSummary {
         agent_id: session.agent_id,
         selected_model_id: session.selected_model_id,
         created_at: session.created_at,
-        last_activity: session.updated_at,
+        last_activity: activity.last_activity,
         message_preview: activity.latest_message,
         has_interrupted_turn: activity.has_interrupted_turn,
+        latest_turn_state: activity.latest_turn_state.as_ref().map(turn_state_to_wire),
     }
 }
 
