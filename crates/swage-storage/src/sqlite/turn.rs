@@ -1002,6 +1002,7 @@ mod tests {
 
         for isolation in [
             TurnIsolation::Isolated,
+            TurnIsolation::SandboxDisabled,
             TurnIsolation::Degraded {
                 reason: "bubblewrap_unavailable".into(),
             },

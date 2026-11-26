@@ -465,8 +465,7 @@ mod tests {
         let events = state.storage.list_audit_events().await.unwrap();
         assert!(events.iter().any(|event| {
             event.entity_id == turn_id.to_string()
-                && event.event_kind == "execution_isolation_degraded"
-                && event.metadata["reason"] == "sandbox_disabled_by_configuration"
+                && event.event_kind == "execution_sandbox_disabled"
         }));
     }
 }

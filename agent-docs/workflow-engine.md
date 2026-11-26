@@ -34,8 +34,9 @@ serialisation, so the cap is a soft admission gate on `start_run`
 callers rather than a hard gateway-wide limit.
 
 `start_run` validates the budget, creates a `NewWorkflowRun` record
-(with `source_hash` as SHA-256 of source, `engine_version:
-"rquickjs-0.12.0"`), then calls `launch_existing_run`.
+(with `source_hash` as SHA-256 of source, `engine_version` as
+`QUICKJS_ENGINE_VERSION`, the locked rquickjs release), then calls
+`launch_existing_run`.
 
 `launch_existing_run` is the shared path for new and resumed runs:
 
