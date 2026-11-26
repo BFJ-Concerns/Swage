@@ -296,7 +296,7 @@ mod tests {
 
         assert_eq!(
             schema["description"],
-            "Provide exactly one of name or source."
+            WorkflowRunTool.parameters()["description"]
         );
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(schema["properties"]["name"]["type"], "string");

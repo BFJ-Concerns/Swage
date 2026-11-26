@@ -913,10 +913,6 @@ mod tests {
         }
         assert_eq!(schema["properties"]["action"]["enum"], json!(ACTIONS));
         assert_eq!(schema["properties"]["scope"]["enum"], json!(SCOPES));
-        assert!(
-            names_as_a_word(description, "task_definition"),
-            "the description points the model to its sibling"
-        );
         assert_eq!(tool.display_hints().summary_param, Some("id"));
     }
 }

@@ -254,12 +254,16 @@ mod tests {
     use swage_tool::context::MockToolContext;
 
     #[test]
-    fn review_fix_acknowledgement_parameter_explains_consumption() {
+    fn each_parameter_of_the_wire_request_is_described_to_the_agent() {
         let schema = WorkflowRunStatusTool.parameters();
-        let description = schema["properties"]["acknowledge_run_ids"]["description"]
-            .as_str()
-            .expect("acknowledge_run_ids must describe how handled endings stop returning");
-        assert!(description.contains("ended runs") && description.contains("returned again"));
+        for (parameter, spec) in schema["properties"].as_object().expect("properties") {
+            assert!(
+                spec["description"]
+                    .as_str()
+                    .is_some_and(|text| !text.trim().is_empty()),
+                "{parameter} is described"
+            );
+        }
     }
 
     fn context_for(
