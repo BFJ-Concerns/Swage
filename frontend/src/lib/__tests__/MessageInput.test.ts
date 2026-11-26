@@ -42,7 +42,7 @@ function makeStreamingStore(isStreaming = false): StreamingStore {
     },
     handleServerEvent: vi.fn(),
     startTurn: vi.fn(),
-    cancelTurn: vi.fn(),
+    cancelTurn: vi.fn(async () => {}),
     clearConnectionError: () => {},
     reconcileAfterReconnect: vi.fn(),
   };
@@ -95,14 +95,14 @@ describe("MessageInput", () => {
     } as ConversationDetail);
     const conversations = createConversationStore();
     await conversations.selectConversation("external");
-    const cancelTurn = vi.fn();
-    const store = createStreamingStore({ conversationStore: conversations, connectionStore: { sendMessage: vi.fn(), cancelTurn } });
+    const stopTurn = vi.fn(async () => {});
+    const store = createStreamingStore({ conversationStore: conversations, connectionStore: { sendMessage: vi.fn() }, stopTurn });
     component = mount(MessageInput, { target: document.body, props: { store, sessionId: "external" } });
     flushSync();
     const stop = document.querySelector<HTMLButtonElement>(".action.stop");
     expect(stop?.textContent?.trim()).toBe("Stop");
     flushSync(() => stop!.click());
-    expect(cancelTurn).toHaveBeenCalledWith("external");
+    expect(stopTurn).toHaveBeenCalledWith("external");
     flushSync(() => store.handleServerEvent({ type: "cancelled" }, "external"));
     expect(conversations.activeConversation?.messages[0].turn_state).toBe("cancelled");
     expect(document.querySelector(".action.stop")).toBeNull();
@@ -363,5 +363,16 @@ describe("MessageInput", () => {
     });
 
     expect(store.cancelTurn).toHaveBeenCalledOnce();
+  });
+
+  it("says why a refused Stop did not reach the turn and keeps Stop offered", async () => {
+    const streaming = makeStreamingStore(true);
+    vi.mocked(streaming.cancelTurn).mockRejectedValue(new Error("the gateway could not be reached"));
+    mountComponent(streaming);
+
+    flushSync(() => document.querySelector<HTMLButtonElement>(".action.stop")!.click());
+    await vi.waitFor(() => expect(document.querySelector('.stop-notice[role="alert"]')?.textContent)
+      .toContain("the gateway could not be reached"));
+    expect(document.querySelector(".action.stop")).not.toBeNull();
   });
 });

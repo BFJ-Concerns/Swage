@@ -9,7 +9,8 @@ import { compile } from "svelte/compiler";
 import { chromium } from "@playwright/test";
 import appCss from "../../app.css?raw";
 
-import { createConnectionStore } from "../stores/connection";
+import type { WorkSurfaceChannel } from "../api/work-surface";
+import type { ServerEvent } from "../types";
 import risoCss from "../styles/riso.css?raw";
 
 import OperatorDashboard from "../components/OperatorDashboard.svelte";
@@ -32,6 +33,31 @@ vi.mock("../api/operator", () => ({
   pauseSchedule: vi.fn(),
   resumeSchedule: vi.fn(),
   triggerSchedule: vi.fn(),
+}));
+
+// The gateway's signal channel, driven by the test. Every dashboard mounts
+// one; the module default never opens a socket here.
+interface FakeChannel extends WorkSurfaceChannel {
+  signal(event: ServerEvent): void;
+  reconnect(): void;
+  closed: boolean;
+}
+
+function fakeChannel(): FakeChannel {
+  const handlers: ((event: ServerEvent) => void)[] = [];
+  const reconnectHandlers: (() => void)[] = [];
+  return {
+    closed: false,
+    onSignal: (handler) => handlers.push(handler),
+    onReconnect: (handler) => reconnectHandlers.push(handler),
+    close() { this.closed = true; },
+    signal: (event) => handlers.forEach((handler) => handler(event)),
+    reconnect: () => reconnectHandlers.forEach((handler) => handler()),
+  };
+}
+
+vi.mock("../api/work-surface", () => ({
+  createWorkSurfaceChannel: () => fakeChannel(),
 }));
 
 async function launchLayoutBrowser(context: TestContext) {
@@ -229,59 +255,143 @@ describe("OperatorDashboard", () => {
     if (ending !== "interrupted") expect(labels).not.toContain("interrupted");
   });
 
-  it("attributes live runs and child sessions and sends their wind-down commands", async () => {
-    vi.useFakeTimers();
+  function liveFleet(): OperatorOverview {
     const overview = makeOverview();
     overview.sessions[0] = { ...overview.sessions[0], id: "child-1", agent_id: "researcher", parent_session_id: "parent-1" };
-    overview.workflow_runs = [{ id: "run-1", name: "Research sweep", state: "running", agent_id: "researcher", parent_session_id: "parent-1", activity: "Executing" }];
+    overview.workflow_runs = [
+      { id: "run-1", name: "Research sweep", state: "running", agent_id: "researcher", parent_session_id: "parent-1", activity: "Executing" },
+      { id: "run-2", name: "Second sweep", state: "running", agent_id: "researcher", parent_session_id: "parent-1", activity: "Executing" },
+    ];
+    return overview;
+  }
+
+  function fleetRow(text: string): HTMLElement {
+    const row = Array.from(document.querySelectorAll<HTMLElement>(".ledger-row")).find((candidate) => candidate.textContent?.includes(text));
+    expect(row, `${text} is rendered on the fleet`).toBeDefined();
+    return row!;
+  }
+
+  it("attributes live runs and child sessions and sends their wind-down commands", async () => {
+    vi.useFakeTimers();
+    const overview = liveFleet();
     vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(overview);
     const onNavigate = vi.fn();
-    const client = { connect: vi.fn(), send: vi.fn(), disconnect: vi.fn(), onEvent: vi.fn(), onStatusChange: vi.fn() };
-    const connections = createConnectionStore({ wsClientFactory: () => client });
-    const fetch = vi.fn(async () => new Response("{}", { status: 200 }));
+    const fetch = vi.fn(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetch);
     try {
-      component = mount(OperatorDashboard, { target: document.body, props: { onNavigate, onStopSession: (id) => connections.cancelTurn(id) } });
+      component = mount(OperatorDashboard, { target: document.body, props: { onNavigate } });
       await vi.advanceTimersByTimeAsync(0);
-      const rows = Array.from(document.querySelectorAll<HTMLElement>(".ledger-row"));
-      const run = rows.find((row) => row.textContent?.includes("Research sweep"));
-      expect(run, "workflow run is rendered on the fleet").toBeDefined();
-      expect(run!.textContent).toContain("Agent researcher");
-      expect(run?.textContent).toContain("Parent parent-1");
-      expect(run?.textContent).toContain("Executing");
-      expect(run?.querySelector("a")?.getAttribute("href")).toBe("/workflow-runs/run-1");
-      const child = rows.find((row) => row.textContent?.includes("child-1"))!;
-      expect(child, "processing child is rendered on the fleet").toBeDefined();
+      const run = fleetRow("Research sweep");
+      expect(run.textContent).toContain("Agent researcher");
+      expect(run.textContent).toContain("Parent parent-1");
+      expect(run.textContent).toContain("Executing");
+      expect(run.querySelector("a")?.getAttribute("href")).toBe("/workflow-runs/run-1");
+      const child = fleetRow("child-1");
       expect(child.textContent).toContain("Agent researcher");
       expect(child.textContent).toContain("Parent parent-1");
       expect(child.querySelector("a")?.getAttribute("href")).toBe("/conversations/child-1");
+
+      // Stop goes to the gateway's route, not through a conversation socket
+      // another client may hold.
       const stop = child.querySelector<HTMLButtonElement>("button");
       expect(stop?.textContent).toBe("Stop");
       flushSync(() => stop!.click());
-      expect(client.connect).toHaveBeenCalledWith("child-1");
-      expect(client.send).toHaveBeenCalledWith({ type: "cancel" });
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/conversations/child-1/cancel", { method: "POST" }));
       await vi.advanceTimersByTimeAsync(0);
-      const cancel = run!.querySelector<HTMLButtonElement>("button");
-      expect(cancel?.textContent).toBe("Cancel");
-      flushSync(() => cancel!.click());
-      await vi.waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/workflow-runs/run-1/cancel", { method: "POST" }));
-      await vi.advanceTimersByTimeAsync(0);
+      expect(child.querySelector('[role="alert"]')).toBeNull();
+
+      // Each cancelled run keeps its own account link once it leaves the fleet.
+      for (const [name, id] of [["Research sweep", "run-1"], ["Second sweep", "run-2"]]) {
+        const cancel = fleetRow(name).querySelector<HTMLButtonElement>("button");
+        expect(cancel?.textContent).toBe("Cancel");
+        flushSync(() => cancel!.click());
+        await vi.waitFor(() => expect(fetch).toHaveBeenCalledWith(`/api/workflow-runs/${id}/cancel`, { method: "POST" }));
+        await vi.advanceTimersByTimeAsync(0);
+      }
       vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue({ ...overview, sessions: [], workflow_runs: [] });
-      const reads = vi.mocked(operatorApi.fetchOperatorOverview).mock.calls.length;
-      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS * 2);
-      expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledTimes(reads);
-      expect(document.querySelector('.ledger a[href="/workflow-runs/run-1"]')).not.toBeNull();
       flushSync(() => [...document.querySelectorAll<HTMLButtonElement>(".header-actions button")].find((button) => button.textContent?.trim() === "Refresh")!.click());
       await vi.advanceTimersByTimeAsync(0);
       expect(document.querySelector('.ledger a[href="/workflow-runs/run-1"]')).toBeNull();
-      const accountLink = Array.from(document.querySelectorAll("a"))
-        .find((link) => link.textContent?.trim() === "View run account");
-      expect(accountLink?.getAttribute("href")).toBe("/workflow-runs/run-1");
-      flushSync(() => accountLink!.click());
+      const accountLinks = Array.from(document.querySelectorAll("a"))
+        .filter((link) => link.textContent?.includes("View account of cancelled run"));
+      expect(accountLinks.map((link) => link.getAttribute("href"))).toEqual(["/workflow-runs/run-2", "/workflow-runs/run-1"]);
+      flushSync(() => accountLinks[1].click());
       expect(onNavigate).toHaveBeenCalledWith("/workflow-runs/run-1");
       expect(document.querySelector('a[href="/conversations/child-1"]')).toBeNull();
     } finally {
       vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a session running and says why when its Stop is refused", async () => {
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(liveFleet());
+    const fetch = vi.fn(async () => new Response(
+      JSON.stringify({ code: "conflict", message: "Nothing is running in this conversation to stop." }),
+      { status: 409, headers: { "Content-Type": "application/json" } },
+    ));
+    vi.stubGlobal("fetch", fetch);
+    try {
+      component = mount(OperatorDashboard, { target: document.body });
+      await settleUi();
+      flushSync(() => fleetRow("child-1").querySelector<HTMLButtonElement>("button")!.click());
+      await vi.waitFor(() => expect(fleetRow("child-1").querySelector('[role="alert"]')?.textContent)
+        .toContain("Nothing is running in this conversation to stop."));
+      const child = fleetRow("child-1");
+      expect(child.textContent).toContain("running");
+      expect(child.querySelector<HTMLButtonElement>("button")?.disabled).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("follows the gateway's signals without a refresh", async () => {
+    vi.useFakeTimers();
+    const channel = fakeChannel();
+    const overview = liveFleet();
+    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(overview);
+    try {
+      component = mount(OperatorDashboard, { target: document.body, props: { channelFactory: () => channel } });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fleetRow("child-1").textContent).toContain("running");
+
+      // Nothing changes on a timer: reads follow signals.
+      const reads = vi.mocked(operatorApi.fetchOperatorOverview).mock.calls.length;
+      await vi.advanceTimersByTimeAsync(UNSETTLED_RUN_REFRESH_MS * 2);
+      expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledTimes(reads);
+
+      // A child settling elsewhere reaches the open fleet.
+      vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue({
+        ...overview,
+        sessions: [{ ...overview.sessions[0], has_running_turn: false, ending: "failed", activity: "idle" }],
+      });
+      channel.signal({ type: "session_updated", session_id: "child-1" });
+      channel.signal({ type: "session_updated", session_id: "parent-1" });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledTimes(reads + 1);
+      expect(fleetRow("child-1").textContent).not.toContain("running");
+      expect(fleetRow("child-1").querySelector("button")).toBeNull();
+
+      // A run ending, a dropped burst and a reconnect each re-read the fleet.
+      vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue({ ...overview, workflow_runs: [] });
+      channel.signal({ type: "workflow_run_completed", run: { id: "run-1" } } as unknown as ServerEvent);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(document.querySelector('.ledger a[href="/workflow-runs/run-1"]')).toBeNull();
+      channel.signal({ type: "lagged", dropped: 3 });
+      await vi.advanceTimersByTimeAsync(100);
+      channel.reconnect();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledTimes(reads + 4);
+
+      // Signals that say nothing about running work are ignored.
+      channel.signal({ type: "library_updated", entry_id: "entry-1" });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledTimes(reads + 4);
+
+      unmount(component);
+      component = undefined;
+      expect(channel.closed).toBe(true);
+    } finally {
       vi.useRealTimers();
     }
   });

@@ -14,7 +14,7 @@
  *   - turn_complete: pushes assistant message, resets streaming state
  *   - error: preserves partial response, records turnError, stops streaming
  *   - cancelled: preserves partial response, stops streaming
- *   - cancelTurn() delegates to connection store
+ *   - cancelTurn() stops the turn through the gateway's stop route
  *   - Graceful no-ops when dependencies are not injected
  *   - activeToolCalls: initial empty state
  *   - tool_start: adds in-progress entry to activeToolCalls
@@ -60,7 +60,6 @@ function createMockConversationStore() {
 function createMockConnectionStore() {
   return {
     sendMessage: vi.fn(),
-    cancelTurn: vi.fn(),
     setStreamActive: vi.fn(),
   };
 }
@@ -802,21 +801,37 @@ describe("cancelled events", () => {
 // ---------------------------------------------------------------------------
 
 describe("cancelTurn", () => {
-  it("delegates to the connection store", () => {
+  it("stops the running turn through the gateway's stop route", async () => {
     const conn = createMockConnectionStore();
     const conv = createMockConversationStore();
-    const store = createStreamingStore({ connectionStore: conn, conversationStore: conv });
+    const stopTurn = vi.fn(async () => {});
+    const store = createStreamingStore({ connectionStore: conn, conversationStore: conv, stopTurn });
 
     store.startTurn("cancel me");
-    store.cancelTurn();
+    await store.cancelTurn();
 
-    expect(conn.cancelTurn).toHaveBeenCalledWith("test-conversation");
+    expect(stopTurn).toHaveBeenCalledWith("test-conversation");
   });
 
-  it("does not throw when no connection store is injected", () => {
-    const store = createStreamingStore();
+  it("passes a refused stop to the caller and leaves the turn running", async () => {
+    const conv = createMockConversationStore();
+    const stopTurn = vi.fn(async () => { throw new Error("Nothing is running in this conversation to stop."); });
+    const store = createStreamingStore({ connectionStore: createMockConnectionStore(), conversationStore: conv, stopTurn });
 
-    expect(() => store.cancelTurn()).not.toThrow();
+    store.startTurn("cancel me");
+    await expect(store.cancelTurn()).rejects.toThrow("Nothing is running");
+
+    expect(store.isStreaming).toBe(true);
+    expect(store.turnError).toBeNull();
+  });
+
+  it("stops nothing when no turn is running", async () => {
+    const stopTurn = vi.fn(async () => {});
+    const store = createStreamingStore({ stopTurn });
+
+    await store.cancelTurn();
+
+    expect(stopTurn).not.toHaveBeenCalled();
   });
 });
 

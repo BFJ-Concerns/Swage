@@ -1,5 +1,7 @@
 <script lang="ts">
   import { cancelWorkflowRun } from "../api/workflow-runs";
+  import { stopConversationTurn } from "../api/conversations";
+  import { createWorkSurfaceChannel, type WorkSurfaceChannel } from "../api/work-surface";
   import { conversationPath } from "../router";
   import { messagePreview } from "../message-preview";
   import { onMount } from "svelte";
@@ -19,10 +21,10 @@
   import type { ScheduleRun } from "../protocol/ScheduleRun";
   import { passedOneShot, runUnsettled, UNSETTLED_RUN_REFRESH_MS } from "../one-shot-runs";
 
-  let { onStopSession, stopErrorFor, onNavigate }: {
-    onStopSession?: (sessionId: string) => void;
-    stopErrorFor?: (sessionId: string) => string | null;
+  let { onNavigate, channelFactory = createWorkSurfaceChannel }: {
     onNavigate?: (path: string) => void;
+    // The gateway's signal channel; tests supply a fake.
+    channelFactory?: () => WorkSurfaceChannel;
   } = $props();
 
   let overview = $state<OperatorOverview | null>(null);
@@ -32,7 +34,12 @@
   let openScheduleId = $state<string | null>(null);
   let scheduleRuns = $state<Record<string, ScheduleRun[]>>({});
   let showHistory = $state(false);
-  let runAccountId = $state<string | null>(null);
+  // Every run cancelled from here keeps a link to its account, newest first:
+  // a cancelled run leaves the live fleet once it settles.
+  let cancelledRunIds = $state<string[]>([]);
+  // Why a Stop did not reach a session, by session. The session keeps
+  // running, so the reason stays on its row until a later Stop is accepted.
+  let stopErrors = $state<Record<string, string>>({});
   const approvalsIdle = $derived((overview?.approvals.length ?? 0) === 0);
 
   function describeSpec(schedule: Schedule): string {
@@ -121,20 +128,40 @@
     });
   }
 
+  // A slow read must not overwrite a later one.
+  let loadGeneration = 0;
+
   async function loadOverview(): Promise<void> {
+    const generation = ++loadGeneration;
     isLoading = true;
     errorMessage = null;
 
     try {
-      overview = await fetchOperatorOverview();
+      const next = await fetchOperatorOverview();
+      if (generation !== loadGeneration) return;
+      overview = next;
       const passed = overview.schedules.schedules.filter(passedOneShot).map((schedule) => schedule.id);
       scheduleRuns = { ...scheduleRuns, ...(await readRuns(passed)) };
     } catch (error) {
       errorMessage =
         error instanceof Error ? error.message : "Failed to load operator overview";
     } finally {
-      isLoading = false;
+      if (generation === loadGeneration) isLoading = false;
     }
+  }
+
+  // The gateway signals when a session's turn begins or settles and when a
+  // run starts or ends; signals come in bursts, so one read answers each.
+  const SIGNAL_COALESCE_MS = 100;
+  const FLEET_SIGNALS = new Set(["session_updated", "workflow_run_started", "workflow_run_completed", "lagged"]);
+  let signalTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function reloadOnSignal(): void {
+    if (signalTimer !== null) return;
+    signalTimer = setTimeout(() => {
+      signalTimer = null;
+      void loadOverview();
+    }, SIGNAL_COALESCE_MS);
   }
 
   async function runAction(
@@ -161,7 +188,18 @@
 
   async function cancelRun(runId: string): Promise<void> {
     await cancelWorkflowRun(runId);
-    runAccountId = runId;
+    cancelledRunIds = [runId, ...cancelledRunIds.filter((id) => id !== runId)];
+  }
+
+  async function stopSession(sessionId: string): Promise<void> {
+    const next = { ...stopErrors };
+    delete next[sessionId];
+    try {
+      await stopConversationTurn(sessionId);
+    } catch (error) {
+      next[sessionId] = error instanceof Error ? error.message : "Stop did not reach the session.";
+    }
+    stopErrors = next;
   }
 
   function navigate(event: MouseEvent): void {
@@ -186,6 +224,15 @@
 
   onMount(() => {
     void loadOverview();
+    const channel = channelFactory();
+    channel.onSignal((event) => {
+      if (FLEET_SIGNALS.has(event.type)) reloadOnSignal();
+    });
+    channel.onReconnect(reloadOnSignal);
+    return () => {
+      channel.close();
+      if (signalTimer !== null) clearTimeout(signalTimer);
+    };
   });
 </script>
 
@@ -250,9 +297,9 @@
           </div>
           <span class="panel-count">{overview.sessions.length + overview.workflow_runs.length}</span>
         </div>
-        {#if runAccountId}
-          <p class="detail-copy"><a onclick={navigate} href={`/workflow-runs/${encodeURIComponent(runAccountId)}`}>View run account</a></p>
-        {/if}
+        {#each cancelledRunIds as runId (runId)}
+          <p class="detail-copy"><a onclick={navigate} href={`/workflow-runs/${encodeURIComponent(runId)}`}>View account of cancelled run {runId}</a></p>
+        {/each}
         <div class="ledger fleet-ledger">
           {#each overview.workflow_runs as run (run.id)}
             <div class="ledger-row">
@@ -295,14 +342,14 @@
                   {#if session.parent_session_id}<a onclick={navigate} href={conversationPath(session.parent_session_id)}>Parent {session.parent_session_id}</a>{:else}No spawning session recorded{/if}
                   {#if session.source} · {session.source}{/if} · {session.activity}
                 </div>
-                {#if stopErrorFor?.(session.id)}<p role="alert">{stopErrorFor(session.id)}</p>{/if}
+                {#if stopErrors[session.id]}<p role="alert">Stop did not reach this session: {stopErrors[session.id]}</p>{/if}
               </div>
               <div class="action-row">
                 {#if session.has_running_turn}
                   {#if session.workflow_run_id}
                     <button class="action-btn" disabled={actionBusy(`cancel-${session.workflow_run_id}`)} onclick={() => runAction(`cancel-${session.workflow_run_id}`, () => cancelRun(session.workflow_run_id!))}>Cancel run</button>
                   {:else}
-                    <button class="action-btn" disabled={!onStopSession || actionBusy(`stop-${session.id}`)} onclick={() => runAction(`stop-${session.id}`, async () => onStopSession?.(session.id))}>Stop</button>
+                    <button class="action-btn" disabled={actionBusy(`stop-${session.id}`)} onclick={() => runAction(`stop-${session.id}`, () => stopSession(session.id))}>Stop</button>
                   {/if}
                 {/if}
                 <span class="timestamp">{new Date(session.last_activity).toLocaleString()}</span>

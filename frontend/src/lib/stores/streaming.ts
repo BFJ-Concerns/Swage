@@ -6,6 +6,7 @@
 import { fromStore, get, writable, type Writable } from "svelte/store";
 
 import type { MessageAttachment } from "../protocol/MessageAttachment";
+import { stopConversationTurn } from "../api/conversations";
 import type { MessageView, ServerEvent, ToolCallView } from "../types";
 
 /**
@@ -88,7 +89,12 @@ export interface StreamingStore {
     recoveredMessages?: MessageView[],
   ): void;
   startTurn(content: string, selectedModelId?: string | null, agentId?: string | null, effort?: import("../protocol/Effort").Effort | null): void;
-  cancelTurn(): void;
+  /**
+   * Stop the running turn in the current conversation. Resolves once the
+   * gateway has accepted the stop; rejects with the gateway's reason when it
+   * refused or could not be reached. The turn's ending arrives on its stream.
+   */
+  cancelTurn(): Promise<void>;
 }
 
 // Cancellation records the stop decision without asserting completed effects.
@@ -149,7 +155,12 @@ export interface StreamingStoreOptions {
     /** The held messages became the next turn's input. */
     clearQueuedMessages?(conversationId: string, queuedIds: string[]): void;
   };
-  /** Sends WebSocket events for outgoing user messages and cancellation. */
+  /**
+   * Stops a conversation's running turn through the gateway's HTTP route,
+   * which reaches the turn whichever client holds its socket.
+   */
+  stopTurn?: (conversationId: string) => Promise<void>;
+  /** Sends WebSocket events for outgoing user messages. */
   connectionStore?: {
     sendMessage(
       conversationId: string,
@@ -159,7 +170,6 @@ export interface StreamingStoreOptions {
       threadId?: string | null,
       clientId?: string,
     ): void;
-    cancelTurn(conversationId: string): void;
     setStreamActive?(conversationId: string, active: boolean): void;
   };
 }
@@ -734,10 +744,10 @@ export function createStreamingStore(
       }
     },
 
-    cancelTurn(): void {
+    async cancelTurn(): Promise<void> {
       const conversationId = currentConversationId();
       if (conversationId && (streams.get(conversationId)?.isStreamingState.current || hasProcessingRequest(conversationId))) {
-        options?.connectionStore?.cancelTurn(conversationId);
+        await (options?.stopTurn ?? stopConversationTurn)(conversationId);
       }
     },
   };

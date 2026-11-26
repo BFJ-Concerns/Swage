@@ -162,7 +162,6 @@ function mockConnectionStore(): ConnectionStore {
     connectTo: () => {},
     disconnect: () => {},
     sendMessage: () => {},
-    cancelTurn: () => {},
     onServerEvent: () => {},
   };
 }
@@ -195,7 +194,7 @@ function mockStreamingStore(): StreamingStore {
     },
     handleServerEvent: () => {},
     startTurn: () => {},
-    cancelTurn: () => {},
+    cancelTurn: async () => {},
     clearConnectionError: () => {},
     reconcileAfterReconnect: () => {},
   };

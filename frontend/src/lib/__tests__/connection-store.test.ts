@@ -11,7 +11,6 @@
  *   - connectTo() delegates to the WS client and sets status via callback
  *   - disconnect() delegates and surfaces "disconnected"
  *   - sendMessage() emits a send_message ClientEvent
- *   - cancelTurn() emits a cancel ClientEvent
  *   - Server events are routed to registered handlers
  *   - Error status + message on handshake rejection (mirrors 409 Conflict)
  *   - onReconnect callback fires when reconnect succeeds
@@ -269,19 +268,6 @@ describe("sendMessage", () => {
   });
 });
 
-describe("cancelTurn", () => {
-  it("sends a cancel ClientEvent via the WS client", () => {
-    const mock = createMockWsClient();
-    const store = createConnectionStore({ wsClientFactory: () => mock });
-
-    store.connectTo("conv-abc");
-    store.cancelTurn("conv-abc");
-
-    const events = mock.sentEvents().map((s) => JSON.parse(s));
-    expect(events).toContainEqual({ type: "cancel" });
-  });
-});
-
 describe("server event routing", () => {
   it("routes incoming server events to registered handlers", () => {
     const mock = createMockWsClient();
@@ -438,17 +424,3 @@ describe("connection explanations", () => {
   });
 });
 
-describe("Stop during reconnect", () => {
-  it("reconnects before sending cancellation during backoff", () => {
-    const mock = createMockWsClient();
-    const store = createConnectionStore({ wsClientFactory: () => mock });
-    store.connectTo("child");
-    mock.triggerStatus("connected");
-    mock.triggerStatus("reconnecting");
-    vi.mocked(mock.connect).mockClear();
-    store.cancelTurn("child");
-    expect(mock.connect).toHaveBeenCalledWith("child");
-    expect(mock.send).toHaveBeenCalledWith({ type: "cancel" });
-    expect(vi.mocked(mock.connect).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(mock.send).mock.invocationCallOrder[0]);
-  });
-});
