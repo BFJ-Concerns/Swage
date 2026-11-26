@@ -669,6 +669,15 @@ async fn announce_delegated_outcome(
     state.send_to_session(session_id, &event).await;
 }
 
+/// A delegated child's result, and whether settling it started work queued
+/// behind it in the child's session.
+struct TrackedDelegation {
+    result: Result<swage_storage::AgentMessage, AgentError>,
+    /// The queued turns run in the child's placement, so a worktree the
+    /// delegation would otherwise remove on completion has to stay for them.
+    queued_work_started: bool,
+}
+
 // Both completion modes publish their child session through the same stop
 // registry; the executor owns the token and its lifetime remains the turn's.
 async fn track_delegated_session(
@@ -679,7 +688,7 @@ async fn track_delegated_session(
     mut execution: std::pin::Pin<
         Box<impl std::future::Future<Output = Result<swage_storage::AgentMessage, AgentError>>>,
     >,
-) -> Result<swage_storage::AgentMessage, AgentError> {
+) -> TrackedDelegation {
     tokio::select! {
         biased;
         started = &mut started_rx => {
@@ -694,10 +703,11 @@ async fn track_delegated_session(
                     announce_delegated_outcome(state, session_id, turn_id, &result).await;
                     state.active_turns.lock().await.remove(&session_id);
                     crate::service::announce_session_updated(state, session_id);
-                    drain_queue_after_delegated_turn(state, session_id, turn_id).await;
-                    result
+                    let queued_work_started =
+                        drain_queue_after_delegated_turn(state, session_id, turn_id).await;
+                    TrackedDelegation { result, queued_work_started }
                 }
-                Err(_) => execution.await,
+                Err(_) => TrackedDelegation { result: execution.await, queued_work_started: false },
             }
         }
         result = &mut execution => {
@@ -708,27 +718,50 @@ async fn track_delegated_session(
                 announce_delegated_outcome(state, session_id, turn_id, &result).await;
                 crate::service::announce_session_updated(state, session_id);
                 if let Some(sender) = forward_started { let _ = sender.send(started); }
-                drain_queue_after_delegated_turn(state, session_id, turn_id).await;
+                let queued_work_started =
+                    drain_queue_after_delegated_turn(state, session_id, turn_id).await;
+                return TrackedDelegation { result, queued_work_started };
             }
-            result
+            TrackedDelegation { result, queued_work_started: false }
         },
     }
 }
 
 /// Start the child session's queued work once its delegated turn has settled,
 /// unless the turn was stopped or interrupted, which leaves the queue standing.
-async fn drain_queue_after_delegated_turn(state: &AppState, session_id: Uuid, turn_id: Uuid) {
+/// Returns whether queued work was started.
+async fn drain_queue_after_delegated_turn(
+    state: &AppState,
+    session_id: Uuid,
+    turn_id: Uuid,
+) -> bool {
     match state.storage.get_turn(turn_id).await {
         Ok(Some(turn)) => {
-            if crate::turn_queue::drains_queue_after(turn.state) {
-                crate::turn_queue::spawn_drain(state.clone(), session_id);
+            if !crate::turn_queue::drains_queue_after(turn.state) {
+                return false;
+            }
+            match state.storage.list_queued_turn_inputs(session_id).await {
+                Ok(queued) if queued.is_empty() => false,
+                Ok(_) => {
+                    crate::turn_queue::spawn_drain(state.clone(), session_id);
+                    true
+                }
+                Err(error) => {
+                    // Unknown: drain anyway, and report work started so the
+                    // child's placement is kept rather than removed under it.
+                    tracing::warn!(%session_id, %error, "could not read the delegated child's queue");
+                    crate::turn_queue::spawn_drain(state.clone(), session_id);
+                    true
+                }
             }
         }
         Ok(None) => {
             tracing::warn!(%turn_id, "delegated turn missing; its queue was not drained");
+            false
         }
         Err(error) => {
             tracing::warn!(%turn_id, %error, "could not read delegated outcome for queue drain");
+            false
         }
     }
 }
@@ -1443,15 +1476,15 @@ impl DelegationHandler for GatewayDelegationHandler {
                         child_effort,
                     ),
                 );
-                let result_msg = match Box::pin(track_delegated_session(
+                let tracked = Box::pin(track_delegated_session(
                     &self.state,
                     child_cancel_token,
                     started_rx,
                     None,
                     execution,
                 ))
-                .await
-                {
+                .await;
+                let result_msg = match tracked.result {
                     Ok(result_msg) => result_msg,
                     Err(error) => {
                         shutdown_sandbox_guard(
@@ -1473,6 +1506,7 @@ impl DelegationHandler for GatewayDelegationHandler {
 
                 if result_msg.payload.get("error").is_none()
                     && child.is_none()
+                    && !tracked.queued_work_started
                     && let Some(owner_id) = worktree_owner_id
                 {
                     self.state.worktree_host.cleanup_owner(owner_id).await;
@@ -1545,7 +1579,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                             child_effort,
                         ),
                     );
-                    let result = Box::pin(track_delegated_session(
+                    let tracked = Box::pin(track_delegated_session(
                         &tracking_state,
                         child_cancel_token,
                         started_rx,
@@ -1560,13 +1594,14 @@ impl DelegationHandler for GatewayDelegationHandler {
                     )
                     .await;
 
-                    match result {
+                    match tracked.result {
                         // execute_delegation has persisted the Result as Pending.
                         // The parent's next turn owns its delivery: Step 7 appends
                         // it to the parent thread before claiming it Delivered.
                         Ok(result_msg) => {
                             if result_msg.payload.get("error").is_none()
                                 && !retain_worktree
+                                && !tracked.queued_work_started
                                 && let Some(owner_id) = worktree_owner_id
                             {
                                 worktree_host.cleanup_owner(owner_id).await;
@@ -1859,15 +1894,24 @@ mod settlement_tests {
                 .await
                 .map_err(AgentError::from)
         });
-        track_delegated_session(
+        let tracked = track_delegated_session(
             &state,
             CancellationToken::new(),
             started_rx,
             Some(registered),
             execution,
         )
-        .await
-        .expect("tracked child should return its durable result");
+        .await;
+        tracked
+            .result
+            .expect("tracked child should return its durable result");
+        // Queued work starts only when the child settled in a state that
+        // drains its queue, and the caller is told so it keeps the placement.
+        assert_eq!(
+            tracked.queued_work_started,
+            queue_message && crate::turn_queue::drains_queue_after(ending.clone()),
+            "queued work started for ending {ending:?}"
+        );
         assert!(!state.active_turns.lock().await.contains_key(&session_id));
         // Views of running work hear the child start and settle, as they do
         // for a turn started in the child's own conversation.
