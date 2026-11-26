@@ -19277,10 +19277,6 @@ async fn secret_refs_stay_out_of_snapshots_and_persisted_tool_arguments() {
             })
         }
 
-        fn sensitive_keys(&self) -> &[&str] {
-            &["secret"]
-        }
-
         fn device_secret_keys(&self) -> &[&str] {
             &["secret"]
         }

@@ -168,10 +168,6 @@ impl Tool for BrowserTypeTool {
         })
     }
 
-    fn sensitive_keys(&self) -> &[&str] {
-        TEXT_SECRET_KEYS
-    }
-
     fn device_secret_keys(&self) -> &[&str] {
         TEXT_SECRET_KEYS
     }
