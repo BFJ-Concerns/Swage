@@ -41,8 +41,6 @@ use swage_storage::{
     },
 };
 
-use super::history::parse_model_arguments;
-
 use swage_agent::{AgentEvent, DelegationOutcome};
 use swage_sandbox::ToolCallResult;
 
@@ -11457,56 +11455,6 @@ fn replayed_long_argument_values_are_bounded_inside_the_native_shape() {
     );
 }
 
-#[test]
-fn replayed_old_argument_envelopes_recover_bounded_raw_arguments_and_keep_results() {
-    let raw = serde_json::json!({"path": "Cargo.toml", "note": "x".repeat(2001)});
-    let mut old = complete_replay_record("old-read");
-    old.arguments = raw.to_string();
-    old.model_arguments = serde_json::json!({
-        "kind": "tool_arguments", "bytes": old.arguments.len(),
-        "sha256": "a".repeat(64), "truncated": true,
-        "preview": "not the original arguments"
-    })
-    .to_string();
-    let mut native = complete_replay_record("native-kind");
-    native.model_arguments = serde_json::json!({
-        "path": "kind.txt", "kind": "tool_arguments", "preview": "ordinary parameter"
-    })
-    .to_string();
-    let result = old.model_result.clone().unwrap();
-    let replay = compact_tool_replay_messages(&[old.clone(), native]).unwrap();
-    let calls = replay[0].tool_replay().unwrap();
-    assert!(
-        matches!(&calls[0], ToolReplayPart::ToolCall { call_id, arguments, .. }
-        if call_id == "old-read" && arguments == &serde_json::json!({
-            "path": "Cargo.toml", "note": "x".repeat(2000)
-        })),
-        "an old envelope must recover bounded arguments from the raw row"
-    );
-    assert!(
-        matches!(&calls[1], ToolReplayPart::ToolCall { arguments, .. }
-        if arguments == &serde_json::json!({
-            "path": "kind.txt", "kind": "tool_arguments", "preview": "ordinary parameter"
-        })),
-        "native parameters resembling part of an envelope must remain intact"
-    );
-    assert!(
-        matches!(&replay[1].tool_replay().unwrap()[0],
-        ToolReplayPart::ToolResult { call_id, content, .. }
-        if call_id == "old-read" && content == &result),
-        "recovering old arguments must retain the original result"
-    );
-
-    old.arguments = "{invalid".into();
-    assert!(
-        matches!(
-            compact_tool_replay_messages(&[old]),
-            Err(StorageError::Corruption { .. })
-        ),
-        "a preview is no substitute for corrupt raw arguments"
-    );
-}
-
 #[tokio::test]
 async fn replayed_native_arguments_are_redacted_in_recorded_provider_requests() {
     let secret = "registered-replayed-argument-secret";
@@ -11634,17 +11582,6 @@ fn replay_omits_rejected_tool_calls_with_empty_names() {
         vec!["accepted-call", "accepted-call"],
         "the valid call and result should remain while the rejected pair stays out of provider replay"
     );
-}
-
-#[test]
-fn replay_uses_valid_raw_arguments_when_compact_arguments_are_unreadable() {
-    let mut record = complete_replay_record("legacy-call");
-    record.model_arguments = "not-json".into();
-
-    let arguments = parse_model_arguments(&record)
-        .expect("valid raw arguments are a safe legacy replay fallback");
-
-    assert_eq!(arguments["path"], "Cargo.toml");
 }
 
 #[test]
