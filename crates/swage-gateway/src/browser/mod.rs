@@ -251,7 +251,7 @@ impl BrowserHost {
                 "browser_type",
                 true,
                 format!(
-                    "(el) => {{ el.scrollIntoView({{block:'center',inline:'center'}}); el.focus(); if ({replace}) el.value = ''; el.value = {quoted_text}; el.dispatchEvent(new InputEvent('input', {{bubbles:true}})); el.dispatchEvent(new Event('change', {{bubbles:true}})); if ({submit} && el.form) el.form.requestSubmit(); }}"
+                    "(el) => {{ el.scrollIntoView({{block:'center',inline:'center'}}); el.focus(); if ({replace}) el.value = ''; el.value = ({replace} ? '' : el.value) + {quoted_text}; el.dispatchEvent(new InputEvent('input', {{bubbles:true}})); el.dispatchEvent(new Event('change', {{bubbles:true}})); if ({submit} && el.form) el.form.requestSubmit(); }}"
                 ),
             )
             .await?
@@ -269,7 +269,7 @@ impl BrowserHost {
                             this.value = '';
                             this.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'deleteContent'}));
                         }
-                        this.value = String(text);
+                        this.value = (replace ? '' : this.value) + String(text);
                         this.dispatchEvent(new InputEvent('input', {bubbles: true, data: String(text)}));
                         this.dispatchEvent(new Event('change', {bubbles: true}));
                         if (submit) {
