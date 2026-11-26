@@ -665,12 +665,12 @@ async fn track_delegated_session(
                     let session_id = started.child_session_id;
                     let turn_id = started.child_turn_id;
                     state.active_turns.lock().await.insert(session_id, token);
-                    crate::service::announce_session_updated(state, session_id);
+                    crate::service::announce_session_updated(&state.broadcast, session_id);
                     if let Some(sender) = forward_started { let _ = sender.send(started); }
                     let result = execution.await;
                     announce_delegated_outcome(state, session_id, turn_id, &result).await;
                     state.active_turns.lock().await.remove(&session_id);
-                    crate::service::announce_session_updated(state, session_id);
+                    crate::service::announce_session_updated(&state.broadcast, session_id);
                     drain_queue_after_delegated_turn(state, session_id, turn_id).await;
                     result
                 }
@@ -683,7 +683,7 @@ async fn track_delegated_session(
                 let session_id = started.child_session_id;
                 let turn_id = started.child_turn_id;
                 announce_delegated_outcome(state, session_id, turn_id, &result).await;
-                crate::service::announce_session_updated(state, session_id);
+                crate::service::announce_session_updated(&state.broadcast, session_id);
                 if let Some(sender) = forward_started { let _ = sender.send(started); }
                 drain_queue_after_delegated_turn(state, session_id, turn_id).await;
             }

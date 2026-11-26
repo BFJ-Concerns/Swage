@@ -149,9 +149,8 @@ pub enum ServerEvent {
     /// on a durable wait. Views of running work refetch; the event is the
     /// signal, not the content.
     WorkflowRunUpdated { run_id: Uuid },
-    /// A session's list-visible state changed: a turn began or settled on
-    /// it, so it is running, idle, or left interrupted. Clients showing
-    /// session lists refetch — the event is the signal, not the content.
+    /// A session row may have changed or entered or left a list. Refetch
+    /// session lists to read the current rows from the gateway.
     SessionUpdated { session_id: Uuid },
     /// A message was recorded on a conversation by something other than the
     /// person at this client — a schedule's brief, a delegation's completion

@@ -20,6 +20,7 @@ export interface ConversationStore {
   readonly activeConversation: ConversationDetail | null;
   readonly isLoading: boolean;
   loadConversations(topicId: string | null): Promise<void>;
+  refreshConversations?(): Promise<void>;
   selectConversation(id: string): Promise<void>;
   // topicId is required by the underlying store but optional here so that
   // the router-aware proxy in App.svelte can satisfy this interface without
@@ -159,36 +160,6 @@ export function createConversationStore(): ConversationStore {
     activeThreadIdStore.set(threadId);
   }
 
-  function updateConversationSummary(
-    conversationId: string,
-    message: {
-      content: string;
-      timestamp: string;
-      turn_state: MessageView["turn_state"];
-      origin?: MessageView["origin"];
-    },
-  ): void {
-    const conversations = get(conversationsStore);
-    const updatedSummary = conversations.find((c) => c.id === conversationId);
-    if (!updatedSummary) return;
-
-    const nextSummary: ConversationSummary = {
-      ...updatedSummary,
-      last_activity: message.origin === "platform" ? updatedSummary.last_activity : message.timestamp,
-      ...(message.content && message.origin !== "platform" ? { message_preview: message.content } : {}),
-      has_interrupted_turn:
-        updatedSummary.has_interrupted_turn || message.turn_state === "interrupted",
-    };
-
-    conversationsStore.set(
-      sortByRecency(
-        conversations.map((conversation) =>
-          conversation.id === conversationId ? nextSummary : conversation,
-        ),
-      ),
-    );
-  }
-
   function replaceActiveConversationIfCurrent(conversation: ConversationDetail): void {
     if (get(activeConversationStore)?.id === conversation.id) {
       activeConversationStore.set(conversation);
@@ -211,17 +182,17 @@ export function createConversationStore(): ConversationStore {
     conversationId?: string | null,
   ): void {
     const activeConversation = get(activeConversationStore);
-    const ownerId = conversationId ?? activeConversation?.id;
-    if (!ownerId) return;
+    if (!activeConversation || (conversationId != null && activeConversation.id !== conversationId)) return;
 
     // A message belongs to the thread it names, else to the thread in view.
     // It joins the visible list only when that is the thread in view: a
-    // reply to a turn sent on a branch the person has since left updates
-    // the summary and waits on its own thread.
-    const threadInView = get(activeThreadIdStore) ?? activeConversation?.root_thread_id;
+    // reply to a turn sent on a branch the person has since left waits
+    // on its own thread.
+    const threadInView = get(activeThreadIdStore) ?? activeConversation.root_thread_id;
     const threadId = message.thread_id ?? threadInView;
     const belongsToView =
       message.thread_id === undefined || threadInView === undefined || message.thread_id === threadInView;
+    if (!belongsToView) return;
     const appendedMessage: MessageView = {
       role: message.role,
       content: message.content,
@@ -235,11 +206,6 @@ export function createConversationStore(): ConversationStore {
       ...(message.tool_calls === undefined ? {} : { tool_calls: message.tool_calls }),
     };
 
-    if (activeConversation?.id !== ownerId || !belongsToView) {
-      updateConversationSummary(ownerId, message);
-      return;
-    }
-
     const messages = [...activeConversation.messages];
     const recordedIndex = message.id === undefined
       ? -1
@@ -252,11 +218,16 @@ export function createConversationStore(): ConversationStore {
       last_activity: message.origin === "platform" ? activeConversation.last_activity : message.timestamp,
       messages,
     });
-
-    updateConversationSummary(ownerId, message);
   }
 
   let listGeneration = 0;
+  let currentScope: { topicId: string | null; initial: Promise<void> } | undefined;
+
+  async function readConversationList(topicId: string | null): Promise<void> {
+    const generation = ++listGeneration;
+    const list = await api.listConversations(topicId);
+    if (generation === listGeneration) conversationsStore.set(sortByRecency(list));
+  }
 
   return {
     // ---------------------------------------------------------------------------
@@ -288,24 +259,33 @@ export function createConversationStore(): ConversationStore {
     // ---------------------------------------------------------------------------
 
     async loadConversations(topicId) {
-      const generation = ++listGeneration;
       conversationsStore.set([]);
       isLoadingStore.set(true);
+      const scope = { topicId, initial: readConversationList(topicId) };
+      currentScope = scope;
       try {
-        const list = await api.listConversations(topicId);
-        if (generation !== listGeneration) return;
-        conversationsStore.set(sortByRecency(list));
+        await scope.initial;
       } finally {
-        if (generation === listGeneration) isLoadingStore.set(false);
+        if (currentScope === scope) isLoadingStore.set(false);
+      }
+    },
+
+    async refreshConversations() {
+      const scope = currentScope;
+      if (!scope) return;
+      await scope.initial.catch(() => {});
+      if (currentScope !== scope) return;
+      try {
+        await readConversationList(scope.topicId);
+      } catch {
+        // A transient refresh failure leaves the current list visible.
       }
     },
 
     async selectConversation(id) {
       isLoadingStore.set(true);
       try {
-        // The server is authoritative for an off-screen conversation. Terminal
-        // stream events update its summary only; retaining synthetic messages
-        // here duplicates partial errors that have no stable turn identity.
+        // Read off-screen conversations from the gateway when selected.
         await loadConversationDetail(id);
       } finally {
         isLoadingStore.set(false);
@@ -341,8 +321,12 @@ export function createConversationStore(): ConversationStore {
         has_interrupted_turn: false,
       };
 
-      // Prepend: the freshly created conversation is the most recent.
-      conversationsStore.update((conversations) => [summary, ...conversations]);
+      // A live refresh can already have installed the gateway's summary.
+      conversationsStore.update((conversations) =>
+        conversations.some((conversation) => conversation.id === summary.id)
+          ? conversations
+          : [summary, ...conversations],
+      );
       activeConversationStore.set(detail);
       activeThreadIdStore.set(null);
       branchesStore.set([]);
@@ -404,13 +388,14 @@ export function createConversationStore(): ConversationStore {
       );
       if (index < 0) return;
       const messages = [...activeConversation.messages];
-      messages[index] = {
+      const settledMessage = {
         ...messages[index],
         turn_state: settlement.turn_state,
         ...(settlement.tool_calls && settlement.tool_calls.length > 0
           ? { tool_calls: settlement.tool_calls }
           : {}),
       };
+      messages[index] = settledMessage;
       activeConversationStore.set({ ...activeConversation, messages });
     },
 

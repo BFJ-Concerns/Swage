@@ -827,7 +827,8 @@ default_effort = "high"
             .await
             .unwrap();
 
-        svc.storage
+        let message = svc
+            .storage
             .create_message(NewMessage {
                 thread_id,
                 attachments: Vec::new(),
@@ -840,6 +841,11 @@ default_effort = "high"
             })
             .await
             .unwrap();
+
+        let running_list = svc.list_conversations().await.unwrap();
+        let running_summary = running_list.iter().find(|s| s.id == session_id).unwrap();
+        assert_eq!(running_summary.message_preview.as_deref(), Some("Hello!"));
+        assert_eq!(running_summary.last_activity, message.created_at);
 
         // Mark the turn as Interrupted so `has_interrupted_turn` is set.
         svc.storage

@@ -1023,7 +1023,8 @@ pub async fn delete_conversation(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let svc = ConversationService::new(state.storage, state.topic_store);
+    let svc =
+        ConversationService::new(state.storage, state.topic_store).with_broadcast(state.broadcast);
     svc.delete_conversation(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

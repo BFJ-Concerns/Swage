@@ -7275,8 +7275,8 @@ async fn a_turn_signals_session_lists_when_it_begins_and_when_it_settles() {
         }
     }
     assert_eq!(
-        session_signals, 2,
-        "one signal when the turn begins and one when it settles"
+        session_signals, 3,
+        "signals when the turn begins, records its input and settles"
     );
 }
 

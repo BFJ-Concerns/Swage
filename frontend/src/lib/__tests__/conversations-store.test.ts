@@ -200,6 +200,28 @@ describe("selectConversation", () => {
 // ---------------------------------------------------------------------------
 
 describe("createConversation", () => {
+  it("preserves the gateway summary when it arrives before the creation response", async () => {
+    const store = createConversationStore();
+    vi.mocked(api.listConversations).mockResolvedValueOnce([]);
+    await store.loadConversations("proj-1");
+
+    const recorded = { ...makeSummary("new-session"), message_preview: "Recorded while creating" };
+    let finishCreation!: (response: Awaited<ReturnType<typeof api.createConversation>>) => void;
+    vi.mocked(api.createConversation).mockReturnValueOnce(new Promise((resolve) => {
+      finishCreation = resolve;
+    }));
+    const creating = store.createConversation("proj-1");
+
+    vi.mocked(api.listConversations).mockResolvedValueOnce([recorded]);
+    await store.refreshConversations!();
+    expect(store.conversations).toEqual([recorded]);
+
+    finishCreation({ ...makeDetail(recorded.id), topic_id: "proj-1" });
+    await creating;
+    expect(store.conversations).toEqual([recorded]);
+    expect(store.activeConversation?.id).toBe(recorded.id);
+  });
+
   it("creates a conversation, adds it to the list, and selects it", async () => {
     const store = createConversationStore();
     const resp = {
@@ -367,8 +389,7 @@ describe("durable local updates", () => {
       content: "Hello, Swage!",
       turn_state: "pending",
     });
-    expect(store.conversations[0].message_preview).toBe("Hello, Swage!");
-    expect(store.conversations[0].last_activity).toBe("2026-01-01T12:00:00Z");
+    expect(store.conversations[0]).toEqual(makeSummary("conv-1", "2026-01-01T00:00:00Z"));
   });
 
   it("does not throw and does not modify state when there is no active conversation", () => {
@@ -414,7 +435,6 @@ describe("durable local updates", () => {
     expect(store.activeConversation!.messages).toHaveLength(2);
     expect(store.activeConversation!.messages[1].role).toBe("assistant");
     expect(store.activeConversation!.messages[1].turn_id).toBe("turn-1");
-    expect(store.conversations[0].message_preview).toBe("Reply");
   });
 
   it("installs a message the gateway recorded on the open conversation, as recorded", async () => {
@@ -446,7 +466,6 @@ describe("durable local updates", () => {
     expect(installed.origin).toBe("schedule");
     expect(installed.turn_id).toBe("turn-7");
     expect(installed.thread_id).toBe("thread-1");
-    expect(store.conversations[0].message_preview).toBe("Summarise the inbox.");
   });
 
   it("keeps the first optimistic ping when an identical second send queues", async () => {
@@ -506,7 +525,7 @@ describe("durable local updates", () => {
     expect(store.activeConversation!.queued!.map((item) => item.id)).toEqual(["q-2"]);
   });
 
-  it("a recorded message for another conversation updates only that conversation's summary", async () => {
+  it("leaves the open conversation and sidebar rows alone for an off-screen recorded message", async () => {
     const store = createConversationStore();
     vi.mocked(api.listConversations).mockResolvedValueOnce([
       makeSummary("conv-1", "2026-01-01T00:00:00Z"),
@@ -531,26 +550,7 @@ describe("durable local updates", () => {
     );
 
     expect(store.activeConversation!.messages).toHaveLength(0);
-    const other = store.conversations.find((c) => c.id === "conv-2")!;
-    expect(other.message_preview).toBe("Delegated agent worker completed: done.");
-    expect(store.conversations[0].id).toBe("conv-2");
-  });
-
-  it("installs a platform refusal account without replacing the session preview", async () => {
-    const store = createConversationStore();
-    vi.mocked(api.listConversations).mockResolvedValueOnce([
-      { ...makeSummary("conv-1"), message_preview: "Read README.md" },
-    ]);
-    await store.loadConversations("proj-1");
-    vi.mocked(api.getConversation).mockResolvedValueOnce(makeDetail("conv-1"));
-    await store.selectConversation("conv-1");
-    store.appendRecordedMessage({
-      id: "refusal-notice", thread_id: "thread-1", turn_id: "refused-turn",
-      role: "user", origin: "platform", content: "The model refused this request.",
-      timestamp: "2026-01-01T00:01:00Z", turn_state: "refused", tool_calls: [],
-    }, "conv-1");
-    expect(store.activeConversation!.messages.at(-1)?.content).toBe("The model refused this request.");
-    expect(store.conversations[0].message_preview, "platform accounts must preserve the person's preview").toBe("Read README.md");
+    expect(store.conversations).toEqual([makeSummary("conv-1"), makeSummary("conv-2")]);
   });
 
   it("installs a platform refusal account without changing activity or sidebar order", async () => {
@@ -578,7 +578,7 @@ describe("durable local updates", () => {
     expect.soft(store.conversations).toEqual(summaries);
   });
 
-  it("preserves the existing preview for a tool-only assistant message", async () => {
+  it("appends a tool-only reply without patching the sidebar", async () => {
     const store = createConversationStore();
     vi.mocked(api.listConversations).mockResolvedValueOnce([
       makeSummary("conv-2", "2026-01-01T00:00:30Z"),
@@ -611,33 +611,31 @@ describe("durable local updates", () => {
       content: "",
       tool_calls: [expect.objectContaining({ call_id: "call-1" })],
     });
-    expect(store.conversations[0]).toMatchObject({
-      id: "conv-1",
-      last_activity: "2026-01-01T00:01:00Z",
-      message_preview: "Read README.md",
-    });
-    expect(store.conversations.map((conversation) => conversation.id)).toEqual([
-      "conv-1",
-      "conv-2",
+    expect(store.conversations).toEqual([
+      makeSummary("conv-2", "2026-01-01T00:00:30Z"),
+      { ...makeSummary("conv-1"), message_preview: "Read README.md" },
     ]);
   });
 
-  it("marks the summary as interrupted when an interrupted assistant message is appended", async () => {
+  it("marks the open request interrupted when approval times out before assistant text", async () => {
     const store = createConversationStore();
-    vi.mocked(api.listConversations).mockResolvedValueOnce([
-      makeSummary("conv-1", "2026-01-01T00:00:00Z"),
-    ]);
+    vi.mocked(api.listConversations).mockResolvedValueOnce([makeSummary("conv-1")]);
     await store.loadConversations("proj-1");
     vi.mocked(api.getConversation).mockResolvedValueOnce(makeDetail("conv-1"));
     await store.selectConversation("conv-1");
+    store.appendOptimisticUserMessage({
+      content: "Use echo", timestamp: "2026-01-01T00:02:00Z",
+    });
+    const stream = createStreamingStore({ conversationStore: store });
 
-    store.appendAssistantMessage({
-      content: "Partial reply",
-      timestamp: "2026-01-01T00:02:00Z",
-      turn_state: "interrupted",
+    stream.handleServerEvent({
+      type: "error", code: "approval_timeout",
+      message: "approval timed out before tool execution; turn interrupted",
     });
 
-    expect(store.conversations[0].has_interrupted_turn).toBe(true);
+    expect(store.conversations[0]).toEqual(makeSummary("conv-1"));
+    expect(store.activeConversation!.messages).toHaveLength(1);
+    expect(store.activeConversation!.messages[0].turn_state).toBe("interrupted");
   });
 });
 
@@ -866,7 +864,7 @@ describe("threads and branches", () => {
     });
   });
 
-  it("a reply for a branch the person has left updates the summary but not the view", async () => {
+  it("keeps replies for a branch the person has left out of the open thread", async () => {
     vi.mocked(api.getConversation).mockResolvedValue(makeRootDetail("conv-1"));
     vi.mocked(api.listConversations).mockResolvedValue([makeSummary("conv-1")]);
     const store = createConversationStore();
@@ -879,7 +877,6 @@ describe("threads and branches", () => {
     );
 
     expect(store.activeConversation?.messages.map((m) => m.content)).toEqual(["first"]);
-    expect(store.conversations[0].message_preview).toBe("branch reply");
 
     store.appendAssistantMessage(
       { content: "root reply", timestamp: "2026-01-01T00:00:10Z", turn_state: "completed", thread_id: "root-1" },

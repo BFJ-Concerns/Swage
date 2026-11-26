@@ -115,8 +115,7 @@ const SESSION_ACTIVITY_COLUMNS: &str = "
     turn_activity.active_turn_id,
     turn_activity.active_turn_state";
 
-// Equal-time turns retain the first encountered in thread-creation order,
-// then insertion order within that thread.
+// Equal-time turns resolve to the one recorded last.
 const SESSION_ACTIVITY_JOIN: &str = "
     LEFT JOIN (
         SELECT threads.session_id, messages.created_at, messages.content,
@@ -142,16 +141,14 @@ const SESSION_ACTIVITY_JOIN: &str = "
                ) AS has_processing_turn,
                ROW_NUMBER() OVER (
                    PARTITION BY threads.session_id
-                   ORDER BY turns.created_at DESC, threads.created_at ASC,
-                            threads.rowid ASC, turns.rowid ASC
+                   ORDER BY turns.created_at DESC, turns.rowid DESC
                ) AS recency
         FROM turns
         JOIN threads ON threads.id = turns.thread_id
         WINDOW active_first AS (
             PARTITION BY threads.session_id
             ORDER BY (turns.state IN ('processing', 'delegating', 'awaiting_approval')) DESC,
-                     turns.created_at DESC, threads.created_at ASC,
-                     threads.rowid ASC, turns.rowid ASC
+                     turns.created_at DESC, turns.rowid DESC
         )
     ) AS turn_activity ON turn_activity.session_id = sessions.id AND turn_activity.recency = 1";
 
@@ -706,6 +703,77 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn the_recent_list_reports_the_latest_recorded_turn_across_threads() {
+        use crate::model::{NewTurn, TurnState};
+        use crate::store::{ThreadStore, TurnStore};
+        let (storage, topic_id) = make_storage_with_topic().await;
+        let session = storage.create_session(new_session(topic_id)).await.unwrap();
+        assert_eq!(
+            storage
+                .get_session_activity(session.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .latest_turn,
+            None
+        );
+        for state in [
+            TurnState::Failed,
+            TurnState::Interrupted,
+            TurnState::Completed,
+        ] {
+            // Different threads, identical timestamps: insertion order breaks ties.
+            let thread = ThreadStore::create(
+                &storage,
+                NewThread {
+                    session_id: session.id,
+                    agent_id: "test-agent".into(),
+                },
+            )
+            .await
+            .unwrap();
+            let turn = storage
+                .create_turn(NewTurn {
+                    thread_id: thread.id,
+                    agent_id: "test-agent".into(),
+                    state: state.clone(),
+                    user_input: None,
+                    parent_turn_id: None,
+                })
+                .await
+                .unwrap();
+            storage
+                .with_conn(move |conn| {
+                    conn.execute(
+                        "UPDATE turns SET created_at = '2026-10-01T00:00:00Z' WHERE id = ?1",
+                        [turn.id.to_string()],
+                    )
+                })
+                .await
+                .unwrap();
+            let activity = storage
+                .list_recent_sessions(SessionListing::default())
+                .await
+                .unwrap()
+                .remove(0);
+            assert_eq!(activity.latest_turn.map(|turn| turn.state), Some(state));
+        }
+        let activity = storage
+            .get_session_activity(session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            activity.latest_turn.as_ref().map(|turn| turn.state.clone()),
+            Some(TurnState::Completed)
+        );
+        assert!(
+            activity.has_interrupted_turn,
+            "history remains separate from the latest state"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn the_recent_list_orders_by_the_latest_user_or_assistant_message() {
         let (storage, topic_id) = make_storage_with_topic().await;
         let quiet = storage.create_session(new_session(topic_id)).await.unwrap();
@@ -796,8 +864,8 @@ mod tests {
         assert_eq!(fetched.latest_turn, expected);
         assert!(fetched.has_processing_turn && fetched.has_interrupted_turn);
 
-        // Equal creation times keep the first turn from the earliest thread.
-        let first_id = turns[0].id;
+        // Equal creation times resolve to the turn recorded last.
+        let last_id = latest.id;
         storage
             .with_conn(move |conn| {
                 conn.execute(
@@ -813,7 +881,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(tied.latest_turn.unwrap().id, first_id);
+        assert_eq!(tied.latest_turn.unwrap().id, last_id);
     }
 
     #[tokio::test(flavor = "multi_thread")]
