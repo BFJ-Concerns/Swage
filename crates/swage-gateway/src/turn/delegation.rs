@@ -23,6 +23,8 @@ use swage_agent::{
 };
 use swage_context::tokeniser::TiktokenTokeniser;
 use swage_core::DelegateCompletionMode;
+use tokio_util::task::AbortOnDropHandle;
+use tracing::Instrument;
 
 pub(super) const DELEGATED_CHILD_SKILLS_METADATA_KEY: &str = "delegated_child_skills";
 pub(super) const DELEGATED_CHILD_COMPOSITION_METADATA_KEY: &str = "delegated_child_composition";
@@ -1500,37 +1502,51 @@ impl DelegationHandler for GatewayDelegationHandler {
         match completion_mode {
             DelegateCompletionMode::Wait => {
                 let child_cancel_token = cancel_token.child_token();
+                let delegate_message_id = delegate_msg.id;
                 let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-                // Keep the child future off the tracking state's inline storage:
-                // polling nested delegations must fit the default worker stack.
-                let execution = Box::pin(
-                    executor.execute_delegation(
-                        &delegate_msg,
-                        Some(sender_turn_id),
-                        Some(sender_session_id),
-                        topic_id,
-                        target_agent_config,
-                        target_context_transfer_config,
-                        Some(target_dispatcher),
-                        session_metadata,
-                        child_cancel_token.clone(),
-                        Some(started_tx),
-                        existing_child,
-                        placement
-                            .as_ref()
-                            .map(|placement| placement.path.to_string_lossy().into_owned()),
-                        child_effort,
-                    ),
-                );
-                let result_msg = match Box::pin(track_delegated_session(
-                    &self.state,
-                    child_cancel_token,
-                    started_rx,
-                    None,
-                    execution,
-                ))
-                .await
-                {
+                let tracking_state = self.state.clone();
+                // Give each child its own poll stack so nested waits do not
+                // accumulate the parents' turn frames on the same stack. The
+                // tracking runs with it, so a dropped wait aborts both and the
+                // child's registration releases it.
+                let child_task = AbortOnDropHandle::new(tokio::spawn(
+                    async move {
+                        let execution = Box::pin(executor.execute_delegation(
+                            &delegate_msg,
+                            Some(sender_turn_id),
+                            Some(sender_session_id),
+                            topic_id,
+                            target_agent_config,
+                            target_context_transfer_config,
+                            Some(target_dispatcher),
+                            session_metadata,
+                            child_cancel_token.clone(),
+                            Some(started_tx),
+                            existing_child,
+                            placement
+                                .as_ref()
+                                .map(|placement| placement.path.to_string_lossy().into_owned()),
+                            child_effort,
+                        ));
+                        track_delegated_session(
+                            &tracking_state,
+                            child_cancel_token,
+                            started_rx,
+                            None,
+                            execution,
+                        )
+                        .await
+                    }
+                    .in_current_span(),
+                ));
+                let result = child_task.await.unwrap_or_else(|error| {
+                    Err(swage_core::ToolError::ExecutionFailed {
+                        name: "delegate".into(),
+                        message: format!("child task ended before returning a result: {error}"),
+                    }
+                    .into())
+                });
+                let result_msg = match result {
                     Ok(result_msg) => result_msg,
                     Err(error) => {
                         shutdown_sandbox_guard(
@@ -1539,7 +1555,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                         )
                         .await;
                         let _ = router
-                            .fail_message(delegate_msg.id, &error.to_string())
+                            .fail_message(delegate_message_id, &error.to_string())
                             .await;
                         return Err(error);
                     }
