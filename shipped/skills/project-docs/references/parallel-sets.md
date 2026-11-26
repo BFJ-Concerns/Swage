@@ -1,122 +1,104 @@
-# Parallel Documentation Sets
+# The two documentation trees
 
-A project past the README-only floor keeps two parallel documentation trees —
-one per register — plus generated indexes that guarantee no file goes
-unaccounted for. Read this when a project keeps, or this job creates, a `docs/`
-tree; a README-only project has no parallel set, and the README serves both
-readers.
+A project with a `docs/` tree keeps two trees, one for each reader, and
+indexes generated from them so that no page goes unlisted. A project with
+only a README has neither, and the README serves both readers.
 
 ## Layout
 
 ```
-README.md          human front door (never mirrored)
-llms.txt           generated agent index (llms.txt format)
-llms-full.txt      generated agent corpus, one file
-docs/              human set: narrative, guides, reference, runbooks
-  README.md        generated human index (hand preamble + generated region)
-agent-docs/        agent set: the same ground, terse
+README.md          where a person starts (has no counterpart)
+llms.txt           generated index of the agent pages, in the llms.txt format
+llms-full.txt      generated: every agent page in one file
+docs/              for people: narrative, guides, reference, runbooks
+  README.md        index of the human pages: a hand-written opening, then a generated region
+agent-docs/        for agents: the same ground, terse
 ```
 
-The two trees mirror paths: `docs/reference/cli.md` pairs with
-`agent-docs/reference/cli.md`. A page without a counterpart declares itself
-`unpaired` in frontmatter (below) — a human-only tutorial, an agent-only
-operational detail — so the index check reads declarations, never guesses. The
-agent-guidance file (AGENTS.md / CLAUDE.md) sits entirely outside both trees
-and keeps its own owner; the boundary is ambient versus on-demand — facts an
-agent needs in every session belong to the guidance file, facts it looks up
-belong to `agent-docs/`. Whether a project maintains one register, both, or
-neither is the project's policy (its planning layer records it); the index
-script checks the trees that exist rather than mandating which exist. Both
-trees carry usage documentation only (the skill's Scope): a
-repository-development fact an agent needs is guidance-file or planning-layer
-material, never an `agent-docs/` page, however on-demand it is.
+The trees mirror each other's paths: `docs/reference/cli.md` pairs with
+`agent-docs/reference/cli.md`. A page with no counterpart, such as a tutorial
+only a person needs or an operational detail only an agent needs, says so
+with `unpaired` in its front matter, so that the index check reads a
+declaration and never guesses.
 
-## Precedence: the agent set is primary
+Both trees document using the product. The agent-guidance file sits outside
+them: what an agent needs in every session belongs there, and what it looks
+up when needed belongs in `agent-docs/`. Which trees a project keeps is the
+project's choice, and the index script checks the trees that exist.
 
-Where a fact serves both registers, it is authored in the agent set and the
-human page derives from it — restating the same facts with the narrative,
-rationale, and worked examples the agent set deliberately strips. Update order
-follows: bring the agent page true against the code first, then re-derive the
-affected human pages. Human-native material with no agent counterpart —
-tutorials, usage rationale (why a reader would choose one option over
-another), conceptual guides — is written directly and declared unpaired.
+## The agent page comes first
 
-This is the one sanctioned exception to the single-home rule (doctrine gate 3):
-the agent page stays the fact's authoritative home, and the human rendering is
-a governed derivation, kept honest by the verification chain below — not a
-second authority. A derived page earns its file (gate 2) by its rendering:
-deleting it would leave the facts machine-terse only, and readability for the
-human audience is what the file exists to hold.
+Where a fact serves both readers, it is written on the agent page, and the
+human page restates it with the narrative, reasons and worked examples the
+agent page leaves out. So an update corrects the agent page against the code
+first and then re-derives the human pages that restate it. Material only a
+person needs (tutorials, why someone would choose one option over another,
+conceptual guides) is written directly and declared unpaired.
 
-## The agent register's shape
+This is the one case where a fact appears in two files. The agent page
+remains its home, and the human page is a derivation that the accuracy
+review checks against it. The human page earns its file by being readable:
+without it the facts would exist only in the terse form.
 
-An agent page carries what an executing agent acts on and nothing else:
-behaviour, commands, configuration, APIs, constraints, gotchas — stated once,
-plainly, tables where the content is enumerable. No motivation sections, no
-worked walkthroughs, no restated context. The prompt-engineering craft applies
-(Two Registers); the evidence and extraction gates apply in full — terseness
-never licenses an unverified claim.
+An agent page holds what an agent acts on: behaviour, commands,
+configuration, interfaces, constraints, and the facts that defy a reasonable
+assumption. Each is stated once, in tables where the content is a list, with
+no motivation and no walkthrough. Being terse does not excuse an unchecked
+claim.
 
-## Frontmatter
+## Front matter
 
-Both trees carry minimal YAML frontmatter — flat string fields only, and the
-one carve-out from the no-frontmatter default:
+Both trees carry minimal YAML front matter, flat `key: value` lines only:
 
 | Field | Where | Meaning |
 |---|---|---|
-| `description` | agent pages | One line for `llms.txt` — only when the page title alone is ambiguous; omit otherwise |
-| `description` | human pages | One line for the human index — always |
-| `unpaired` | either tree | Why this page deliberately has no counterpart |
+| `description` | agent pages | One line for `llms.txt`, given only when the page title alone is ambiguous |
+| `description` | human pages | One line for the human index, always given |
+| `unpaired` | either tree | Why this page has no counterpart |
 
-## Indexes are generated, never hand-edited
+## The indexes are generated
 
-`scripts/doc-indexes.sh` derives every index deterministically from the trees
-and their frontmatter:
+`scripts/doc-indexes.sh` builds every index from the trees and their front
+matter:
 
-- **`llms.txt`** — the llms.txt format: a hand-written header (H1 title,
-  blockquote summary) above the marker, then a generated region of H2-grouped
-  link lists, one entry per agent page (a `title` link to its path, plus `: description`
-  only where frontmatter supplies one), grouped by subdirectory.
-- **`llms-full.txt`** — the whole agent set concatenated, fully generated.
-- **`docs/README.md`** — the human index: a hand-written preamble above the
-  marker, then a generated region listing every human page with its
-  frontmatter description, grouped and rendered for a person.
+- **`llms.txt`**: a hand-written header (an H1 title and a blockquote
+  summary) above the marker, then a generated region of link lists under H2
+  headings, one entry for each agent page, grouped by subdirectory. An entry
+  is the page title linked to its path, followed by its description where the
+  front matter gives one.
+- **`llms-full.txt`**: the whole agent tree in one file, entirely generated.
+- **`docs/README.md`**: a hand-written opening above the marker, then a
+  generated region listing every human page with its description.
 
-`scripts/doc-indexes.sh --check` regenerates to a temp copy and diffs, and
-enforces the mirror rule: every page in either tree has a counterpart at the
-mirrored path or an `unpaired` declaration. A stale index, an orphaned page,
-or an undeclared one-sided page fails the check — run it in the verify step,
-and fix by regenerating or declaring, never by hand-editing a generated
-region.
+`scripts/doc-indexes.sh --check` regenerates into a temporary copy and
+compares, and it enforces the mirror: every page in either tree has a
+counterpart at the mirrored path or an `unpaired` declaration. A stale index,
+a page missing from one, or a one-sided page with no declaration fails the
+check. The remedy is to regenerate or to declare. A generated region is never
+edited by hand, since the next generation overwrites the edit.
 
-## The verification chain
+## The order of the accuracy review
 
-The accuracy review runs as a chain, priced by where each claim is
-authoritative:
+Each claim is checked against whatever is authoritative for it:
 
-1. **Agent set against the code** — the full adversarial audit; this is where
-   accuracy is enforced.
-2. **Human pages against their agent counterparts** — a derivation check: the
-   same facts, no contradictions, nothing invented in the retelling.
-3. **Human-only claims against the code** — material with no agent
-   counterpart (narrative, tutorials, unpaired pages) cannot be checked
-   against the agent set, so it takes the direct audit.
+1. **Agent pages against the code.** This is where accuracy is established.
+2. **Human pages against their agent counterparts**: the same facts, no
+   contradiction, nothing added in the retelling.
+3. **Claims only a human page makes against the code**: narrative,
+   tutorials and unpaired pages have no agent page to be checked against.
 
-The authority is per claim, not per page, and the writer derives it when
-filling the inventory's authority column (`survey-protocol.md`): a claim that
-restates its page's agent counterpart carries that counterpart's path; every
-other claim — agent pages, unpaired pages, and narrative added inside a
-paired page — carries the code. Each leg runs over the claims the job's
-scope puts in play (refresh scoping applies); it is not a whole-tree audit
-on every touch. The generated artefacts (`llms-full.txt`, the index regions)
-are renderings of the trees, not additional fact homes — audit their
-generation, never their prose.
+What a claim is checked against is decided claim by claim, and the writer
+records it in the inventory (`survey-protocol.md`). A claim that restates its
+page's agent counterpart is checked against that counterpart's path. Every
+other claim, including narrative added inside a paired page, is checked
+against the code. Each step covers the claims this job put in play and is not
+an audit of the whole tree. The generated files are renderings of the trees:
+check that they regenerate cleanly, and do not review their text.
 
-## Adopting the scheme in an existing project
+## A project that has only `docs/`
 
-A project with only a conventional `docs/` tree is not retrofitted silently:
-propose the parallel set as part of the doc plan, and build the agent set from
-the fact inventory — it is a write of the terse register, not a mechanical
-compression of the human prose. Where the project already keeps its own
-doc-site tooling with an agent-export mechanism, conform to the incumbent
-system rather than installing this one beside it.
+Do not add the agent tree without saying so. Propose it in the plan, and
+build it from the fact inventory: it is written fresh in the terse register
+and is not a compression of the human prose. Where the project's own
+documentation tooling already produces an
+export for agents, use that and do not install this scheme beside it.

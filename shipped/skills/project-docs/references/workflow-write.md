@@ -1,89 +1,69 @@
-# Write Mode
+# Writing a new set
 
-Creating documentation that does not exist. The doctrine's gates all apply; the
-decisions specific to write mode are choosing the doc set and shaping the front
-door.
+Two decisions are particular to writing documentation that does not exist:
+which documents to write, and how the README opens the project.
 
-## Choosing the Doc Set
+## Which documents
 
-The kit is a menu gated by content, not a template to fill. Advisory bands, from
-the floor up:
+The set follows the content the survey found. As a guide to where projects
+usually land:
 
-- **Script or single-purpose tool** — README only.
-- **Small tool or library** — README, plus at most one reference page if there is
-  a real enumerable surface (a CLI, a config file).
-- **Service, application, or library with a real surface** — README, then
-  guides, reference pages, and a runbook as each is earned: a coherent body of
-  grounded content that exists today and fits nowhere else.
+- **A script or single-purpose tool**: a README.
+- **A small tool or library**: a README, and one reference page where there
+  is a real surface to list, such as a command line or a config file.
+- **A service, an application, or a library with a real surface**: a README,
+  then guides, reference pages and a runbook, each added when there is
+  grounded content for it that fits nowhere else.
 
-Whenever the chosen set includes a `docs/` tree — at any band, a single
-earned reference page included — the parallel `agent-docs/` set comes with it
-(`parallel-sets.md`), and drafting ends by generating its indexes:
-`scripts/doc-indexes.sh` (the verify step's `--check` then proves them
-current).
+A request from the person for a particular document outranks this guide where
+there is real content for it. Nothing here justifies an empty file.
 
-The bands are advisory. An explicit user request for a specific doc overrides
-them when real content exists to ground it; a band never licenses an empty file.
+Whenever the set includes a `docs/` tree, even a single reference page, the
+`agent-docs/` tree comes with it (`parallel-sets.md`), and drafting ends by
+generating the indexes with `scripts/doc-indexes.sh`.
 
-**Detect and conform**: where the repo already has documentation conventions — a
-docs/ layout, a doc-site tool, heading styles — those win over this file's
-defaults. This skill extends an incumbent system; it does not migrate one.
+Where the repository already has documentation conventions (a `docs/`
+layout, a doc-site tool, a heading style), follow them in place of the
+defaults here. This skill adds to a system that is there; it does not replace
+one.
 
-**Source boundary**: existing docs and any Markdown the user supplies are context
-for tone, terminology, and conventions — not prose to lift into new documents
-unless the user asks for reuse. (Refresh mode preserving already-correct text is
-the opposite case, and right.)
+Existing docs and any Markdown the person supplies show the project's tone,
+terms and conventions. Their sentences are not material to copy into new
+documents unless the person asks for that.
 
-## README Shape
+## The README
 
-The human front door. A shape, not a template — omit any part the project
-genuinely lacks:
+The README is where a person starts. It has these parts, less any the
+project lacks:
 
-- What it is and why it exists, in the first paragraph — plain language before
-  jargon.
-- Install or build, and a quickstart with copy-paste commands that actually work
-  (gate 5: extracted, sanity-checked where safe).
-- One usage example showing the main workflow.
-- A configuration pointer — the couple of options everyone needs, linking to the
-  full reference for the rest.
-- Links into deeper docs (each reachable from the README directly or via one
-  hop) and to the project's status or support expectations where they exist.
+- what the project is and what it is for, in the first paragraph, in plain
+  words before any jargon;
+- how to install or build it, and a short start with commands that can be
+  pasted and that work, copied from their source and tried where that is
+  safe;
+- one example of the main thing a person does with it;
+- the few settings everyone needs, with a link to the full reference;
+- links to the deeper documents, each reachable from the README directly or
+  through one other page, and the project's status or support expectations
+  where it states them.
 
-Completeness check: purpose, install/build/test/run, configuration, main
-workflows, pointers — each either present or genuinely inapplicable.
+Before finishing, check that purpose, install, build, test, run,
+configuration and the main uses are each present or do not apply.
 
-## Routing by Audience
+## Where facts go
 
-Every fact routes by who acts on it (doctrine gate 3), and write mode is where
-the two audiences become concrete files:
-
-- **Users** — README to orient, docs/ guides and reference to go deep.
-  Building from source and operating a deployed instance are user activities
-  too: build instructions land in the README's install/build lines and, when
-  earned, a how-to guide; test commands ride with them as build verification
-  (running the shipped suite proves a from-source build; evolving the suite
-  is development process). Capture alongside the build lines the non-obvious
-  environment prerequisites — toolchain, platform, system libraries, the
-  quirks that defy assumption. Operational procedure lands in the runbook
-  (`document-shapes.md`, *Runbooks*). Operational notes are the usual site of
-  machine-conditioned facts; doctrine gate 6 governs when they may be written
-  and how they are scoped.
-- **Coding agents** — two homes, split by when the fact is needed. What an
-  agent needs *ambiently in every session* — the build/test/run commands,
-  repository layout, standing constraints — is guidance-file material: it
-  feeds the agent-guidance hand-off (the skill's Agent-Facing Guidance
-  section) and is never written here. What an agent looks up *on demand* —
-  reference detail, APIs, configuration surfaces, behaviour — is authored in
-  the `agent-docs/` set, the primary rendering the human pages derive from
-  (`parallel-sets.md`). Neither gets a narrative home.
-
-Development-process material the survey turns up — release mechanics,
-contribution setup, internal design — routes to no document (the skill's
-Scope): surface it in the report for the project's planning layer, or into the
-agent-guidance hand-off where it is an ambient every-session fact.
-
-## Before Mass Drafting
-
-Propose the doc plan first: the file set with a one-line content statement per
-file, plus what is deliberately omitted and why. A plan the user can veto in ten
-seconds is cheaper than three drafted files they didn't want.
+- **Building from source and running the tests** are things a user does. The
+  commands go in the README's install and build lines, with the test command
+  beside them as the way to prove a build, and in a how-to guide where the
+  project has earned one. Put with them whatever the environment needs that a
+  reader would not assume: the toolchain, the platform, system libraries.
+  Changing the test suite is development and is not documented.
+- **Operating a running instance** goes in the runbook
+  (`document-shapes.md`, *Runbooks*).
+- **What an agent looks up when it needs it** (reference detail, interfaces,
+  configuration, behaviour) is written in `agent-docs/`, and the human pages
+  derive from it (`parallel-sets.md`).
+- **What an agent needs in every session** (the build, test and run
+  commands, the layout, standing constraints) belongs to the agent-guidance
+  file and is reported for it, not written into the docs trees (the skill's
+  *The agent-guidance file*).
