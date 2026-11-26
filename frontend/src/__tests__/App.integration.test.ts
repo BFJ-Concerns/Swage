@@ -239,7 +239,7 @@ function makeSettings(
       require_approval: [],
     },
     hitl: { timeout: 300, timeout_policy: "reject" },
-    sandbox: { enabled: true, allow_degraded_execution: false, egress_hosts: ["github.com"] },
+    sandbox: { enabled: true, allow_degraded_execution: false, network: "open", egress_hosts: [] },
     context: { assembly: "default", timeout: 5, budget: null },
     pricing: { models: {} },
     observability: { force_on: false },

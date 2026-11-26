@@ -37,7 +37,8 @@ export function emptySettings(): SettingsResponse {
     sandbox: {
       enabled: true,
       allow_degraded_execution: false,
-      egress_hosts: ["github.com"],
+      network: "open",
+      egress_hosts: [],
     },
     context: {
       assembly: "default",

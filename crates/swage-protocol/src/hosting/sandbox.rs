@@ -60,6 +60,10 @@ pub struct SandboxPolicy {
     /// Where tools keep their output artefacts, carried to the child
     /// independently of its working directory; writable, as a write path.
     pub tool_output_directory: Option<PathBuf>,
+    /// Whether sandboxed commands share the host's network. Without it the
+    /// sandbox has its own network namespace, reaching the network only
+    /// through an egress proxy when the host binds one in.
+    pub host_network: bool,
     /// Host-selected environment inherited by sandboxed commands.
     pub environment: std::collections::BTreeMap<String, String>,
     /// Time to wait for graceful shutdown before SIGKILL.
@@ -105,6 +109,7 @@ pub struct SandboxPolicyBuilder {
     read_only_paths: Vec<PathBuf>,
     masked_paths: Vec<PathBuf>,
     tool_output_directory: Option<PathBuf>,
+    host_network: bool,
     // 5 second default — long enough for a clean shutdown, short enough not
     // to stall the host on a hung agent.
     shutdown_grace_period: Duration,
@@ -124,6 +129,7 @@ impl SandboxPolicyBuilder {
             read_only_paths: Vec::new(),
             masked_paths: Vec::new(),
             tool_output_directory: None,
+            host_network: false,
             shutdown_grace_period: Duration::from_secs(5),
             tool_call_timeout: Duration::from_secs(30),
             tool_runtime: None,
@@ -171,6 +177,12 @@ impl SandboxPolicyBuilder {
         self
     }
 
+    /// Shares the host's network with sandboxed commands (default: no).
+    pub fn host_network(mut self, shared: bool) -> Self {
+        self.host_network = shared;
+        self
+    }
+
     /// Overrides the graceful shutdown timeout (default: 5s).
     pub fn shutdown_grace_period(mut self, duration: Duration) -> Self {
         self.shutdown_grace_period = duration;
@@ -211,6 +223,7 @@ impl SandboxPolicyBuilder {
             read_only_paths: self.read_only_paths,
             masked_paths: self.masked_paths,
             tool_output_directory: self.tool_output_directory,
+            host_network: self.host_network,
             environment: std::collections::BTreeMap::new(),
             shutdown_grace_period: self.shutdown_grace_period,
             // The shell owns its deadline. Allow its process cleanup and reply

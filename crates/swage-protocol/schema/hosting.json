@@ -1453,6 +1453,10 @@
             "type": "string"
           }
         },
+        "host_network": {
+          "description": "Whether sandboxed commands share the host's network. Without it the\nsandbox has its own network namespace, reaching the network only\nthrough an egress proxy when the host binds one in.",
+          "type": "boolean"
+        },
         "llm_request_timeout": {
           "description": "Per-LLM-request IPC timeout.",
           "$ref": "#/$defs/Duration"
@@ -1514,6 +1518,7 @@
         "write_paths",
         "read_only_paths",
         "masked_paths",
+        "host_network",
         "environment",
         "shutdown_grace_period",
         "tool_call_timeout",

@@ -194,7 +194,12 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
         "server" => &["host", "port"],
         "providers" => &["default", "entries"],
         "models" => &["default", "default_model_id", "entries"],
-        "sandbox" => &["enabled", "allow_degraded_execution", "egress_hosts"],
+        "sandbox" => &[
+            "enabled",
+            "allow_degraded_execution",
+            "network",
+            "egress_hosts",
+        ],
         "logging" => &["level"],
         // Scalar tool settings plus flattened permission fields (allow, deny,
         // bundles, require_approval) which live at the [tools] level in TOML.
@@ -307,6 +312,7 @@ fn check_field_type(
         ("sandbox", "enabled" | "allow_degraded_execution") => {
             ("boolean", matches!(value, Value::Boolean(_)))
         }
+        ("sandbox", "network") => ("string", matches!(value, Value::String(_))),
         ("sandbox", "egress_hosts") => ("array", matches!(value, Value::Array(_))),
         ("logging", "level") => ("string", matches!(value, Value::String(_))),
         ("tools", "max_identical_failures") => ("integer", matches!(value, Value::Integer(_))),
@@ -400,6 +406,21 @@ fn check_field_semantics(
                     Some(field_path.to_string()),
                     ConfigProblemKind::SemanticError {
                         message: format!("port must be between 1 and 65535, got {port}"),
+                    },
+                ));
+            }
+        }
+        ("sandbox", "network") => {
+            if let Value::String(network) = value
+                && !["open", "none", "proxy"].contains(&network.as_str())
+            {
+                problems.push(make_problem(
+                    file_path,
+                    Some(field_path.to_string()),
+                    ConfigProblemKind::SemanticError {
+                        message: format!(
+                            "unknown sandbox network '{network}'; expected one of: open, none, proxy"
+                        ),
                     },
                 ));
             }

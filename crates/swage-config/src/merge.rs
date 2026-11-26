@@ -47,6 +47,7 @@ pub struct PartialModelCatalogConfig {
 pub struct PartialSandboxConfig {
     pub enabled: Option<bool>,
     pub allow_degraded_execution: Option<bool>,
+    pub network: Option<swage_protocol::client::settings::SandboxNetwork>,
     pub egress_hosts: Option<Vec<String>>,
 }
 
@@ -339,6 +340,7 @@ impl From<ResolvedConfig> for PartialConfig {
             sandbox: Some(PartialSandboxConfig {
                 enabled: Some(sandbox.enabled),
                 allow_degraded_execution: Some(sandbox.allow_degraded_execution),
+                network: Some(sandbox.network),
                 egress_hosts: Some(sandbox.egress_hosts),
             }),
             logging: Some(PartialLoggingConfig {
@@ -530,6 +532,7 @@ impl_merge_overlay!(PartialServerConfig { host, port });
 impl_merge_overlay!(PartialSandboxConfig {
     enabled,
     allow_degraded_execution,
+    network,
     egress_hosts,
 });
 impl_merge_overlay!(PartialLoggingConfig { level });
@@ -846,6 +849,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             allow_degraded_execution: sb
                 .allow_degraded_execution
                 .unwrap_or(dsb.allow_degraded_execution),
+            network: sb.network.unwrap_or(dsb.network),
             egress_hosts: sb.egress_hosts.unwrap_or(dsb.egress_hosts),
         },
         logging: LoggingConfig {

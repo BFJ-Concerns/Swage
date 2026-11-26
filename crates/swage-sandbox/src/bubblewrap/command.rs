@@ -58,7 +58,7 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 ///
 /// `egress_socket` is the host proxy's socket to bind into the sandbox and
 /// name in the child's environment; `None` leaves the sandbox with no route
-/// to the network.
+/// to the network unless the policy shares the host's.
 pub fn build_bwrap_command(
     config: &SandboxConfig,
     socket_path: &Path,
@@ -108,8 +108,9 @@ pub fn policy_command(
 ) -> Result<Command, SandboxError> {
     let mut cmd = Command::new(bwrap_path);
     // Only named development settings cross the process boundary. In
-    // particular, no inherited Git selector, command configuration, askpass,
-    // HTTP proxy or provider credential can become a second authority.
+    // particular, no inherited Git selector, command configuration, askpass
+    // or provider credential can become a second authority; what else a
+    // command needs the host names in the policy's environment.
     cmd.env_clear();
     for key in [
         "PATH",
@@ -133,18 +134,25 @@ pub fn policy_command(
         "CARGO_HOME",
         "RUSTUP_HOME",
         "RUSTUP_TOOLCHAIN",
+        // Which system and global git configuration the operator uses.
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_NOSYSTEM",
     ] {
         if let Some(value) = std::env::var_os(key) {
             cmd.env(key, value);
         }
     }
-    // HOME and XDG remain useful to development tools, but neither is a Git
-    // configuration source. Repository configuration stays readable.
-    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
-    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
+    // Git reads the operator's own system and global configuration, as it
+    // would outside the sandbox: HOME, XDG_CONFIG_HOME and the GIT_CONFIG_*
+    // file selectors above locate it.
 
-    // Isolate all namespaces (PID, network, mount, user, IPC, UTS).
+    // Isolate every namespace (PID, network, mount, user, IPC, UTS), the
+    // network excepted where the policy shares the host's.
     cmd.arg("--unshare-all");
+    if config.host_network {
+        cmd.arg("--share-net");
+    }
 
     // Terminate the child automatically if the host process dies — prevents
     // orphaned sandbox processes when the daemon crashes or is killed.
@@ -369,6 +377,28 @@ mod tests {
             args.contains(&OsStr::new("--die-with-parent")),
             "missing --die-with-parent; args: {args:?}"
         );
+    }
+
+    #[test]
+    fn the_host_network_is_shared_only_when_the_policy_shares_it() {
+        let shares = |host_network: bool| {
+            let config = SandboxConfig::builder()
+                .working_directory("/tmp/agent")
+                .host_network(host_network)
+                .build()
+                .unwrap();
+            let cmd = build_bwrap_command_with_path(
+                Path::new("/usr/bin/bwrap"),
+                &config,
+                Path::new("/run/swage/agent.sock"),
+                None,
+                Path::new("/usr/bin/swage-agent"),
+            )
+            .unwrap();
+            args_of(&cmd).contains(&OsStr::new("--share-net"))
+        };
+        assert!(shares(true));
+        assert!(!shares(false));
     }
 
     #[test]

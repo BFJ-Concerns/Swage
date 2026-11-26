@@ -17571,15 +17571,13 @@ async fn delegation_rejects_missing_sender_turn_lineage() {
 fn sandbox_config_carries_the_session_shell_timeout_and_waits_for_its_reply() {
     let agent = AgentConfig::new("agent").with_workspace(std::env::current_dir().unwrap(), vec![]);
     for seconds in [1, 75] {
-        let tools = swage_config::ToolConfig {
-            shell_timeout_secs: seconds,
-            ..Default::default()
-        };
+        let mut config = swage_config::ResolvedConfig::default();
+        config.tools.shell_timeout_secs = seconds;
         let roots = PolicyRoots {
             home: std::env::temp_dir().join("swage-no-home"),
             data_root: std::env::temp_dir().join("swage-no-data-root"),
         };
-        let config = build_sandbox_config(&agent, None, &roots, &tools).unwrap();
+        let config = build_sandbox_config(&agent, None, &roots, &config).unwrap();
         assert_eq!(
             config
                 .tool_runtime
@@ -17641,7 +17639,7 @@ fn sandbox_config_skips_missing_trusted_workspace_paths() {
         &agent_config,
         Some(&policy),
         &roots,
-        &swage_config::ToolConfig::default(),
+        &swage_config::ResolvedConfig::default(),
     )
     .unwrap();
     let existing_workspace = sandbox_path(&existing_workspace);
@@ -17719,7 +17717,7 @@ fn a_linked_worktree_writes_its_gitdir_and_the_repository_it_belongs_to() {
         &agent_config,
         None,
         &roots,
-        &swage_config::ToolConfig::default(),
+        &swage_config::ResolvedConfig::default(),
     )
     .unwrap();
     assert!(sandbox_config.working_directory_is_writable());
@@ -17757,7 +17755,7 @@ fn git_metadata_under_a_masked_path_is_left_masked() {
             &agent_config,
             None,
             &roots,
-            &swage_config::ToolConfig::default(),
+            &swage_config::ResolvedConfig::default(),
         )
         .unwrap();
         assert!(policy.working_directory_is_writable());
@@ -17798,8 +17796,13 @@ fn a_grant_equal_to_a_masked_path_is_carried_beside_its_mask() {
     };
 
     let at_ssh = AgentConfig::new("worker").with_workspace(&ssh, vec![ssh.clone()]);
-    let policy =
-        build_sandbox_config(&at_ssh, None, &roots, &swage_config::ToolConfig::default()).unwrap();
+    let policy = build_sandbox_config(
+        &at_ssh,
+        None,
+        &roots,
+        &swage_config::ResolvedConfig::default(),
+    )
+    .unwrap();
     assert!(
         policy.masked_paths.contains(&sandbox_path(&ssh)),
         "{:?}",
@@ -17812,14 +17815,24 @@ fn a_grant_equal_to_a_masked_path_is_carried_beside_its_mask() {
     );
 
     let at_root = AgentConfig::new("worker").with_workspace(&data_root, vec![data_root.clone()]);
-    let policy =
-        build_sandbox_config(&at_root, None, &roots, &swage_config::ToolConfig::default()).unwrap();
+    let policy = build_sandbox_config(
+        &at_root,
+        None,
+        &roots,
+        &swage_config::ResolvedConfig::default(),
+    )
+    .unwrap();
     assert!(policy.masked_paths.contains(&sandbox_path(&data_root)));
     assert!(policy.write_paths.contains(&sandbox_path(&data_root)));
 
     let above = AgentConfig::new("worker").with_workspace(&home, vec![home.clone()]);
-    let policy =
-        build_sandbox_config(&above, None, &roots, &swage_config::ToolConfig::default()).unwrap();
+    let policy = build_sandbox_config(
+        &above,
+        None,
+        &roots,
+        &swage_config::ResolvedConfig::default(),
+    )
+    .unwrap();
     assert!(policy.masked_paths.contains(&sandbox_path(&ssh)));
     assert!(
         !policy.write_paths.contains(&sandbox_path(&ssh)),
@@ -17845,7 +17858,7 @@ fn a_grant_equal_to_a_masked_path_is_carried_beside_its_mask() {
         &at_ssh,
         Some(&read_only_policy),
         &roots,
-        &swage_config::ToolConfig::default(),
+        &swage_config::ResolvedConfig::default(),
     )
     .unwrap();
     assert!(policy.masked_paths.contains(&sandbox_path(&ssh)));
@@ -17888,7 +17901,7 @@ fn a_git_pointer_at_a_directory_that_is_not_git_metadata_grants_nothing() {
         &agent_config,
         None,
         &roots,
-        &swage_config::ToolConfig::default(),
+        &swage_config::ResolvedConfig::default(),
     )
     .unwrap();
     assert!(
@@ -17904,7 +17917,7 @@ fn a_git_pointer_at_a_directory_that_is_not_git_metadata_grants_nothing() {
         &agent_config,
         None,
         &roots,
-        &swage_config::ToolConfig::default(),
+        &swage_config::ResolvedConfig::default(),
     )
     .unwrap();
     assert!(
@@ -17986,7 +17999,7 @@ fn the_policy_masks_private_home_paths_and_the_data_root_and_opens_the_shared_ca
         &agent_config,
         None,
         &roots,
-        &swage_config::ToolConfig::default(),
+        &swage_config::ResolvedConfig::default(),
     )
     .unwrap();
 
@@ -18024,14 +18037,92 @@ fn the_policy_masks_private_home_paths_and_the_data_root_and_opens_the_shared_ca
     let inside = data_root.join("scratch").join("session-1");
     std::fs::create_dir_all(&inside).unwrap();
     let granted = AgentConfig::new("worker").with_workspace(&inside, vec![inside.clone()]);
-    let sandbox_config =
-        build_sandbox_config(&granted, None, &roots, &swage_config::ToolConfig::default()).unwrap();
+    let sandbox_config = build_sandbox_config(
+        &granted,
+        None,
+        &roots,
+        &swage_config::ResolvedConfig::default(),
+    )
+    .unwrap();
     assert!(
         sandbox_config
             .masked_paths
             .contains(&sandbox_path(&data_root))
     );
     assert!(sandbox_config.write_paths.contains(&sandbox_path(&inside)));
+}
+
+/// Of `~/.ssh`, what ssh needs to reach a forge through the operator's
+/// agent reopens read-only through the mask; the private keys stay hidden.
+#[test]
+fn the_ssh_files_that_hold_no_key_reopen_read_only_and_the_keys_stay_masked() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path().join("home");
+    let ssh = home.join(".ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    for file in ["config", "known_hosts", "id_ed25519", "id_ed25519.pub"] {
+        std::fs::write(ssh.join(file), "x").unwrap();
+    }
+    let workspace = home.join("project");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let roots = PolicyRoots {
+        home: home.clone(),
+        data_root: home.join(".swage"),
+    };
+    let agent_config =
+        AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
+    let policy = build_sandbox_config(
+        &agent_config,
+        None,
+        &roots,
+        &swage_config::ResolvedConfig::default(),
+    )
+    .unwrap();
+
+    assert!(policy.masked_paths.contains(&sandbox_path(&ssh)));
+    let ssh = sandbox_path(&ssh);
+    let reopened: Vec<_> = policy
+        .read_only_paths
+        .iter()
+        .filter(|path| path.starts_with(&ssh))
+        .collect();
+    assert_eq!(
+        reopened,
+        vec![
+            &ssh.join("config"),
+            &ssh.join("id_ed25519.pub"),
+            &ssh.join("known_hosts"),
+        ]
+    );
+    assert!(!policy.write_paths.iter().any(|path| path.starts_with(&ssh)));
+}
+
+/// The network a sandboxed command reaches follows the setting: the host's
+/// by default, its own namespace when the person confines it or puts it
+/// behind the recording proxy.
+#[test]
+fn the_sandbox_shares_the_host_network_unless_the_setting_confines_it() {
+    let workspace = tempfile::tempdir().unwrap();
+    let roots = PolicyRoots {
+        home: workspace.path().join("home"),
+        data_root: workspace.path().join("data-root"),
+    };
+    let agent_config = AgentConfig::new("worker")
+        .with_workspace(workspace.path(), vec![workspace.path().to_path_buf()]);
+    for (network, shared) in [
+        (swage_config::SandboxNetwork::Open, true),
+        (swage_config::SandboxNetwork::None, false),
+        (swage_config::SandboxNetwork::Proxy, false),
+    ] {
+        let mut config = swage_config::ResolvedConfig::default();
+        config.sandbox.network = network;
+        let policy = build_sandbox_config(&agent_config, None, &roots, &config).unwrap();
+        assert_eq!(policy.host_network, shared, "{network:?}");
+    }
+    assert_eq!(
+        swage_config::ResolvedConfig::default().sandbox.network,
+        swage_config::SandboxNetwork::Open
+    );
 }
 
 #[test]
@@ -18075,7 +18166,7 @@ fn worker_placement_replaces_other_filesystem_authority() {
         &agent_config,
         Some(&policy),
         &roots,
-        &swage_config::ToolConfig::default(),
+        &swage_config::ResolvedConfig::default(),
     )
     .unwrap();
     let placement = sandbox_path(&placement);

@@ -176,7 +176,7 @@ pub fn resolve_provider_route<'a>(
 }
 
 /// Sandbox isolation settings.
-pub use swage_protocol::client::settings::SandboxConfig;
+pub use swage_protocol::client::settings::{SandboxConfig, SandboxNetwork};
 
 /// Log verbosity levels.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]

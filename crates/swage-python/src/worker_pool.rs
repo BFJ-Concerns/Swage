@@ -93,7 +93,7 @@ impl WorkerPool {
     pub async fn acquire_for_turn(
         self: &Arc<Self>,
         policy: Option<swage_sandbox::SandboxConfig>,
-        egress: swage_sandbox::EgressSetup,
+        egress: Option<swage_sandbox::EgressSetup>,
     ) -> Result<WorkerLease, PythonWorkerError> {
         if policy.is_none() && self.spawn_sandboxed {
             return Err(PythonWorkerError::SandboxUnavailable(
@@ -466,10 +466,10 @@ raise SystemExit(1)
         let mut lease = pool
             .acquire_for_turn(
                 None,
-                EgressSetup {
+                Some(EgressSetup {
                     policy: Arc::new(LocalOnly),
                     recorder: recorded.clone(),
-                },
+                }),
             )
             .await
             .expect("unsandboxed scoped worker must start");

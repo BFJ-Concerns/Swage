@@ -1072,6 +1072,7 @@ fn apply_runtime_settings_to_partial(
         partial.sandbox = Some(swage_config::merge::PartialSandboxConfig {
             enabled: Some(sandbox.enabled),
             allow_degraded_execution: Some(sandbox.allow_degraded_execution),
+            network: Some(sandbox.network),
             egress_hosts: Some(sandbox.egress_hosts.clone()),
         });
     }
@@ -2748,6 +2749,7 @@ mod tests {
             sandbox: Some(swage_protocol::client::settings::SandboxConfig {
                 enabled: false,
                 allow_degraded_execution: true,
+                network: swage_protocol::client::settings::SandboxNetwork::Proxy,
                 egress_hosts: vec!["github.com".into()],
             }),
             context: Some(swage_protocol::client::settings::ContextConfig {
@@ -3742,6 +3744,7 @@ mod tests {
                 sandbox: Some(swage_config::SandboxConfig {
                     enabled: false,
                     allow_degraded_execution: true,
+                    network: swage_protocol::client::settings::SandboxNetwork::Proxy,
                     egress_hosts: vec!["github.com".into()],
                 }),
                 context: Some(swage_config::ContextConfig {

@@ -28,7 +28,7 @@ use crate::websocket::ServerEvent;
 #[derive(Clone)]
 pub struct PythonExecution {
     pub sandbox: Option<swage_sandbox::SandboxConfig>,
-    pub egress: swage_sandbox::EgressSetup,
+    pub egress: Option<swage_sandbox::EgressSetup>,
     pub dispatcher: Arc<swage_tool::dispatch::ToolDispatcher>,
     // Keep the private IPC services alive through nested calls and workers.
     pub credentials: Arc<crate::git_credential::CredentialServer>,

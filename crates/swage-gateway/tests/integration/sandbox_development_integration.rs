@@ -13,6 +13,10 @@ use swage_storage::{SqliteStorage, store::AuditStore};
 #[tokio::test(flavor = "multi_thread")]
 async fn git_get_resolves_over_ipc_and_unknown_hosts_receive_nothing() {
     let mut env = ProcessEnvGuard::new();
+    // The machine's own git configuration stays out of the test: the
+    // host's credential helpers are the fixture's, or none.
+    env.set_var("GIT_CONFIG_GLOBAL", "/dev/null");
+    env.set_var("GIT_CONFIG_NOSYSTEM", "1");
     env.set_managed_secret_key(11);
     env.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
@@ -319,54 +323,54 @@ async fn sandboxed_git_configuration_excludes_inherited_indexed_entries() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sandboxed_git_fetch_resets_inherited_file_helpers() {
+async fn sandboxed_git_runs_the_operators_global_and_system_helpers_on_the_host() {
     for source in ["global", "system"] {
         check_inherited_git_configuration(source, true).await;
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sandboxed_git_boundary_global_file() {
+async fn sandboxed_git_reads_the_operators_global_file() {
     check_inherited_git_configuration("global_file", true).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sandboxed_git_boundary_system_enabled() {
+async fn sandboxed_git_reads_the_operators_enabled_system_file() {
     check_inherited_git_configuration("system_enabled", true).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sandboxed_git_boundary_system_default() {
+async fn sandboxed_git_reads_the_operators_system_file() {
     check_inherited_git_configuration("system_default", true).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sandboxed_git_boundary_home_file() {
+async fn sandboxed_git_reads_the_operators_home_file() {
     check_inherited_git_configuration("home_file", true).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sandboxed_git_boundary_xdg_file() {
+async fn sandboxed_git_reads_the_operators_xdg_file() {
     check_inherited_git_configuration("xdg_file", true).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sandboxed_git_boundary_include_file() {
+async fn sandboxed_git_reads_the_operators_included_file() {
     check_inherited_git_configuration("include_file", true).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sandboxed_git_boundary_git_dir() {
+async fn sandboxed_git_ignores_an_inherited_git_dir() {
     check_inherited_git_configuration("git_dir", true).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sandboxed_git_boundary_http_header() {
+async fn sandboxed_git_sends_the_operators_scoped_http_header() {
     check_inherited_git_configuration("http_header", false).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sandboxed_git_boundary_url_username() {
+async fn sandboxed_git_authenticates_through_the_operators_helper() {
     check_inherited_git_configuration("url_username", false).await;
 }
 
@@ -421,7 +425,7 @@ touch "$(dirname "$0")/marker-invoked"
             let mut contents = format!("[credential]\nhelper = {marker}\n");
             if source != "url_username" {
                 contents += &format!(
-                    "[credential \"https://unlisted.invalid\"]\nusername = inherited-user\nhelper = {marker}\n[credential \"https://localhost:18443\"]\nusername = inherited-user\n[http]\nextraHeader = Authorization: inherited-header\n[http \"https://127.0.0.1:18443\"]\nextraHeader = X-Inherited: inherited-scoped-header\n"
+                    "[credential \"https://unlisted.invalid\"]\nusername = inherited-user\nhelper = {marker}\n[credential \"https://localhost:18443\"]\nusername = inherited-user\n[http \"https://127.0.0.1:18443\"]\nextraHeader = X-Inherited: inherited-scoped-header\n"
                 );
             }
             std::fs::write(&file, contents).unwrap();
@@ -596,7 +600,7 @@ try:
     configured = git('config', '--get-all', 'credential.helper')
     assert configured.returncode == 0
     foreign_keys = ['INHERITED_UNLISTED_SETTING', 'GIT_FUTURE_SETTING', 'GIT_DIR',
-                    'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_SYSTEM']
+                    'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_CONFIG_PARAMETERS']
     print(json.dumps({
         'fetches': results,
         'url_username_resolved': (credential.returncode == 0
@@ -658,18 +662,35 @@ finally:
     assert_eq!(result.output["exit_code"], 0, "{:?}", result.output);
     let output = result.output["output"].as_str().unwrap();
     let observed: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+    // A configuration file the operator's environment selects is the
+    // operator's git configuration: the sandboxed git reads it, and its
+    // credential helper runs on the host. Configuration carried in the
+    // gateway's environment — command-scope entries, a repository selector —
+    // is not, and reaches neither.
+    let operator_file = !matches!(source, "parameters" | "indexed" | "git_dir");
+    let scoped_sections = operator_file && !matches!(source, "url_username" | "global" | "system");
     let check_config = || {
         assert_eq!(
             observed["repository_name"], "Repository Fixture",
             "workspace repository configuration must stay readable"
         );
         assert_eq!(
-            observed["username"], "",
-            "inherited {source} must not supply a username"
+            observed["username"],
+            if scoped_sections {
+                "inherited-user"
+            } else {
+                ""
+            },
+            "{source}: the operator's configuration is read, and nothing else"
         );
         assert_eq!(
-            observed["header"], "",
-            "inherited {source} must not supply an HTTP header"
+            observed["header"],
+            if scoped_sections {
+                "X-Inherited: inherited-scoped-header"
+            } else {
+                ""
+            },
+            "{source}: the operator's HTTP headers apply, and nobody else's"
         );
         let helpers: Vec<_> = observed["helpers"]
             .as_array()
@@ -677,10 +698,14 @@ finally:
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
+        assert!(
+            helpers.ends_with(&["", governed.as_str()]),
+            "{source}: command scope resets every helper for the host's: {helpers:?}"
+        );
         assert_eq!(
-            helpers,
-            ["", governed.as_str()],
-            "inherited {source} must not appear in raw helper configuration"
+            helpers.contains(&marker.as_str()),
+            operator_file,
+            "{source}: only the operator's configuration lists its helper: {helpers:?}"
         );
         assert_eq!(
             observed["foreign_env"],
@@ -697,15 +722,14 @@ finally:
         check_config();
     }
     assert_eq!(
-        observed["fetches"][0]["authenticated"], false,
-        "unlisted fetch must get no credentials from inherited {source}"
+        observed["fetches"][0]["authenticated"], operator_file,
+        "{source}: an unregistered host is answered by the operator's helper, and only that"
     );
+    assert_eq!(observed["fetches"][0]["governed"], false);
     assert_eq!(observed["fetches"][0]["success"], false);
-    for fetched in observed["fetches"].as_array().unwrap() {
-        assert_eq!(
-            fetched["extra_header"], false,
-            "inherited URL-scoped HTTP headers must not reach either host"
-        );
+    assert_eq!(observed["fetches"][0]["extra_header"], scoped_sections);
+    for fetched in &observed["fetches"].as_array().unwrap()[1..] {
+        assert_eq!(fetched["extra_header"], false);
     }
     assert_eq!(
         observed["fetches"][1]["governed"], true,
@@ -732,22 +756,33 @@ finally:
     if !config_first {
         check_config();
     }
-    assert!(
-        !root.path().join("marker-invoked").exists(),
-        "inherited {source} helper must never execute"
+    assert_eq!(
+        root.path().join("marker-invoked").exists(),
+        operator_file,
+        "{source}: the operator's helper runs, on the host, and no other"
     );
     let events = storage.list_audit_events().await.unwrap();
-    for (host, outcome) in [
-        ("127.0.0.1:18443", "absent"),
-        ("localhost:18443", "resolved"),
+    let unregistered = if operator_file {
+        (
+            "127.0.0.1:18443",
+            "resolved",
+            json!("operator_credential_helper"),
+        )
+    } else {
+        ("127.0.0.1:18443", "absent", serde_json::Value::Null)
+    };
+    for (host, outcome, credential_source) in [
+        unregistered,
+        ("localhost:18443", "resolved", json!("registered_secret")),
     ] {
         assert!(
             events
                 .iter()
                 .any(|e| e.event_kind == "git_credential_lookup"
                     && e.metadata["host"] == host
-                    && e.metadata["outcome"] == outcome),
-            "every fetch credential lookup must be audited: {host} {outcome}"
+                    && e.metadata["outcome"] == outcome
+                    && e.metadata["source"] == credential_source),
+            "every fetch credential lookup must be audited: {host} {outcome}: {events:?}"
         );
     }
     let audit = serde_json::to_string(&events).unwrap();
@@ -820,7 +855,10 @@ async fn python_uses_the_callers_workspace_masks_and_recording_proxy() {
         recorder: recorded.clone(),
     };
     let runtime = swage_python::PythonWorkerRuntime::new(Default::default()).unwrap();
-    let mut worker = runtime.spawn_worker_for_turn(policy, egress).await.unwrap();
+    let mut worker = runtime
+        .spawn_worker_for_turn(Some(policy), Some(egress))
+        .await
+        .unwrap();
     let code = format!(
         r#"
 import os, urllib.request, urllib.error
@@ -886,6 +924,10 @@ except urllib.error.URLError as error:
 #[tokio::test(flavor = "multi_thread")]
 async fn git_path_scoped_credentials_match_only_the_repository_url() {
     let mut env = ProcessEnvGuard::new();
+    // The machine's own git configuration stays out of the test: the
+    // host's credential helpers are the fixture's, or none.
+    env.set_var("GIT_CONFIG_GLOBAL", "/dev/null");
+    env.set_var("GIT_CONFIG_NOSYSTEM", "1");
     env.set_managed_secret_key(11);
     env.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
     let root = tempfile::tempdir().unwrap();
@@ -1006,11 +1048,11 @@ shutil.copytree(stdlib, root / 'lib' / stdlib.name,
         .unwrap();
     let started = runtime
         .spawn_worker_for_turn(
-            policy,
-            EgressSetup {
+            Some(policy),
+            Some(EgressSetup {
                 policy: Arc::new(Refuse),
                 recorder: Arc::new(Connections::default()),
-            },
+            }),
         )
         .await;
     assert!(
@@ -1052,6 +1094,10 @@ async fn sandboxed_git_commits_are_signed_on_the_host_with_the_operators_key() {
     use swage_gateway::git_signer::{SignerServer, SigningConfig};
 
     let mut env = ProcessEnvGuard::new();
+    // The machine's own git configuration stays out of the test: the
+    // host's credential helpers are the fixture's, or none.
+    env.set_var("GIT_CONFIG_GLOBAL", "/dev/null");
+    env.set_var("GIT_CONFIG_NOSYSTEM", "1");
     env.set_managed_secret_key(13);
     env.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
@@ -1268,4 +1314,58 @@ async fn sandboxed_git_commits_are_signed_on_the_host_with_the_operators_key() {
                 .is_some_and(|f| f.starts_with("SHA256:"))
             && e.entity_id == e.metadata["fingerprint"]
     }));
+}
+
+/// A sandboxed command reaches the host's network when the policy shares it,
+/// as it does by default, and nothing when the person confines it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sandboxed_command_reaches_the_host_network_only_when_shared() {
+    use swage_sandbox::Sandbox;
+
+    let mut env = ProcessEnvGuard::new();
+    env.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    let root = tempfile::tempdir().unwrap();
+    env.set_var("XDG_RUNTIME_DIR", root.path());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accepted = tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = stream.write_all(b"host-network\n").await;
+        }
+    });
+    for shared in [true, false] {
+        let policy = SandboxConfig::builder()
+            .working_directory(root.path())
+            .write_path(root.path())
+            .host_network(shared)
+            .build()
+            .unwrap();
+        let mut sandbox = swage_sandbox::BubblewrapSandbox::new(
+            policy,
+            swage_sandbox::llm_handler::HostLlmHandler::new(|_| async {
+                unreachable!("the command uses no model")
+            }),
+        );
+        sandbox.spawn_agent().await.unwrap();
+        let result = sandbox
+            .execute_tool(
+                "shell",
+                json!({"command": format!(
+                    "python3 -c \"import socket; print(socket.create_connection(('127.0.0.1', {port}), 5).recv(64).decode())\""
+                )}),
+            )
+            .await
+            .unwrap();
+        sandbox.shutdown().await.unwrap();
+        let output = result.output["output"].as_str().unwrap_or_default();
+        assert_eq!(
+            output.contains("host-network"),
+            shared,
+            "shared={shared}: {:?}",
+            result.output
+        );
+    }
+    accepted.abort();
 }

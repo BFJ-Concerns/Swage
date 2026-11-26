@@ -4354,7 +4354,7 @@
           "type": "boolean"
         },
         "egress_hosts": {
-          "description": "Hosts a sandboxed command may reach through the egress proxy without\nanyone being asked: an exact host, or `*.suffix` for a host and every\nname beneath it. Any other host goes to the request judge and fails\nclosed without its yes. Shipped with the forges and package registries\nordinary development reaches.",
+          "description": "Under the recorded proxy, the hosts a sandboxed command reaches\nwithout the judge being asked: an exact host, or `*.suffix` for a\nhost and every name beneath it. Any other host goes to the request\njudge and fails closed without its yes. Read only when `network` is\n`proxy`.",
           "type": "array",
           "items": {
             "type": "string"
@@ -4362,13 +4362,38 @@
         },
         "enabled": {
           "type": "boolean"
+        },
+        "network": {
+          "description": "What a sandboxed command can reach on the network.",
+          "$ref": "#/$defs/SandboxNetwork"
         }
       },
       "additionalProperties": false,
       "required": [
         "enabled",
         "allow_degraded_execution",
+        "network",
         "egress_hosts"
+      ]
+    },
+    "SandboxNetwork": {
+      "description": "What a sandboxed command can reach on the network.",
+      "oneOf": [
+        {
+          "description": "The host's network, directly, as an unsandboxed command reaches it.",
+          "type": "string",
+          "const": "open"
+        },
+        {
+          "description": "No network at all.",
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "description": "Only through the gateway's recording proxy: every destination is\nrecorded, a listed host is reached, and any other host is put to the\nrequest judge.",
+          "type": "string",
+          "const": "proxy"
+        }
       ]
     },
     "SaveProviderSettings": {

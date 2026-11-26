@@ -179,8 +179,10 @@ impl PolicyRoots {
 
 /// Under the home, what a sandboxed command never sees: key material, cloud
 /// and cluster credentials, plaintext token files. Forge and registry
-/// authentication goes through the operator's credential helper, so none of
-/// these is needed to build, commit, push or fetch.
+/// authentication goes through the operator's SSH agent and their git
+/// credential helpers run on the host, so none of these is needed to build,
+/// commit, push or fetch; of `~/.ssh`, the files that hold no key reopen
+/// (`ssh_files_without_keys`).
 const MASKED_HOME_PATHS: &[&str] = &[
     ".ssh",
     ".gnupg",
@@ -274,17 +276,19 @@ pub(crate) fn build_sandbox_config(
     agent_config: &AgentConfig,
     workspace_policy: Option<&TrustedWorkspacePolicy>,
     roots: &PolicyRoots,
-    tools: &swage_config::ToolConfig,
+    config: &swage_config::ResolvedConfig,
 ) -> Result<swage_sandbox::SandboxConfig, swage_core::SandboxError> {
     let working_directory = sandbox_path(&agent_config.working_directory);
-    let runtime = crate::settings::tool_runtime_from_config(tools).map_err(|error| {
+    let runtime = crate::settings::tool_runtime_from_config(&config.tools).map_err(|error| {
         swage_core::SandboxError::SpawnFailed {
             message: format!("failed to configure sandbox tools: {error}"),
         }
     })?;
+    let host_network = config.sandbox.network == swage_config::SandboxNetwork::Open;
     let mut builder = swage_sandbox::SandboxConfig::builder()
         .working_directory(&working_directory)
-        .tool_runtime(runtime);
+        .tool_runtime(runtime)
+        .host_network(host_network);
     let mut granted: Vec<PathBuf> = Vec::new();
     let masked = masked_paths(roots);
 
@@ -361,6 +365,13 @@ pub(crate) fn build_sandbox_config(
     for private in &masked {
         builder = builder.masked_path(private);
     }
+    for path in ssh_files_without_keys(&roots.home) {
+        builder = builder.read_only_path(path);
+    }
+    let ssh_agent = operator_ssh_agent();
+    if let Some(socket) = &ssh_agent {
+        builder = builder.read_only_path(socket);
+    }
     tracing::debug!(?granted, "sandbox policy grants");
 
     if let Some(directory) = &agent_config.tool_output_directory {
@@ -369,11 +380,75 @@ pub(crate) fn build_sandbox_config(
             .write_path(&directory)
             .tool_output_directory(directory);
     }
-    builder
+    let mut policy = builder
         .build()
         .map_err(|error| swage_core::SandboxError::SpawnFailed {
             message: format!("failed to build sandbox config: {error}"),
+        })?;
+    if let Some(socket) = ssh_agent {
+        policy
+            .environment
+            .insert("SSH_AUTH_SOCK".into(), socket.display().to_string());
+    }
+    // On the host's network a command uses the operator's own proxy, as it
+    // would unsandboxed.
+    if host_network {
+        for key in PROXY_ENVIRONMENT {
+            if let Ok(value) = std::env::var(key) {
+                policy.environment.insert((*key).into(), value);
+            }
+        }
+    }
+    Ok(policy)
+}
+
+/// The operator's network proxy settings, which a command on the host's
+/// network inherits.
+const PROXY_ENVIRONMENT: &[&str] = &[
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+];
+
+/// The operator's SSH agent socket, when one is running: a sandboxed ssh
+/// authenticates through it and never reads a key.
+fn operator_ssh_agent() -> Option<PathBuf> {
+    let socket = PathBuf::from(std::env::var_os("SSH_AUTH_SOCK")?);
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::metadata(&socket)
+        .is_ok_and(|metadata| metadata.file_type().is_socket())
+        .then_some(socket)
+}
+
+/// The files under the masked `~/.ssh` that hold no key and that ssh needs
+/// to reach a forge: its configuration, the known hosts and the public
+/// halves of the operator's keys. Each reopens read-only through the mask.
+pub(crate) fn ssh_files_without_keys(home: &Path) -> Vec<PathBuf> {
+    let directory = home.join(".ssh");
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    matches!(name, "config" | "known_hosts" | "known_hosts2")
+                        || name.ends_with(".pub")
+                })
         })
+        .map(|path| sandbox_path(&path))
+        .collect();
+    files.sort();
+    files
 }
 
 /// The private paths a turn's sandbox masks, each only where it exists: the
@@ -423,7 +498,7 @@ pub(super) async fn build_turn_sandbox(
     config: &swage_config::ResolvedConfig,
     agent_config: &AgentConfig,
     workspace_policy: Option<&TrustedWorkspacePolicy>,
-    egress: swage_sandbox::EgressSetup,
+    egress: Option<swage_sandbox::EgressSetup>,
     credentials: Option<&crate::git_credential::CredentialServer>,
     signer: Option<&crate::git_signer::SignerServer>,
 ) -> Result<TurnSandboxBuild, swage_core::SandboxError> {
@@ -448,7 +523,7 @@ pub(super) async fn build_turn_sandbox(
     #[cfg(test)]
     if state.test_sandbox_enabled() {
         let roots = PolicyRoots::from_environment(&state.config_root)?;
-        let config = build_sandbox_config(agent_config, workspace_policy, &roots, &config.tools)?;
+        let config = build_sandbox_config(agent_config, workspace_policy, &roots, config)?;
         return Ok(TurnSandboxBuild {
             sandbox: Some(Arc::new(PolicyEnforcingTestSandbox { config })),
             isolation: ExecutionIsolation::Isolated,
@@ -554,15 +629,14 @@ async fn build_turn_sandbox_for_backend_selection(
     config: &swage_config::ResolvedConfig,
     agent_config: &AgentConfig,
     workspace_policy: Option<&TrustedWorkspacePolicy>,
-    egress: swage_sandbox::EgressSetup,
+    egress: Option<swage_sandbox::EgressSetup>,
     credentials: Option<&crate::git_credential::CredentialServer>,
     signer: Option<&crate::git_signer::SignerServer>,
     bubblewrap_available: bool,
     spawn_fallback: bool,
 ) -> Result<TurnSandboxBuild, swage_core::SandboxError> {
     let roots = PolicyRoots::from_environment(&state.config_root)?;
-    let mut sandbox_config =
-        build_sandbox_config(agent_config, workspace_policy, &roots, &config.tools)?;
+    let mut sandbox_config = build_sandbox_config(agent_config, workspace_policy, &roots, config)?;
 
     if let Some(credentials) = credentials {
         credentials.configure(&mut sandbox_config)?;
@@ -590,8 +664,10 @@ async fn build_turn_sandbox_for_backend_selection(
     let degradation_reason;
     if bubblewrap_available {
         let mut sandbox =
-            swage_sandbox::BubblewrapSandbox::new(sandbox_config.clone(), make_llm_handler())
-                .with_egress(egress.clone());
+            swage_sandbox::BubblewrapSandbox::new(sandbox_config.clone(), make_llm_handler());
+        if let Some(egress) = egress.clone() {
+            sandbox = sandbox.with_egress(egress);
+        }
         match sandbox.spawn_agent().await {
             Ok(()) => {
                 return Ok(TurnSandboxBuild {
@@ -628,8 +704,10 @@ async fn build_turn_sandbox_for_backend_selection(
     // paths the policy masks are readable to this turn, and the record
     // of its degraded isolation says which.
     let degradation_reason = degraded_reason(degradation_reason, &sandbox_config.masked_paths);
-    let mut fallback =
-        swage_sandbox::FallbackSandbox::new(sandbox_config, make_llm_handler()).with_egress(egress);
+    let mut fallback = swage_sandbox::FallbackSandbox::new(sandbox_config, make_llm_handler());
+    if let Some(egress) = egress {
+        fallback = fallback.with_egress(egress);
+    }
     if spawn_fallback {
         fallback.spawn_agent().await?;
     }
@@ -716,19 +794,22 @@ pub(crate) async fn build_gateway_dispatcher(
         false,
     );
 
-    // What this turn's sandboxed commands may reach, and the record of it:
-    // the install's hosts, then the judge, every attempt an audit event of
-    // this session and turn.
-    let egress = crate::egress::turn_egress_setup(
-        &config.sandbox.egress_hosts,
-        Some(Arc::new(crate::request_judge::GatewayRequestJudge::new(
-            state.clone(),
-        ))),
-        state.storage.clone(),
-        session_id,
-        turn_id,
-        &agent_config.agent_id,
-    );
+    // Where the person has put sandboxed commands behind the recording
+    // proxy, what they may reach and the record of it: the listed hosts,
+    // then the judge, every attempt an audit event of this session and
+    // turn. Otherwise no proxy runs: the network is the host's, or none.
+    let egress = (config.sandbox.network == swage_config::SandboxNetwork::Proxy).then(|| {
+        crate::egress::turn_egress_setup(
+            &config.sandbox.egress_hosts,
+            Some(Arc::new(crate::request_judge::GatewayRequestJudge::new(
+                state.clone(),
+            ))),
+            state.storage.clone(),
+            session_id,
+            turn_id,
+            &agent_config.agent_id,
+        )
+    });
     let credentials = crate::git_credential::CredentialServer::start(
         state.secret_manager.clone(),
         state.storage.clone(),
@@ -767,12 +848,8 @@ pub(crate) async fn build_gateway_dispatcher(
             || sandbox_build.backend == SandboxBackend::Bubblewrap)
     {
         let roots = PolicyRoots::from_environment(&state.config_root)?;
-        let mut policy = build_sandbox_config(
-            agent_config,
-            workspace_policy.as_ref(),
-            &roots,
-            &config.tools,
-        )?;
+        let mut policy =
+            build_sandbox_config(agent_config, workspace_policy.as_ref(), &roots, config)?;
         credentials.configure(&mut policy)?;
         if let Some(signer) = &signer {
             signer.configure(&mut policy)?;
@@ -1189,6 +1266,7 @@ mod tests {
             let mut config = swage_config::ResolvedConfig::default();
             config.sandbox.enabled = true;
             config.sandbox.allow_degraded_execution = true;
+            config.sandbox.network = swage_config::SandboxNetwork::Proxy;
             config.sandbox.egress_hosts = vec!["127.0.0.1".into()];
             config.tools.python_execute.enabled = true;
             config.tools.python_execute.require_sandbox = require_sandbox;
@@ -1291,7 +1369,7 @@ mod tests {
 
     /// An egress setup for tests of backend selection: nothing is reachable
     /// and nothing is recorded, since no command runs.
-    fn test_egress() -> swage_sandbox::EgressSetup {
+    fn test_egress() -> Option<swage_sandbox::EgressSetup> {
         struct Closed;
         #[async_trait::async_trait]
         impl swage_sandbox::EgressPolicy for Closed {
@@ -1311,10 +1389,10 @@ mod tests {
                 Ok(())
             }
         }
-        swage_sandbox::EgressSetup {
+        Some(swage_sandbox::EgressSetup {
             policy: Arc::new(Closed),
             recorder: Arc::new(Dropped),
-        }
+        })
     }
 
     fn codex_config() -> swage_config::ResolvedConfig {

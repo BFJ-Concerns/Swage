@@ -36,6 +36,12 @@ masked_paths: Array<string>,
  */
 tool_output_directory?: string | null,
 /**
+ * Whether sandboxed commands share the host's network. Without it the
+ * sandbox has its own network namespace, reaching the network only
+ * through an egress proxy when the host binds one in.
+ */
+host_network: boolean,
+/**
  * Host-selected environment inherited by sandboxed commands.
  */
 environment: { [key in string]: string },
