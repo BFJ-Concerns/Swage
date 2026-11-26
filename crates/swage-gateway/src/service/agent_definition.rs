@@ -642,11 +642,9 @@ mod validation_tests {
         let permissions: swage_config::ToolPermissionConfig =
             serde_json::from_value(curator.definition.tool_permissions.expect("overlay")).unwrap();
         assert_eq!(permissions.allow, vec!["memory_read", "memory_write"]);
-        assert!(
-            curator
-                .definition
-                .instructions
-                .contains("Record only what the operator stated"),
+        assert_eq!(
+            curator.definition.instructions,
+            crate::memory_curation::CURATOR_INSTRUCTIONS,
             "the curator runs under its instructions"
         );
         assert!(matches!(

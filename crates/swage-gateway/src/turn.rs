@@ -517,26 +517,23 @@ pub(super) async fn process_turn_with_composition_and_focus(
     )
     .await;
     let replay_retrieval = swage_core::ReplayRetrieval::with_read_tool(
-        offered_tools.contains(crate::tool::tool_result_read::TOOL_RESULT_READ_TOOL),
+        offered_tools.is_offered(crate::tool::tool_result_read::TOOL_RESULT_READ_TOOL),
     );
     let history_messages = record_failed_turn_and_release_on_error(
         state,
         session_id,
         prepared_turn_id,
-        history::rebuild_thread_history_messages_with_retrieval(
-            state.storage.as_ref(),
-            thread_id,
-            Some(replay_retrieval),
-        )
-        .await,
+        history::rebuild_thread_history_messages_with_retrieval(state, thread_id, replay_retrieval)
+            .await,
     )
     .await?;
     let memory_index = if session_carries_memory(&session) {
         Some(
             crate::memory::load_memory_index(swage_root, &scope)
                 .await
-                .into_element(swage_context::memory::MemoryReach::with_read_tool(
-                    offered_tools.contains(crate::tool::memory::MEMORY_READ_TOOL),
+                .into_element(swage_context::memory::MemoryReach::for_tools(
+                    offered_tools.is_offered(crate::tool::memory::MEMORY_READ_TOOL),
+                    offered_tools.is_offered(crate::tool::memory::MEMORY_WRITE_TOOL),
                 )),
         )
     } else {
@@ -597,6 +594,12 @@ pub(super) async fn process_turn_with_composition_and_focus(
             tokeniser: &tokeniser,
             degradation: succession::recent_degradation(state.storage.as_ref(), thread_id).await,
             diagnosis_models: succession::diagnosis_models(&config),
+            summary_instructions: &succession::SessionSummaryInstructions {
+                state,
+                config: &config.experimentation,
+                session_id,
+                turn_id: prepared_turn_id,
+            },
         },
         elements,
         output,
