@@ -4925,7 +4925,7 @@
             "type": "object"
           },
           {
-            "description": "A workflow run's state changed without starting or ending — it parked\non a durable wait. Views of running work refetch; the event is the\nsignal, not the content.",
+            "description": "A workflow run started, parked on a durable wait, or ended. Views of\nrunning work refetch; the event is the signal, not the content.",
             "properties": {
               "run_id": {
                 "format": "uuid",

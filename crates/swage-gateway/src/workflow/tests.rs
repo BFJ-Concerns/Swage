@@ -6541,7 +6541,7 @@ async fn cancelling_a_parked_run_settles_journal_and_records_terminal_budget() {
             let mut seen = Vec::new();
             loop {
                 match events.recv().await {
-                    Ok(event) if crate::websocket::work_surface::is_work_surface_signal(&event) => {
+                    Ok(event) if crate::websocket::work_surface::work_surface_signal(&event).is_some() => {
                         let done = matches!(event, ServerEvent::WorkflowRunCompleted { .. });
                         seen.push(event);
                         if done {
@@ -20428,8 +20428,15 @@ async fn run_start_and_completion_reach_the_signal_channel() {
     let completed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let event = events.recv().await.expect("broadcast open");
-            if !crate::websocket::work_surface::is_work_surface_signal(&event) {
+            let Some(signal) = crate::websocket::work_surface::work_surface_signal(&event) else {
                 continue;
+            };
+            if matches!(event, ServerEvent::WorkflowRunStarted { .. } | ServerEvent::WorkflowRunCompleted { .. }) {
+                // The signal socket carries the run's id, never the run.
+                assert!(
+                    matches!(signal, ServerEvent::WorkflowRunUpdated { run_id } if run_id == started.id),
+                    "a run's start and end reach the signal socket as its id alone: {signal:?}"
+                );
             }
             match event {
                 ServerEvent::WorkflowRunStarted { event } if event.run.id == started.id => {

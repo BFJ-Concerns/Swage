@@ -145,9 +145,8 @@ pub enum ServerEvent {
     /// Clients showing the catalogue refetch it — the event is the signal,
     /// not the content.
     LibraryUpdated { entry_id: Uuid },
-    /// A workflow run's state changed without starting or ending — it parked
-    /// on a durable wait. Views of running work refetch; the event is the
-    /// signal, not the content.
+    /// A workflow run started, parked on a durable wait, or ended. Views of
+    /// running work refetch; the event is the signal, not the content.
     WorkflowRunUpdated { run_id: Uuid },
     /// A session row may have changed or entered or left a list. Refetch
     /// session lists to read the current rows from the gateway.
