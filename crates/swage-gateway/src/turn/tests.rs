@@ -18503,7 +18503,7 @@ fn the_policy_masks_private_home_paths_and_the_data_root_and_opens_the_shared_ca
         "{writes:?}"
     );
     assert!(
-        writes.contains(&sandbox_path(&home.join(".cargo"))),
+        writes.contains(&sandbox_path(&home.join(".cargo/registry"))),
         "{writes:?}"
     );
 
@@ -18585,9 +18585,18 @@ fn cargo_home_elsewhere_is_the_cache_granted_and_its_tokens_are_masked() {
     )
     .unwrap();
 
+    for cache in ["registry", "git"] {
+        assert!(
+            policy
+                .write_paths
+                .contains(&sandbox_path(&cargo_home.join(cache))),
+            "{cache}: {:?}",
+            policy.write_paths
+        );
+    }
     assert!(
-        policy.write_paths.contains(&sandbox_path(&cargo_home)),
-        "{:?}",
+        !policy.write_paths.contains(&sandbox_path(&cargo_home)),
+        "Cargo's home beyond its caches stays read-only: {:?}",
         policy.write_paths
     );
     assert!(

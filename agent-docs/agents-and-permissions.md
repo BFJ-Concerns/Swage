@@ -469,8 +469,9 @@ as owned by nobody inside the user namespace. Over HTTPS the sandboxed
 git's one credential helper asks the gateway (`git_credential.rs`), which
 runs `git credential fill` on the host with the operator's helpers, never
 prompting; a secret registered with the gateway is never an answer.
-Cargo's home (`CARGO_HOME`, else `~/.cargo`) is the Cargo cache granted
-and where its token files are masked. Commit
+Cargo's home (`CARGO_HOME`, else `~/.cargo`) holds the Cargo caches
+granted, `registry` and `git`, and its token files, which are masked;
+the rest of it stays read-only. Commit
 signing (SSH or OpenPGP) is forwarded to the host by `git_signer.rs`,
 which signs with the operator's configured key and records each signing.
 

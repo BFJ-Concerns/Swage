@@ -219,13 +219,19 @@ const MASKED_HOME_PATHS: &[&str] = &[
     ".password-store",
 ];
 
-/// Cargo's registry tokens in its home. Its home is a cache the sandbox
-/// writes; a mask is deeper than the cache's grant, so it still hides them.
+/// Cargo's registry tokens in its home, which the sandbox reads broadly.
 const CARGO_TOKEN_FILES: &[&str] = &["credentials", "credentials.toml"];
+
+/// The caches inside Cargo's home that a sandboxed build fills: the
+/// registry's index and crates, and git dependencies. The rest of the home
+/// is not a cache — `bin/` holds the binaries on the operator's PATH and
+/// `config.toml` steers every host cargo — so it stays read-only.
+const CARGO_CACHE_DIRS: &[&str] = &["registry", "git"];
 
 /// Under the home, the shared build and package caches a sandboxed command
 /// may write, so a dependency fetched once is fetched once, each with the
-/// tool that fills it; `.cache` is every tool's. Cargo's is its home.
+/// tool that fills it; `.cache` is every tool's. Cargo's are inside its
+/// home (`CARGO_CACHE_DIRS`).
 const SHARED_CACHE_PATHS: &[(&str, Option<&str>)] = &[
     (".cache", None),
     (".npm", Some("npm")),
@@ -241,7 +247,11 @@ pub(crate) fn shared_caches(roots: &PolicyRoots, installed: impl Fn(&str) -> boo
     SHARED_CACHE_PATHS
         .iter()
         .map(|(cache, tool)| (roots.home.join(cache), *tool))
-        .chain([(roots.cargo_home(), Some("cargo"))])
+        .chain(
+            CARGO_CACHE_DIRS
+                .iter()
+                .map(|cache| (roots.cargo_home().join(cache), Some("cargo"))),
+        )
         .filter_map(|(path, tool)| {
             if !path.is_dir()
                 && tool.is_none_or(&installed)

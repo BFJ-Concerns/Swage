@@ -443,7 +443,8 @@ root reopens it.
 Writes go only to the workspace (when its grant allows), the workspace's
 git metadata where a linked worktree keeps it outside the tree, temporary
 space, the shared build and package caches under the home (`~/.cache`,
-Cargo's home — `CARGO_HOME`, else `~/.cargo` — `~/.npm`,
+the `registry` and `git` caches in Cargo's home — `CARGO_HOME`, else
+`~/.cargo`, the rest of which stays read-only — `~/.npm`,
 `~/.local/share/pnpm`, `~/go/pkg`) and any attachment
 granted write. A cache that does not exist yet is created before the turn
 where its tool is installed, so a first fetch can fill it; a token kept
