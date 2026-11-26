@@ -854,8 +854,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             ToolConfig {
                 max_identical_failures: t
                     .max_identical_failures
-                    .unwrap_or(dt.max_identical_failures)
-                    .clamp(1, 100),
+                    .unwrap_or(dt.max_identical_failures),
                 shell_timeout_secs: t.shell_timeout_secs.unwrap_or(dt.shell_timeout_secs),
                 python_execute: PythonExecuteToolConfig {
                     enabled: py.enabled.unwrap_or(dpy.enabled),

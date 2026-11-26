@@ -10,6 +10,10 @@ use toml::{Table, Value};
 
 pub use swage_protocol::client::settings::MAX_ARCHIVE_AFTER_DAYS;
 
+/// The most identical failing calls `tools.max_identical_failures` may
+/// permit within one unattended turn.
+pub const MAX_IDENTICAL_FAILURES: i64 = 100;
+
 // ---------------------------------------------------------------------------
 // Declared sections
 // ---------------------------------------------------------------------------
@@ -508,6 +512,21 @@ fn check_field_semantics(
                         },
                     ));
                 }
+            }
+        }
+        ("tools", "max_identical_failures") => {
+            if let Value::Integer(n) = value
+                && !(1..=MAX_IDENTICAL_FAILURES).contains(n)
+            {
+                problems.push(make_problem(
+                    file_path,
+                    Some(field_path.to_string()),
+                    ConfigProblemKind::SemanticError {
+                        message: format!(
+                            "tools.max_identical_failures must be between 1 and {MAX_IDENTICAL_FAILURES}, got {n}"
+                        ),
+                    },
+                ));
             }
         }
         ("output", "max_retries") => {
@@ -2012,6 +2031,30 @@ allowed_fields = ["user"]
             problem.field_path.as_deref() == Some("tools.max_identical_failures")
                 && matches!(&problem.kind, ConfigProblemKind::TypeError { .. })
         }));
+    }
+
+    #[test]
+    fn tools_failure_bound_refuses_values_outside_its_range() {
+        for raw in ["0", "101", "-1"] {
+            let problems = validate_toml_string(
+                &format!("[tools]\nmax_identical_failures = {raw}"),
+                &path("config.toml"),
+            );
+            assert!(
+                problems.iter().any(|problem| {
+                    problem.field_path.as_deref() == Some("tools.max_identical_failures")
+                        && matches!(&problem.kind, ConfigProblemKind::SemanticError { .. })
+                }),
+                "{raw} is refused: {problems:?}"
+            );
+        }
+        for raw in ["1", "100"] {
+            let problems = validate_toml_string(
+                &format!("[tools]\nmax_identical_failures = {raw}"),
+                &path("config.toml"),
+            );
+            assert!(problems.is_empty(), "{raw} is accepted: {problems:?}");
+        }
     }
 
     #[test]
