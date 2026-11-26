@@ -402,6 +402,7 @@ struct ScriptBookkeeping {
 /// are captured here, while they are still the originals.
 const HOST_PRELUDE: &str = r#"
 (() => {
+    "use strict";
     const freeze = Object.freeze;
     const isArray = Array.isArray;
     const quote = JSON.stringify;
@@ -602,38 +603,14 @@ fn run_script(
         .set_global_json("__variables", &variables_json)
         .map_err(|error| error.to_string())?;
 
-    // The host prelude runs before the script source is even parsed: it
-    // freezes the element projection and returns the runner that owns the
-    // run's bookkeeping.
-    program
-        .execute(
-            "swage:assembly-host",
-            format!("globalThis.__assemblyRunner = {HOST_PRELUDE};"),
-        )
-        .map_err(|error| format!("cage setup failed: {error}"))?;
-
-    // The script body becomes a function of its own, defined at global
-    // scope. Nothing the host keeps is in that scope chain, so `added`,
-    // `omitted`, the output list and the session values have no name the
-    // script can reach: `add`, `omit`, `ctx` and `elements` are the whole
-    // surface.
-    program
-        .execute(
-            "swage:assembly",
-            format!("globalThis.__assemblyScript = function () {{\n{source}\n}};"),
-        )
-        .map_err(|error| error.to_string())?;
+    // Compile the source as a function body in the global scope. Passing it
+    // as a string keeps its syntax separate from the host's runner and keeps
+    // the runner and its bookkeeping out of the script's scope.
+    let body = serde_json::to_string(source).map_err(|error| error.to_string())?;
     let bookkeeping_json = program
         .execute_for_string(
-            "swage:assembly-run",
-            "(() => {
-                const runner = globalThis.__assemblyRunner;
-                const script = globalThis.__assemblyScript;
-                delete globalThis.__assemblyRunner;
-                delete globalThis.__assemblyScript;
-                return runner(script);
-            })()"
-                .to_owned(),
+            "swage:assembly",
+            format!("({HOST_PRELUDE})(Function({body}))"),
         )
         .map_err(|error| error.to_string())?;
     let ScriptBookkeeping {
@@ -959,6 +936,16 @@ mod tests {
     fn script_errors_surface_with_their_message() {
         let error = run("throw new Error('deliberate');").unwrap_err();
         assert!(error.contains("deliberate"));
+    }
+
+    #[test]
+    fn invalid_function_body_falls_back_to_the_default_assembly() {
+        let output = assemble_source("}; {", &baseline_bearing_elements());
+        assert_eq!(output.report.assembly_name, "default");
+        let [error] = output.report.errors.as_slice() else {
+            panic!("expected one assembly error: {:?}", output.report.errors);
+        };
+        assert!(error.message.contains("SyntaxError"), "{error:?}");
     }
 
     #[test]
