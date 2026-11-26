@@ -951,6 +951,25 @@ describe("scope list isolation", () => {
   });
 });
 
+describe("live transcript settlement", () => {
+  it("keeps a request failed after sending again when the provider returned no output", async () => {
+    vi.mocked(api.getConversation).mockResolvedValue(makeDetail("conv-1"));
+    const conversations = createConversationStore();
+    await conversations.selectConversation("conv-1");
+    const stream = createStreamingStore({ conversationStore: conversations });
+
+    stream.startTurn("First request");
+    stream.handleServerEvent({ type: "error", code: "provider_error", message: "Provider unavailable" });
+    stream.startTurn("Next request");
+
+    expect(stream.turnError).toBeNull();
+    expect(conversations.activeConversation?.messages).toEqual([
+      expect.objectContaining({ role: "user", content: "First request", turn_state: "failed" }),
+      expect.objectContaining({ role: "user", content: "Next request", turn_state: "pending" }),
+    ]);
+  });
+});
+
 describe("queued thread replies", () => {
   it("keeps queued branch replies out of Main and resets the destination for the following turn", async () => {
     vi.mocked(api.getConversation).mockResolvedValue({ ...makeDetail("conv-queue"), root_thread_id: "main-thread" });

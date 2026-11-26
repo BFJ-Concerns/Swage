@@ -329,7 +329,7 @@ export function createStreamingStore(
     const streamedContent = get(stream.streamedContentStore);
     if (streamedContent || (toolCalls?.length ?? 0) > 0) {
       pushAssistantMessage(conversationId, streamedContent, turnState, turnId, toolCalls);
-    } else {
+    } else if (get(stream.activeToolCallsStore).length === 0) {
       options?.conversationStore?.settleUnansweredRequest?.(
         { turn_state: turnState, tool_calls: [] }, conversationId,
       );

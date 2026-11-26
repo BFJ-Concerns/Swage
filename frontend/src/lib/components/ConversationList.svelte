@@ -1,6 +1,6 @@
 <!--
   Sidebar conversation list — shows all conversations, supports create and delete.
-  The list reloads the store when the gateway announces a change.
+  The list reloads the store on mount and when the gateway announces a change.
 -->
 <script lang="ts">
   import { watchSessionList } from "../session-list-updates";
@@ -20,7 +20,10 @@
 
   $effect(() => {
     const current = store;
-    if (current?.refreshConversations) return watchSessionList(() => current.refreshConversations!());
+    if (!current?.refreshConversations) return;
+    const stop = watchSessionList(() => current.refreshConversations!());
+    void current.refreshConversations();
+    return stop;
   });
 
   // Track which conversation is awaiting inline delete confirmation.
