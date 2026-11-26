@@ -205,6 +205,9 @@ async fn bubblewrap_sandbox_reads_broadly_masks_private_paths_and_reaches_the_ne
     // Ungranted host /tmp contents are intentionally hidden. Put the home
     // fixture beside the runtime, as in the development sandbox tests, so
     // notes exercise broad host reads rather than private temporary storage.
+    // The environment is read under its lock: another test may point
+    // XDG_RUNTIME_DIR at a directory of its own while it runs.
+    let mut env_guard = ProcessEnvGuard::new();
     let home = tempfile::Builder::new()
         .prefix("t")
         .tempdir_in(
@@ -244,7 +247,6 @@ async fn bubblewrap_sandbox_reads_broadly_masks_private_paths_and_reaches_the_ne
         .shutdown_grace_period(std::time::Duration::from_secs(5))
         .build()
         .unwrap();
-    let mut env_guard = ProcessEnvGuard::new();
     env_guard.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
     let mut sandbox = BubblewrapSandbox::new(config, test_llm_handler()).with_egress(
         swage_sandbox::EgressSetup {

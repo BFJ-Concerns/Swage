@@ -227,14 +227,15 @@ pub(crate) fn shared_caches(home: &Path, installed: impl Fn(&str) -> bool) -> Ve
         .iter()
         .filter_map(|(cache, tool)| {
             let path = home.join(cache);
-            if !path.is_dir() && tool.is_none_or(&installed) {
-                if let Err(error) = std::fs::create_dir_all(&path) {
-                    tracing::warn!(
-                        path = %path.display(),
-                        %error,
-                        "the shared cache could not be created; sandboxed commands cannot write it"
-                    );
-                }
+            if !path.is_dir()
+                && tool.is_none_or(&installed)
+                && let Err(error) = std::fs::create_dir_all(&path)
+            {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "the shared cache could not be created; sandboxed commands cannot write it"
+                );
             }
             path.is_dir().then(|| sandbox_path(&path))
         })
