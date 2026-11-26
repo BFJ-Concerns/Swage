@@ -878,7 +878,7 @@ async fn tool_approval_timeout_interrupt_policy() {
     )
     .await;
 
-    let _approval = ws_wait_for_event(&mut stream, "approval_required", WEBSOCKET_EVENT_DEADLINE)
+    let approval = ws_wait_for_event(&mut stream, "approval_required", WEBSOCKET_EVENT_DEADLINE)
         .await
         .expect("should receive ApprovalRequired");
 
@@ -888,16 +888,36 @@ async fn tool_approval_timeout_interrupt_policy() {
         .expect("should receive ApprovalExpired");
     assert_eq!(expired["timeout_policy"], "interrupt");
 
-    // Turn should NOT complete normally — it should be interrupted.
-    // Collect remaining events; we should NOT see a turn_complete.
     let remaining = ws_collect_events(&mut stream, Duration::from_secs(2)).await;
-    let has_turn_complete = remaining
-        .iter()
-        .any(|e| e.get("type").and_then(|t| t.as_str()) == Some("turn_complete"));
     assert!(
-        !has_turn_complete,
-        "turn should not complete on interrupt policy timeout"
+        remaining
+            .iter()
+            .all(|event| event["type"] != "turn_complete"),
+        "the interrupted turn should not complete"
     );
+    let error = remaining
+        .iter()
+        .find(|event| event["type"] == "error")
+        .expect("the live conversation should receive the interruption");
+    assert_eq!(error["code"], "approval_timeout");
+    let reason = "approval timed out before tool execution; turn interrupted";
+    assert_eq!(error["message"], reason);
+
+    let (status, conversation) = http(
+        &router,
+        "GET",
+        &format!("/api/conversations/{conversation_id}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let message = conversation["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|message| message["turn_id"] == approval["turn_id"])
+        .expect("the reloaded conversation should include the interrupted turn");
+    assert_eq!(message["turn_state"], "interrupted");
+    assert_eq!(message["failure_message"], error["message"]);
 }
 
 /// Journey: Pending approval survives WebSocket reconnection — re-emitted to new client.
@@ -1235,9 +1255,15 @@ fn native_call(id: &str, name: &str, arguments: Value) -> Vec<StreamChunk> {
 }
 
 fn native_done() -> Vec<StreamChunk> {
-    vec![StreamChunk::Done {
-        finish_reason: Some(FinishReason::Stop),
-    }]
+    // Each scripted turn has a final reply before the next turn's tool call.
+    vec![
+        StreamChunk::Delta {
+            content: "Finished processing the tool result.".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: Some(FinishReason::Stop),
+        },
+    ]
 }
 
 async fn attach_native_workspace(

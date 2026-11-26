@@ -306,7 +306,11 @@ impl OpenAiProvider {
 
     /// Construct the `HttpClient` for this provider.
     fn make_http_client(&self) -> HttpClient {
-        HttpClient::new(self.config.base_url.clone(), self.build_headers())
+        HttpClient::new(
+            self.config.provider_id_or("openai"),
+            self.config.base_url.clone(),
+            self.build_headers(),
+        )
     }
 
     /// Convert `ChatMessage` list to OpenAI wire format.

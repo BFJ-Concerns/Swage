@@ -205,7 +205,11 @@ impl ResponsesProvider {
     }
 
     fn make_http_client(&self) -> HttpClient {
-        HttpClient::new(self.config.base_url.clone(), self.build_headers())
+        HttpClient::new(
+            self.config.provider_id_or("openai-responses"),
+            self.config.base_url.clone(),
+            self.build_headers(),
+        )
     }
 
     /// Convert `ChatMessage` list to Responses input items.

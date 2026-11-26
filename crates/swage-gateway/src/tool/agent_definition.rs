@@ -256,28 +256,27 @@ impl Tool for AgentDefinitionTool {
     }
 
     fn description(&self) -> &str {
-        "Create, update, list, or delete the durable agent definitions a person can pick when \
-         starting a session: a named agent with its own instructions, preferred model, tool \
-         grants, skills and output contract. Set `action` to `create` (a new definition — `id`, \
-         `display_name`, `description` and `instructions` are required; `model_id`, \
-         `tool_permissions`, `skills`, `output_schema` and `output_max_retries` are optional), \
-         `update` (change named fields of an existing definition — a field you leave out keeps \
-         its stored value, and setting an optional field to null clears it), `delete`, or `list` \
-         (every definition this session's topic can see, the shipped ones included; each \
-         row's `selectable` says whether the new-session picker offers it).\n\n\
-         Reach for this when the person asks for a new or changed agent, assistant, persona or \
-         role they can choose for future sessions, or asks what agents exist. It does not change \
-         the session you are in: a definition governs sessions started under it, and a change \
-         reaches a session already running under that definition from its next turn. For a \
-         reusable work contract a delegated child turn runs under — instructions and limits with \
-         no entry in the picker — use `task_definition` instead.\n\n\
+        "Create, update, delete or list agent definitions: the durable, named agents a \
+         person can choose when starting a session, each with its own instructions, \
+         preferred model, tool grants, skills and output contract. `action` says which. \
+         `create` adds a definition and needs `id`, `display_name`, `description` and \
+         `instructions`; `model_id`, `tool_permissions`, `skills`, `output_schema` and \
+         `output_max_retries` are optional. `update` changes the fields it is given on an \
+         existing definition: a field left out keeps its stored value, and an optional field \
+         given as null is cleared. `delete` removes one. `list` returns every definition \
+         this session's topic can see, the shipped ones included, and each row's \
+         `selectable` says whether the new-session picker offers it.\n\n\
+         It applies when the person asks for an agent they can choose for later sessions to \
+         be made or changed, or asks which agents exist. It does not change the session you \
+         are in: a definition governs sessions started under it, and a change reaches a \
+         session already running under that definition from its next turn.\n\n\
          A definition is stored for every topic unless `scope` is `topic`, which stores it for \
          this session's topic alone, where it hides a global definition with the same id. Every \
          create, update and delete is written to the audit trail with the definition's whole \
          state before and after. The stored definition is the one the agent settings list \
-         and, when it is selectable, the one the new-session picker offers. \
-         Deleting is permanent (the definition can be recreated); a session already running under \
-         a deleted definition falls back to the configuration's defaults. The shipped default \
+         and, when it is selectable, the one the new-session picker offers. Deleting is \
+         permanent, though the definition can be created again, and a session already running \
+         under a deleted definition falls back to the configuration's defaults. The shipped default \
          agent and the memory curator cannot be changed or deleted. `tool_permissions` can only \
          narrow what the configuration already grants, never widen it, and approval requirements \
          are set in configuration, not here. A `model_id` must be one the gateway's model \
@@ -323,11 +322,11 @@ impl Tool for AgentDefinitionTool {
                 },
                 "model_id": {
                     "type": ["string", "null"],
-                    "description": "The id of a model in the gateway's configured catalogue that sessions under this agent use unless a person picks another at session start. Omit on create for the configured default; on update, null clears the preference and omitting keeps it. An id the catalogue does not configure is refused."
+                    "description": "The id of a model in the gateway's configured catalogue that sessions under this agent use unless a person picks another at session start. Left out on create, sessions use the configured default. An id the catalogue does not configure is refused."
                 },
                 "tool_permissions": {
                     "type": ["object", "null"],
-                    "description": "Narrows the tools sessions under this agent may call. The result intersects with what the configuration grants: it can only remove tools, never add them. Omit on create to leave the configuration's grants unchanged; on update, null removes the narrowing and omitting keeps it. Approval requirements cannot be set here.",
+                    "description": "Narrows the tools sessions under this agent may call. The result intersects with what the configuration grants: it can only remove tools, never add them. Left out on create, the configuration's grants apply unchanged. Approval requirements cannot be set here.",
                     "properties": {
                         "allow": string_array("Tool names, bundle names, or `*` for every tool the configuration grants."),
                         "deny": string_array("Tool names withheld even when allowed."),
@@ -343,17 +342,17 @@ impl Tool for AgentDefinitionTool {
                 "skills": {
                     "type": ["array", "null"],
                     "items": {"type": "string"},
-                    "description": "Names of configured skills the agent activates in every session, as the skill catalogue lists them. Omit on create for none; on update, null removes them all and omitting keeps them."
+                    "description": "Names of configured skills the agent activates in every session, as the skill catalogue lists them. Left out on create, it activates none."
                 },
                 "output_schema": {
                     "type": ["object", "null"],
-                    "description": "A JSON Schema the agent's final reply must satisfy; a reply that does not is retried. Omit on create for free-form replies; on update, null removes the contract and omitting keeps it."
+                    "description": "A JSON Schema the agent's final reply must satisfy; a reply that does not is retried. Left out on create, replies are free-form."
                 },
                 "output_max_retries": {
                     "type": ["integer", "null"],
                     "minimum": 0,
                     "maximum": u32::MAX,
-                    "description": "How many times a reply failing `output_schema` is retried before the turn fails. Omit on create for the configured default; on update, null restores that default and omitting keeps the stored value."
+                    "description": "How many times a reply failing `output_schema` is retried before the turn fails. Left out on create, or cleared, the configured default applies."
                 }
             },
             "required": ["action"],
@@ -914,10 +913,6 @@ mod tests {
         }
         assert_eq!(schema["properties"]["action"]["enum"], json!(ACTIONS));
         assert_eq!(schema["properties"]["scope"]["enum"], json!(SCOPES));
-        assert!(
-            names_as_a_word(description, "task_definition"),
-            "the description points the model to its sibling"
-        );
         assert_eq!(tool.display_hints().summary_param, Some("id"));
     }
 }

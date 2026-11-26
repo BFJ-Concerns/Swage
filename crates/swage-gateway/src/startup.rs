@@ -1183,7 +1183,10 @@ async fn create_provider_with_retry(
             )
             .await
             {
-                Ok(()) => concrete_provider(provider_endpoint.protocol.clone(), provider_config),
+                Ok(()) => concrete_provider(
+                    provider_endpoint.protocol.clone(),
+                    provider_config.with_provider_id(&model_endpoint.provider_id),
+                ),
                 Err(reason) => Box::new(swage_provider::UnsupportedLlmProvider::for_model(
                     reason,
                     &model_endpoint.model_id,
@@ -2795,9 +2798,7 @@ mod tests {
             );
         }
         assert!(
-            text.contains(
-                "Every other tool, `shell` included, receives a reference as literal text"
-            ),
+            text.contains("Every other tool, `shell` included,"),
             "{text}"
         );
     }
