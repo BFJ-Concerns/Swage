@@ -33,7 +33,12 @@ impl Tool for FileWriteTool {
     }
 
     fn description(&self) -> &str {
-        "Create or overwrite a file in the workspace. Parent directories are created if needed."
+        "Write a file whole: create it, or replace everything an existing file holds, with \
+         `content`. With `append` the content is added to the end of the file instead. \
+         Directories missing from the path are created. To change part of a file and keep \
+         the rest, `file_edit` replaces only the text it is given. The result says how many \
+         bytes were written and, where a file was replaced, how many it held before. A path \
+         inside a folder attached read-only is refused."
     }
 
     fn parameters(&self) -> Value {
@@ -42,15 +47,15 @@ impl Tool for FileWriteTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to the file, relative to the workspace root."
+                    "description": "The file to write: relative to the session's working directory, or absolute for one elsewhere the session has been allowed to reach."
                 },
                 "append": {
                     "type": "boolean",
-                    "description": "Append content to the file instead of replacing it. Defaults to false."
+                    "description": "Add `content` to the end of the file, creating the file if there is none. Left out or false, `content` replaces whatever the file holds."
                 },
                 "content": {
                     "type": "string",
-                    "description": "Content to write to the file."
+                    "description": "The text to write, exactly as the file should hold it."
                 }
             },
             "required": ["path", "content"]

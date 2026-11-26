@@ -157,11 +157,14 @@ impl Tool for WorkflowRunStatusTool {
     }
 
     fn description(&self) -> &str {
-        "See which workflow runs in this topic are still going and what each is waiting on. \
-         Without a run_id, lists every run that has not ended — running, parked, or \
-         interrupted — with its undelivered events: a pipeline holding for a decision shows \
+        "Read the state of the workflow runs in this session's topic. Without a `run_id` \
+         it lists every run that has not ended, whether running, parked or interrupted, \
+         with its undelivered events: a pipeline holding for a decision shows \
          the hold's content and the verdicts it accepts, and you answer it with \
-         run_event_post. With a run_id, reads that one run in any state. Use this at the \
+         run_event_post. With a `run_id` it reads that one run, whatever its state. Either \
+         way the result also names, in `ended_runs`, the runs that have ended and not yet \
+         been acknowledged; `acknowledge_run_ids` takes the ones that have been dealt with \
+         off that list. Use this at the \
          start of a wake to find the decisions waiting for you, and after acting to confirm \
          a run moved on."
     }
@@ -169,10 +172,10 @@ impl Tool for WorkflowRunStatusTool {
     fn parameters(&self) -> Value {
         let mut schema = swage_protocol::client::workflow::WorkflowRunStatusRequest::json_schema();
         schema["properties"]["run_id"]["description"] = json!(
-            "Optional. Omit it (or leave it empty) to list every open run in the topic. Give a run's UUID to read that one run in any state."
+            "The id of one run to read, whatever its state, as `workflow_run` or an earlier listing gave it. Omitted or empty, every run that has not ended is listed."
         );
         schema["properties"]["acknowledge_run_ids"]["description"] = json!(
-            "Optional. Pass the IDs of ended runs already handled to stop them being returned again."
+            "The ids of ended runs that have been dealt with, at most 100 in a call. An acknowledged run is not named in `ended_runs` again."
         );
         schema
     }
@@ -251,12 +254,16 @@ mod tests {
     use swage_tool::context::MockToolContext;
 
     #[test]
-    fn review_fix_acknowledgement_parameter_explains_consumption() {
+    fn each_parameter_of_the_wire_request_is_described_to_the_agent() {
         let schema = WorkflowRunStatusTool.parameters();
-        let description = schema["properties"]["acknowledge_run_ids"]["description"]
-            .as_str()
-            .expect("acknowledge_run_ids must describe how handled endings stop returning");
-        assert!(description.contains("ended runs") && description.contains("returned again"));
+        for (parameter, spec) in schema["properties"].as_object().expect("properties") {
+            assert!(
+                spec["description"]
+                    .as_str()
+                    .is_some_and(|text| !text.trim().is_empty()),
+                "{parameter} is described"
+            );
+        }
     }
 
     fn context_for(
