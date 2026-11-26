@@ -1,7 +1,9 @@
 use super::{
     AppState, BTreeMap, ChatMessage, GatewayError, HashMap, HashSet, Role, ToolCall,
     ToolCallRecord, ToolResult, Uuid, build_tool_round_messages,
-    provider_record::{REDACTED_SECRET, known_secret_values, redact_secret_values, redact_text},
+    provider_record::{
+        REDACTED_SECRET, known_secret_values, redact_secret_values, redact_serialised_text,
+    },
 };
 
 #[cfg(test)]
@@ -212,7 +214,7 @@ fn replay_result(record: &ToolCallRecord, secret_values: Option<&[String]>) -> S
         return REDACTED_SECRET.into();
     };
     if let Some(mut result) = crate::tool::tool_result_read::recovered_model_result(record) {
-        redact_result_text(&mut result, secret_values);
+        redact_serialised_text(&mut result, secret_values);
         return result;
     }
     if secret_values.is_empty() {
@@ -223,7 +225,7 @@ fn replay_result(record: &ToolCallRecord, secret_values: Option<&[String]>) -> S
     let (account, envelope) = stored.rsplit_once('\n').unwrap_or(("", stored));
     let Ok(replay) = serde_json::from_str::<swage_core::CompactToolReplay>(envelope) else {
         let mut result = stored.clone();
-        redact_result_text(&mut result, secret_values);
+        redact_serialised_text(&mut result, secret_values);
         return result;
     };
     let mut result = if replay.truncated {
@@ -242,8 +244,8 @@ fn replay_result(record: &ToolCallRecord, secret_values: Option<&[String]>) -> S
         replay.preview
     };
     let mut account = account.to_owned();
-    let account_changed = redact_result_text(&mut account, secret_values);
-    let result_changed = redact_result_text(&mut result, secret_values);
+    let account_changed = redact_serialised_text(&mut account, secret_values);
+    let result_changed = redact_serialised_text(&mut result, secret_values);
     if !account_changed && !result_changed {
         return stored.clone();
     }
@@ -293,19 +295,6 @@ fn verified_full_result(
     // The stored digest is of the model-facing result after pattern scanning.
     let scanned = DETECTOR.scan(original);
     matches_replay(&scanned).then_some(scanned)
-}
-
-fn redact_result_text(text: &mut String, secret_values: &[String]) -> bool {
-    let mut changed = false;
-    for secret in secret_values {
-        let encoded = serde_json::to_string(secret).expect("secret text serialises");
-        let escaped = &encoded[1..encoded.len() - 1];
-        if escaped != secret.as_str() {
-            changed |= redact_text(text, &[escaped]);
-        }
-        changed |= redact_text(text, &[secret.as_str()]);
-    }
-    changed
 }
 
 fn parse_redacted_model_arguments(

@@ -19,13 +19,10 @@ use crate::provider::ProviderConfig;
 pub struct VoiceCapabilities {
     pub transcription: bool,
     pub synthesis: bool,
-    /// Whether the configured speech model's availability is still unverified.
-    pub synthesis_unverified: bool,
     pub default_voice: Option<String>,
     #[serde(default)]
     pub supported_voices: Vec<String>,
-    /// Why transcription or synthesis is unavailable, naming what to
-    /// configure; `None` when both are available.
+    /// Why transcription or synthesis is unavailable. `None` when both are available.
     #[serde(default)]
     pub unavailable_reason: Option<String>,
 }
@@ -35,7 +32,6 @@ impl VoiceCapabilities {
         Self {
             transcription: false,
             synthesis: false,
-            synthesis_unverified: false,
             default_voice: None,
             supported_voices: Vec::new(),
             unavailable_reason: Some(reason.into()),
@@ -200,9 +196,9 @@ impl OpenAiVoiceProvider {
 
     async fn request_speech(
         &self,
+        model: &str,
         request: SpeechRequest,
     ) -> Result<SpeechResponse, ProviderError> {
-        let model = self.route_model(&self.routes.speech_model)?;
         let voice = request.voice.unwrap_or_else(|| {
             self.capabilities()
                 .default_voice
@@ -264,37 +260,6 @@ impl OpenAiVoiceProvider {
         })
     }
 
-    fn speech_failure_affects_route(error: &ProviderError) -> bool {
-        match error {
-            ProviderError::Network { .. } | ProviderError::InvalidResponse(_) => true,
-            ProviderError::HttpError {
-                status: 401 | 403, ..
-            } => true,
-            ProviderError::HttpError { body, .. } => {
-                let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
-                let field = |name| {
-                    parsed
-                        .as_ref()
-                        .and_then(|value| value.pointer(name))
-                        .and_then(serde_json::Value::as_str)
-                };
-                // Model codes identify the failure even when param names a caller input.
-                // Message prose cannot reliably identify which resource failed.
-                matches!(
-                    field("/error/code"),
-                    Some(
-                        "model_not_found"
-                            | "invalid_model"
-                            | "unsupported_model"
-                            | "model_not_supported"
-                            | "unknown_model"
-                    )
-                ) || field("/error/param") == Some("model")
-            }
-            _ => false,
-        }
-    }
-
     fn supported_voices() -> Vec<String> {
         [
             "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer",
@@ -318,13 +283,11 @@ impl VoiceProvider for OpenAiVoiceProvider {
             transcription: self.routes.transcription_model.is_some(),
             synthesis: self.routes.speech_model.is_some()
                 && matches!(*speech_status, SpeechStatus::Available),
-            synthesis_unverified: self.routes.speech_model.is_some()
-                && matches!(*speech_status, SpeechStatus::Unverified),
             default_voice: Some("alloy".to_string()),
             supported_voices: Self::supported_voices(),
             unavailable_reason: match (&self.routes.speech_model, &*speech_status) {
                 (Some(model), SpeechStatus::Unverified) => Some(format!(
-                    "speech model `{model}` has not been checked since configuration or its last failed request. Check the Speech model in Voice settings"
+                    "speech model `{model}` has not been checked. Check the Speech model in Voice settings"
                 )),
                 (_, SpeechStatus::Failed(reason)) => Some(reason.clone()),
                 _ => self.unavailable_reason(),
@@ -382,26 +345,16 @@ impl VoiceProvider for OpenAiVoiceProvider {
     }
 
     async fn synthesise(&self, request: SpeechRequest) -> Result<SpeechResponse, ProviderError> {
-        let result = self.request_speech(request).await;
+        let model = self.route_model(&self.routes.speech_model)?;
+        let result = self.request_speech(model, request).await;
         let mut status = self
             .speech_status
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        match &result {
-            Ok(_) => *status = SpeechStatus::Available,
-            Err(error) if Self::speech_failure_affects_route(error) => {
-                *status = SpeechStatus::Failed(format!(
-                    "speech model `{}` failed: {error}. Check the Speech model in Voice settings and try again",
-                    self.routes.speech_model.as_deref().unwrap_or("not set")
-                ));
-            }
-            // Any failed request invalidates an earlier success, but only route/model
-            // evidence can replace a stored failure or turn unchecked into failed.
-            Err(_) if matches!(*status, SpeechStatus::Available) => {
-                *status = SpeechStatus::Unverified;
-            }
-            Err(_) => {}
-        }
+        *status = match &result {
+            Ok(_) => SpeechStatus::Available,
+            Err(error) => SpeechStatus::Failed(error.to_string()),
+        };
         result
     }
 }
@@ -569,7 +522,7 @@ mod tests {
                 .unavailable_reason
                 .as_deref()
                 .unwrap()
-                .contains("has not been checked since configuration or its last failed request")
+                .contains("has not been checked")
         );
         assert_eq!(capabilities.default_voice.as_deref(), Some("alloy"));
         assert!(
@@ -579,227 +532,13 @@ mod tests {
                 .any(|voice| voice == "nova")
         );
     }
+
     fn speech_request() -> SpeechRequest {
         SpeechRequest {
             text: "hello".into(),
             voice: None,
             format: None,
         }
-    }
-
-    #[tokio::test]
-    async fn speech_failure_status_table() {
-        // Each response is exercised from all three states, then followed by success.
-        let cases = [
-            (
-                404,
-                r#"{"error":{"param":"model","code":"model_not_found","message":"Unsupported voice model 'speech-route'"}}"#,
-                true,
-            ),
-            (
-                404,
-                r#"{"error":{"param":"voice","code":"model_not_found","message":"Model 'speech-route' does not exist"}}"#,
-                true,
-            ),
-            (
-                400,
-                r#"{"error":{"param":"format","code":"unsupported_model","message":"Request rejected"}}"#,
-                true,
-            ),
-            (
-                500,
-                r#"{"error":{"param":"input","code":"invalid_model","message":"Request rejected"}}"#,
-                true,
-            ),
-            (400, r#"{"error":{"code":"model_not_supported"}}"#, true),
-            (400, r#"{"error":{"code":"unknown_model"}}"#, true),
-            (
-                400,
-                r#"{"error":{"param":"model","message":"Voice 'invalid' does not exist"}}"#,
-                true,
-            ),
-            (
-                400,
-                r#"{"error":{"code":"model_not_found","message":"Voice 'invalid' does not exist"}}"#,
-                true,
-            ),
-            (
-                429,
-                r#"{"error":{"code":"unsupported_model","message":"Unsupported voice 'invalid'"}}"#,
-                true,
-            ),
-            (
-                400,
-                "Voice 'invalid' is not supported; model 'speech-route' does not exist",
-                false,
-            ),
-            (400, "Model speech-route does not exist", false),
-            (
-                400,
-                "Model 'speech-route' does not exist for voice 'invalid'",
-                false,
-            ),
-            (404, "Unsupported voice model 'speech-route'", false),
-            (
-                400,
-                "Voice 'invalid' is not supported by model 'speech-route'",
-                false,
-            ),
-            (400, "Voice 'invalid' does not exist", false),
-            (404, "Voice 'invalid' does not exist", false),
-            (500, "Voice 'invalid' does not exist", false),
-            (404, "Voice example does not exist", false),
-            (
-                500,
-                r#"{"error":{"param":"voice","message":"Voice 'invalid' could not be loaded"}}"#,
-                false,
-            ),
-            (
-                500,
-                r#"{"error":{"param":"voice","message":"Request rejected"}}"#,
-                false,
-            ),
-            (
-                503,
-                r#"{"error":{"param":"voice","message":"Model 'speech-route' does not exist"}}"#,
-                false,
-            ),
-            (
-                500,
-                r#"{"error":{"code":"invalid_voice","message":"Request rejected"}}"#,
-                false,
-            ),
-            (
-                404,
-                r#"{"error":{"code":"unsupported_format","message":"Request rejected"}}"#,
-                false,
-            ),
-            (
-                422,
-                r#"{"error":{"param":"response_format","message":"Unsupported format"}}"#,
-                false,
-            ),
-            (400, "Unsupported format", false),
-            (401, "Authentication failed", true),
-            (403, "Access denied", true),
-            (
-                401,
-                r#"{"error":{"param":"format","message":"Request rejected"}}"#,
-                true,
-            ),
-            (
-                403,
-                r#"{"error":{"param":"input","message":"Request rejected"}}"#,
-                true,
-            ),
-            (404, "Route not found", false),
-            (410, "Route removed", false),
-            (503, "Route unavailable", false),
-            (
-                429,
-                r#"{"error":{"code":"rate_limit_exceeded","message":"Rate limit exceeded"}}"#,
-                false,
-            ),
-            (400, "Request rejected", false),
-            (400, "{not-json", false),
-            (404, "{not-json", false),
-            (500, "{not-json", false),
-            (
-                400,
-                r#"{"message":"model_not_found","code":"invalid_model","param":"model"}"#,
-                false,
-            ),
-            (
-                400,
-                r#"{"error":{"code":404,"param":null,"message":"model_not_found"}}"#,
-                false,
-            ),
-        ];
-        let mut mismatches = Vec::new();
-        for (status, body, model_or_route_failure) in cases {
-            for before in ["unchecked", "available", "failed"] {
-                let mut responses = match before {
-                    "available" => vec![(200, "audio")],
-                    "failed" => vec![(401, "original authentication failure")],
-                    _ => Vec::new(),
-                };
-                responses.extend([(status, body), (200, "default audio")]);
-                let request_count = responses.len();
-                let (url, captured) = capture_requests(responses).await;
-                let provider = routed(&url, both_routes());
-                let unchecked = provider.capabilities();
-                match before {
-                    "available" => {
-                        provider.synthesise(speech_request()).await.unwrap();
-                    }
-                    "failed" => {
-                        provider.synthesise(speech_request()).await.unwrap_err();
-                    }
-                    _ => {}
-                }
-                let previous = provider.capabilities();
-                let error = provider
-                    .synthesise(SpeechRequest {
-                        text: "caller input".into(),
-                        voice: Some("invalid".into()),
-                        format: Some("invalid".into()),
-                    })
-                    .await
-                    .unwrap_err();
-                assert!(error.to_string().contains(body));
-                let after = provider.capabilities();
-                let expected = if model_or_route_failure || before == "failed" {
-                    "failed"
-                } else {
-                    "unchecked"
-                };
-                let actual = if after.synthesis {
-                    "available"
-                } else if after.synthesis_unverified {
-                    "unchecked"
-                } else {
-                    "failed"
-                };
-                if actual != expected {
-                    mismatches.push(format!(
-                        "{before} + HTTP {status} {body}: expected {expected}, got {actual}"
-                    ));
-                }
-                if model_or_route_failure {
-                    if !after
-                        .unavailable_reason
-                        .as_deref()
-                        .is_some_and(|reason| reason.contains(body))
-                    {
-                        mismatches.push(format!(
-                            "{before} + HTTP {status} {body}: stored failure reason missing"
-                        ));
-                    }
-                } else if expected == "failed" {
-                    if after.unavailable_reason != previous.unavailable_reason {
-                        mismatches.push(format!(
-                            "{before} + HTTP {status} {body}: stored failure reason changed"
-                        ));
-                    }
-                } else if after.unavailable_reason != unchecked.unavailable_reason {
-                    mismatches.push(format!(
-                        "{before} + HTTP {status} {body}: unchecked reason changed"
-                    ));
-                }
-                // Inspect the failed request's state before success can hide a mismatch.
-                provider.synthesise(speech_request()).await.unwrap();
-                let recovered = provider.capabilities();
-                assert!(recovered.synthesis);
-                assert!(!recovered.synthesis_unverified);
-                assert_eq!(recovered.unavailable_reason, None);
-                assert_eq!(captured.await.unwrap().len(), request_count);
-            }
-        }
-        assert!(
-            mismatches.is_empty(),
-            "speech status mismatches:\n{}",
-            mismatches.join("\n")
-        );
     }
 
     #[tokio::test]
@@ -819,7 +558,6 @@ mod tests {
             );
             let capabilities = provider.capabilities();
             assert!(!capabilities.synthesis);
-            assert!(!capabilities.synthesis_unverified);
             assert!(
                 capabilities
                     .unavailable_reason
@@ -849,7 +587,6 @@ mod tests {
             assert!(matches!(error, ProviderError::Network { .. }));
             let capabilities = provider.capabilities();
             assert!(!capabilities.synthesis);
-            assert!(!capabilities.synthesis_unverified);
             assert!(
                 capabilities
                     .unavailable_reason

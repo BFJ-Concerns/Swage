@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- A provider whose credential would travel in plain `http://` to an address off this machine is recorded once in the audit trail (`provider_credential_exposure`) and still sent to; its `plaintext_credentials` setting (`warn`, `refuse` or `allow`, set in `config.toml` or through the settings API) refuses such requests instead or sends them without the record. Model discovery follows the same setting, and the record keeps only the base URL's scheme, host and port. Loopback addresses are never affected.
 - Agents can create and edit agent definitions through conversation, making them available in Settings and the new-session picker; each change records the previous and new definition in configuration history.
 - Delegation chains stop at a configurable depth, including cycles (default: four child levels). Settings → Automation edits `sessions.max_delegation_depth`; a refused delegation records its depth reason and returns it to the delegating model.
 
@@ -175,6 +176,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- `tool_result_read` masks registered secret values in the stored result it returns, as the conversation's history does, instead of reading them back whole.
 - An error that ends no turn — a message that could not be queued, a skill or approval request the gateway could not carry out — no longer marks the running request failed, and a gateway shutdown shows an unanswered request as interrupted, as the record says.
 - The project-docs skill no longer hands agent-guidance changes to a skill Swage does not ship: it reports proposed changes to `AGENTS.md`, and edits that file only when the request covers it.
 - The orientation gives a registered secret's reference as `secret://<backend>/<id>`, the form the gateway resolves, where it gave `secret://<id>`, which was refused.

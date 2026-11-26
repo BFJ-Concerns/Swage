@@ -272,6 +272,24 @@ A provider entry has two credential fields, checked in order:
 
 When both are set, `api_key_secret_ref` wins.
 
+A credential travels in plaintext when the provider's `base_url` is
+`http://` and names an address other than this machine's loopback: anyone
+on the path can read it. A local model server on `localhost` or `127.0.0.1`
+is never plaintext in this sense, and needs no setting. For a remote
+`http://` endpoint the provider entry's `plaintext_credentials` decides what
+happens, judged when the provider is built:
+
+- `warn` (the default) — requests are sent, after one warning for the
+  provider in the audit record (event kind `provider_credential_exposure`).
+  A rebuild of the same provider finds the warning and adds none; if the
+  warning cannot be recorded, nothing is sent.
+- `refuse` — nothing is sent: every request fails with the reason, and the
+  refusal is recorded once.
+- `allow` — requests are sent and nothing is recorded.
+
+A provider with no credential is never judged. The voice provider shares
+the default provider's route and follows the same setting.
+
 The built-in Codex app server (`protocol = "codex"`) is temporarily
 disabled: a configuration naming it does not load, until Swage can ask you
 to approve the commands and file changes it makes. Settings offers no Codex
@@ -892,11 +910,11 @@ audio. `GET /api/voice/capabilities` returns:
 
 - **`transcription`** and **`synthesis`** — booleans for whether speech-to-text
   and text-to-speech are available.
-- **`unavailable_reason`** — when either capability is off, the reason and
-  what to address: the default provider may be absent, its credentials
-  unavailable, its protocol incompatible (only OpenAI-protocol providers
-  serve audio), or a `[voice]` model id may be unset. Absent when both
-  capabilities are available.
+- **`unavailable_reason`** — why either capability is unavailable. It can
+  identify a missing default provider, unavailable credentials, an
+  incompatible provider protocol, an unset `[voice]` model id or a speech
+  model that has yet to be checked. After a speech request fails, it reports
+  the provider error. The field is absent when both capabilities are available.
 - **`default_voice`** and **`supported_voices`** — the default synthesis
   voice and the available voice list. The OpenAI provider reports both
   regardless of whether synthesis is configured.
@@ -904,8 +922,11 @@ audio. `GET /api/voice/capabilities` returns:
 The two audio routes — `POST /api/voice/transcriptions` and
 `POST /api/voice/speech` — send requests to the default provider's
 OpenAI-protocol audio endpoints using the model ids configured in `[voice]`.
-A request to an unavailable capability returns a 422 validation error. See
-[Agents and permissions — Voice configuration](agents-and-permissions.md#voice-configuration)
+The transcription route returns a 422 validation error when transcription
+is unavailable. The speech route accepts requests before synthesis is
+advertised, so a caller can check the model or retry after a failure.
+A successful speech request makes synthesis available.
+See [Agents and permissions — Voice configuration](agents-and-permissions.md#voice-configuration)
 for the configuration keys.
 
 ## Gateway tools
