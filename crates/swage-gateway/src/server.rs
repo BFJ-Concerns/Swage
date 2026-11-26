@@ -655,6 +655,10 @@ mod tests {
             .unwrap()
             .to_owned();
         assert!(cookie.starts_with("swage_token=the-token;"), "{cookie}");
+        assert!(
+            cookie.contains("; Max-Age="),
+            "a session cookie would unpair the browser when it closes: {cookie}"
+        );
         let paired_body = to_bytes(paired.into_body(), usize::MAX).await.unwrap();
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&paired_body).unwrap()["token"],

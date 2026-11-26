@@ -41,6 +41,9 @@ use crate::state::AppState;
 pub const TOKEN_FILE: &str = "gateway-token";
 /// The cookie a paired browser carries.
 pub const TOKEN_COOKIE: &str = "swage_token";
+/// How long a browser keeps the pairing cookie: the 400 days browsers allow
+/// at most, so a paired browser stays paired across restarts.
+const TOKEN_COOKIE_MAX_AGE_SECS: u32 = 400 * 24 * 60 * 60;
 /// The header a paired CLI or desktop app sends.
 pub const TOKEN_HEADER: &str = "x-swage-token";
 /// How long an issued pairing code may wait to be redeemed.
@@ -217,7 +220,9 @@ pub fn pair_client(state: &AppState, request: PairClientRequest) -> Result<Respo
     let token = state
         .access_gate
         .redeem_pairing_code(&request.pairing_code)?;
-    let cookie = format!("{TOKEN_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict");
+    let cookie = format!(
+        "{TOKEN_COOKIE}={token}; Path=/; Max-Age={TOKEN_COOKIE_MAX_AGE_SECS}; HttpOnly; SameSite=Strict"
+    );
     let mut response = axum::Json(PairClientResponse { token }).into_response();
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
