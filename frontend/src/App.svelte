@@ -32,6 +32,7 @@
     type StreamingStore,
   } from "./lib/stores/streaming";
   import { createTopicStore } from "./lib/stores/topics";
+  import { watchOpenConversation } from "./lib/open-conversation-updates";
   import { conversationPath, createRouter } from "./lib/router";
   import type { Route } from "./lib/router";
   import { getDesktopRuntime } from "./lib/runtime";
@@ -444,6 +445,17 @@
       window.removeEventListener(DISPLAY_PREFERENCES_CHANGED, onPreferencesChange);
     };
   });
+
+  // A conversation open in this tab while another tab holds its socket follows
+  // the gateway's session signal, so a turn stopped or settled elsewhere — or
+  // by this tab's own Stop — shows here too.
+  onMount(() =>
+    watchOpenConversation({
+      openConversationId: () => conversationStore.activeConversation?.id ?? null,
+      holdsSocket: () => connectionStore.status === "connected",
+      refresh: () => conversationStore.refreshActiveConversation(),
+    }),
+  );
 
   // Passed to ConnectionIndicator so the user can trigger a manual reconnect.
   function handleRetry(): void {
