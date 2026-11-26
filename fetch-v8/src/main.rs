@@ -17,7 +17,8 @@ use std::process::{Command, ExitCode};
 use sha2::{Digest, Sha256};
 
 const PIN_FILE: &str = "v8-archive.toml";
-const DESTINATION: &str = "vendor/v8/librusty_v8.a.gz";
+const VENDOR_DIR: &str = "vendor/v8";
+const ARCHIVE_NAME: &str = "librusty_v8.a.gz";
 const RELEASES: &str = "https://github.com/denoland/rusty_v8/releases/download";
 
 type Result<T> = std::result::Result<T, String>;
@@ -47,37 +48,36 @@ fn run() -> Result<String> {
     let pin = read_pin(&root.join(PIN_FILE), &target)?;
     check_lock_version(&root.join("Cargo.lock"), &pin.version)?;
 
-    let destination = root.join(DESTINATION);
+    let directory = root.join(VENDOR_DIR);
+    let destination = directory.join(ARCHIVE_NAME);
     if destination.is_file() && sha256_of(&destination)? == pin.sha256 {
         return Ok(format!(
-            "V8 {} archive for {target} present and verified at {DESTINATION}",
-            pin.version
+            "V8 {} archive for {target} present and verified at {VENDOR_DIR}/{ARCHIVE_NAME}",
+            pin.version,
         ));
     }
 
     let url = format!("{RELEASES}/v{}/{}", pin.version, pin.asset);
     let cached = cargo_home().map(|home| home.join(".rusty_v8").join(escape(&url)));
-    let staged = destination.with_extension("gz.partial");
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("creating {}: {error}", parent.display()))?;
-    }
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("creating {}: {error}", directory.display()))?;
+    let staged = tempfile::NamedTempFile::new_in(&directory)
+        .map_err(|error| format!("staging a V8 archive in {}: {error}", directory.display()))?;
 
     let obtained = match &cached {
         Some(cached) if cached.is_file() && sha256_of(cached)? == pin.sha256 => {
-            fs::copy(cached, &staged)
+            fs::copy(cached, staged.path())
                 .map_err(|error| format!("copying {}: {error}", cached.display()))?;
             format!("copied from {}", cached.display())
         }
         _ => {
-            download(&url, &staged)?;
+            download(&url, staged.path())?;
             format!("downloaded from {url}")
         }
     };
 
-    let actual = sha256_of(&staged)?;
+    let actual = sha256_of(staged.path())?;
     if actual != pin.sha256 {
-        let _ = fs::remove_file(&staged);
         return Err(format!(
             "V8 archive {} does not match {PIN_FILE}: the pin records sha256 {} but the archive \
              {obtained} is {actual}. Either the release asset changed under its version — \
@@ -85,7 +85,8 @@ fn run() -> Result<String> {
             pin.asset, pin.sha256
         ));
     }
-    fs::rename(&staged, &destination)
+    staged
+        .persist(&destination)
         .map_err(|error| format!("placing {}: {error}", destination.display()))?;
 
     if let Some(cached) = &cached
@@ -99,7 +100,7 @@ fn run() -> Result<String> {
     }
 
     Ok(format!(
-        "V8 {} archive for {target} {obtained}, verified (sha256 {}) and placed at {DESTINATION}",
+        "V8 {} archive for {target} {obtained}, verified (sha256 {}) and placed at {VENDOR_DIR}/{ARCHIVE_NAME}",
         pin.version, pin.sha256
     ))
 }
@@ -229,7 +230,6 @@ fn download(url: &str, to: &Path) -> Result<()> {
     if status.success() {
         Ok(())
     } else {
-        let _ = fs::remove_file(to);
         Err(format!("downloading {url} failed ({status})"))
     }
 }

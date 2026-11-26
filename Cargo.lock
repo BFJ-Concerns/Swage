@@ -1076,6 +1076,7 @@ name = "fetch-v8"
 version = "0.0.1"
 dependencies = [
  "sha2",
+ "tempfile",
  "toml",
 ]
 
