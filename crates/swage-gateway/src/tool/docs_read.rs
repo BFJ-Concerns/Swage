@@ -28,7 +28,15 @@ impl Tool for DocsReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read Swage's own documentation: how sessions, topics, agents, permissions, tools, surfaces, schedules and workflows behave on this platform. Call with no arguments to list the documents with their descriptions; call with a document name to read it. Prefer this over guessing when asked how Swage itself works."
+        "Read the documentation that ships with this platform, which says how its sessions, \
+         topics, agents, permissions, tools and workflows behave. Called without a `name` it \
+         lists the documents, each with its name, its title and a description of what it \
+         covers; called with a `name` it returns that document as `output`. The documents \
+         describe this installation as it is, which knowledge of other systems does not. A \
+         document longer than the installation's output limit comes back cut and marked \
+         `truncated`, with the call that carries it on in `follow_up`. A name the listing \
+         does not have fails, and the failure gives the names there are. Reading changes \
+         nothing."
     }
 
     fn parameters(&self) -> Value {
@@ -37,12 +45,12 @@ impl Tool for DocsReadTool {
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "The document to read, as listed. Omit to list the documents."
+                    "description": "The document to read, by the name the listing gives it. Omit to get the listing."
                 },
                 "offset_bytes": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Continue a long document from this byte offset, as the previous result's follow_up gives it."
+                    "description": "Where to carry on a cut document: the `offset_bytes` its `follow_up` gives."
                 }
             },
             "additionalProperties": false

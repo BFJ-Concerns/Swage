@@ -50,7 +50,16 @@ impl Tool for FileSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search file contents for a pattern across the workspace or a subdirectory."
+        "Find the lines that contain a piece of text, in every text file under a directory \
+         and the directories below it. The text is matched as written, ignoring case: it is \
+         a plain substring, not a pattern language. Each match comes back as a line of \
+         `output` giving the file's path, the line number and the line. Directories whose \
+         names begin with a dot are passed over, as are dependency and build directories \
+         such as `node_modules` and `target`, and binary files. Finding nothing is a result \
+         that says so, not a failure. Matches beyond the installation's output limit are cut \
+         and the result marked `truncated`, with `next_offset_bytes` to carry on from. A \
+         search that overruns its time limit fails, and a narrower `path` shortens it. \
+         Searching changes nothing."
     }
 
     fn parameters(&self) -> Value {
@@ -59,16 +68,16 @@ impl Tool for FileSearchTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Case-insensitive substring pattern to search for."
+                    "description": "The text to find, matched wherever it occurs within a line, in either case."
                 },
                 "path": {
                     "type": "string",
-                    "description": "Subdirectory relative to workspace root to restrict the search. Defaults to \".\" (entire workspace)."
+                    "description": "The directory to search: relative to the session's working directory, or absolute for one elsewhere the session has been allowed to reach. Omit to search the working directory."
                 },
                 "offset_bytes": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Byte offset into the search result stream. Use next_offset_bytes from a truncated result to continue."
+                    "description": "Where to carry on a cut result: its `next_offset_bytes`, given with the same `pattern` and `path`."
                 }
             },
             "required": ["pattern"]

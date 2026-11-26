@@ -721,7 +721,12 @@ impl LlmProvider for GoogleProvider {
         let status = response.status().as_u16();
         if !response.status().is_success() {
             let body_text = self.redact_api_key_in_text(response.text().await.unwrap_or_default());
-            return Err(crate::http::map_http_error(status, body_text, None));
+            return Err(crate::http::map_http_error(
+                self.config.provider_id_or("google"),
+                status,
+                body_text,
+                None,
+            ));
         }
 
         let gemini_response: GenerateContentResponse = response
@@ -756,7 +761,12 @@ impl LlmProvider for GoogleProvider {
         let status = response.status().as_u16();
         if !response.status().is_success() {
             let body_text = self.redact_api_key_in_text(response.text().await.unwrap_or_default());
-            return Err(crate::http::map_http_error(status, body_text, None));
+            return Err(crate::http::map_http_error(
+                self.config.provider_id_or("google"),
+                status,
+                body_text,
+                None,
+            ));
         }
 
         let gemini_response: GenerateContentResponse = response
@@ -785,6 +795,7 @@ impl LlmProvider for GoogleProvider {
         let body = self.build_request(&request);
         let request = self.http_request(model, true, &body);
         let api_key = self.config.api_key.clone();
+        let provider_id = self.config.provider_id_or("google").to_owned();
 
         spawn_stream_forwarder(move |tx| async move {
             let request = match request {
@@ -812,7 +823,7 @@ impl LlmProvider for GoogleProvider {
                     &response.text().await.unwrap_or_default(),
                     api_key.as_deref(),
                 );
-                let err = crate::http::map_http_error(status, body_text, None);
+                let err = crate::http::map_http_error(&provider_id, status, body_text, None);
                 let _ = tx.send(StreamChunk::Error {
                     message: err.to_string(),
                 });

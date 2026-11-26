@@ -2786,6 +2786,61 @@ mod tests {
         );
     }
 
+    /// The guide presents its independent-check script as one that runs as
+    /// written, with the checker's model optional. Both hold only while the
+    /// script and the surface agree.
+    #[tokio::test(flavor = "current_thread")]
+    async fn workflow_authoring_guide_check_example_runs_with_and_without_a_checker_model() {
+        let guide = include_str!("../../../shipped/skills/workflow-authoring/SKILL.md");
+        let example = guide
+            .split_once("## An independent check")
+            .expect("independent check section")
+            .1
+            .split_once("```js\n")
+            .expect("JavaScript example")
+            .1
+            .split_once("\n```")
+            .expect("complete JavaScript example")
+            .0;
+
+        for (args, checker_model) in [
+            (r#"{"cwd":"/work","area":"request validation"}"#, None),
+            (
+                r#"{"cwd":"/work","area":"request validation","checkerModel":"second"}"#,
+                Some("second"),
+            ),
+        ] {
+            let host = Arc::new(SurfaceHost::new());
+            let finding = json!({"file": "src/lib.rs", "line": 7, "claim": "length unchecked"});
+            let verdict = json!({"holds": true, "evidence": "read line 7", "otherConcerns": ""});
+            host.agent_outputs
+                .lock()
+                .unwrap()
+                .extend([Ok(finding.clone()), Ok(verdict.clone())]);
+            let output = WorkflowEngine::new(EngineLimits::default())
+                .execute_hosted(
+                    example,
+                    args,
+                    CancellationToken::new(),
+                    Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                    ScriptCapabilities::default(),
+                )
+                .await
+                .expect("the documented script runs as written");
+
+            assert_eq!(
+                serde_json::from_str::<Value>(&output).expect("workflow output"),
+                json!({"finding": finding, "verdict": verdict, "confirmed": true})
+            );
+            let requests = host.agent_requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].model, None);
+            assert_eq!(requests[1].model.as_deref(), checker_model);
+            assert_eq!(requests[1].cwd.as_deref(), Some("/work"));
+            assert!(requests[1].prompt.contains("length unchecked"));
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn agent_call_without_a_definition_omits_agent_from_the_host_request() {
         let host = Arc::new(SurfaceHost::new());

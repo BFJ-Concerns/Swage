@@ -534,9 +534,13 @@ pub(super) async fn project_agent_events(
                 message,
                 provider_failure,
             } => {
-                let message = match provider_route.filter(|_| provider_failure) {
-                    Some(route) => format!("{route}: {message}"),
-                    None => message,
+                let message = if provider_failure && !model_name.is_empty() {
+                    match provider_route {
+                        Some(route) => format!("Model {model_name}: {route}: {message}"),
+                        None => format!("Model {model_name}: {message}"),
+                    }
+                } else {
+                    message
                 };
                 if provider_failure && let Some(observer) = provider_failure_observer {
                     *observer.lock().unwrap_or_else(|error| error.into_inner()) =

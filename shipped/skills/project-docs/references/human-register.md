@@ -1,94 +1,63 @@
-# The Human Register
+# Prose written for people
 
-Patterns that make documentation read as generated rather than written. Read
-this before drafting or materially revising human-facing prose — README
-narrative, guides, rationale, runbooks, whether written fresh or added
-inside a refresh patch — and hold the patterns out from the start;
-retrofitting them out costs more than never writing them.
+This covers the README's narrative, guides, explanations and runbooks,
+whether written new or added inside a correction. Prose in an existing
+document that is already clear and plainly a person's is left as it is.
 
-Neutral and plain is the correct voice for documentation: no injected opinions,
-no first-person asides in reference material, no personality sprinkled on. What
-follows is not a push toward casual prose — it is the removal of the specific
-tells that generated text carries even at a neutral register.
+## What it should be
 
-## Content patterns
+Documentation prose is plain and neutral. It says what a thing is and what it
+does, in the words someone who knows the product would use to a colleague. It
+carries no opinions, no personality, and no first person in reference
+material.
 
-**Significance inflation.** Watch for: stands as, serves as, is a testament to,
-plays a vital/crucial/pivotal role, underscores, highlights the importance of,
-reflects broader, marking a shift, key turning point. Documentation states what a
-thing is and does; it does not argue for the thing's importance. If a sentence's
-only work is to assert significance, cut it.
+- **State the fact and stop.** A sentence either tells the reader something
+  about the product or is cut. A benefit is stated as the mechanism that
+  produces it, in a sentence of its own, or left out. A claim of speed or
+  reliability is the measurement or the mechanism behind it.
+- **Use the plain word.** "Is", "has" and "use" are right. A longer word
+  standing in for one of them adds nothing.
+- **Let the subject set the shape.** A list has as many items as the subject
+  has. Prose that is an explanation is written as paragraphs, and facts that
+  are parallel go in a table or a plain list.
+- **Start with the first real point.** No announcement of what is coming, no
+  paragraph restating the heading, and no closing remark after the last
+  point.
+- **Describe the product as it is.** What changed, and what it replaced,
+  belongs in a commit message or a changelog. Changelogs and migration guides
+  are the exception, since they are about a version.
+- **Give this project's reasons.** Where a choice needs a reason, give the
+  one that holds in this repository, or none.
+- **Headings in sentence case**, unless the project's existing documents do
+  otherwise. Bold marks what a reader scans for: a command, a filename, a
+  term where it is defined.
 
-**Promotional vocabulary.** Watch for: seamless, powerful, robust, blazingly
-fast, comprehensive, cutting-edge, effortless, rich, vibrant, boasts, showcases.
-A README that says "handles X, Y, and Z" outranks one that says "a powerful,
-comprehensive solution for X". Claims of speed or robustness stay only when a
-measurement or mechanism backs them, stated as that measurement or mechanism.
+## Reading a draft back
 
-**Tacked-on "-ing" analysis.** Watch for sentence tails like ", ensuring
-consistency", ", enhancing performance", ", allowing for flexibility". These
-assert a benefit without saying how it arises. Either state the mechanism as its
-own sentence or cut the tail.
+Generated prose has habits that survive a neutral tone. When reading a draft
+back, look for these and rewrite the sentence as the plain claim, or cut it
+where no claim is left:
 
-**Copula avoidance.** "The gallery features four topics and boasts 3,000 square
-feet" → "The gallery has four topics and 3,000 square feet". Plain "is", "are",
-and "has" are correct; elaborate substitutes (serves as, represents, offers,
-provides a way to) are the tell.
+- a sentence whose only work is to say that something matters: "plays a
+  crucial role", "serves as", "stands as", "underscores";
+- praise in place of description: "powerful", "seamless", "robust",
+  "comprehensive";
+- a tail that asserts a benefit without saying how it arises: ", ensuring
+  consistency", ", allowing for flexibility";
+- an elaborate substitute for "is" or "has": "features", "boasts", "offers",
+  "provides a way to";
+- words that turn up far more often in generated text than in documentation
+  written by hand: "delve", "leverage", "utilize", "facilitate",
+  "streamline", "pivotal", "landscape";
+- three abstract nouns in a row where the subject does not have exactly
+  three;
+- "it's not just X, it's Y";
+- an appeal to unnamed authority: "best practice", "many developers
+  prefer";
+- filler and stacked hedges: "in order to", "it is important to note that",
+  "could potentially";
+- bullets shaped as a bold label followed by a sentence restating the label.
 
-**AI-frequent vocabulary.** Watch for: delve, leverage (as a verb for "use"),
-utilize, facilitate, streamline, intricate, pivotal, crucial, foster, garner,
-landscape (abstract), tapestry, interplay, showcase, underscore. Each has a
-plainer word: use, help, simplify, detailed, central, important.
-
-**Manufactured triads.** Lists of exactly three abstract benefits ("innovation,
-inspiration, and insights") are a rhythm reflex, not information. A list has as
-many members as the subject genuinely has.
-
-**Negative parallelisms.** "It's not just an installer, it's a complete
-onboarding experience" — rewrite as the plain claim: say what it does.
-
-**Vague authority.** "Industry best practice", "many developers prefer",
-"experts recommend" — documentation grounded in this repo cites this repo's
-reasons or none.
-
-**Generic conclusions.** Endings like "the future looks bright" or "happy
-coding!" carry nothing. End on the last substantive point.
-
-**Filler and stacked hedges.** "In order to", "it is important to note that",
-"at this point in time" → "to", (delete), "now". Collapse stacked qualifiers
-("could potentially possibly") to the one honest hedge the claim needs.
-
-## Structure patterns
-
-**Inline-header bullet lists.** Bullets shaped `**Label:** sentence restating
-the label` are generated scaffolding. Where the items are genuinely parallel
-facts, a table or plain list serves; where they are prose, write the paragraph.
-
-**Boldface as emphasis machine.** Bold marks the term a reader scans for — a
-command, a filename, a defined term at first use — not every phrase the writer
-considers important.
-
-**Heading warm-ups.** A one-line paragraph after a heading that restates the
-heading ("## Performance — Speed matters.") is padding; start with the first
-real point.
-
-**Signposting.** "Let's dive in", "here's what you need to know", "without
-further ado" — delete the announcement and start.
-
-**Diff-anchored writing.** Documentation describes the system as it is, not the
-change that produced it: "this function replaces the previous approach, which
-was O(n²)" belongs in a commit message or changelog. The doc says what the
-function does now and why that design holds. (Changelogs and migration guides
-are the exception — they are inherently version-scoped.)
-
-**Title Case Headings.** Use sentence case in headings unless the project's
-existing docs already do otherwise.
-
-## What not to sand off
-
-Polish is not a tell. Perfect grammar, formal vocabulary, an occasional
-transition word, and genuinely three-membered lists are all fine. Avoid the
-specific patterns above and stop there: over-editing plain correct sentences
-into fragments is its own defect. When an existing doc's voice is human and
-clear, refresh mode preserves it (gate 4) — this reference governs prose that
-gets newly written, in write mode or inside a refresh patch.
+Correct grammar, formal vocabulary, an occasional connecting word and a list
+that really has three members are all fine. Stop at the habits above; a plain
+correct sentence edited into fragments is worse than it was.

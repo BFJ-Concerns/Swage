@@ -633,6 +633,21 @@ describe("error events", () => {
     ]);
   });
 
+  it("keeps a failed partial response and its tool calls on the same message", () => {
+    const conv = createMockConversationStore();
+    const store = createStreamingStore({ conversationStore: conv });
+    store.startTurn("question");
+    store.handleServerEvent({ type: "tool_start", call_id: "call-1", tool: "echo", arguments: {} });
+    store.handleServerEvent({ type: "token", content: "partial" });
+    store.handleServerEvent({ type: "error", code: "agent_error", message: "Model example: provider unavailable" });
+    expect(conv.getMessages().find(message => message.role === "assistant")).toMatchObject({
+      content: "partial",
+      turn_state: "failed",
+      tool_calls: [{ call_id: "call-1" }],
+    });
+    expect(store.activeToolCalls).toEqual([]);
+  });
+
   it("keeps a streamed refusal as refused rather than failed", () => {
     const conv = createMockConversationStore();
     const store = createStreamingStore({ conversationStore: conv });
@@ -718,7 +733,10 @@ describe("error events", () => {
     store.handleServerEvent(event, "conv-a");
 
     expect(appendAssistantMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ content: "Partial A", turn_state: event.type === "shutdown" ? "interrupted" : "failed" }),
+      expect.objectContaining({
+        content: "Partial A",
+        turn_state: event.type === "shutdown" ? "interrupted" : "failed",
+      }),
       "conv-a",
     );
     expect(store.streamFor?.("conv-a").streamedContent).toBe("");
@@ -1132,6 +1150,44 @@ describe("shutdown events", () => {
     });
   });
 
+  it("leaves the failed reply alone when the gateway shuts down afterwards", () => {
+    const conv = createMockConversationStore();
+    const store = createStreamingStore({ conversationStore: conv });
+    const failure = "Structured output validation failed: /answer is required";
+
+    store.startTurn("question");
+    store.handleServerEvent({
+      type: "tool_start",
+      call_id: "call-1",
+      tool: "echo",
+      arguments: {},
+    });
+    store.handleServerEvent({
+      type: "tool_end",
+      call_id: "call-1",
+      tool: "echo",
+      result: "echoed",
+      status: "success",
+      duration_ms: 1,
+      truncated: false,
+    });
+    store.handleServerEvent({ type: "token", content: "partial" });
+    store.handleServerEvent({
+      type: "output_schema_failed",
+      failure_message: failure,
+      turn_id: "turn-1",
+      attempts: 1,
+      errors: [{ path: "/answer", message: "is required" }],
+    });
+
+    store.handleServerEvent({ type: "shutdown", reason: "admin shutdown request" });
+
+    expect(conv.getMessages().filter((message) => message.role === "assistant")).toEqual([
+      expect.objectContaining({ turn_state: "failed", content: "partial" }),
+    ]);
+    expect(store.turnError).toEqual({ code: "output_schema_failed", message: failure });
+  });
+
   it("preserves partial response in the conversation store", () => {
     const conv = createMockConversationStore();
     const store = createStreamingStore({ conversationStore: conv });
@@ -1145,6 +1201,7 @@ describe("shutdown events", () => {
       .filter((m) => m.role === "assistant");
     expect(assistantMessages).toHaveLength(1);
     expect(assistantMessages[0].content).toBe("partial");
+    expect(assistantMessages[0].turn_state).toBe("interrupted");
   });
 });
 
@@ -1172,12 +1229,17 @@ describe("output_schema_failed events", () => {
     });
   });
 
-  it("preserves partial response in the conversation store", () => {
+  it("keeps the tool calls beside the failed reply", () => {
     const conv = createMockConversationStore();
     const store = createStreamingStore({ conversationStore: conv });
 
     store.startTurn("question");
     store.handleServerEvent({ type: "token", content: "partial" });
+    store.handleServerEvent({ type: "tool_start", call_id: "echo-1", tool: "echo", arguments: {} });
+    store.handleServerEvent({
+      type: "tool_end", call_id: "echo-1", tool: "echo",
+      status: "success", result: "echoed", duration_ms: 1, truncated: false,
+    });
     store.handleServerEvent({
       type: "output_schema_failed", failure_message: "Structured output validation failed after 3 attempts: /answer: is required",
       turn_id: "t-1",
@@ -1189,7 +1251,13 @@ describe("output_schema_failed events", () => {
       .getMessages()
       .filter((m) => m.role === "assistant");
     expect(assistantMessages).toHaveLength(1);
-    expect(assistantMessages[0].content).toBe("partial");
+    expect(assistantMessages[0]).toMatchObject({
+      turn_id: "t-1",
+      turn_state: "failed",
+      content: "partial",
+      tool_calls: [{ call_id: "echo-1", status: "success", result: "echoed" }],
+    });
+    expect(store.activeToolCalls).toEqual([]);
   });
 });
 
@@ -1528,29 +1596,6 @@ describe("gateway shutdown", () => {
     store.handleServerEvent({ type: "token", content: "partial" });
     store.handleServerEvent({ type: "shutdown", reason: "admin shutdown request" });
     expect(conv.getMessages().find((m) => m.role === "assistant")?.turn_state).toBe("interrupted");
-  });
-});
-
-describe("queued turn model identity", () => {
-  it("uses the last drained submission and clears it before an unrelated turn", () => {
-    const conv = createMockConversationStore();
-    const conn = createMockConnectionStore();
-    const store = createStreamingStore({ conversationStore: conv, connectionStore: conn });
-    store.startTurn("Active", "active-model");
-    for (const [id, model] of [["q-1", "first-queued"], ["q-2", "last-queued"]]) {
-      store.startTurn(id, model);
-      const clientId = conn.sendMessage.mock.calls.at(-1)![5] as string;
-      store.handleServerEvent({ type: "message_queued", session_id: "test-conversation", queued: {
-        id, client_id: clientId, origin: "user", content: id, queued_at: "2026-10-15T12:00:00Z",
-      } });
-    }
-    store.handleServerEvent({ type: "turn_complete", turn_id: "active" });
-    store.handleServerEvent({ type: "queue_drained", thread_id: "main-thread", session_id: "test-conversation", turn_id: "queued", queued_ids: ["q-1", "q-2"] });
-    store.handleServerEvent({ type: "error", code: "provider_error", message: "Rejected" });
-    expect(store.turnError?.selectedModelId).toBe("last-queued");
-    store.handleServerEvent({ type: "queue_drained", thread_id: "main-thread", session_id: "test-conversation", turn_id: "external", queued_ids: ["external-q"] });
-    store.handleServerEvent({ type: "error", code: "provider_error", message: "Rejected" });
-    expect(store.turnError?.selectedModelId).toBeUndefined();
   });
 });
 

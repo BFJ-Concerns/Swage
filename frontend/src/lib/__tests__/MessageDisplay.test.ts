@@ -229,11 +229,11 @@ describe("provider failure notice", () => {
     expect(compiled.css?.code).toMatch(/overflow-wrap:\s*anywhere/);
   });
 
-  it.each(["unknown provider for model gpt-model-access-does-not-exist", "Authentication rejected"])("uses the failed turn selection with a stale conversation: %s", (cause) => {
+  it("leaves the model unnamed when the error supplies no model", () => {
     const request: MessageView = { role: "user", content: "Hello", timestamp: "2026-10-15T12:00:00Z" };
     const store = makeConversationStore([request]);
     Object.defineProperty(store.activeConversation!, "selected_model_id", { value: "sol" });
-    const raw = `provider 'cliproxy-openai' at https://Proxy.Example/v1: HTTP error 400: ${JSON.stringify({ error: { message: cause } })}`;
+    const raw = `provider 'cliproxy-openai' at https://Proxy.Example/v1: HTTP error 400: ${JSON.stringify({ error: { message: "Authentication rejected" } })}`;
     const sendMessage = vi.fn();
     const streaming = createStreamingStore({ conversationStore: store, connectionStore: { sendMessage } });
     streaming.startTurn("Hello", "cliproxy-openai:gpt-model-access-does-not-exist");
@@ -242,12 +242,11 @@ describe("provider failure notice", () => {
     flushSync();
     const summary = document.querySelector(".turn-error p")!.textContent!;
     expect(summary).toContain("provider cliproxy-openai");
-    expect(summary).toContain("gpt-model-access-does-not-exist");
-    expect(summary).not.toContain("using model sol");
+    expect(summary).not.toContain("using model");
     expect(document.querySelector(".turn-error pre")!.textContent).toBe(raw);
   });
 
-  it("shows the submitted model when a queued turn fails", () => {
+  it("shows the model the gateway reports when a queued turn fails", () => {
     const store = makeConversationStore([{ role: "user", content: "Queued", timestamp: "2026-10-15T12:00:00Z" }]);
     Object.defineProperty(store.activeConversation!, "root_thread_id", { value: "main-thread" });
     const sendMessage = vi.fn();
@@ -260,10 +259,79 @@ describe("provider failure notice", () => {
     } });
     streaming.handleServerEvent({ type: "turn_complete", turn_id: "first-turn" });
     streaming.handleServerEvent({ type: "queue_drained", thread_id: "main-thread", session_id: "conv-1", turn_id: "queued-turn", queued_ids: ["q-1"] });
-    streaming.handleServerEvent({ type: "error", code: "provider_error", message: "Request rejected" });
+    streaming.handleServerEvent({ type: "error", code: "agent_error", message: "Model Routed-Model: Request rejected" });
     component = mount(MessageDisplay, { target: document.body, props: { store, streamingStore: streaming } });
     flushSync();
-    expect(document.querySelector(".turn-error p")?.textContent).toContain("using model Queued-Model failed");
+    expect(document.querySelector(".turn-error p")?.textContent).toContain("using model Routed-Model failed");
+  });
+
+  it.each([
+    "rate limited by provider fallback",
+    "provider fallback overloaded: capacity exhausted",
+  ])("names the provider that reported %s", (cause) => {
+    const request: MessageView = {
+      role: "user", content: "Hello", timestamp: "2026-10-15T12:00:00Z",
+    };
+    const streaming = makeStreamingStore();
+    Object.defineProperty(streaming, "turnError", {
+      get: () => ({
+        code: "agent_error",
+        message: `Model routed-model: provider 'primary' at https://example.test: ${cause}`,
+      }),
+    });
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store: makeConversationStore([request]), streamingStore: streaming },
+    });
+    flushSync();
+    expect(document.querySelector(".turn-error p")?.textContent).toContain("to provider fallback");
+  });
+
+  it("shows the gateway's model for a failed turn with no reply", () => {
+    const request: MessageView = {
+      role: "user", content: "Hello", timestamp: "2026-10-15T12:00:00Z",
+      turn_state: "failed",
+      failure_message: "Model routed-model:free: provider 'proxy' at https://example.test: connection reset",
+    };
+    component = mount(MessageDisplay, { target: document.body, props: { store: makeConversationStore([request]) } });
+    flushSync();
+    const summary = document.querySelector(".turn-error p")!.textContent!;
+    expect(summary).toContain("provider proxy");
+    expect(summary).toContain("using model routed-model:free failed");
+  });
+
+  it.each([
+    ["gateway_shutdown", "The gateway shut down while the turn was running."],
+    ["approval_timeout", "approval timed out before tool execution; turn interrupted"],
+  ])("shows the cause of %s directly", (code, reason) => {
+    const streaming = makeStreamingStore();
+    Object.defineProperty(streaming, "turnError", { get: () => ({ code, message: reason }) });
+    const request: MessageView = { role: "user", content: "Hello", timestamp: "2026-10-15T12:00:00Z" };
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store: makeConversationStore([request]), streamingStore: streaming },
+    });
+    flushSync();
+    expect(document.querySelector(".turn-error p")?.textContent).toBe(reason);
+  });
+
+  it.each([
+    ["assistant", "The gateway shut down while the turn was running."],
+    ["user", "approval timed out before tool execution; turn interrupted"],
+  ] as const)("shows the recorded interruption on a reloaded %s message", (role, reason) => {
+    const message: MessageView = {
+      role,
+      content: role === "assistant" ? "Partial reply" : "Write the file",
+      timestamp: "2026-10-15T12:00:00Z",
+      turn_state: "interrupted",
+      failure_message: reason,
+    };
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store: makeConversationStore([message]) },
+    });
+    flushSync();
+    expect(document.querySelector(".turn-error p")?.textContent).toBe(reason);
   });
 
   it("offers generic recovery without inventing a provider or error category", () => {

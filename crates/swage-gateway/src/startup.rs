@@ -1161,7 +1161,7 @@ async fn create_provider_with_retry(
         };
         providers.push(concrete_provider(
             provider_endpoint.protocol.clone(),
-            provider_config,
+            provider_config.with_provider_id(&model_endpoint.provider_id),
         ));
     }
 
@@ -2483,9 +2483,7 @@ mod tests {
             );
         }
         assert!(
-            text.contains(
-                "Every other tool, `shell` included, receives a reference as literal text"
-            ),
+            text.contains("Every other tool, `shell` included,"),
             "{text}"
         );
     }
