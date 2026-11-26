@@ -736,47 +736,6 @@ api_key = "x"
     }
 
     #[test]
-    fn a_target_without_its_own_mode_follows_the_scope_s_transfer_policy_through_the_overlay() {
-        let tmp = TempDir::new().unwrap();
-        build_fixture(
-            tmp.path(),
-            Some(
-                "[communication.context_transfer]\nmode = \"summary\"\n[communication.context_transfer.targets.worker]\n",
-            ),
-            "proj",
-            Some("[communication.context_transfer]\nmode = \"none\"\n"),
-            "default",
-            None,
-        );
-        let running = load_running_config_from(tmp.path()).unwrap();
-        let scope = ScopeLocation::topic("proj");
-        let file_based = load_resolved_config_from(tmp.path(), &scope, "default").unwrap();
-        assert_eq!(
-            *file_based
-                .communication
-                .context_transfer
-                .policy_for("worker")
-                .mode,
-            crate::ContextTransferMode::None,
-            "a full load reads the scope's default into the inheriting target"
-        );
-        let session = overlay_scope_layers(running, tmp.path(), &scope, "default").unwrap();
-        assert_eq!(
-            *session
-                .communication
-                .context_transfer
-                .policy_for("worker")
-                .mode,
-            crate::ContextTransferMode::None,
-            "a target without a mode of its own inherits the scope's transfer policy"
-        );
-        assert_eq!(
-            session.communication.context_transfer.targets["worker"].mode, None,
-            "the running configuration's conversion keeps the target's own fields only"
-        );
-    }
-
-    #[test]
     fn scope_overlays_preserve_attachment_policy_and_instruction_provenance() {
         let tmp = TempDir::new().unwrap();
         let scope = ScopeLocation::topic("proj");

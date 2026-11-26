@@ -20,8 +20,9 @@ pub struct TransferredContext {
     pub messages: Vec<ChatMessage>,
 }
 
-/// Resolve the effective transfer policy for a specific target agent: the
-/// target's own fields where it set them, the default policy's otherwise.
+/// Resolve the effective transfer policy for a specific target agent.
+///
+/// Checks the per-target map first, falls back to the default policy.
 pub fn resolve_policy<'a>(
     config: &'a ContextTransferConfig,
     target_agent_id: &str,
@@ -30,8 +31,15 @@ pub fn resolve_policy<'a>(
     &'a [ContextTransferField],
     Option<u32>,
 ) {
-    let policy = config.policy_for(target_agent_id);
-    (policy.mode, policy.allowed_fields, policy.summary_budget)
+    if let Some(target_config) = config.targets.get(target_agent_id) {
+        (
+            &target_config.mode,
+            &target_config.allowed_fields,
+            target_config.summary_budget,
+        )
+    } else {
+        (&config.mode, &config.allowed_fields, config.summary_budget)
+    }
 }
 
 /// Evaluate the context transfer policy and produce the transferred context.
@@ -500,16 +508,8 @@ mod tests {
                 m.insert(
                     "agent-b".to_string(),
                     ContextTransferTargetConfig {
-                        mode: Some(ContextTransferMode::Explicit),
-                        allowed_fields: Some(vec![ContextTransferField::System]),
-                        summary_budget: None,
-                    },
-                );
-                m.insert(
-                    "agent-d".to_string(),
-                    ContextTransferTargetConfig {
-                        mode: None,
-                        allowed_fields: Some(vec![ContextTransferField::User]),
+                        mode: ContextTransferMode::Explicit,
+                        allowed_fields: vec![ContextTransferField::System],
                         summary_budget: None,
                     },
                 );
@@ -524,11 +524,6 @@ mod tests {
         // Unspecified target falls back to default.
         let (mode, _, _) = resolve_policy(&config, "agent-c");
         assert_eq!(*mode, ContextTransferMode::None);
-
-        // A target that set only its fields inherits the default mode.
-        let (mode, fields, _) = resolve_policy(&config, "agent-d");
-        assert_eq!(*mode, ContextTransferMode::None);
-        assert_eq!(fields, &[ContextTransferField::User]);
     }
 
     #[test]

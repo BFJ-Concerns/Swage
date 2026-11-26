@@ -443,14 +443,12 @@ pub enum ContextTransferField {
     User,
     Assistant,
 }
-/// A target's own context-transfer fields; an unset one inherits the
-/// policy's default at use.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
 #[ts(optional_fields = nullable)]
 pub struct ContextTransferTargetConfig {
-    pub mode: Option<ContextTransferMode>,
-    pub allowed_fields: Option<Vec<ContextTransferField>>,
+    pub mode: ContextTransferMode,
+    pub allowed_fields: Vec<ContextTransferField>,
     pub summary_budget: Option<u32>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
