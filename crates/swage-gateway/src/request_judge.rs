@@ -25,8 +25,10 @@ use swage_core::{ChatMessage, CompletionRequest, Role};
 use crate::experimentation::{LOCATION_REQUEST_JUDGE_PROMPT, select_session_variant};
 use crate::state::AppState;
 
-/// The judge answers in a sentence or two; this bounds a model that does not.
-pub const JUDGE_MAX_TOKENS: u32 = 400;
+/// The judge answers in a sentence or two, but a model that reasons before
+/// it replies spends that reasoning from the same allowance; this leaves
+/// room for it and still bounds a model that runs on.
+pub const JUDGE_MAX_TOKENS: u32 = 4096;
 
 /// The instruction every judgement runs under until an alternative registers.
 pub const DEFAULT_JUDGE_INSTRUCTION_VARIANT: &str = "default";
@@ -105,7 +107,9 @@ impl RequestJudge for GatewayRequestJudge {
             })
             .await;
         match response {
-            Ok(response) => parse_judge_reply(&judge_key, &response.content),
+            Ok(response) => {
+                parse_judge_reply(&judge_key, &response.content, &response.finish_reason)
+            }
             Err(error) => Judgement {
                 verdict: JudgeVerdict::Unavailable,
                 confident: false,
@@ -275,7 +279,11 @@ struct JudgeReply {
 /// Read the judge's reply, failing closed: only a clear `allow` is a yes,
 /// any other decision is a refusal, and a reply that is not readable is no
 /// judgement at all, its text kept for the record.
-fn parse_judge_reply(judge_key: &str, content: &str) -> Judgement {
+fn parse_judge_reply(
+    judge_key: &str,
+    content: &str,
+    finish_reason: &swage_core::FinishReason,
+) -> Judgement {
     let json_slice = content
         .find('{')
         .and_then(|start| content.rfind('}').map(|end| &content[start..=end]));
@@ -286,10 +294,15 @@ fn parse_judge_reply(judge_key: &str, content: &str) -> Judgement {
             .chars()
             .take(UNREADABLE_REPLY_EXCERPT_CHARS)
             .collect();
+        let cut_off = if *finish_reason == swage_core::FinishReason::Length {
+            " (the reply stopped at its output limit)"
+        } else {
+            ""
+        };
         return Judgement {
             verdict: JudgeVerdict::Unavailable,
             confident: false,
-            reason: format!("judge reply was not readable as a verdict: {excerpt}"),
+            reason: format!("judge reply was not readable as a verdict{cut_off}: {excerpt}"),
             judge: Some(judge_key.to_owned()),
         };
     };
@@ -576,26 +589,45 @@ mod tests {
 
     #[test]
     fn the_reply_parser_reads_only_a_clear_allow_as_a_yes() {
-        let allowed = parse_judge_reply("judge", r#"{"decision":"ALLOW","reason":"fine"}"#);
+        let allowed = parse_judge_reply(
+            "judge",
+            r#"{"decision":"ALLOW","reason":"fine"}"#,
+            &swage_core::FinishReason::Stop,
+        );
         assert_eq!(allowed.verdict, JudgeVerdict::Allowed);
-        let hedged = parse_judge_reply("judge", r#"{"decision":"allow if needed","reason":""}"#);
+        let hedged = parse_judge_reply(
+            "judge",
+            r#"{"decision":"allow if needed","reason":""}"#,
+            &swage_core::FinishReason::Stop,
+        );
         assert_eq!(hedged.verdict, JudgeVerdict::Refused);
         assert_eq!(hedged.reason, "no reason given");
-        let empty = parse_judge_reply("judge", "");
+        let empty = parse_judge_reply("judge", "", &swage_core::FinishReason::Stop);
         assert_eq!(empty.verdict, JudgeVerdict::Unavailable);
+        let cut_off = parse_judge_reply("judge", "", &swage_core::FinishReason::Length);
+        assert_eq!(cut_off.verdict, JudgeVerdict::Unavailable);
+        assert!(
+            cut_off.reason.contains("stopped at its output limit"),
+            "{}",
+            cut_off.reason
+        );
     }
 
     #[test]
     fn confidence_requires_an_explicit_boolean_true() {
         for value in ["true", "false", "null", "7", "\"true\"", "{}", "[]"] {
             let reply = format!(r#"{{"decision":"allow","reason":"needed","confident":{value}}}"#);
-            let judgement = parse_judge_reply("judge", &reply);
+            let judgement = parse_judge_reply("judge", &reply, &swage_core::FinishReason::Stop);
             assert_eq!(judgement.verdict, JudgeVerdict::Allowed);
             assert_eq!(judgement.confident, value == "true", "{reply}");
         }
-        let missing = parse_judge_reply("judge", r#"{"decision":"allow","reason":"needed"}"#);
+        let missing = parse_judge_reply(
+            "judge",
+            r#"{"decision":"allow","reason":"needed"}"#,
+            &swage_core::FinishReason::Stop,
+        );
         assert!(!missing.confident);
-        let unreadable = parse_judge_reply("judge", "no verdict");
+        let unreadable = parse_judge_reply("judge", "no verdict", &swage_core::FinishReason::Stop);
         assert!(!unreadable.confident);
     }
 
