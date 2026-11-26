@@ -173,6 +173,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- A shortened tool result replayed after the account of its approval says it is shortened and how to read the rest, as any other shortened result does. `tool_result_read` reads a result too long for one reply in parts, each part's `follow_up` giving the `offset_bytes` of the next, so the whole of it can be read.
 - A value registered as a secret is masked as `[REDACTED_SECRET]` in every conversation record the gateway writes and in what the conversation socket carries, however it came in: a person's message, queued or delegated input, a tool's arguments and result, an approval's request, a schedule's message, a reply or a context snapshot. A tool's result is masked before the model reads it, so its shortened preview never ends inside a registered value. Registering, rotating, revoking or restoring a secret changes what is masked at once.
 - `tool_result_read` masks registered secret values in the stored result it returns, as the conversation's history does, instead of reading them back whole.
 - The project-docs skill no longer hands agent-guidance changes to a skill Swage does not ship: it reports proposed changes to `AGENTS.md`, and edits that file only when the request covers it.

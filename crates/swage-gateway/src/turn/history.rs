@@ -168,14 +168,9 @@ fn compact_tool_replay_messages_with_retrieval(
 
         for record in round_records {
             let model_result = replay_result(record, secret_values);
-            let model_result = match (
-                retrieval,
-                serde_json::from_str::<swage_core::CompactToolReplay>(&model_result),
-            ) {
-                (Some(retrieval), Ok(replay)) => {
-                    replay.with_elision_note(retrieval).to_stable_json()
-                }
-                _ => model_result,
+            let model_result = match retrieval {
+                Some(retrieval) => with_elision_note(model_result, retrieval),
+                None => model_result,
             };
             tool_calls.push(ToolCall {
                 call_id: record.call_id.clone(),
@@ -198,6 +193,24 @@ fn compact_tool_replay_messages_with_retrieval(
     }
 
     Ok(replay_messages)
+}
+
+/// The replay as a later turn reads it: a shortened result carries the note
+/// that says so. An account of the call's approval can precede the
+/// single-line envelope; it is kept as it is, ahead of the noted envelope.
+fn with_elision_note(model_result: String, retrieval: swage_core::ReplayRetrieval) -> String {
+    let (account, envelope) = match model_result.rsplit_once('\n') {
+        Some((account, envelope)) => (Some(account), envelope),
+        None => (None, model_result.as_str()),
+    };
+    let Ok(replay) = serde_json::from_str::<swage_core::CompactToolReplay>(envelope) else {
+        return model_result;
+    };
+    let envelope = replay.with_elision_note(retrieval).to_stable_json();
+    match account {
+        Some(account) => format!("{account}\n{envelope}"),
+        None => envelope,
+    }
 }
 
 fn replay_result(record: &ToolCallRecord, secret_values: Option<&[String]>) -> String {
@@ -355,4 +368,39 @@ fn is_tool_argument_envelope(arguments: &serde_json::Value) -> bool {
         && ["bytes", "sha256", "truncated", "preview"]
             .iter()
             .all(|key| arguments.get(key).is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_elision_note;
+    use swage_core::{CompactToolReplay, ReplayRetrieval};
+
+    /// An approval's account of the call can precede the stored envelope;
+    /// a shortened result says it is shortened all the same, and the account
+    /// is kept ahead of it as it was.
+    #[test]
+    fn a_shortened_result_after_an_approval_account_carries_the_note() {
+        let envelope = swage_core::compact_tool_result_for_model_with_reference(
+            &"x".repeat(5_000),
+            false,
+            "tool_call:00000000-0000-0000-0000-000000000000:call-1:result",
+        );
+        let account = "The person approved this call.";
+        let replayed = with_elision_note(
+            format!("{account}\n{envelope}"),
+            ReplayRetrieval::ByReference,
+        );
+
+        let (kept, noted) = replayed.rsplit_once('\n').expect("account and envelope");
+        assert_eq!(kept, account);
+        let noted: CompactToolReplay = serde_json::from_str(noted).unwrap();
+        assert!(noted.truncated);
+        assert!(
+            noted
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("tool_result_read")),
+            "the note names the tool that reads the rest"
+        );
+    }
 }
