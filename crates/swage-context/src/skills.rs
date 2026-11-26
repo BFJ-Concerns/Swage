@@ -107,8 +107,13 @@ impl ContextElement for SkillsElement {
             .sorted_skills()
             .iter()
             .map(|s| {
+                // The lead-in names the skill, since its instructions need
+                // not, and says where its own files are: a relative path in
+                // a skill is relative to the skill, not to the directory
+                // tool paths resolve against.
                 format!(
-                    "Skill directory: {}\nResolve relative paths in these instructions against this directory.\n\n{}",
+                    "Active skill: {}. A relative path in its instructions names a file in the skill's own directory, {}; join the two to open it.\n\n{}",
+                    s.name,
                     s.source_directory.display(),
                     s.instructions
                 )
