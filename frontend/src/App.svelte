@@ -88,9 +88,7 @@
     streamingStore.handleServerEvent(event, conversationId),
   );
 
-  // The surfaces store opens its own work-surface channel: surface signals are not
-  // turn events, and an open surface must stay live even with no conversation
-  // selected.
+  // Surfaces and session lists share the gateway’s page-wide signal channel.
   const surfacesStore = createSurfacesStore();
 
   // ---------------------------------------------------------------------------
@@ -239,6 +237,7 @@
     },
     loadConversations: (topicId) =>
       conversationStore.loadConversations(topicId),
+    refreshConversations: () => conversationStore.refreshConversations!(),
     selectConversation: selectAndNavigate,
     // The proxy captures topicId from topicStore at call time so child
     // components don't need to know about topics.
