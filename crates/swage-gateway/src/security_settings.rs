@@ -146,14 +146,20 @@ impl ResolvedScope {
     /// whose setting caused it.
     async fn read(&self, state: &AppState) -> Result<SecuritySettingsResponse, ApiError> {
         let overrides = overrides_from_partial(&read_partial(&self.config_path).await?)?;
-        let effective = effective_checks(state, &self.location)?;
+        let (effective, gated_tools) = effective_checks(state, &self.location)?;
         let install_overrides = match self.scope {
             SettingsScope::Install => overrides.clone(),
             SettingsScope::Topic { .. } => overrides_from_partial(
                 &read_partial(&state.config_root.join("config.toml")).await?,
             )?,
         };
-        let relaxed = relaxations(&effective, &self.scope, &overrides, &install_overrides);
+        let relaxed = relaxations(
+            &effective,
+            &gated_tools,
+            &self.scope,
+            &overrides,
+            &install_overrides,
+        );
         let dispatcher = state.active_tool_dispatcher();
         let mut available_tools: Vec<String> = dispatcher
             .registry()
@@ -174,11 +180,12 @@ impl ResolvedScope {
 
 /// The checks as the cascade resolves them for `location`, with no agent
 /// overlay: the install's active configuration for the general scope, the
-/// topic's file over it for a topic.
+/// topic's file over it for a topic. Beside them, the tools a turn there
+/// asks about, with approval entries naming a bundle expanded to its tools.
 fn effective_checks(
     state: &AppState,
     location: &ScopeLocation,
-) -> Result<EffectiveSecurityChecks, ApiError> {
+) -> Result<(EffectiveSecurityChecks, Vec<String>), ApiError> {
     let config = if location.is_general() {
         state.active_config()
     } else {
@@ -190,11 +197,18 @@ fn effective_checks(
         )
         .map_err(ApiError::from)?
     };
-    Ok(EffectiveSecurityChecks {
-        sandbox_enabled: config.sandbox.enabled,
-        require_approval: wire_entries(&config.tools.permissions.require_approval)?,
-        access_gate: config.server.access,
-    })
+    let gated_tools = crate::turn::expand_require_approval_entries(&config)
+        .into_iter()
+        .map(|entry| entry.tool_name)
+        .collect();
+    Ok((
+        EffectiveSecurityChecks {
+            sandbox_enabled: config.sandbox.enabled,
+            require_approval: wire_entries(&config.tools.permissions.require_approval)?,
+            access_gate: config.server.access,
+        },
+        gated_tools,
+    ))
 }
 
 /// The shipped defaults every relaxation is measured against.
@@ -214,6 +228,7 @@ fn shipped_defaults() -> EffectiveSecurityChecks {
 /// field, the install otherwise.
 fn relaxations(
     effective: &EffectiveSecurityChecks,
+    gated_tools: &[String],
     scope: &SettingsScope,
     scope_overrides: &SecurityOverrides,
     install_overrides: &SecurityOverrides,
@@ -245,12 +260,7 @@ fn relaxations(
         .require_approval
         .iter()
         .map(RequireApprovalEntry::tool_name)
-        .filter(|tool| {
-            !effective
-                .require_approval
-                .iter()
-                .any(|entry| entry.tool_name() == *tool)
-        })
+        .filter(|tool| !gated_tools.iter().any(|gated| gated == tool))
         .collect();
     if !missing.is_empty() {
         relaxed.push(RelaxedCheck {
@@ -735,6 +745,35 @@ mod tests {
         assert_eq!(
             serde_json::to_value(reading.effective.require_approval).unwrap(),
             serde_json::json!(["shell"])
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_approval_entry_naming_a_bundle_covers_its_tools() {
+        let (state, _, _root) = fixture().await;
+        let shipped: Vec<String> = shipped_defaults()
+            .require_approval
+            .iter()
+            .map(|entry| entry.tool_name().to_owned())
+            .collect();
+        let mut config = state.active_config();
+        config
+            .tools
+            .permissions
+            .bundles
+            .insert("risky".into(), shipped);
+        config.tools.permissions.require_approval =
+            vec![swage_config::model::RequireApprovalEntry::Simple(
+                "risky".into(),
+            )];
+        *state.runtime_config.write().unwrap() = config;
+        let reading = read_security_settings(&state, SettingsScope::Install)
+            .await
+            .unwrap();
+        assert!(
+            reading.relaxed.is_empty(),
+            "a bundle of the shipped tools still asks about each: {:?}",
+            reading.relaxed
         );
     }
 
