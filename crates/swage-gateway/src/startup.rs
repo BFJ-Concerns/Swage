@@ -1184,7 +1184,10 @@ async fn create_provider_with_retry(
             .await
             {
                 Ok(()) => concrete_provider(provider_endpoint.protocol.clone(), provider_config),
-                Err(reason) => Box::new(swage_provider::UnsupportedLlmProvider::new(reason)),
+                Err(reason) => Box::new(swage_provider::UnsupportedLlmProvider::for_model(
+                    reason,
+                    &model_endpoint.model_id,
+                )),
             },
         );
     }
@@ -2169,6 +2172,45 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    /// A request that names a refused model is answered with the refusal at
+    /// that model's place in the chain, not passed to another provider.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_request_for_a_refused_model_is_refused_not_rerouted() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let local_url =
+            spawn_openai_compatible_server(Arc::clone(&calls), StatusCode::OK, "local reply").await;
+        let mut config = keyed_provider_config(
+            "http://192.0.2.13:9/v1".into(),
+            "SWAGE_PLAINTEXT_REROUTE_TEST_KEY",
+            swage_config::PlaintextCredentialPolicy::Refuse,
+        );
+        config
+            .providers
+            .entries
+            .insert("local".into(), endpoint(Protocol::OpenAi, local_url));
+        config.providers.default = "local".into();
+        config
+            .models
+            .entries
+            .insert("local-model".into(), model("local", "local-wire"));
+        config.models.default = "local-model".into();
+
+        let provider =
+            create_provider_with_retry(&config, &secret_manager, storage.as_ref(), no_retry())
+                .await;
+        let error = provider
+            .complete(selected_model_request("lan-wire"))
+            .await
+            .expect_err("the refused model answers with its refusal");
+        assert!(error.to_string().contains("plaintext"), "{error}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
