@@ -895,6 +895,7 @@ mod tests {
                 },
                 vec![],
                 std::collections::BTreeSet::new(),
+                std::collections::BTreeMap::new(),
             )),
             Box::new(PromptsElement::new(vec![PromptRule {
                 priority: 0,
@@ -1030,6 +1031,7 @@ mod tests {
                 },
                 vec![],
                 std::collections::BTreeSet::new(),
+                std::collections::BTreeMap::new(),
             )),
             Box::new(WorkingNormsElement::for_model(
                 "claude-opus-5",

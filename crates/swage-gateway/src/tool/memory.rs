@@ -59,6 +59,7 @@ async fn session_memory_scope(
 /// The read tool's name, as the standing memory text names it and the
 /// context assembly asks after it.
 pub(crate) const MEMORY_READ_TOOL: &str = "memory_read";
+pub(crate) const MEMORY_WRITE_TOOL: &str = "memory_write";
 
 pub struct MemoryReadTool;
 
@@ -120,7 +121,7 @@ pub struct MemoryWriteTool;
 #[async_trait]
 impl Tool for MemoryWriteTool {
     fn name(&self) -> &str {
-        "memory_write"
+        MEMORY_WRITE_TOOL
     }
 
     fn description(&self) -> &str {

@@ -25,10 +25,15 @@ impl Tool for ToolResultReadTool {
     }
 
     fn description(&self) -> &str {
-        "See the whole of a tool result you received in an earlier turn of this \
-         conversation. The conversation's record keeps only such a result's opening \
-         characters and a full_result_ref; you received it whole when the call returned. \
-         Pass that full_result_ref, copied exactly, as reference to see all of it again."
+        "Read a tool result from earlier in this conversation that its history shows \
+         shortened. A result longer than its preview appears in history as its opening \
+         characters with a `full_result_ref`; pass that as `reference` to get the result as \
+         the tool returned it, with the tool's name, the call's status and the result's size \
+         in bytes. A result too long for one reply comes back cut and says so, with its full \
+         size in `total_bytes`. Only this conversation's results can be read: a \
+         reference that is malformed is refused, one from another conversation or naming no \
+         call is reported as unavailable, and a call that has not finished has no result to \
+         read. Reading changes nothing."
     }
 
     fn parameters(&self) -> Value {
@@ -37,7 +42,7 @@ impl Tool for ToolResultReadTool {
             "properties": {
                 "reference": {
                     "type": "string",
-                    "description": "The full_result_ref shown with the recorded tool result, copied exactly: it has the form tool_call:<turn>:<call>:result, and every segment is needed."
+                    "description": "The `full_result_ref` shown with the shortened result, copied exactly. It has the form tool_call:<turn>:<call>:result, and every segment is needed."
                 }
             },
             "required": ["reference"]

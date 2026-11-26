@@ -11,7 +11,7 @@
 //! work, not routine maintenance. A preference names a tool, so it is stated
 //! only on a turn that offers that tool.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use swage_core::{ChatMessage, Role};
@@ -80,25 +80,78 @@ pub struct AvailableSkill {
 
 // ── Element ───────────────────────────────────────────────────────────────────
 
+/// Identity, record coverage and how tool calls are decided. Every kind of
+/// session reads it, attended or not, so nothing here assumes a person is in
+/// the conversation: an unattended call that reaches past its grants is
+/// refused without anyone being asked.
 const IDENTITY: &str = "\
-You are an agent running on Swage, a context-governed agent platform on your \
-operator's own hardware. A session may run inside a topic — a container \
-holding its conversations, the topic's memory, and any attached workspaces — \
-or without one, as a general assistant; the place section below says which.
+You are an agent running on Swage, a platform that runs agents on its \
+operator's own machine. The operator is the person this installation belongs \
+to and whose work you are doing, whether they are in this conversation or the \
+request reached you from a schedule, a workflow or another agent. A session \
+runs either inside a topic, a named body of work with its own memory and \
+attached folders, or with no topic, as a general assistant; \"Where you are\" \
+below says which.
 
-Everything you do here is recorded locally on the operator's machine and is \
-reconstructable afterwards: your turns, your tool calls and their results, \
-and how this context was assembled. Values of secrets the platform manages \
-are redacted from that record by design — so use a registered secret freely \
-where a tool needs it, and keep those values out of any text you author \
-(replies, files, briefs for other agents), which is recorded as written.
+Everything you do here is recorded on the operator's machine and can be read \
+back afterwards: each turn, each tool call with its arguments and its result, \
+and the context each reply was built from. The values of secrets the platform \
+manages are redacted from that record. Use a registered secret by reference \
+wherever a tool resolves one. The \"Registered secrets\" section says which \
+tools do. A reply, a file or a brief for another agent carries what you \
+wrote, so leave secret values out of them.
 
-You have tools; each description states what the tool is for. Some tool \
-calls pause for approval before running — the platform is asking your \
-operator, not reporting an error: wait for the outcome rather than \
-retrying, and continue with the approved result or work around a \
-rejection. File paths in tool calls resolve against your working \
-directory unless a tool says otherwise.";
+Your tools are the ones offered with this request, and each description says \
+what its tool is for. A call may be held until the operator approves or \
+rejects it, or refused outright because it reaches past what this session is \
+allowed. A rejection or a refusal is a decision about that action, not a \
+fault to retry: carry on with the task in a way that does not need the \
+action, or say what could not be done. Relative paths in tool \
+calls resolve against the directory \"Where you are\" names, unless a tool's \
+description says otherwise.";
+
+/// The registered-secrets section: how a secret is used (by reference) and
+/// which offered tools resolve one. Stated to every session, so a secret
+/// that reaches a tool as literal text is reported as unresolved rather
+/// than as used.
+const SECRETS_HEADING: &str = "## Registered secrets";
+const SECRETS_OPENING: &str = "A registered secret is used by reference — `secret://<id>` in place of \
+its value — and only a tool that resolves references turns one into the value.";
+const SECRETS_CLOSING: &str = "receives a reference as literal text and nothing is resolved: say so when \
+it happens, and never report a secret as used on the strength of a command \
+that only saw its reference.";
+
+/// The sentence naming which offered tools resolve a reference and in which
+/// parameters, then the tools that do not — `shell` by name when offered,
+/// since a shell command is where the literal reference is most often
+/// mistaken for use.
+fn secret_resolution_sentence(
+    offered_tools: &BTreeSet<String>,
+    secret_reference_parameters: &BTreeMap<String, Vec<String>>,
+) -> String {
+    let others =
+        if offered_tools.contains("shell") && !secret_reference_parameters.contains_key("shell") {
+            "Every other tool, `shell` included,"
+        } else {
+            "Every other tool"
+        };
+    if secret_reference_parameters.is_empty() {
+        return format!("This turn, no tool resolves a reference, so every tool {SECRETS_CLOSING}");
+    }
+    let resolvers = secret_reference_parameters
+        .iter()
+        .map(|(tool, parameters)| {
+            let parameters = parameters
+                .iter()
+                .map(|parameter| format!("`{parameter}`"))
+                .collect::<Vec<_>>()
+                .join(" and ");
+            format!("`{tool}` resolves one in {parameters}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("This turn, {resolvers}. {others} {SECRETS_CLOSING}")
+}
 
 /// A preference between overlapping tools. It is stated only on a turn that
 /// offers the tool it names, so a session without the tool is never told to
@@ -109,7 +162,8 @@ struct ToolPreference {
     sentence: &'static str,
 }
 
-const PREFERENCES_OPENING: &str = "Where tools overlap, prefer the specific one.";
+const PREFERENCES_OPENING: &str =
+    "Where two of your tools could do a job, use the one built for it.";
 
 /// The preferences in reading order, one tool each. The gateway holds every
 /// name here to a registered tool, so a renamed tool fails that test rather
@@ -117,30 +171,34 @@ const PREFERENCES_OPENING: &str = "Where tools overlap, prefer the specific one.
 const TOOL_PREFERENCES: &[ToolPreference] = &[
     ToolPreference {
         tool: "web_search",
-        sentence: "Use `web_search` to find web sources.",
+        sentence: "`web_search` finds pages on the web.",
     },
     ToolPreference {
         tool: "url_fetch",
-        sentence: "Use `url_fetch` to read a URL you already have.",
+        sentence: "`url_fetch` reads a page whose address you already have.",
     },
     ToolPreference {
         tool: "surface_library",
-        sentence: "Reusable work surfaces are found with `surface_library`, never on the web.",
+        sentence: "`surface_library` lists the work surfaces saved on this installation, which is where to look for one to reuse.",
     },
     ToolPreference {
         tool: "workflow_run",
-        sentence: "Use `workflow_run` for a saved, journalled multi-step job.",
+        sentence: "`workflow_run` runs a scripted job of many agent calls, journalled so that it resumes after an interruption.",
     },
     ToolPreference {
         tool: "delegate",
-        sentence: "Use `delegate` for a one-off child task.",
+        sentence: "`delegate` hands one self-contained task to a child agent.",
     },
     ToolPreference {
         tool: "python_execute",
-        sentence: "Prefer your native file and shell tools over `python_execute` unless the task is \
-genuinely computation.",
+        sentence: "`python_execute` is for computation; reading, writing and searching files and \
+running commands belong to the file and shell tools where you have them.",
     },
 ];
+
+/// Where a session's own working files go, said once in whichever place line
+/// names the directory tool paths resolve against. "It" is that directory.
+const WORKING_FILES: &str = "Temporary and scratch files go under it rather than in /tmp, so that they stay with this work.";
 
 /// The wire names the tool preferences depend on.
 pub fn tools_named_in_preferences() -> impl Iterator<Item = &'static str> {
@@ -159,6 +217,9 @@ pub struct OrientationElement {
     /// The tools this turn offers the model, by wire name — the request's
     /// own tool list, so a preference never names a tool the model lacks.
     offered_tools: BTreeSet<String>,
+    /// By offered tool, the parameters that resolve a `secret://` reference,
+    /// from the tools' own declarations; empty when none does.
+    secret_reference_parameters: BTreeMap<String, Vec<String>>,
 }
 
 impl OrientationElement {
@@ -166,11 +227,13 @@ impl OrientationElement {
         environment: SessionEnvironment,
         available_skills: Vec<AvailableSkill>,
         offered_tools: BTreeSet<String>,
+        secret_reference_parameters: BTreeMap<String, Vec<String>>,
     ) -> Self {
         Self {
             environment,
             available_skills,
             offered_tools,
+            secret_reference_parameters,
         }
     }
 
@@ -186,14 +249,19 @@ impl OrientationElement {
         );
         blocks.push(preferences.join(" "));
 
+        blocks.push(format!(
+            "{SECRETS_HEADING}\n{SECRETS_OPENING} {}",
+            secret_resolution_sentence(&self.offered_tools, &self.secret_reference_parameters)
+        ));
+
         let mut place = String::from("## Where you are\n");
         if self.environment.topic_name.is_empty() {
             // Stated, never left to inference: a session that was started
             // without a topic must not read a previous topic as current.
             place.push_str(
-                "Topic: none — this session was started without a topic. It runs as a general \
-                 assistant with general memory and the general knowledge base, and inherits \
-                 nothing from any topic.\n",
+                "Topic: none — this session was started without a topic. It is a general \
+                 assistant and inherits nothing from any topic: no topic's memory, folders or \
+                 settings apply to it.\n",
             );
         } else {
             place.push_str(&format!("Topic: {}", self.environment.topic_name));
@@ -204,18 +272,16 @@ impl OrientationElement {
         }
         match &self.environment.tool_root {
             ToolRoot::WorkingDirectory(dir) => {
-                place.push_str(&format!(
-                    "Working directory: {dir} — temporary files belong under it, not in /tmp.\n"
-                ));
+                place.push_str(&format!("Working directory: {dir}. {WORKING_FILES}\n"));
             }
             ToolRoot::ManagedScratch(dir) => {
                 if self.environment.workspaces.is_empty() {
                     place.push_str(&format!(
-                        "No workspace is attached. Tool paths resolve at {dir}, a scratch directory for this work; temporary files belong under it, not in /tmp.\n"
+                        "No workspace is attached. Tool paths resolve at {dir}, a scratch directory for this work. {WORKING_FILES}\n"
                     ));
                 } else {
                     place.push_str(&format!(
-                        "Tool paths resolve at {dir}, a scratch directory for this work: no attached workspace is the working root, and temporary files belong under it, not in /tmp. The workspaces below are attached and reachable at their own paths.\n"
+                        "Tool paths resolve at {dir}, a scratch directory for this work; none of the attached workspaces is the working directory. {WORKING_FILES} The workspaces below are reached at their own paths.\n"
                     ));
                 }
             }
@@ -251,10 +317,14 @@ impl OrientationElement {
         if !self.available_skills.is_empty() {
             let mut skills = String::from(
                 "## Skills available in this session\n\
-                 Each skill adds instructions for a kind of task. Your \
-                 operator activates one by typing /its-name; when a task fits \
-                 a skill's trigger and it is not active, say so and suggest \
-                 it:\n",
+                 Each skill below is a set of instructions for one kind of \
+                 task, listed by its name and when it applies. A skill takes \
+                 effect once it is active, which is when its instructions \
+                 appear in your context; the operator activates one by typing \
+                 a slash and its name in the conversation. When a task fits a \
+                 skill that is not active, say so and name the skill so that \
+                 the operator can activate it, and where nobody is in the \
+                 conversation to do that, go on without it.\n",
             );
             for skill in &self.available_skills {
                 skills.push_str(&format!("- {} — {}\n", skill.name, skill.trigger));
@@ -322,7 +392,8 @@ mod tests {
     /// all still produces a system message with identity and place.
     #[test]
     fn empty_configuration_still_orients() {
-        let element = OrientationElement::new(bare_environment(), vec![], BTreeSet::new());
+        let element =
+            OrientationElement::new(bare_environment(), vec![], BTreeSet::new(), BTreeMap::new());
 
         let content = element.content();
         assert_eq!(content.len(), 1);
@@ -346,9 +417,10 @@ mod tests {
     /// hears that one alone. Memory guidance is the memory element's.
     #[test]
     fn tool_preferences_follow_the_tools_the_turn_offers() {
-        let file_only = OrientationElement::new(bare_environment(), vec![], BTreeSet::new());
+        let file_only =
+            OrientationElement::new(bare_environment(), vec![], BTreeSet::new(), BTreeMap::new());
         let text = file_only.content()[0].text_content();
-        assert!(text.contains("Where tools overlap, prefer the specific one."));
+        assert!(text.contains(PREFERENCES_OPENING));
         for tool in tools_named_in_preferences() {
             assert!(
                 !text.contains(&format!("`{tool}`")),
@@ -361,25 +433,76 @@ mod tests {
             bare_environment(),
             vec![],
             BTreeSet::from(["web_search".to_string()]),
+            BTreeMap::new(),
         );
         let text = with_search.content()[0].text_content();
-        assert!(text.contains("Use `web_search` to find web sources."));
+        let web_search = TOOL_PREFERENCES
+            .iter()
+            .find(|preference| preference.tool == "web_search")
+            .expect("a preference for web_search");
+        assert!(text.contains(web_search.sentence));
         assert!(!text.contains("`url_fetch`"), "{text}");
+    }
+
+    /// The secrets section follows the tools' own declarations: a turn whose
+    /// `browser` resolves a reference in `text` hears that and that `shell`
+    /// gets literal text; a turn with no resolving tool hears that none
+    /// does. Neither names a tool the turn does not offer.
+    #[test]
+    fn secret_resolution_follows_the_tools_declarations() {
+        let with_browser = OrientationElement::new(
+            bare_environment(),
+            vec![],
+            BTreeSet::from(["browser".to_string(), "shell".to_string()]),
+            BTreeMap::from([("browser".to_string(), vec!["text".to_string()])]),
+        );
+        let text = with_browser.content()[0].text_content();
+        assert!(text.contains("## Registered secrets"), "{text}");
+        assert!(
+            text.contains("`secret://<id>` in place of its value"),
+            "{text}"
+        );
+        assert!(
+            text.contains("This turn, `browser` resolves one in `text`."),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "Every other tool, `shell` included, receives a reference as literal text"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("never report a secret as used"), "{text}");
+
+        let none = OrientationElement::new(
+            bare_environment(),
+            vec![],
+            BTreeSet::from(["file_read".to_string()]),
+            BTreeMap::new(),
+        );
+        let text = none.content()[0].text_content();
+        assert!(text.contains("This turn, no tool resolves a reference, so every tool receives a reference as literal text"), "{text}");
+        assert!(!text.contains("`shell`"), "{text}");
+        assert!(!text.contains("`browser`"), "{text}");
     }
 
     #[test]
     fn identity_states_record_coverage_and_secret_redaction() {
-        let element = OrientationElement::new(bare_environment(), vec![], BTreeSet::new());
+        let element =
+            OrientationElement::new(bare_environment(), vec![], BTreeSet::new(), BTreeMap::new());
         let text = element.content()[0].text_content();
-        assert!(text.contains("your turns, your tool calls and their results"));
-        assert!(text.contains("how this context was assembled"));
-        assert!(text.contains("redacted from that record"));
-        assert!(text.contains("recorded as written"));
+        assert!(text.starts_with(IDENTITY), "every session opens on it");
+        // The coverage is stated by what it holds, so a reworded identity
+        // that dropped a kind of record fails here.
+        for covered in ["turn", "tool call", "result", "context", "redacted"] {
+            assert!(IDENTITY.contains(covered), "{covered}");
+        }
     }
 
     #[test]
     fn report_preview_is_a_static_excerpt_not_session_environment() {
-        let element = OrientationElement::new(bare_environment(), vec![], BTreeSet::new());
+        let element =
+            OrientationElement::new(bare_environment(), vec![], BTreeSet::new(), BTreeMap::new());
         let content = element.content()[0].text_content();
         let preview = element.report_preview().expect("built-in preview");
         let opening_sentence = built_in_first_sentence_preview(&content);
@@ -391,14 +514,16 @@ mod tests {
 
     #[test]
     fn priority_places_orientation_before_operator_prompts() {
-        let element = OrientationElement::new(bare_environment(), vec![], BTreeSet::new());
+        let element =
+            OrientationElement::new(bare_environment(), vec![], BTreeSet::new(), BTreeMap::new());
         // PromptsElement sits at 100; the baseline must sort ahead of it.
         assert!(element.priority() > 100);
     }
 
     #[test]
     fn channel_block_renders_only_for_channel_sessions() {
-        let plain = OrientationElement::new(bare_environment(), vec![], BTreeSet::new());
+        let plain =
+            OrientationElement::new(bare_environment(), vec![], BTreeSet::new(), BTreeMap::new());
         assert!(!plain.content()[0].text_content().contains("speaking with"));
 
         let mut environment = bare_environment();
@@ -408,7 +533,8 @@ mod tests {
                           short and use no markdown tables."
                 .into(),
         });
-        let with_channel = OrientationElement::new(environment, vec![], BTreeSet::new());
+        let with_channel =
+            OrientationElement::new(environment, vec![], BTreeSet::new(), BTreeMap::new());
         let text = with_channel.content()[0].text_content();
         assert!(text.contains("speaking with your operator over Telegram"));
         assert!(text.contains("plain text messages"));
@@ -423,6 +549,7 @@ mod tests {
                 trigger: "drafting release notes for a tagged build".into(),
             }],
             BTreeSet::new(),
+            BTreeMap::new(),
         );
 
         let text = element.content()[0].text_content();
@@ -438,6 +565,7 @@ mod tests {
                 trigger: "shape project intent".into(),
             }],
             BTreeSet::new(),
+            BTreeMap::new(),
         );
 
         let text = element.content()[0].text_content();
@@ -452,7 +580,8 @@ mod tests {
         environment.topic_description = "material science digging".into();
         environment.tool_root = ToolRoot::WorkingDirectory("/data/projects/alloys".into());
 
-        let element = OrientationElement::new(environment, vec![], BTreeSet::new());
+        let element =
+            OrientationElement::new(environment, vec![], BTreeSet::new(), BTreeMap::new());
         let text = element.content()[0].text_content();
         assert!(text.contains("Topic: research — material science digging"));
         assert!(text.contains("Working directory: /data/projects/alloys"));
@@ -466,7 +595,8 @@ mod tests {
         environment.tool_root =
             ToolRoot::ManagedScratch("/scratch/topics/research/sessions/42".into());
 
-        let text = OrientationElement::new(environment, vec![], BTreeSet::new()).content()[0]
+        let text = OrientationElement::new(environment, vec![], BTreeSet::new(), BTreeMap::new())
+            .content()[0]
             .text_content();
         assert!(text.contains("Topic: research"));
         assert!(text.contains("No workspace is attached."));
@@ -486,7 +616,8 @@ mod tests {
             is_trusted: true,
         }];
 
-        let text = OrientationElement::new(environment, vec![], BTreeSet::new()).content()[0]
+        let text = OrientationElement::new(environment, vec![], BTreeSet::new(), BTreeMap::new())
+            .content()[0]
             .text_content();
         assert!(!text.contains("No workspace is attached"), "{text}");
         assert!(
@@ -501,7 +632,8 @@ mod tests {
 
     #[test]
     fn source_names_function_not_mechanism() {
-        let element = OrientationElement::new(bare_environment(), vec![], BTreeSet::new());
+        let element =
+            OrientationElement::new(bare_environment(), vec![], BTreeSet::new(), BTreeMap::new());
         assert_eq!(element.source(), "built-in identity");
     }
     #[test]
@@ -519,7 +651,8 @@ mod tests {
                 is_trusted: true,
             },
         ];
-        let text = OrientationElement::new(environment, vec![], BTreeSet::new()).content()[0]
+        let text = OrientationElement::new(environment, vec![], BTreeSet::new(), BTreeMap::new())
+            .content()[0]
             .text_content();
         assert!(
             text.contains("Workspace: /projects/source — writable, trusted"),
@@ -542,6 +675,7 @@ mod tests {
                 environment,
                 vec![],
                 BTreeSet::new(),
+                BTreeMap::new(),
             )),
             Box::new(crate::current_time::CurrentTimeElement::new(now)),
         ];

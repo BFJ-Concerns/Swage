@@ -226,7 +226,7 @@ struct GatewayDelegatedContextAssembler {
     composition: DispatchContextComposition,
     /// The tools the child's own dispatcher offers it, by name: the standing
     /// text follows them.
-    offered_tools: std::collections::BTreeSet<String>,
+    offered_tools: swage_tool::registry::OfferedTools,
 }
 
 pub(crate) fn delegated_context_assembler(
@@ -238,7 +238,7 @@ pub(crate) fn delegated_context_assembler(
     context_event_tx: mpsc::UnboundedSender<crate::websocket::ServerEvent>,
     effective_tool_permissions: serde_json::Value,
     composition: DispatchContextComposition,
-    offered_tools: std::collections::BTreeSet<String>,
+    offered_tools: swage_tool::registry::OfferedTools,
 ) -> Arc<dyn DelegationContextAssembler> {
     let swage_root = resolve_swage_root(&state).to_path_buf();
     Arc::new(GatewayDelegatedContextAssembler {
@@ -329,9 +329,11 @@ impl DelegationContextAssembler for GatewayDelegatedContextAssembler {
         let memory_index = Some(
             crate::memory::load_memory_index(&self.swage_root, &self.topic.location())
                 .await
-                .into_element(swage_context::memory::MemoryReach::with_read_tool(
+                .into_element(swage_context::memory::MemoryReach::for_tools(
                     self.offered_tools
-                        .contains(crate::tool::memory::MEMORY_READ_TOOL),
+                        .is_offered(crate::tool::memory::MEMORY_READ_TOOL),
+                    self.offered_tools
+                        .is_offered(crate::tool::memory::MEMORY_WRITE_TOOL),
                 )),
         );
         let mut session_variables: std::collections::BTreeMap<String, String> = self
@@ -1154,9 +1156,9 @@ impl DelegationHandler for GatewayDelegationHandler {
                     .contains(crate::tool::tool_result_read::TOOL_RESULT_READ_TOOL),
             );
             let history = match super::history::rebuild_thread_history_messages_with_retrieval(
-                self.state.storage.as_ref(),
+                &self.state,
                 existing.thread_id,
-                Some(retrieval),
+                retrieval,
             )
             .await
             {
@@ -1202,7 +1204,7 @@ impl DelegationHandler for GatewayDelegationHandler {
                 silent_ws_tx,
                 effective_tool_permissions_record(&effective_target_resolved),
                 composition.clone(),
-                target_dispatcher.offered_tools(),
+                target_dispatcher.offered(),
             ),
             snapshot_recorder: Some(delegation_snapshot_recorder_for_state(self.state.clone())),
         };

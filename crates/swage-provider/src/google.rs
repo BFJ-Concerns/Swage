@@ -2,12 +2,13 @@
 //!
 //! Translates Swage types to Google's `generateContent` format and handles
 //! Google-specific conventions: `system_instruction` field, `parts` structure,
-//! and API key as query parameter.
+//! and API key authentication via a request header.
 
 use std::pin::Pin;
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
+use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize};
 use swage_core::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, EffortCapability,
@@ -212,39 +213,50 @@ impl GoogleProvider {
         Self { config }
     }
 
-    /// Build the generateContent URL for a given model, appending the API key.
-    ///
-    /// CRITICAL: The returned URL contains the API key — never log it directly.
-    fn build_url(&self, model: &str, stream: bool) -> String {
-        let endpoint = if stream {
-            "streamGenerateContent"
+    fn http_request(
+        &self,
+        model: &str,
+        stream: bool,
+        body: &GenerateContentRequest,
+    ) -> Result<reqwest::RequestBuilder, ProviderError> {
+        let (endpoint, query) = if stream {
+            ("streamGenerateContent", "?alt=sse")
         } else {
-            "generateContent"
+            ("generateContent", "")
         };
-
-        let key = self.config.api_key.as_deref().unwrap_or("");
-
-        let mut url = format!(
-            "{}/v1beta/models/{}:{}?key={}",
-            self.config.base_url, model, endpoint, key,
+        let url = format!(
+            "{}/v1beta/models/{model}:{endpoint}{query}",
+            self.config.base_url
         );
-
-        // Streaming uses SSE via the alt=sse query parameter.
-        if stream {
-            url.push_str("&alt=sse");
+        let api_key = self.config.api_key.as_deref();
+        let authenticated = api_key.is_some();
+        // reqwest does not strip custom auth headers on cross-origin redirects.
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if authenticated
+                    && attempt
+                        .previous()
+                        .first()
+                        .is_some_and(|original| original.origin() != attempt.url().origin())
+                {
+                    return attempt.stop();
+                }
+                reqwest::redirect::Policy::default().redirect(attempt)
+            }))
+            .build()
+            .map_err(|error| ProviderError::InvalidConfig {
+                message: error.to_string(),
+            })?;
+        let mut request = client.post(url).json(body);
+        if let Some(key) = self.config.api_key.as_deref() {
+            let mut value =
+                HeaderValue::from_str(key).map_err(|_| ProviderError::InvalidConfig {
+                    message: "Google API key is invalid as a request header".into(),
+                })?;
+            value.set_sensitive(true);
+            request = request.header("x-goog-api-key", value);
         }
-
-        url
-    }
-
-    /// Build a sanitised URL for logging (API key redacted).
-    fn sanitised_url(model: &str, base_url: &str, stream: bool) -> String {
-        let endpoint = if stream {
-            "streamGenerateContent"
-        } else {
-            "generateContent"
-        };
-        format!("{base_url}/v1beta/models/{model}:{endpoint}?key=REDACTED")
+        Ok(request)
     }
 
     fn redact_api_key_in_text(&self, text: impl AsRef<str>) -> String {
@@ -699,14 +711,9 @@ impl LlmProvider for GoogleProvider {
         request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
         let model = request.model.as_deref().unwrap_or(&self.config.model);
-        let url = self.build_url(model, false);
         let body = self.build_request(&request);
-
-        let client = reqwest::Client::new();
-        let response = client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&body)
+        let response = self
+            .http_request(model, false, &body)?
             .send()
             .await
             .map_err(|e| ProviderError::StreamError(self.redact_api_key_in_text(e.to_string())))?;
@@ -739,14 +746,9 @@ impl LlmProvider for GoogleProvider {
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, ProviderError> {
         let model = request.model.as_deref().unwrap_or(&self.config.model);
-        let url = self.build_url(model, false);
         let body = self.build_tool_request(&request);
-
-        let client = reqwest::Client::new();
-        let response = client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&body)
+        let response = self
+            .http_request(model, false, &body)?
             .send()
             .await
             .map_err(|e| ProviderError::StreamError(self.redact_api_key_in_text(e.to_string())))?;
@@ -779,25 +781,22 @@ impl LlmProvider for GoogleProvider {
         &self,
         request: CompletionRequest,
     ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
-        let model = request
-            .model
-            .as_deref()
-            .unwrap_or(&self.config.model)
-            .to_string();
-        let url = self.build_url(&model, true);
+        let model = request.model.as_deref().unwrap_or(&self.config.model);
         let body = self.build_request(&request);
-        let _sanitised = Self::sanitised_url(&model, &self.config.base_url, true);
+        let request = self.http_request(model, true, &body);
         let api_key = self.config.api_key.clone();
 
         spawn_stream_forwarder(move |tx| async move {
-            let client = reqwest::Client::new();
-            let response = match client
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await
-            {
+            let request = match request {
+                Ok(request) => request,
+                Err(error) => {
+                    let _ = tx.send(StreamChunk::Error {
+                        message: error.to_string(),
+                    });
+                    return;
+                }
+            };
+            let response = match request.send().await {
                 Ok(r) => r,
                 Err(e) => {
                     let _ = tx.send(StreamChunk::Error {
@@ -1330,42 +1329,99 @@ mod tests {
         );
     }
 
-    // --- URL building ---
+    // --- HTTP requests ---
 
     #[test]
-    fn build_url_includes_api_key_as_query_param() {
+    fn requests_put_the_api_key_in_a_sensitive_header() {
         let provider = GoogleProvider::from_config(ProviderConfig::new(
             "test-key",
             "gemini-pro",
             "https://generativelanguage.googleapis.com",
         ));
-        let url = provider.build_url("gemini-pro", false);
-        assert!(url.contains("key=test-key"));
-        assert!(url.contains(":generateContent"));
-        assert!(!url.contains("alt=sse"));
+        let body = GenerateContentRequest {
+            contents: Vec::new(),
+            system_instruction: None,
+            generation_config: None,
+            tools: Vec::new(),
+        };
+        for (stream, path, query) in [
+            (false, "/v1beta/models/gemini-pro:generateContent", None),
+            (
+                true,
+                "/v1beta/models/gemini-pro:streamGenerateContent",
+                Some("alt=sse"),
+            ),
+        ] {
+            let request = provider
+                .http_request("gemini-pro", stream, &body)
+                .unwrap()
+                .build()
+                .unwrap();
+            assert_eq!(request.url().path(), path);
+            assert_eq!(request.url().query(), query);
+            let key = &request.headers()["x-goog-api-key"];
+            assert_eq!(key, "test-key");
+            assert!(key.is_sensitive());
+        }
     }
 
-    #[test]
-    fn build_url_streaming_uses_stream_endpoint() {
+    #[tokio::test]
+    async fn a_redirect_cannot_forward_the_api_key_to_another_origin() {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let destination_addr = destination.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = origin.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let mut buffer = [0; 1024];
+            while !bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+                let count = socket.read(&mut buffer).await.unwrap();
+                assert_ne!(count, 0, "request ended before its headers arrived");
+                bytes.extend_from_slice(&buffer[..count]);
+            }
+            let request = String::from_utf8_lossy(&bytes);
+            assert!(request.starts_with("POST /v1beta/models/gemini-pro:generateContent HTTP/1.1"));
+            assert!(request.contains("x-goog-api-key: test-key\r\n"));
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{destination_addr}/redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
         let provider = GoogleProvider::from_config(ProviderConfig::new(
             "test-key",
             "gemini-pro",
-            "https://generativelanguage.googleapis.com",
+            format!("http://{origin_addr}"),
         ));
-        let url = provider.build_url("gemini-pro", true);
-        assert!(url.contains(":streamGenerateContent"));
-        assert!(url.contains("alt=sse"));
-    }
-
-    #[test]
-    fn sanitised_url_redacts_api_key() {
-        let url = GoogleProvider::sanitised_url(
-            "gemini-pro",
-            "https://generativelanguage.googleapis.com",
-            false,
-        );
-        assert!(url.contains("REDACTED"));
-        assert!(!url.contains("test-key"));
+        let request = provider
+            .http_request(
+                "gemini-pro",
+                false,
+                &GenerateContentRequest {
+                    contents: Vec::new(),
+                    system_instruction: None,
+                    generation_config: None,
+                    tools: Vec::new(),
+                },
+            )
+            .unwrap();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), request.send())
+            .await
+            .expect("request should stop at the redirect")
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+        server.await.unwrap();
     }
 
     #[test]
@@ -1642,13 +1698,26 @@ mod tests {
     // --- Keyless operation ---
 
     #[test]
-    fn keyless_url_has_empty_key_param() {
+    fn keyless_request_has_no_credential() {
         let provider = GoogleProvider::from_config(ProviderConfig::keyless(
             "gemini-pro",
             "https://localhost:8080",
         ));
-        let url = provider.build_url("gemini-pro", false);
-        assert!(url.contains("key="));
-        // No panic, just empty key.
+        let request = provider
+            .http_request(
+                "gemini-pro",
+                false,
+                &GenerateContentRequest {
+                    contents: Vec::new(),
+                    system_instruction: None,
+                    generation_config: None,
+                    tools: Vec::new(),
+                },
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(request.url().query(), None);
+        assert!(!request.headers().contains_key("x-goog-api-key"));
     }
 }
