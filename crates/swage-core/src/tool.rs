@@ -62,9 +62,10 @@ const MODEL_ARGUMENT_STRING_CHARS: usize = 2000;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactToolReplay {
     /// The model's account of an elided replay, read before the fields it
-    /// explains: that the model received the result whole when the call
-    /// returned, and how this turn sees the rest. Written for the turn that
-    /// reads the replay (`with_elision_note`), never stored.
+    /// explains: which field holds what, that the result was handed back
+    /// whole when the call returned, and how this turn reads the rest.
+    /// Written for the turn that reads the replay (`with_elision_note`),
+    /// never stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     pub kind: String,
@@ -84,14 +85,18 @@ impl CompactToolReplay {
     }
 
     /// The replay as the model of a later turn reads it. An elided result
-    /// carries the note that the earlier turn received it whole and the
-    /// route this turn has to the rest; a result replayed whole carries
-    /// none.
+    /// carries the note that the result was handed back whole and the route
+    /// this turn has to the rest; a result replayed whole carries none.
     pub fn with_elision_note(mut self, retrieval: ReplayRetrieval) -> Self {
         self.note = self.truncated.then(|| self.elision_note(retrieval));
         self
     }
 
+    /// The note speaks of the call and the result, never of "you" having
+    /// read it: the turn that made the call may have ended before any reply
+    /// was written, and the model reading the note may not be the one that
+    /// made the call. "As the tool returned it" is the stored result, which
+    /// for a tool that bounds its own output is that bounded output.
     fn elision_note(&self, retrieval: ReplayRetrieval) -> String {
         let shown = self.preview.chars().count();
         let bytes = self.bytes;
@@ -102,12 +107,12 @@ impl CompactToolReplay {
             ReplayRetrieval::ByReference | ReplayRetrieval::None => ELIDED_NO_READ_AGAIN,
         };
         format!(
-            "You received this result whole when the call returned ({bytes} bytes; the sha256 \
-             is of all of it) and wrote your next reply with all of it in view. This is the \
-             conversation's record of it, kept to its first {shown} characters: the truncation \
-             is in the record, not in what you read. When asked about it, say what you read; \
-             do not call the reading partial or unverified because the record here is short. \
-             {route}"
+            "This is a shortened copy of a tool result. `preview` holds the first {shown} \
+             characters of the result as the tool returned it; `bytes` ({bytes}) and `sha256` \
+             describe that whole result. The whole result was handed back when the call \
+             returned, and whatever was written next was written with all of it available: \
+             the shortening was made afterwards, for this conversation's history, and says \
+             nothing about how much was read at the time. {route}"
         )
     }
 }
@@ -137,12 +142,12 @@ impl ReplayRetrieval {
 }
 
 const ELIDED_READ_AGAIN_BY_REFERENCE: &str = "\
-To see all of it again, call tool_result_read with this full_result_ref, copied \
-exactly, as reference.";
+To read beyond the preview, call `tool_result_read` with this `full_result_ref`, \
+copied exactly, as its `reference`.";
 
 const ELIDED_NO_READ_AGAIN: &str = "\
-No tool in this session shows it again: where you now need a detail this record \
-omits, say the record here omits it, not that you never read it.";
+The rest of this result cannot be read back in this session, so a detail beyond \
+`preview` is no longer available here; say that where it matters.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolResultReference {
