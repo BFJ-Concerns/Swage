@@ -173,6 +173,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- `shell` no longer drops a command's standard error from its result when standard output fills the output limit. The two streams share the limit, so a short error after a long build log is reported whole, and each stream that is cut is flagged (`stdout_truncated`, `stderr_truncated`) with the path of the file holding all of it.
 - `tool_result_read` masks registered secret values in the stored result it returns, as the conversation's history does, instead of reading them back whole.
 - The project-docs skill no longer hands agent-guidance changes to a skill Swage does not ship: it reports proposed changes to `AGENTS.md`, and edits that file only when the request covers it.
 - The orientation gives a registered secret's reference as `secret://<backend>/<id>`, the form the gateway resolves, where it gave `secret://<id>`, which was refused.

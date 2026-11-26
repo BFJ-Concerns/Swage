@@ -14,7 +14,6 @@ use tokio::process::{Child, Command};
 use super::Tool;
 use super::workspace::{
     ToolOutputArtifactPath, create_tool_output_artifact, tool_output_artifact_path,
-    truncated_output_value,
 };
 
 // ---------------------------------------------------------------------------
@@ -24,7 +23,7 @@ use super::workspace::{
 /// Executes shell commands in the turn workspace.
 ///
 /// Commands run via `sh -c` with CWD set to the active ToolContext directory.
-/// Output is capped at `max_output_bytes`; the process group stops on timeout
+/// The two streams share `max_output_bytes`; the process group stops on timeout
 /// or when execution is cancelled.
 pub struct ShellTool {
     pub timeout: Duration,
@@ -50,10 +49,12 @@ impl Tool for ShellTool {
          that is zero, so a command that ran and failed is reported as failed. Each call \
          starts a new shell: a change of directory or a variable set in one call is gone in \
          the next. A command still running at the installation's time limit is stopped, \
-         along with every process it started, and the call fails saying so. Output beyond \
-         the installation's limit is cut and flagged for the stream it came from \
-         (`stdout_truncated`, `stderr_truncated`), and the result then gives the path of a \
-         file holding that whole stream, which `file_read` opens. Unless the operator has \
+         along with every process it started, and the call fails saying so. The two streams \
+         share the installation's output limit. One that is cut to fit keeps its beginning, \
+         is marked in `output` where it stops and flagged (`stdout_truncated`, \
+         `stderr_truncated`), and the result then gives the path of a file holding the whole \
+         of that stream (`stdout_artifact_path`, `stderr_artifact_path`), which `file_read` \
+         opens. Unless the operator has \
          lifted it, the command runs sandboxed: it can change files under the working \
          directory and little outside it, so a write refused elsewhere is that boundary and \
          not a fault to retry. The file tools read, write, edit and search files directly; \
@@ -121,6 +122,12 @@ impl Tool for ShellTool {
         let cap = self.max_output_bytes;
         let tool_name = self.name().to_owned();
         let artifact_paths = shell_output_artifact_paths(ctx);
+        // A call that reports no output leaves no file of it behind.
+        let unreported_artifacts = [&artifact_paths.stdout_path, &artifact_paths.stderr_path]
+            .into_iter()
+            .flatten()
+            .map(|path| path.absolute.clone())
+            .collect::<Vec<_>>();
 
         // Read stdout and stderr concurrently to prevent pipe-buffer deadlocks.
         // Each stream is bounded at max_output_bytes so a high-throughput command
@@ -165,6 +172,7 @@ impl Tool for ShellTool {
             Err(_elapsed) => {
                 // Timeout expired — stop the process group to free resources.
                 kill_child(&mut child, &mut process_group).await;
+                remove_artifacts(&unreported_artifacts).await;
                 Err(ToolError::ExecutionFailed {
                     name: self.name().to_owned(),
                     message: format!(
@@ -177,26 +185,23 @@ impl Tool for ShellTool {
             Ok(Err(e)) => {
                 // Output or process-wait error — stop the group and propagate.
                 kill_child(&mut child, &mut process_group).await;
+                remove_artifacts(&unreported_artifacts).await;
                 Err(e)
             }
 
             Ok(Ok((stdout, stderr, exit_status))) => {
                 process_group.disarm();
 
-                let stdout_str = String::from_utf8_lossy(&stdout.bytes);
-                let stderr_str = String::from_utf8_lossy(&stderr.bytes);
+                // The streams share the limit, so that what `output` holds
+                // of each is either all of it or flagged as cut, with the
+                // whole stream left in its file.
+                let (stdout_kept, stderr_kept) =
+                    share_output_limit(stdout.bytes.len(), stderr.bytes.len(), cap);
+                let stdout = stdout.kept_to(stdout_kept).await;
+                let stderr = stderr.kept_to(stderr_kept).await;
 
-                // Append truncation notes so the model knows the stream was cut.
-                let stdout_display = if stdout.truncated {
-                    format!("{stdout_str}\n[stdout truncated: exceeded {cap} bytes]")
-                } else {
-                    stdout_str.into_owned()
-                };
-                let stderr_display = if stderr.truncated {
-                    format!("{stderr_str}\n[stderr truncated: exceeded {cap} bytes]")
-                } else {
-                    stderr_str.into_owned()
-                };
+                let stdout_display = stdout.display("stdout");
+                let stderr_display = stderr.display("stderr");
 
                 // Combine stdout then stderr (prefixed) so the model sees both.
                 let combined = if stderr_display.is_empty() {
@@ -207,9 +212,13 @@ impl Tool for ShellTool {
                     format!("{stdout_display}stderr: {stderr_display}")
                 };
 
-                let mut output = truncated_output_value(&combined, self.max_output_bytes);
+                let mut output = json!({ "output": combined });
                 output["exit_code"] = json!(exit_status.code());
                 output["success"] = json!(exit_status.success());
+                if stdout.truncated || stderr.truncated {
+                    output["truncated"] = json!(true);
+                    output["total_bytes"] = json!(stdout.total_bytes + stderr.total_bytes);
+                }
                 if stdout.truncated {
                     output["stdout_truncated"] = json!(true);
                     output["stdout_total_bytes"] = json!(stdout.total_bytes);
@@ -232,11 +241,75 @@ impl Tool for ShellTool {
     }
 }
 
+/// One stream as it was read: at most the limit's worth of its bytes, how
+/// many it produced, and the file that holds all of them.
 struct BoundedRead {
+    bytes: Vec<u8>,
+    total_bytes: usize,
+    artifact_path: Option<ToolOutputArtifactPath>,
+}
+
+/// One stream as the result reports it.
+struct ReportedStream {
     bytes: Vec<u8>,
     total_bytes: usize,
     truncated: bool,
     reported_artifact_path: Option<String>,
+}
+
+impl BoundedRead {
+    /// Keep the first `kept` bytes. A stream reported whole needs no file,
+    /// so its file is removed; a cut one keeps it and reports its path.
+    async fn kept_to(mut self, kept: usize) -> ReportedStream {
+        self.bytes.truncate(kept);
+        let truncated = self.total_bytes > kept;
+        if !truncated && let Some(path) = self.artifact_path.as_ref() {
+            let _ = tokio::fs::remove_file(&path.absolute).await;
+        }
+        ReportedStream {
+            bytes: self.bytes,
+            total_bytes: self.total_bytes,
+            truncated,
+            reported_artifact_path: truncated
+                .then(|| self.artifact_path.map(|path| path.reported))
+                .flatten(),
+        }
+    }
+}
+
+impl ReportedStream {
+    /// The stream's text, ending in a note where it was cut so that the
+    /// reader does not take the cut for the stream's end.
+    fn display(&self, stream: &str) -> String {
+        let text = String::from_utf8_lossy(&self.bytes);
+        if self.truncated {
+            format!(
+                "{text}\n[{stream} cut here: the first {} of {} bytes]\n",
+                self.bytes.len(),
+                self.total_bytes
+            )
+        } else {
+            text.into_owned()
+        }
+    }
+}
+
+/// How many bytes of each stream fit under `cap` together. Both are kept
+/// whole when they fit. Otherwise the smaller is kept whole where it is
+/// within half the limit and the other takes the rest, and two streams
+/// that are both over half take half each.
+fn share_output_limit(stdout: usize, stderr: usize, cap: usize) -> (usize, usize) {
+    if stdout + stderr <= cap {
+        return (stdout, stderr);
+    }
+    let half = cap / 2;
+    if stdout <= half {
+        (stdout, cap - stdout)
+    } else if stderr <= half {
+        (cap - stderr, stderr)
+    } else {
+        (cap - half, half)
+    }
 }
 
 struct ShellOutputArtifactPaths {
@@ -248,6 +321,12 @@ fn shell_output_artifact_paths(ctx: &dyn ToolContext) -> ShellOutputArtifactPath
     ShellOutputArtifactPaths {
         stdout_path: Some(tool_output_artifact_path(ctx, "stdout.txt")),
         stderr_path: Some(tool_output_artifact_path(ctx, "stderr.txt")),
+    }
+}
+
+async fn remove_artifacts(paths: &[std::path::PathBuf]) {
+    for path in paths {
+        let _ = tokio::fs::remove_file(path).await;
     }
 }
 
@@ -301,18 +380,10 @@ where
     if let Some(writer) = artifact_writer.as_mut() {
         writer.flush().await?;
     }
-    let truncated = total > cap;
-    if !truncated && let Some(path) = artifact_path.as_ref() {
-        let _ = tokio::fs::remove_file(&path.absolute).await;
-    }
-
     Ok(BoundedRead {
         bytes: buf,
         total_bytes: total,
-        truncated,
-        reported_artifact_path: truncated
-            .then(|| artifact_path.map(|path| path.reported))
-            .flatten(),
+        artifact_path,
     })
 }
 
@@ -544,15 +615,55 @@ mod tests {
         let val = result.expect("command should succeed");
         let output = val["output"].as_str().unwrap();
         assert_eq!(val["exit_code"], json!(0));
-        assert!(
-            output.len() <= 10,
-            "content should be capped: len={}",
-            output.len()
+        assert_eq!(
+            output, "1234567890\n[stdout cut here: the first 10 of 1000 bytes]\n",
+            "the stream is cut at the limit and marked where it stops"
         );
         assert_eq!(val["truncated"], json!(true));
-        assert!(val["total_bytes"].as_u64().unwrap() > 10);
+        assert_eq!(val["total_bytes"], json!(1000));
         assert_eq!(val["stdout_truncated"], json!(true));
-        assert!(val["stdout_total_bytes"].as_u64().unwrap() > 10);
+        assert_eq!(val["stdout_total_bytes"], json!(1000));
+    }
+
+    /// A command that fills the limit on stdout and then fails keeps its
+    /// error: stderr is within its share, so it is reported whole, and
+    /// stdout is the stream flagged as cut, with its file.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_full_stdout_does_not_push_a_short_stderr_out_of_the_output() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ctx = ctx_in_dir_with_ids(&dir);
+        let t = ShellTool {
+            timeout: Duration::from_secs(5),
+            max_output_bytes: 40,
+        };
+
+        let val = t
+            .execute(
+                json!({"command": "printf '%0.s1234567890' $(seq 1 10); echo 'build failed' >&2; exit 1"}),
+                &ctx,
+            )
+            .await
+            .expect("command should return its output");
+
+        let output = val["output"].as_str().unwrap();
+        assert!(output.ends_with("stderr: build failed\n"), "{output}");
+        assert!(val.get("stderr_truncated").is_none(), "{val}");
+        assert_eq!(val["stdout_truncated"], json!(true));
+        let artifact_path = val["stdout_artifact_path"]
+            .as_str()
+            .expect("the cut stream keeps its file");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(artifact_path)).expect("stdout file"),
+            "1234567890".repeat(10)
+        );
+    }
+
+    #[test]
+    fn two_long_streams_take_half_the_limit_each() {
+        assert_eq!(share_output_limit(3, 4, 10), (3, 4));
+        assert_eq!(share_output_limit(100, 2, 10), (8, 2));
+        assert_eq!(share_output_limit(2, 100, 10), (2, 8));
+        assert_eq!(share_output_limit(100, 100, 11), (6, 5));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -608,10 +719,9 @@ mod tests {
         let val = result.expect("command should return captured stderr");
         let output = val["output"].as_str().unwrap();
         assert_eq!(val["exit_code"], json!(1));
-        assert!(
-            output.len() <= 10,
-            "content should be capped: len={}",
-            output.len()
+        assert_eq!(
+            output,
+            "stderr: 1234567890\n[stderr cut here: the first 10 of 1000 bytes]\n"
         );
         assert_eq!(val["truncated"], json!(true));
         assert_eq!(val["stderr_truncated"], json!(true));

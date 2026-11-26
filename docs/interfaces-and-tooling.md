@@ -993,7 +993,9 @@ of the attached workspace's write permission:
 
 `shell` retains stdout and stderr artefacts only when the output stream was
 truncated — a stream that fits in the tool result is reported inline and the
-artefact file is removed. Three browser action tools — `browser_click`,
+artefact file is removed. The two streams share the output limit: a short
+stream is reported whole beside a long one, and two long streams take half
+the limit each. Three browser action tools — `browser_click`,
 `browser_select`, and `browser_scroll` — write a post-action screenshot when
 the browser screenshot policy is not Off; `browser_type` never captures.
 `browser_snapshot` writes a full
