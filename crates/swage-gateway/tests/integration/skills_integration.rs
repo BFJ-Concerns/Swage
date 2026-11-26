@@ -131,7 +131,11 @@ async fn fresh_root_lists_orients_and_activates_a_shipped_skill() {
         prompt.contains("Planning is building joint understanding between the user and the model")
     );
     let projected_dir = root.join("generated/shipped-skills/commission");
-    assert!(prompt.contains(&format!("Skill directory: {}", projected_dir.display())));
+    assert!(prompt.contains("Active skill: commission."), "{prompt}");
+    assert!(
+        prompt.contains(&projected_dir.display().to_string()),
+        "the skill's own directory is named: {prompt}"
+    );
 }
 
 // ---------------------------------------------------------------------------
