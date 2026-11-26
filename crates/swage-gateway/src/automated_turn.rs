@@ -278,34 +278,6 @@ mod tests {
             Some(swage_storage::TurnIsolation::Isolated),
             "every settled turn carries where it ran"
         );
-
-        // In an install that declares its boundary: the turn says so, and
-        // nothing about it reads as degraded.
-        let (mut state, session_id) = make_state_with_session(reply()).await;
-        state.declared_execution_boundary = Some("container".into());
-        let turn_id = create_placeholder_turn(&state, session_id, "gateway", "Hello")
-            .await
-            .unwrap();
-        run_placeholder_turn(&state, session_id, "Hello", turn_id)
-            .await
-            .unwrap();
-        let turn = state.storage.get_turn(turn_id).await.unwrap().unwrap();
-        assert_eq!(
-            turn.execution_isolation,
-            Some(swage_storage::TurnIsolation::Declared {
-                boundary: "container".into()
-            })
-        );
-        assert!(
-            state
-                .storage
-                .list_audit_events()
-                .await
-                .unwrap()
-                .iter()
-                .all(|event| event.event_kind != "execution_isolation_degraded"),
-            "a declared boundary is not a degradation"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

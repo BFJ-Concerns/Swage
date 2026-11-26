@@ -1005,9 +1005,6 @@ mod tests {
             TurnIsolation::Degraded {
                 reason: "bubblewrap_unavailable".into(),
             },
-            TurnIsolation::Declared {
-                boundary: "container".into(),
-            },
         ] {
             storage
                 .record_turn_isolation(turn.id, &isolation)

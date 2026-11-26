@@ -7,6 +7,7 @@
 pub mod agent_definition;
 pub mod browser;
 pub mod docs_read;
+mod exact_text_replacement;
 pub mod file_edit;
 pub mod file_list;
 pub mod file_read;

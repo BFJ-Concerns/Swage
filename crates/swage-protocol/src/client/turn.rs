@@ -83,16 +83,14 @@ pub struct TurnPollResponse {
     pub execution_isolation: Option<TurnIsolationView>,
 }
 
-/// The execution boundary a turn ran inside: sandboxed on the host, degraded
-/// for a stated reason, or the boundary the install declares for every turn
-/// (a container image, for one) — which is neither of the other two.
+/// A turn's execution isolation: sandboxed on the host or degraded for a
+/// stated reason.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[ts(optional_fields = nullable)]
 pub enum TurnIsolationView {
     Isolated,
     Degraded { reason: String },
-    Declared { boundary: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]

@@ -1,0 +1,150 @@
+/* Settings controls; the page scopes these rules to its own content. */
+:where(.settings-pane) .field {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 24px;
+  border-top: 1px solid var(--rule-soft);
+  padding: 14px 0;
+  align-items: baseline;
+}
+
+:where(.settings-pane) .key {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 11px;
+  line-height: 1.5;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+:where(.settings-pane) .key small {
+  display: block;
+  margin-top: 4px;
+  font-family: var(--font-body);
+  font-weight: 400;
+  font-size: 11px;
+  line-height: 1.4;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ink-soft);
+}
+
+:where(.settings-pane) .val {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+:where(.settings-pane) .val-stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+}
+
+:where(.settings-pane) .opt {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--ink);
+  background: var(--paper);
+  color: var(--ink);
+  padding: 6px 12px;
+  font-family: var(--font-display);
+  font-size: 14px;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.settings-pane .opt.active {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+:where(.settings-pane) .text {
+  width: 100%;
+  max-width: 480px;
+  padding: 9px 11px;
+  border: 1px solid var(--ink);
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 13px;
+}
+
+:where(.settings-pane) .text.small {
+  max-width: 160px;
+}
+
+:where(.settings-pane) textarea.text {
+  resize: vertical;
+  min-height: 90px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+:where(.settings-pane) .empty {
+  margin: 0;
+  color: var(--ink-soft);
+}
+
+:where(.settings-pane) :where(.provider-settings-surface, .shell-section) .opt {
+  position: relative;
+  line-height: 1;
+  letter-spacing: 0.04em;
+  isolation: isolate;
+}
+
+:where(.settings-pane) :where(.provider-settings-surface) .opt {
+  gap: 8px;
+  font-weight: 400;
+}
+
+:where(.settings-pane) :where(.provider-settings-surface) .opt:hover:not(:disabled):not(.active),
+:where(.settings-pane) :where(.shell-section) .opt:hover:not(.active) {
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+}
+
+:where(.settings-pane) :where(.provider-settings-surface, .shell-section) .opt.active::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--accent);
+  transform: translate(2px, 2px);
+  z-index: -1;
+  mix-blend-mode: var(--shadow-blend);
+  opacity: var(--shadow-opacity);
+  pointer-events: none;
+}
+
+:where(.settings-pane) :where(.provider-settings-surface) .text {
+  line-height: 1.4;
+}
+
+:where(.settings-pane) :where(.provider-settings-surface) .text:focus {
+  outline: none;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+:where(.settings-pane) :where(.provider-settings-surface) .empty {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+:where(.settings-pane) :where(.provider-settings-surface) .empty::before {
+  content: "";
+  flex: 0 0 22px;
+  height: 1px;
+  background: var(--rule-soft);
+}
+
+@media (max-width: 760px) {
+  :where(.settings-pane) .field {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+}

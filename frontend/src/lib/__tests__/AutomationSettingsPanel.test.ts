@@ -31,3 +31,14 @@ it("names every Automation input and visibly labels context, approval and permis
     if (input) expect.soft(input).toHaveAccessibleName(name);
   }
 });
+
+it("locates an empty bundle JSON input at line 1 column 1", () => {
+  component = mount(AutomationSettingsPanel, { target: document.body, props: { settings: emptySettings() } });
+  flushSync();
+  const editor = document.querySelector<HTMLTextAreaElement>('[aria-label="Tool bundles"]')!;
+  editor.value = "";
+  editor.dispatchEvent(new Event("input", { bubbles: true }));
+  flushSync();
+  expect(editor).toHaveAttribute("aria-invalid", "true");
+  expect(document.querySelector('[role="alert"]')).toHaveTextContent("invalid JSON at line 1, column 1");
+});
