@@ -103,7 +103,7 @@ from the session that started the run and can only be narrowed.
 |---|---|
 | `model` | The id of a model in this installation's catalogue (*Choosing a model* below). |
 | `fallbackModel` | A catalogue id used only when `model` is unavailable, or its provider refuses or fails the call before any output. It is not tried after a failure that follows output, or when schema attempts run out. The call's record names the model that served it as `served_model`. |
-| `effort` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`. A level the model lacks becomes the nearest lower one it has, and the record shows what was used. |
+| `effort` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`. A level the model lacks becomes the nearest lower one it has, or its lowest when none is lower, and the record shows what was used. |
 | `schema` | A JSON Schema the reply must satisfy (*What a call returns* below). |
 | `maxAttempts` | How many attempts the worker has to produce a reply that satisfies `schema`. Default 3. |
 | `label` | The worker's name in the run record. |
