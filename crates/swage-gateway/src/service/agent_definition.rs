@@ -63,7 +63,9 @@ fn gateway_definition() -> NewAgentDefinition {
         id: "gateway".into(),
         topic_id: None,
         display_name: "Swage default".into(),
-        description: "The shipped default agent".into(),
+        description: "A general assistant with no instructions of its own: its model and \
+                      tools are the ones this installation's settings give a session."
+            .into(),
         instructions: String::new(),
         model_id: None,
         tool_permissions: None,
