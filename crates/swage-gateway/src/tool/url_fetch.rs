@@ -59,9 +59,12 @@ impl Tool for UrlFetchTool {
          back as they are, and any other kind of content is refused. The page is taken as \
          served, without running its scripts, so a page that builds itself in the browser \
          comes back with little in it; the `browser_*` tools, where they are offered, read \
-         such a page. A redirect is not followed: it fails the call with its status, as any \
-         response that is not a success does. An address on this machine or a private \
-         network is refused. A long response is cut and marked `truncated`. Text and JSON \
+         such a page. An address on this machine or a private network is refused. A \
+         redirect is followed, each address it leads to meeting the same checks as the one \
+         given, and `final_url` in the result is the address that answered in the end. The \
+         call fails, naming the address it stopped at, when a redirect leads to a refused \
+         address, when redirects go on too long, or when the last response is not a success. \
+         A long response is cut and marked `truncated`. Text and JSON \
          carry on from `next_offset_bytes`; an HTML page does not, but every result names, \
          in `raw_body_artifact_path`, a file holding everything that was fetched, which \
          `file_read` opens. Where there is no address to give, `web_search` finds one."
