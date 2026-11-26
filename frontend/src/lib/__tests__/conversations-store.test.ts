@@ -200,6 +200,28 @@ describe("selectConversation", () => {
 // ---------------------------------------------------------------------------
 
 describe("createConversation", () => {
+  it("preserves the gateway summary when it arrives before the creation response", async () => {
+    const store = createConversationStore();
+    vi.mocked(api.listConversations).mockResolvedValueOnce([]);
+    await store.loadConversations("proj-1");
+
+    const recorded = { ...makeSummary("new-session"), message_preview: "Recorded while creating" };
+    let finishCreation!: (response: Awaited<ReturnType<typeof api.createConversation>>) => void;
+    vi.mocked(api.createConversation).mockReturnValueOnce(new Promise((resolve) => {
+      finishCreation = resolve;
+    }));
+    const creating = store.createConversation("proj-1");
+
+    vi.mocked(api.listConversations).mockResolvedValueOnce([recorded]);
+    await store.refreshConversations!();
+    expect(store.conversations).toEqual([recorded]);
+
+    finishCreation({ ...makeDetail(recorded.id), topic_id: "proj-1" });
+    await creating;
+    expect(store.conversations).toEqual([recorded]);
+    expect(store.activeConversation?.id).toBe(recorded.id);
+  });
+
   it("creates a conversation, adds it to the list, and selects it", async () => {
     const store = createConversationStore();
     const resp = {

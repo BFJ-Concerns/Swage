@@ -358,8 +358,12 @@ export function createConversationStore(): ConversationStore {
         latest_turn_state: null,
       };
 
-      // Prepend: the freshly created conversation is the most recent.
-      conversationsStore.update((conversations) => [summary, ...conversations]);
+      // A live refresh can already have installed the gateway's summary.
+      conversationsStore.update((conversations) =>
+        conversations.some((conversation) => conversation.id === summary.id)
+          ? conversations
+          : [summary, ...conversations],
+      );
       activeConversationStore.set(detail);
       activeThreadIdStore.set(null);
       branchesStore.set([]);
