@@ -718,6 +718,7 @@ async fn fallback_sandbox_real_binary_uses_configured_shell_timeout_then_serves_
         let runtime = serde_json::from_value(serde_json::to_value(tools).unwrap()).unwrap();
         let config = SandboxConfig::builder()
             .working_directory(root.path())
+            .write_path(root.path())
             .tool_runtime(runtime)
             .build()
             .unwrap();
@@ -759,6 +760,7 @@ async fn bubblewrap_sandbox_real_binary_uses_configured_shell_timeout_then_serve
         let runtime = serde_json::from_value(serde_json::to_value(tools).unwrap()).unwrap();
         let config = SandboxConfig::builder()
             .working_directory(root.path())
+            .write_path(root.path())
             .tool_runtime(runtime)
             .build()
             .unwrap();
