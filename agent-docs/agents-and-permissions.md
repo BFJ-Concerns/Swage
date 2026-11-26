@@ -473,7 +473,10 @@ on (`SandboxConfig::default()` in `swage-protocol/src/client/settings.rs`). A
 topic inherits sandbox settings from the global configuration; an agent can
 override them. When `sandbox.enabled` resolves to `false`, local gateway turns
 run unsandboxed without requiring `allow_degraded_execution`. The persisted
-turn boundary is `Degraded` with reason `sandbox_disabled_by_configuration`.
+turn boundary is `SandboxDisabled`, and the audit trail carries an
+`execution_sandbox_disabled` event; `Degraded` and
+`execution_isolation_degraded` are kept for a sandbox that was meant to run
+and could not.
 
 To turn sandboxing off for a topic, add this to its `config.toml`:
 
@@ -571,7 +574,7 @@ The `[context]` section of the configuration cascade (Global → Topic → Agent
 |---|---|---|---|
 | `assembly` | string | `"default"` | Named context assembly to use |
 | `alternatives` | array of strings | `[]` | Named assemblies registered as hidden alternatives; selection records the chosen name locally |
-| `timeout` | integer (1–60) | `5` | Assembly timeout in seconds |
+| `timeout` | positive integer | `5` | Assembly timeout in seconds |
 | `budget` | integer or absent | absent | Context token budget; must be positive when set |
 | `compaction_threshold` | `{ messages = N }` or `{ tokens = N }`, or absent | absent (100 messages) | Size past which a turn's context is compacted; `N` must be positive |
 | `diagnosis_reader_model` | string or absent | absent (session's own model) | Model entry or alias for the diagnosis readers during wall succession |

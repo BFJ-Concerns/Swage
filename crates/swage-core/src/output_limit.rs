@@ -6,7 +6,7 @@
 //! always wins; a model's declared limit fills the request only where the
 //! caller set none. The outcome names its source so the turn's record can
 //! say where the number came from. A model no source declares resolves to
-//! nothing, and the adapter's own floor applies on the wire.
+//! nothing, and the adapter chooses what to send on the wire.
 
 use serde::{Deserialize, Serialize};
 

@@ -7024,7 +7024,7 @@ async fn fresh_codex_turn_completes_without_degraded_execution_opt_in_or_audit()
     assert!(
         audit_events
             .iter()
-            .all(|event| { event.metadata["reason"] != "sandbox_disabled_by_configuration" }),
+            .all(|event| event.event_kind != "execution_isolation_degraded"),
         "App Server policy must not be recorded as degraded execution: {audit_events:?}"
     );
     server.abort();

@@ -7244,7 +7244,7 @@
       ]
     },
     "TurnIsolationView": {
-      "description": "A turn's execution isolation: sandboxed on the host or degraded for a\nstated reason.",
+      "description": "A turn's execution isolation: sandboxed on the host, unsandboxed because\nthe configuration switched the sandbox off, or degraded for a stated\nreason.",
       "oneOf": [
         {
           "type": "object",
@@ -7252,6 +7252,18 @@
             "kind": {
               "type": "string",
               "const": "isolated"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "sandbox_disabled"
             }
           },
           "required": [
