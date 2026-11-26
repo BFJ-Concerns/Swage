@@ -1,87 +1,102 @@
 ---
 name: tool-creator
-description: Use this skill to design, add, and improve Swage runtime tools — the `Tool` implementations in `crates/swage-tool/` and the built-in tools under `crates/swage-gateway/src/tool/`, which the LLM agent invokes by name through the dispatch pipeline. Use when the user wants to add a new tool, consolidate or split existing tools, rewrite tool or parameter descriptions because the model is choosing them poorly, fix tool naming/namespacing, design better tool return shapes, make tool error messages actionable, or decide a tool's permission and redaction behaviour. Not for Claude Code tools, and not for Swage runtime *skills* (use the skill-creator skill for those).
+description: Design, add or change a Swage runtime tool — a `Tool` implementation the product's agents call by name — so that it is registered, reachable and chosen correctly. Use when asked to add a tool, merge or split tools, rename one, change a tool's parameters, return value, errors, permissions or secret handling, or fix a tool the model picks wrongly, calls with the wrong arguments or never calls. Not for a coding tool's own tools, and not for the product's skills (swage-skill-creator) or agents (swage-agent-creator).
 metadata:
   audience: maintainers
   workflow: tool-authoring
 ---
 
-# Tool Creator
+# Tool creator
 
-Guide the session through designing, adding, and revising the tools the Swage agent calls.
+A Swage tool is a Rust type implementing the `Tool` trait
+(`crates/swage-tool/src/tool.rs`): a `name`, a `description`, a JSON Schema
+of `parameters`, and `execute`. The model sees only the first three, through
+`definition()`, which forwards `name`, `description` and `input_schema` to
+the provider and nothing else. It chooses a tool and fills in its arguments
+from those alone, so most of the design is in them.
 
-A Swage tool is a Rust type implementing the `Tool` trait in `crates/swage-tool/src/tool.rs`. The trait surface is small: `name`, `description`, `parameters` (JSON Schema), `execute`, plus optional `sensitive_keys`, `device_secret_keys`, `requires_device_execution`, and a `definition()` convenience the framework forwards to the provider. The model picks tools entirely from the `name`, `description`, and parameter schema it sees, so the value of the work sits in those three surfaces, not in `execute`.
+The built-in tools are the house style for naming, schemas and wiring. Read
+two that resemble the one in hand before writing.
 
-The calibration point: the built-in tools under `crates/swage-gateway/src/tool/` are the house style for naming, schema shape, and dispatch wiring. Read a couple before writing a new one. Vague descriptions that merely restate the name are the failure mode this skill is here to break.
+## Where things are
 
-## Two Distinct Activities
+- The trait and its optional methods, each documented where it is declared:
+  `crates/swage-tool/src/tool.rs`.
+- The framework, in `crates/swage-tool/src/`: the registry (`registry.rs`),
+  the dispatch pipeline (`dispatch.rs`), permissions (`permission.rs`),
+  parameter validation (`validation.rs`), redaction (`params.rs`), rate
+  limits (`rate_limit.rs`) and the delegate tool (`delegate.rs`).
+- The built-in tools: `crates/swage-gateway/src/tool/`, one file for a tool
+  or a family of them.
+- `ToolError`: `crates/swage-core/src/error.rs`.
 
-Tool work splits cleanly into two activities. Treat them separately.
+## Wiring a tool
 
-1. **Tool design** — what tools should exist, what shape they take, how they consolidate or split, what their parameters and return shapes look like, where they register, which agents are permitted to call them. See `references/tool-design.md`.
-2. **Description writing** — how to write the `description()` string and the per-parameter descriptions so the model can pick the tool correctly and call it with the right arguments. See `references/description-writing.md`.
+A tool that compiles can still be unregistered, unreachable or absent where
+it runs, and nothing at build time says so. A new built-in needs all of
+these in the same change:
 
-Most "the model isn't using my tool" problems are description-writing problems even when they look like design problems. Diagnose before redesigning.
+1. **Registration.** Construct it in the list that
+   `build_tool_dispatcher_with_browser` assembles in
+   `crates/swage-gateway/src/startup.rs`. Shell and the file tools are in
+   `workspace_tools` beside it, the set a device process also runs.
+   `ToolDispatcher::allow_all` registers everything in the list through
+   `ToolRegistry::register_builtin`.
+2. **The reserved name.** Add the name to `PROTECTED_NAMES` in
+   `crates/swage-tool/src/registry.rs`. `ToolRegistry::register`, the entry
+   point for a tool that is not built in, refuses a name on that list, and
+   that refusal is what stops such a tool taking a built-in's name.
+3. **Where it executes.** A tool whose `requires_device_execution()` returns
+   false can be sent to the sandbox child process, which builds its own tool
+   list in `build_sandbox_agent_tools` (`crates/swage-gateway/src/main.rs`).
+   A tool missing from that list passes its schema and permission checks in
+   the gateway and then fails when the call runs sandboxed. So either add it
+   there or make it return true. It must return true when it needs the
+   gateway's state, the host's network, or typed errors the sandbox channel
+   cannot carry.
+4. **Reach.** Dispatch is default-deny, so the agents meant to call the tool
+   need a permission entry that grants it (`references/tool-design.md`,
+   *Permissions*).
 
-## Where Tools Live
+`Tool::name()` is the tool's identity everywhere: in the registry, in
+`PROTECTED_NAMES`, in permission entries and bundles, in agent definitions'
+permissions, in skills' `tools:` lists, in the orientation text and in the
+docs. A rename changes every one of them in the same change and leaves no
+alias behind. Search the tree for the old name.
 
-- The trait itself: `crates/swage-tool/src/tool.rs`.
-- Shared tool framework: `crates/swage-tool/src/` — registry (`registry.rs`), dispatch pipeline (`dispatch.rs`), permissions (`permission.rs`), schema validation (`validation.rs`), parameter helpers and redaction (`params.rs`), rate limiting (`rate_limit.rs`), the delegate tool (`delegate.rs`).
-- Built-in tool implementations: `crates/swage-gateway/src/tool/` — one file per tool (`file_read.rs`, `shell.rs`, `python_execute.rs`, and so on).
-- `ToolError` lives in `crates/swage-core/src/error.rs`.
-- The tool name the model sees comes from `Tool::name()`. It must match the registry registration, the protected-namespace entry (for a built-in), and every permission entry that refers to the tool.
+Check the result with `just check`, the tests of the crate you touched
+(`just test-lib <package> <filter>`), and the gateway tests that list the
+registered tools, which a new or renamed tool usually has to join.
 
-## Core Workflow
+## The two kinds of work
 
-1. Identify whether this is a new tool, an edit to an existing tool, a description rewrite, or a consolidation/split. The four take different routes.
-2. Run the intake interview (below). Even a "just rewrite the description" task benefits from confirming what the tool is for and what the current model behaviour is.
-3. For an edit or rewrite, read the current implementation in full before changing it — `name`, `description`, `parameters`, `execute`, the registry registration, and any permission config or test that references the tool name. Renames especially need every reference updated together.
-4. Decide the design first (see `references/tool-design.md`): is this one tool or several, what does the parameter schema look like, what does the return value carry, which agents should be permitted to call it.
-5. Write the description and parameter descriptions (see `references/description-writing.md`). This is the highest-leverage part of the work — give it real attention, not a tail-end pass.
-6. Wire the tool: register it, add it to the protected namespace if it is a built-in, and confirm the permission model lets the intended agents reach it.
-7. Summarise what changed — the design choice, the description, and the wiring — before writing live files.
-8. After the edits land, verify them. A tool that compiles can still be unregistered, unadvertised, missing from the sandbox catalogue, or rejected at dispatch — none of which the compiler catches. Confirm the crate builds and the relevant tests pass through the project's `just` targets; at minimum run `just check` and the targeted tests for the touched crate, plus any test that enumerates the tool catalogue.
+**Design** decides what tools exist and what each takes, returns, costs and
+may be called by. Read `references/tool-design.md` when adding a tool,
+merging or splitting tools, or changing parameters, return values, errors,
+permissions or secret handling.
 
-## Intake Interview
+**Description** is the text the model chooses by: the `description()` string
+and each parameter's `description`. Read `references/description-writing.md`
+when writing or changing either, and use the swage-prompt-engineering skill
+for the wording, since both are instruction text.
 
-For new tools, edits, and rewrites alike:
+Before changing an existing tool, read the whole of it and find every place
+its name appears. Say what its callers rely on today, so that the change can
+be checked against it.
 
-1. What should calling this tool let the agent accomplish? Phrase it as a verb on a resource.
-2. Which agents should be able to call it, and through what permission entry — a direct allow, a bundle, or behind an approval gate?
-3. What does success look like — what does the return value carry, and what does the agent do with it next?
-4. What are the side effects? Does the call write state, emit a message, hit an external service, cost money, become visible to the user, or affect other sessions or agents?
-5. Which existing tools sit nearest to it? Could it be an `action` parameter on one of them instead of a new tool?
-6. What does the model currently get wrong (for rewrites)? Wrong tool chosen, wrong parameters, wrong frequency, ignored entirely?
-7. Does the tool touch secrets or sensitive values that need redaction (`sensitive_keys`) or host-side secret resolution (`device_secret_keys`)?
+## When a tool is used badly
 
-Run this as a back-and-forth. The questions exist to surface the design choice and the description targets — not to be filled in mechanically.
+Find which of these it is before changing anything, because each has a
+different fix and a redesign is rarely the first:
 
-## Diagnose Before Redesigning
-
-When the user reports a tool problem, separate diagnosis from the first guessed fix:
-
-- **Wrong tool chosen** → usually a description disambiguation problem. Compare the descriptions of the candidates the model is confusing.
-- **Right tool, wrong parameters** → usually a parameter description or schema problem. Look at the parameter `description:` fields and whether the value space is constrained (enums, format, units).
-- **Tool not called at all** → either the agent's permission config does not allow it, the description is too generic to match, or the model has been told to avoid the kind of action it represents.
-- **Tool called too often** → missing anti-trigger ("do not use this for X"), or the description claims more capability than the tool delivers.
-
-Each branch routes to either `tool-design.md` or `description-writing.md`. Most route to description-writing.
-
-## Core Checklist
-
-Detailed checklists live in the references. This one is the minimum gate.
-
-- [ ] the tool's purpose is named as a verb on a resource, and a near-lookalike has been identified or ruled out
-- [ ] design choices are made (see `references/tool-design.md`): consolidation, namespacing, parameter schema, return shape, permission and redaction behaviour
-- [ ] the description and per-parameter descriptions are written (see `references/description-writing.md`) and reviewed against their checklist
-- [ ] the tool is registered, added to the protected namespace if built-in, and the permission model lets the intended agents reach it
-- [ ] every reference to the tool name (registry, permission config, tests that enumerate the catalogue) has been updated together
-- [ ] the change has been summarised to the user before live files are touched, including the design choice and the description
-- [ ] after the edits, the crate builds and the relevant tests pass — including any catalogue/dispatch tests, and the sandbox path if the tool runs there (see *Wiring Checklist* in `references/tool-design.md`)
-
-## References
-
-Read these on demand:
-
-- `references/tool-design.md` — choosing what tools should exist, shape of parameters and returns, namespacing, consolidation versus splitting, permission and redaction behaviour, error message design, registry wiring
-- `references/description-writing.md` — how to write the `description()` string and per-parameter descriptions so the model picks and calls the tool correctly
+- **The model picks another tool.** The two descriptions do not tell it
+  which applies. Read them side by side and make each say where the other
+  takes over.
+- **Right tool, wrong arguments.** A parameter's description leaves its
+  meaning, unit or source open, or the schema allows values the tool does not
+  accept.
+- **Never called.** Either the agent has no permission entry granting it,
+  or the description does not say when it applies, or the agent's
+  instructions steer it away from that kind of action.
+- **Called where it should not be.** The description promises more than the
+  tool does, or does not say what it leaves to another tool.

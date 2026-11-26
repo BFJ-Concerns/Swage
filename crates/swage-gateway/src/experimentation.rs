@@ -35,6 +35,12 @@ pub const LOCATION_CONTEXT_ASSEMBLY: &str = "context.assembly";
 pub const LOCATION_WORKING_NORMS: &str = "context.working_norms";
 pub const LOCATION_TASK_PROMPT: &str = "task.prompt";
 
+/// The closing-account request: the text that asks the model for a final
+/// account when its last round after tool rounds returns none. The authored
+/// default (`swage_agent::closing_account::CLOSING_ACCOUNT_REQUEST`) is the
+/// first variant; a second sets `AgentConfig::closing_account_request`.
+pub const LOCATION_CLOSING_ACCOUNT_REQUEST: &str = "turn.closing_account_request";
+
 /// The memory curator's prompt: the instructions every curation pass runs
 /// under. The authored default is the first variant.
 pub const LOCATION_MEMORY_CURATOR_PROMPT: &str = "prompts.memory_curator";

@@ -295,6 +295,39 @@ pub(super) async fn process_turn_with_composition_and_focus(
         return Err(GatewayError::ConfigError(error.to_string()));
     }
 
+    let authored_closing_request = (
+        "authored",
+        swage_agent::closing_account::CLOSING_ACCOUNT_REQUEST,
+    );
+    let closing_requests = [authored_closing_request];
+    let closing_request_choice = match crate::experimentation::select_session_variant(
+        state,
+        &config.experimentation,
+        crate::experimentation::LOCATION_CLOSING_ACCOUNT_REQUEST,
+        &closing_requests.map(|(name, _)| name),
+        authored_closing_request.0,
+        session_id,
+        Some(prepared_turn_id),
+    )
+    .await
+    {
+        Ok(decision) => decision.variant,
+        Err(error) => {
+            record_terminal_state_and_release(
+                state,
+                session_id,
+                prepared_turn_id,
+                TurnState::Failed,
+            )
+            .await?;
+            return Err(GatewayError::ConfigError(error.to_string()));
+        }
+    };
+    let closing_account_request = closing_requests
+        .into_iter()
+        .find_map(|(name, text)| (name == closing_request_choice).then_some(text))
+        .unwrap_or(authored_closing_request.1);
+
     // Step 5: Set up the cancellation token before any turn processing begins.
     let cancel_token = cancellation_override.unwrap_or_default();
     {
@@ -505,6 +538,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
         allowed_paths,
     );
     let output_directory = managed_scratch_workspace(&state.config_root, &scope, session.id);
+    agent_config.closing_account_request = closing_account_request.to_owned();
     agent_config.tool_output_directory = Some(output_directory);
     if !task_defines_output_retries && let Some(max_retries) = max_output_retries_override {
         agent_config.max_output_retries = max_retries;
@@ -752,9 +786,38 @@ pub(super) async fn process_turn_with_composition_and_focus(
             ));
         }
         Ok(Err(AgentError::Cancelled)) => {
-            // Cancellation is cooperative — the agent already set
-            // TurnState::Cancelled and ThreadState::Idle in storage.
-            let _ = ws_tx.send(ServerEvent::Cancelled {});
+            let ending_turn_id = turn_id.unwrap_or(prepared_turn_id);
+            // A shutdown records interruption before waking the same token
+            // used by Stop. The turn's recorded outcome decides what to send.
+            let interrupted_by_shutdown = state
+                .turn_shutdown_started
+                .load(std::sync::atomic::Ordering::Acquire)
+                && state
+                    .storage
+                    .get_turn(ending_turn_id)
+                    .await
+                    .is_ok_and(|turn| {
+                        turn.is_some_and(|turn| turn.state == TurnState::Interrupted)
+                    });
+            if interrupted_by_shutdown {
+                let message = crate::shutdown::TURN_SHUTDOWN_REASON;
+                if let Some(reason) = projection::record_failure_explanation(
+                    state,
+                    session_id,
+                    ending_turn_id,
+                    message,
+                )
+                .await
+                {
+                    record_integrity_lost.get_or_insert(reason);
+                }
+                let _ = ws_tx.send(ServerEvent::Error {
+                    code: "gateway_shutdown".to_owned(),
+                    message: message.to_owned(),
+                });
+            } else {
+                let _ = ws_tx.send(ServerEvent::Cancelled {});
+            }
         }
         Ok(Err(error @ AgentError::ApprovalTimedOut)) => {
             let message = error.to_string();

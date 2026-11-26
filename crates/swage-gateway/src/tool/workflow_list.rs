@@ -101,7 +101,14 @@ impl Tool for WorkflowListTool {
     }
 
     fn description(&self) -> &str {
-        "List the workflows available in this session. Each entry gives its name, purpose, and argument contract. A workflow with an unconstrained argument contract declares no schema, so pass the JSON value it expects in workflow_run.args. To author a new workflow, activate the Workflow Authoring skill, which documents the script surface."
+        "List the workflows this session can start by name with `workflow_run`. Each entry \
+         gives the workflow's `name`, a `description` of what it does, and its \
+         `argument_contract`: either a JSON Schema that `workflow_run`'s `args` has to \
+         satisfy, or a mark that the workflow declares none, in which case `args` is \
+         whatever value its description asks for. Listing changes nothing. A job no listed \
+         workflow does can be scripted and run from source with `workflow_run`. \
+         The script interface is set out by the `workflow-authoring` skill and by the \
+         `workflow-engine` document that `docs_read` returns."
     }
 
     fn parameters(&self) -> Value {

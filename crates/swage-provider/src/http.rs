@@ -32,17 +32,22 @@ pub struct StreamResponseMetadata {
 pub struct HttpClient {
     client: reqwest::Client,
     base_url: String,
+    provider_id: String,
 }
 
 impl HttpClient {
-    /// Build a client with the given base URL and default request headers.
-    pub fn new(base_url: String, default_headers: HeaderMap) -> Self {
+    /// Build a client for the provider with its base URL and default headers.
+    pub fn new(provider_id: &str, base_url: String, default_headers: HeaderMap) -> Self {
         let client = reqwest::Client::builder()
             .default_headers(default_headers)
             .build()
             .expect("failed to build reqwest client");
 
-        Self { client, base_url }
+        Self {
+            client,
+            base_url,
+            provider_id: provider_id.to_owned(),
+        }
     }
 
     /// POST JSON body to `path` and deserialise the response.
@@ -65,7 +70,7 @@ impl HttpClient {
 
         if !response.status().is_success() {
             let body_text = response.text().await.unwrap_or_default();
-            return Err(map_http_error(status, body_text, None));
+            return Err(map_http_error(&self.provider_id, status, body_text, None));
         }
 
         response
@@ -110,7 +115,12 @@ impl HttpClient {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u64>().ok());
             let body_text = response.text().await.unwrap_or_default();
-            return Err(map_http_error(status, body_text, retry_after));
+            return Err(map_http_error(
+                &self.provider_id,
+                status,
+                body_text,
+                retry_after,
+            ));
         }
 
         let request_id = response
@@ -226,17 +236,22 @@ pub(crate) fn parse_sse_block(block: &str) -> Option<SseEvent> {
 /// Server errors (500, 502, 503, 504) are classified as `Network` — transient
 /// and retriable. This is critical for the reliability stack: retry, circuit
 /// breaker, and failover decorators all key off `is_retriable()`.
-pub(crate) fn map_http_error(status: u16, body: String, retry_after: Option<u64>) -> ProviderError {
+pub(crate) fn map_http_error(
+    provider_id: &str,
+    status: u16,
+    body: String,
+    retry_after: Option<u64>,
+) -> ProviderError {
     match status {
         401 => ProviderError::Auth { provider: body },
         // Rate limiting and upstream overload have different causes.
         429 => ProviderError::RateLimited {
-            provider: "anthropic".to_string(),
+            provider: provider_id.to_owned(),
             // Convert seconds (u64) to Duration; None stays None.
             retry_after: retry_after.map(Duration::from_secs),
         },
         529 => ProviderError::Overloaded {
-            provider: "anthropic".into(),
+            provider: provider_id.to_owned(),
             message: body,
             retry_after: retry_after.map(Duration::from_secs),
         },
@@ -381,25 +396,25 @@ mod tests {
 
     #[test]
     fn map_401_to_auth_error() {
-        let err = map_http_error(401, "Unauthorized".into(), None);
+        let err = map_http_error("test-provider", 401, "Unauthorized".into(), None);
         assert!(matches!(err, ProviderError::Auth { .. }));
     }
 
     #[test]
     fn map_429_to_rate_limited_with_retry_after() {
-        let err = map_http_error(429, "Too Many Requests".into(), Some(30));
+        let err = map_http_error("test-provider", 429, "Too Many Requests".into(), Some(30));
         assert!(matches!(
             err,
             ProviderError::RateLimited {
-                retry_after: Some(_),
-                ..
-            }
+                provider,
+                retry_after: Some(hint),
+            } if provider == "test-provider" && hint == Duration::from_secs(30)
         ));
     }
 
     #[test]
     fn map_429_to_rate_limited_without_retry_after() {
-        let err = map_http_error(429, "rate limited".into(), None);
+        let err = map_http_error("test-provider", 429, "rate limited".into(), None);
         assert!(matches!(
             err,
             ProviderError::RateLimited {
@@ -412,9 +427,10 @@ mod tests {
     #[test]
     fn map_529_to_overload() {
         // Exhausted overload must retain its category and explanation.
-        let err = map_http_error(529, "overloaded".into(), None);
+        let err = map_http_error("test-provider", 529, "overloaded".into(), None);
         assert!(
-            matches!(err, ProviderError::Overloaded { .. }),
+            matches!(&err, ProviderError::Overloaded { provider, message, .. }
+                if provider == "test-provider" && message == "overloaded"),
             "overload must keep its own category: {err}"
         );
         assert!(err.is_retriable());
@@ -424,28 +440,28 @@ mod tests {
 
     #[test]
     fn map_500_to_network_error() {
-        let err = map_http_error(500, "Internal Server Error".into(), None);
+        let err = map_http_error("test-provider", 500, "Internal Server Error".into(), None);
         assert!(matches!(err, ProviderError::Network { .. }));
         assert!(err.is_retriable(), "500 must be retriable");
     }
 
     #[test]
     fn map_502_to_network_error() {
-        let err = map_http_error(502, "Bad Gateway".into(), None);
+        let err = map_http_error("test-provider", 502, "Bad Gateway".into(), None);
         assert!(matches!(err, ProviderError::Network { .. }));
         assert!(err.is_retriable(), "502 must be retriable");
     }
 
     #[test]
     fn map_503_to_network_error() {
-        let err = map_http_error(503, "Service Unavailable".into(), None);
+        let err = map_http_error("test-provider", 503, "Service Unavailable".into(), None);
         assert!(matches!(err, ProviderError::Network { .. }));
         assert!(err.is_retriable(), "503 must be retriable");
     }
 
     #[test]
     fn map_504_to_network_error() {
-        let err = map_http_error(504, "Gateway Timeout".into(), None);
+        let err = map_http_error("test-provider", 504, "Gateway Timeout".into(), None);
         assert!(matches!(err, ProviderError::Network { .. }));
         assert!(err.is_retriable(), "504 must be retriable");
     }
@@ -454,7 +470,7 @@ mod tests {
 
     #[test]
     fn map_422_to_http_error() {
-        let err = map_http_error(422, "Unprocessable Entity".into(), None);
+        let err = map_http_error("test-provider", 422, "Unprocessable Entity".into(), None);
         assert!(matches!(err, ProviderError::HttpError { status: 422, .. }));
     }
 }

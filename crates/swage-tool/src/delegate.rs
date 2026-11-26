@@ -30,10 +30,13 @@ impl Tool for DelegateTool {
     }
 
     fn description(&self) -> &str {
-        "Delegate a task to another agent. Use completion_mode=\"wait\" when \
-         the next parent step needs the delegate's answer. Use \
-         completion_mode=\"detach\" to start independent work and continue \
-         this turn with a durable reference to the delegated work. Name a \
+        "Hand one self-contained task to another agent, which works on it in a \
+         session of its own and answers when it is done. The child starts from \
+         `task` and, unless the installation is set to pass it more, sees none \
+         of this conversation, so the task carries everything the child needs. \
+         `completion_mode` decides whether this turn waits for the child's \
+         answer or carries on beside it. A job of many agent calls that has to \
+         survive an interruption belongs to `workflow_run`. Name a \
          child to come back to it later with its context intact."
     }
 
@@ -43,11 +46,11 @@ impl Tool for DelegateTool {
             "properties": {
                 "target_agent": {
                     "type": "string",
-                    "description": "The agent ID to delegate work to."
+                    "description": "The agent the child runs as, by its agent definition's `id`."
                 },
                 "task": {
                     "type": "string",
-                    "description": "Task description for the delegate agent."
+                    "description": "The whole brief for the child: what is wanted, how the result will be judged, what to send back, and the facts it needs to do it."
                 },
                 "task_definition": {
                     "type": "string",
@@ -55,7 +58,7 @@ impl Tool for DelegateTool {
                 },
                 "skills": {
                     "type": "array",
-                    "description": "Named skills to activate for this delegated child.",
+                    "description": "Skills to activate for the child, by the names the skill catalogue lists.",
                     "items": { "type": "string" }
                 },
                 "child": {
@@ -64,7 +67,7 @@ impl Tool for DelegateTool {
                 },
                 "context": {
                     "type": "array",
-                    "description": "Optional context messages to transfer to the delegate.",
+                    "description": "Messages handed to the child as background ahead of the task, in place of whatever of this conversation the installation would pass by itself. Each item has to be a complete stored message, with its `id`, `role`, `created_at` and a `content` list of parts such as `{\"type\": \"text\", \"text\": …}`; an item in any other shape is dropped without notice. What the child needs to know is more surely written into `task`.",
                     "items": {
                         "type": "object"
                     }
@@ -73,7 +76,7 @@ impl Tool for DelegateTool {
                     "type": "string",
                     "enum": ["wait", "detach"],
                     "default": "wait",
-                    "description": "Choose \"wait\" when this turn needs the delegate's result before continuing. Choose \"detach\" for independent work; the tool returns a durable delegate_message_id and child session/thread references while the delegate continues."
+                    "description": "`wait`, the default, when the next step needs the child's answer: this turn stops until the child finishes, and the call returns what it answered, with an `incomplete_reason` where the child was cut short. `detach` for work that can go on beside this turn: the call returns at once with references to the child's work (`delegate_message_id`, `child_session_id`, `child_thread_id`), and the child's result reaches this conversation when it is ready."
                 },
                 "cwd": {
                     "type": "string",

@@ -42,6 +42,8 @@ use swage_storage::store::{
 
 use crate::state::AppState;
 
+pub(crate) const TURN_SHUTDOWN_REASON: &str = "The gateway shut down while the turn was running.";
+
 pub(crate) const SCHEDULE_INTERRUPTION_REASON: &str =
     "gateway stopped while schedule run was running";
 
