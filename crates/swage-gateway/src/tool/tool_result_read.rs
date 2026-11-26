@@ -12,6 +12,8 @@ use swage_tool::context::ToolContext;
 use crate::tool::Tool;
 use crate::tool::workspace::truncated_output_value;
 
+pub(crate) const TOOL_RESULT_READ_TOOL: &str = "tool_result_read";
+
 pub struct ToolResultReadTool {
     pub max_output_bytes: usize,
 }
@@ -19,11 +21,14 @@ pub struct ToolResultReadTool {
 #[async_trait]
 impl Tool for ToolResultReadTool {
     fn name(&self) -> &str {
-        "tool_result_read"
+        TOOL_RESULT_READ_TOOL
     }
 
     fn description(&self) -> &str {
-        "Fetch the complete output of an earlier tool call when the conversation shows only a truncated version with a reference id."
+        "See the whole of a tool result you received in an earlier turn of this \
+         conversation. The conversation's record keeps only such a result's opening \
+         characters and a full_result_ref; you received it whole when the call returned. \
+         Pass that full_result_ref, copied exactly, as reference to see all of it again."
     }
 
     fn parameters(&self) -> Value {
@@ -32,7 +37,7 @@ impl Tool for ToolResultReadTool {
             "properties": {
                 "reference": {
                     "type": "string",
-                    "description": "The full_result_ref id shown alongside a truncated tool result."
+                    "description": "The full_result_ref shown with the recorded tool result, copied exactly: it has the form tool_call:<turn>:<call>:result, and every segment is needed."
                 }
             },
             "required": ["reference"]
@@ -73,6 +78,36 @@ impl Tool for ToolResultReadTool {
         object.insert("bytes".to_string(), json!(result.len()));
         Ok(value)
     }
+}
+
+/// An explicit read expands a stored preview. Keep its dispatcher-scanned output
+/// in later requests instead of applying the preview budget to it again. The
+/// hash ties the expansion to the exact bytes recorded for the model; raw rows
+/// that differ from that safe representation must never replace it.
+pub(crate) fn recovered_model_result(record: &swage_storage::ToolCallRecord) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    if record.tool != TOOL_RESULT_READ_TOOL || record.status.as_deref() != Some("success") {
+        return None;
+    }
+    let raw = record.result.as_deref()?;
+    let encoded = record.model_result.as_deref()?;
+    // Approval accounts precede the single-line envelope. Preserve that account
+    // when expanding the result, without interpreting or changing its text.
+    let (prefix, envelope) = encoded.rsplit_once('\n').unwrap_or(("", encoded));
+    let replay: swage_core::CompactToolReplay = serde_json::from_str(envelope).ok()?;
+    let sha256: String = Sha256::digest(raw.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    if replay.kind != "tool_result" || replay.sha256 != sha256 {
+        return None;
+    }
+    Some(if prefix.is_empty() {
+        raw.to_owned()
+    } else {
+        format!("{prefix}\n{raw}")
+    })
 }
 
 /// Resolve a stored tool-call reference (`tool_call:<turn>:<call>:result`)
@@ -237,6 +272,40 @@ mod tests {
             parent_call_id: None,
             display_summary: None,
         }
+    }
+
+    fn names_as_a_word(text: &str, word: &str) -> bool {
+        text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(|token| token == word)
+    }
+
+    /// The model reaches an elided result from the replay's note and this
+    /// text alone, so the description names the parameter and the field of
+    /// the replay it is filled from, and the parameter says what it means.
+    #[test]
+    fn the_description_names_the_parameter_and_the_replay_field_it_takes() {
+        let tool = ToolResultReadTool {
+            max_output_bytes: 1_000,
+        };
+        let description = tool.description();
+        let schema = tool.parameters();
+        for (parameter, spec) in schema["properties"].as_object().expect("properties") {
+            assert!(
+                names_as_a_word(description, parameter),
+                "the description names the parameter {parameter}"
+            );
+            assert!(
+                spec["description"]
+                    .as_str()
+                    .is_some_and(|text| text.split_whitespace().count() >= 8),
+                "the parameter {parameter} says what it means"
+            );
+        }
+        assert!(names_as_a_word(description, "full_result_ref"));
+        assert!(
+            !description.contains("truncated"),
+            "the text says the earlier turn had the result whole, not that it was cut short"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -413,5 +482,30 @@ mod tests {
         assert_eq!(output["output"], "full copied branch result");
         assert_eq!(output["tool"], "shell");
         assert_eq!(output["call_id"], "call_1");
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recovery_rejects_raw_bytes_that_differ_from_the_model_record() {
+        let (storage, _, _, referenced_turn_id) = test_turns().await;
+        let mut call = new_call(
+            referenced_turn_id,
+            "recovered",
+            Some("scanned content".into()),
+        );
+        call.tool = "tool_result_read".into();
+        call.model_result = Some(swage_core::compact_tool_result_for_model(
+            call.result.as_deref().unwrap(),
+            false,
+        ));
+        let mut record = storage.create_tool_call(call).await.unwrap();
+        assert_eq!(
+            super::recovered_model_result(&record).as_deref(),
+            Some("scanned content")
+        );
+        record.result = Some("different unscanned content".into());
+        assert_eq!(
+            super::recovered_model_result(&record),
+            None,
+            "a differing raw result must never replace the model-safe replay"
+        );
     }
 }
