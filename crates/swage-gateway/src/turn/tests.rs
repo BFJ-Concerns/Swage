@@ -2302,6 +2302,23 @@ impl Hook for BlockInboundHook {
     }
 }
 
+struct BlockAfterResponseHook;
+
+#[async_trait]
+impl Hook for BlockAfterResponseHook {
+    fn name(&self) -> &str {
+        "block-after-response"
+    }
+
+    async fn execute(&self, event: &HookEvent) -> HookOutcome {
+        if matches!(event, HookEvent::AfterResponse { .. }) {
+            HookOutcome::Block("final response blocked by test hook".into())
+        } else {
+            HookOutcome::Continue
+        }
+    }
+}
+
 struct ModifyInboundHook;
 
 #[async_trait]
@@ -7981,45 +7998,124 @@ async fn provider_failure_keeps_partial_response_with_its_tool_calls() {
     )
     .await
     .unwrap();
-    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-    let live_partial: String = events
-        .iter()
-        .filter_map(|event| match event {
-            ServerEvent::Token { content } => Some(content.as_str()),
-            _ => None,
-        })
-        .collect();
-    let live_failure = events
-        .iter()
-        .find_map(|event| match event {
-            ServerEvent::Error { code, message } if code == "agent_error" => Some(message.as_str()),
-            _ => None,
-        })
+    let reply = read_failed_reply(&state, session_id, &mut rx).await;
+    assert_eq!(reply.content, "Starting. Partial reply");
+    assert_eq!(reply.tool_calls[0].call_id, "effect-before-failure");
+    let failure = reply.failure_message.unwrap();
+    assert!(failure.contains("partial-response-model"));
+    assert!(failure.contains("provider disconnected"));
+}
+
+#[tokio::test]
+async fn after_response_block_keeps_only_the_streamed_reply_and_tool_calls() {
+    for retry_text in [None, Some(r#"{"answer": "Echoed."}"#)] {
+        let mut rounds = vec![
+            vec![
+                StreamChunk::Delta {
+                    content: "I will use echo.".into(),
+                },
+                StreamChunk::ToolUse {
+                    call_id: "echo-before-block".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::json!({"text": "echoed"}),
+                },
+            ],
+            vec![],
+            vec![],
+        ];
+        let schema = retry_text.map(|content| {
+            rounds.push(vec![StreamChunk::Delta {
+                content: content.into(),
+            }]);
+            serde_json::json!({"type": "object", "required": ["answer"]})
+        });
+        let (mut state, session_id) = make_state_with_tools(rounds).await;
+        let mut hook_registry = HookRegistry::new();
+        hook_registry.register(HookRegistration::new(Arc::new(BlockAfterResponseHook)));
+        state.hook_registry = Some(Arc::new(hook_registry));
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "Use echo",
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            schema,
+        )
+        .await
         .unwrap();
 
-    let conversation =
-        crate::service::ConversationService::new(state.storage.clone(), state.topic_store.clone())
-            .get_conversation(session_id)
-            .await
-            .unwrap();
-    let reply = conversation.messages.last().unwrap();
-    assert_eq!(live_partial, "Starting. Partial reply");
-    assert_eq!(reply.content, live_partial);
-    assert_eq!(reply.tool_calls[0].call_id, "effect-before-failure");
-    assert_eq!(reply.failure_message.as_deref(), Some(live_failure));
-    assert!(live_failure.contains("partial-response-model"));
-    assert!(live_failure.contains("provider disconnected"));
+        let reply = read_failed_reply(&state, session_id, &mut rx).await;
+        assert_eq!(
+            reply.content,
+            format!("I will use echo.{}", retry_text.unwrap_or_default())
+        );
+        assert_eq!(reply.tool_calls[0].call_id, "echo-before-block");
+        assert!(
+            reply
+                .failure_message
+                .unwrap()
+                .contains("final response blocked")
+        );
+    }
+}
+
+async fn read_failed_reply(
+    state: &AppState,
+    session_id: Uuid,
+    rx: &mut mpsc::UnboundedReceiver<ServerEvent>,
+) -> swage_protocol::client::conversation::MessageView {
+    let mut live_reply = String::new();
+    let mut live_failure = None;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            ServerEvent::Token { content } => live_reply.push_str(&content),
+            ServerEvent::Error { code, message } if code == "agent_error" => {
+                assert!(
+                    live_failure.replace(message).is_none(),
+                    "one terminal error"
+                );
+            }
+            ServerEvent::TurnComplete { .. } => panic!("the failed turn must not complete"),
+            _ => {}
+        }
+    }
+    let crate::error::Json(conversation) = crate::handlers::get_conversation(
+        axum::extract::State(state.clone()),
+        crate::error::Path(session_id),
+    )
+    .await
+    .unwrap();
+    let mut replies = conversation
+        .messages
+        .into_iter()
+        .filter(|message| message.role == "assistant");
+    let reply = replies
+        .next()
+        .expect("reload should include the partial reply");
+    assert!(replies.next().is_none(), "one assistant reply");
+    assert_eq!(reply.content, live_reply);
+    assert_eq!(
+        reply.failure_message.as_deref(),
+        Some(live_failure.as_deref().unwrap())
+    );
+    assert_eq!(
+        reply.turn_state,
+        Some(swage_protocol::client::conversation::TurnState::Failed)
+    );
     let turn = state
         .storage
         .get_turn(reply.turn_id.unwrap())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(turn.state, TurnState::Failed);
     assert_eq!(
         turn.assistant_response.as_deref(),
-        Some(live_partial.as_str())
+        Some(live_reply.as_str())
     );
+    reply
 }
 
 #[tokio::test]
@@ -22289,6 +22385,9 @@ async fn settlement_identical_failure_bound_ends_unattended_turn_with_cause() {
         let rounds = (0..4)
             .map(|n| {
                 vec![
+                    StreamChunk::Delta {
+                        content: format!("Trying the tool ({n}). "),
+                    },
                     StreamChunk::ToolUse {
                         call_id: format!("failure-{n}"),
                         name: "unavailable_tool".into(),
@@ -22334,7 +22433,7 @@ async fn settlement_identical_failure_bound_ends_unattended_turn_with_cause() {
             state.active_provider(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
         );
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::unbounded_channel();
         let _ = process_turn_with_composition(
             &state,
             session_id,
@@ -22368,18 +22467,14 @@ async fn settlement_identical_failure_bound_ends_unattended_turn_with_cause() {
             limit,
             "no further provider round after the bound"
         );
-        assert!(
-            turn.failure_message.unwrap().contains("unavailable_tool"),
-            "the underlying cause remains visible"
-        );
-        assert_eq!(
-            storage
-                .list_tool_calls_by_turn(turn.id)
-                .await
-                .unwrap()
-                .len(),
-            limit
-        );
+        let reply = read_failed_reply(&state, session_id, &mut rx).await;
+        assert!(reply.content.starts_with("Trying the tool (0). "));
+        assert!(reply.failure_message.unwrap().contains("unavailable_tool"));
+        assert_eq!(reply.tool_calls.len(), limit);
+        for (n, call) in reply.tool_calls.iter().enumerate() {
+            assert_eq!(call.call_id, format!("failure-{n}"));
+            assert_eq!(call.status.as_deref(), Some("error"));
+        }
     }
 }
 

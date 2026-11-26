@@ -1112,7 +1112,7 @@ async fn streaming_turn_compaction_failure_marks_turn_failed_and_thread_idle() {
     let mut request = test_request(topic.id, session.id, thread.id, "latest request", None);
     request.assembled_context = vec![ChatMessage::new(Role::System, "preserved system prompt")];
 
-    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let error = agent
         .process_turn_streaming(request, event_tx)
         .await
@@ -1129,6 +1129,16 @@ async fn streaming_turn_compaction_failure_marks_turn_failed_and_thread_idle() {
         .expect("turn list");
     assert_eq!(turns.len(), 1);
     assert_eq!(turns[0].state, TurnState::Failed);
+    assert_eq!(turns[0].assistant_response, None);
+    let messages = storage.list_messages_by_thread(thread.id).await.unwrap();
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.role != Role::Assistant)
+    );
+    while let Ok(event) = event_rx.try_recv() {
+        assert!(!matches!(event, AgentEvent::Token { .. }));
+    }
 
     let thread = ThreadStore::get(storage.as_ref(), thread.id)
         .await

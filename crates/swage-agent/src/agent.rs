@@ -2299,11 +2299,6 @@ impl Agent {
                                 "Repeated failing tool call '{}': {}",
                                 call.name, safe_result
                             );
-                            let _ = event_tx.send(AgentEvent::Error {
-                                message: reason.clone(),
-                                provider_failure: false,
-                            });
-                            self.fail_turn_and_idle(turn.id, thread_id).await;
                             return Err(AgentError::RepeatedToolFailure(reason));
                         }
                     }
@@ -2357,13 +2352,22 @@ impl Agent {
                     return Err(AgentError::Cancelled);
                 }
                 Err(error) => {
-                    self.storage
+                    if let Err(storage_error) = self
+                        .storage
                         .settle_started_tool_calls(
                             turn.id,
                             swage_storage::store::INTERRUPTED_TOOL_RESULT,
                             swage_storage::store::INTERRUPTED_TOOL_STATUS,
                         )
-                        .await?;
+                        .await
+                    {
+                        let _ = event_tx.send(AgentEvent::RecordIntegrityLost {
+                            turn_id: turn.id,
+                            reason: format!("failed turn's started tool calls could not be settled: {storage_error}"),
+                        });
+                    }
+                    self.record_failed_reply(&execution, &accumulated, &error, &event_tx)
+                        .await;
                     return Err(error);
                 }
             };
@@ -2393,6 +2397,7 @@ impl Agent {
         // When an output schema is configured, extract JSON from the accumulated
         // response, validate it, and retry the LLM call if validation fails. Each
         // retry streams tokens independently. Without a schema, this block is skipped.
+        let mut streamed_before_schema_retry = String::new();
         let structured_output = if incomplete_reason.is_some() {
             None
         } else if let Some(ref schema_value) = self.config.output_schema {
@@ -2507,8 +2512,13 @@ impl Agent {
                     ..llm_request.clone()
                 };
 
-                // Clear accumulated text and re-enter the streaming loop for a fresh response.
-                accumulated.clear();
+                // Validate the next answer on its own. Keep what the caller already
+                // saw in case the turn ends without an accepted response.
+                let streamed = closing_notice
+                    .take()
+                    .and_then(|notice| accumulated.strip_suffix(&notice))
+                    .unwrap_or(&accumulated);
+                streamed_before_schema_retry.push_str(streamed);
 
                 let retry_outcome = self
                     .consume_provider_stream(
@@ -2516,7 +2526,7 @@ impl Agent {
                         &execution,
                         &event_tx,
                         &cancel_token,
-                        &accumulated,
+                        &streamed_before_schema_retry,
                         &mut total_input_tokens,
                         &mut total_output_tokens,
                         &mut usage_reported,
@@ -2538,13 +2548,20 @@ impl Agent {
         // 8. AfterResponse hook — may modify or block the final accumulated response.
         let response_content = match self.dispatch_after_response(&accumulated).await {
             Ok(content) => content,
-            Err(e) => {
-                self.fail_turn_and_idle(turn.id, thread_id).await;
-                let _ = event_tx.send(AgentEvent::Error {
-                    message: e.to_string(),
-                    provider_failure: false,
-                });
-                return Err(e);
+            Err(error) => {
+                let streamed = closing_notice
+                    .as_deref()
+                    .and_then(|notice| accumulated.strip_suffix(notice))
+                    .unwrap_or(&accumulated);
+                streamed_before_schema_retry.push_str(streamed);
+                self.record_failed_reply(
+                    &execution,
+                    &streamed_before_schema_retry,
+                    &error,
+                    &event_tx,
+                )
+                .await;
+                return Err(error);
             }
         };
 
@@ -4116,6 +4133,29 @@ impl Agent {
     // -----------------------------------------------------------------------
     // Leak detection
     // -----------------------------------------------------------------------
+
+    /// Settle a failed turn that already streamed part of its reply.
+    async fn record_failed_reply(
+        &self,
+        execution: &TurnExecutionContext,
+        text: &str,
+        error: &AgentError,
+        event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    ) {
+        let persisted = self.persist_terminal_response(execution, text).await;
+        self.fail_turn_and_idle(execution.turn_id, execution.thread_id)
+            .await;
+        let _ = event_tx.send(AgentEvent::Error {
+            message: error.to_string(),
+            provider_failure: false,
+        });
+        if let Err(error) = persisted {
+            let _ = event_tx.send(AgentEvent::RecordIntegrityLost {
+                turn_id: execution.turn_id,
+                reason: format!("partial response could not be persisted: {error}"),
+            });
+        }
+    }
 
     /// Preserve terminal response text and the assistant row that owns recorded
     /// tool effects in conversation projections, including tool-only turns.
