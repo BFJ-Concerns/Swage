@@ -4225,9 +4225,10 @@ return review.content;
             .expect("the script can catch the two refusals");
         let errors: Value = serde_json::from_str(&output).unwrap();
         for call in ["log", "agent"] {
-            assert_eq!(errors[call][0], "HostArgumentsError");
+            let error = errors.get(call).expect("the call was refused");
+            assert_eq!(error[0], "HostArgumentsError");
             assert!(
-                errors[call][1]
+                error[1]
                     .as_str()
                     .is_some_and(|message| message
                         .contains(&format!("could not read arguments for '{call}'"))),
