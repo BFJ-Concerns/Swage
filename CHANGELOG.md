@@ -108,6 +108,8 @@ All notable changes to Swage are documented in this file.
 - Workflow scripts can now continue a worker in the same session by reusing the handle returned by an earlier worker call.
 - Turn records now include redacted provider response metadata, including status, request identifiers, stop reasons, usage, and content-block sizes, without retaining response content.
 - Sessions now receive working guidance tailored to the configured model family, with common guidance retained for unrecognised models.
+- The Operator view of everything running stays current without a reload: it re-reads on the gateway's session and workflow-run signals, shows each running session's and run's agent and spawning session, reads a session waiting on the person's approval as "waiting on you", and lists a request waiting on the person as it arrives. Its Stop and Cancel controls wind work down, delegated children included, and a refused Stop or Cancel keeps its reason on screen.
+- `POST /api/conversations/{id}/cancel` stops a conversation's running turn whichever client holds its socket; the web UI's Stop uses it, and a tab that does not hold the socket follows the turn's end through the gateway's session signal.
 
 ### Changed
 
@@ -170,10 +172,12 @@ All notable changes to Swage are documented in this file.
 ### Removed
 
 - The terminal client (`swage chat`) and its `swage-tui` crate; the web UI and desktop shell are the conversation interfaces.
+- The conversation socket's `cancel` frame; clients stop a turn through `POST /api/conversations/{id}/cancel`.
 
 ### Fixed
 
 - `tool_result_read` masks registered secret values in the stored result it returns, as the conversation's history does, instead of reading them back whole.
+- An error that ends no turn — a message that could not be queued, a skill or approval request the gateway could not carry out — no longer marks the running request failed, and a gateway shutdown shows an unanswered request as interrupted, as the record says.
 - The project-docs skill no longer hands agent-guidance changes to a skill Swage does not ship: it reports proposed changes to `AGENTS.md`, and edits that file only when the request covers it.
 - The orientation gives a registered secret's reference as `secret://<backend>/<id>`, the form the gateway resolves, where it gave `secret://<id>`, which was refused.
 - The workflow tools no longer tell the agent to activate the workflow-authoring skill, which only the person can do: they name the skill as the catalogue lists it and the hosted `workflow-engine` document.

@@ -27,24 +27,35 @@ use crate::state::AppState;
 
 use super::ServerEvent;
 
-/// Whether a broadcast event is a work-surface signal.
+/// The signal a broadcast event sends on this channel, if any.
 ///
 /// `SurfaceUpdated` tells an open surface that a surface it may be showing has
 /// changed; `LibraryUpdated` tells a catalogue view that the shared library
-/// changed; `SessionUpdated` tells a session list that a session's running
-/// state changed; `Shutdown` tells it the gateway is going away. Everything
-/// else on the broadcast channel belongs to a conversation or to
-/// observability.
-pub(crate) fn is_work_surface_signal(event: &ServerEvent) -> bool {
-    matches!(
-        event,
+/// changed; `SessionUpdated` tells a session list or a view of running work
+/// that a session's state changed; `WorkflowRunUpdated` tells a view of
+/// running work that a run started, parked or ended. A run's start and end
+/// travel on the broadcast with the whole run, so this channel sends them on
+/// as `WorkflowRunUpdated` carrying the run's id alone: the socket takes no
+/// identity, and listeners refetch rather than read a payload. `AgentDefinitionsChanged` tells
+/// agent pickers to refresh. `Shutdown` tells a listener the gateway is going away. Everything else on the
+/// broadcast channel belongs to a conversation or to observability.
+pub(crate) fn work_surface_signal(event: &ServerEvent) -> Option<ServerEvent> {
+    match event {
+        ServerEvent::WorkflowRunStarted { event } => Some(ServerEvent::WorkflowRunUpdated {
+            run_id: event.run.id,
+        }),
+        ServerEvent::WorkflowRunCompleted { event } => Some(ServerEvent::WorkflowRunUpdated {
+            run_id: event.run.id,
+        }),
         ServerEvent::SurfaceUpdated { .. }
-            | ServerEvent::LibraryUpdated { .. }
-            | ServerEvent::SessionUpdated { .. }
-            | ServerEvent::AgentDefinitionsChanged
-            | ServerEvent::Lagged { .. }
-            | ServerEvent::Shutdown { .. }
-    )
+        | ServerEvent::LibraryUpdated { .. }
+        | ServerEvent::SessionUpdated { .. }
+        | ServerEvent::WorkflowRunUpdated { .. }
+        | ServerEvent::AgentDefinitionsChanged
+        | ServerEvent::Lagged { .. }
+        | ServerEvent::Shutdown { .. } => Some(event.clone()),
+        _ => None,
+    }
 }
 
 /// Axum route handler for `GET /api/work-surface/ws`.
@@ -79,9 +90,9 @@ async fn handle_connection(socket: WebSocket, mut receiver: broadcast::Receiver<
             result = receiver.recv() => {
                 match result {
                     Ok(event) => {
-                        if !is_work_surface_signal(&event) {
+                        let Some(event) = work_surface_signal(&event) else {
                             continue;
-                        }
+                        };
                         let is_shutdown = matches!(event, ServerEvent::Shutdown { .. });
                         match serde_json::to_string(&event) {
                             Ok(json) => {

@@ -8,10 +8,12 @@ Each workflow run evaluates its script in a separate V8 isolate
 (`swage-isolate`). The gateway journals calls to the host so an interrupted
 or parked run can replay them.
 
-Primary sources: `crates/swage-workflow/src/engine.rs` (the JS sandbox and
-host bindings), `crates/swage-workflow/src/host.rs` (the `WorkflowHost`
-trait), `crates/swage-gateway/src/workflow.rs` (journalling, parking,
-budget, handover, wake loop).
+Primary sources are `crates/swage-isolate/src/lib.rs` (the JS sandbox),
+`crates/swage-workflow/src/engine.rs` (the workflow API shim),
+`crates/swage-workflow/src/host_calls.rs` (host bindings),
+`crates/swage-workflow/src/host.rs` (the `WorkflowHost` trait) and
+`crates/swage-gateway/src/workflow.rs` (journalling, parking, budget,
+handover, wake loop).
 
 ## Run lifecycle
 
@@ -66,11 +68,12 @@ and host-locale methods such as `toLocaleString()` throw
 `NondeterministicCallError`. Workflows obtain external values through the
 host API so replay can reproduce them.
 
-`EngineLimits::memory_bytes` independently caps the heap and the combined
-backing stores of live buffers. Programs can use fixed-length buffers and
-typed arrays. Resizable buffers are unavailable. Reaching the heap,
-buffer or uninterrupted execution limit returns
-`WorkflowEngineError::Terminated` and the gateway records an
+The heap and the combined backing stores of live buffers each have a 64 MiB
+ceiling. Programs can use fixed-length buffers and typed arrays. Resizable
+buffers are unavailable. A script can execute for up to 30 seconds without
+yielding, excluding time spent waiting for a host call. Reaching a limit
+returns `WorkflowEngineError::Terminated` and the gateway records
+`heap_limit`, `buffer_limit` or `time_limit` as the reason in an
 `engine_terminated` audit event.
 
 ### Meta header

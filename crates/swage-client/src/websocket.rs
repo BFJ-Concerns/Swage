@@ -591,14 +591,6 @@ mod tests {
     }
 
     #[test]
-    fn cancel_serialises() {
-        let event = ClientEvent::Cancel {};
-        let json = serde_json::to_string(&event).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(v["type"], "cancel");
-    }
-
-    #[test]
     fn subscribe_serialises() {
         let event = ClientEvent::Subscribe {
             channels: vec!["context".to_string(), "tools".to_string()],

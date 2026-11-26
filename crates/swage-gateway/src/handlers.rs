@@ -1032,6 +1032,23 @@ pub async fn delete_conversation(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /api/conversations/:id/cancel` — stop the conversation's running turn.
+///
+/// Reaches the turn whichever client holds the conversation's socket, or
+/// none: the conversation socket admits one client, while anyone supervising
+/// the gateway may need to stop the work. Returns 204 once cancellation is
+/// signalled — the turn settles and records its ending on its own — or 409
+/// when nothing is running there.
+pub async fn cancel_conversation_turn(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    crate::turn::cancel_turn(&state, id).await.map_err(|_| {
+        ApiError::conflict("Nothing is running in this conversation to stop.".into())
+    })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ---------------------------------------------------------------------------
 // Topic handlers
 // ---------------------------------------------------------------------------
@@ -4474,6 +4491,63 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let body = body_json(resp).await;
         assert_eq!(body["code"].as_str().unwrap(), "not_found");
+    }
+
+    // -----------------------------------------------------------------------
+    // POST /api/conversations/:id/cancel
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn cancel_conversation_turn_stops_the_running_turn_without_a_socket() {
+        let storage = Arc::new(MockStorage::new());
+        let state = AppState::for_test(
+            Arc::clone(&storage) as Arc<dyn Storage>,
+            Arc::clone(&storage) as Arc<dyn TopicStore>,
+            Arc::new(MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let session_id = Uuid::new_v4();
+        let token = tokio_util::sync::CancellationToken::new();
+        state
+            .active_turns
+            .lock()
+            .await
+            .insert(session_id, token.clone());
+
+        let resp = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/conversations/{session_id}/cancel"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancel_conversation_turn_refuses_when_nothing_runs() {
+        let (router, _) = make_router();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/conversations/{}/cancel", Uuid::new_v4()))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = body_json(resp).await;
+        assert_eq!(body["code"].as_str().unwrap(), "conflict");
     }
 
     // -----------------------------------------------------------------------

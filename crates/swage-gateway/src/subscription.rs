@@ -146,6 +146,7 @@ impl SubscriptionState {
             ServerEvent::SurfaceUpdated { .. }
             | ServerEvent::LibraryUpdated { .. }
             | ServerEvent::SessionUpdated { .. }
+            | ServerEvent::WorkflowRunUpdated { .. }
             | ServerEvent::AgentDefinitionsChanged
             | ServerEvent::Lagged { .. } => true,
 

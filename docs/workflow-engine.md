@@ -57,9 +57,12 @@ execution time. The heap and the combined backing stores of all live buffers
 each have a 64 MiB ceiling. Typed arrays and data views use those same backing
 stores. Resizable buffers are unavailable. To grow a buffer within the
 ceiling, allocate a new fixed-length buffer and copy the data into it.
+A script can execute for up to 30 seconds without yielding. Time spent
+waiting for a host call does not count towards that limit.
 
 Reaching a limit stops the script and fails the run. The audit trail records
-the reason in an `engine_terminated` event.
+`heap_limit`, `buffer_limit` or `time_limit` as the reason in an
+`engine_terminated` event.
 
 A script may open with a `export const meta = { ... };` header declaring
 portable metadata: `name`, `description`, `task` (an opaque identity for
