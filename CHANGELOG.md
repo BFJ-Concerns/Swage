@@ -110,6 +110,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- The descriptions of the tools an agent works with are rewritten to say what each tool does, what its result carries and what it refuses: the file tools, `shell`, `python_execute`, `url_fetch`, `web_search`, `docs_read`, the memory tools, the browser tools, `agent_definition`, `delegate` and the workflow tools. The compaction strategies' extraction and eviction prompts and the agent runtime's summary prompt are rewritten whole, and each puts the conversation it reads inside named tags. Tools of features not yet released keep their descriptions.
 - The text the gateway itself gives a model is rewritten to say what is wanted and only what holds in every session: the common and family working norms, the orientation, the framing of memory, the memory curator's instructions, the instructions for conversation summaries and stall diagnoses, the note on a shortened tool result, and the lead-in to an active skill. A conversation summary now opens with the rules the user set that are still in force, written as instructions, and a continuing session is told those rules still apply.
 - The supplied and hosted guides explain creating and editing agent definitions in conversation, including the required tool grant, limits and configuration history, alongside the operator API.
 - Anthropic turns without an explicit output limit use the model's documented limit instead of a fixed 4,096 tokens. A limit the request sets is kept, and a model Anthropic does not document falls back to the catalogue's limit.
@@ -167,6 +168,10 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- The orientation gives a registered secret's reference as `secret://<backend>/<id>`, the form the gateway resolves, where it gave `secret://<id>`, which was refused.
+- The workflow tools no longer tell the agent to activate the workflow-authoring skill, which only the person can do: they name the skill as the catalogue lists it and the hosted `workflow-engine` document.
+- `memory_write`'s description no longer repeats the curator's rules, which were untrue of a fact given in Settings.
+- The orientation's workspace lines no longer call each folder "trusted": only a trusted folder is ever listed, so the word told a session nothing.
 - The memory curator's own session is no longer told that it cannot write memory: a session offered `memory_write` is told it keeps memory.
 - Failed settings saves leave configuration, managed credentials and the active runtime unchanged. History distinguishes absent values from strings and identifies its audit-event and saved-context sources.
 - `file_edit` refuses an ambiguous passage whose occurrences overlap, rather than replacing one of them.
