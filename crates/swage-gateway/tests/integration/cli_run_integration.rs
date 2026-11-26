@@ -388,9 +388,14 @@ async fn cli_pairs_once_and_remembers_headers_for_http_and_websocket() {
     );
 }
 
+/// Run `swage run` unpaired against a gated LAN binding with no terminal,
+/// with a fresh pairing code on the command line when `with_code`. Returns
+/// the output, the request paths the gateway saw, and whether the client
+/// remembered a pairing.
 async fn run_unpaired_without_terminal(
     mode: swage_protocol::client::access::AccessGateMode,
-) -> (std::process::Output, Vec<String>) {
+    with_code: bool,
+) -> (std::process::Output, Vec<String>, bool) {
     use axum::{extract::ConnectInfo, middleware};
     use swage_gateway::access_gate::AccessGate;
     let root = crate::support::scratch_tempdir();
@@ -416,6 +421,7 @@ async fn run_unpaired_without_terminal(
     );
     std::fs::create_dir_all(&state.config_root).unwrap();
     state.access_gate = Arc::new(AccessGate::for_binding(&state.config_root, "0.0.0.0").unwrap());
+    let code = with_code.then(|| state.access_gate.issue_pairing_code().pairing_code);
     let paths = Arc::new(std::sync::Mutex::new(Vec::new()));
     let capture = paths.clone();
     let router = build_router(state).layer(middleware::from_fn(
@@ -441,9 +447,14 @@ async fn run_unpaired_without_terminal(
         .await
         .unwrap();
     assert_eq!(access["admitted"], false);
-    let mut child = Command::new("setsid")
+    let mut command = Command::new("setsid");
+    command
         .arg(env!("CARGO_BIN_EXE_swage"))
-        .args(["run", "--url", &address])
+        .args(["run", "--url", &address]);
+    if let Some(code) = &code {
+        command.args(["--pairing-code", code]);
+    }
+    let mut child = command
         .env("SWAGE_HOME", root.path().join("client"))
         .env("XDG_RUNTIME_DIR", root.path().join("runtime"))
         .stdin(Stdio::piped())
@@ -459,13 +470,15 @@ async fn run_unpaired_without_terminal(
         .unwrap();
     let output = child.wait_with_output().unwrap();
     let paths = paths.lock().unwrap().clone();
-    (output, paths)
+    let remembered = root.path().join("client/client-pairings.json").exists();
+    (output, paths, remembered)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_warn_mode_does_not_require_pairing() {
-    let (output, paths) =
-        run_unpaired_without_terminal(swage_protocol::client::access::AccessGateMode::Warn).await;
+    let (output, paths, remembered) =
+        run_unpaired_without_terminal(swage_protocol::client::access::AccessGateMode::Warn, false)
+            .await;
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
@@ -474,11 +487,29 @@ async fn cli_warn_mode_does_not_require_pairing() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "proceeded\n");
     assert!(!stderr.contains("Pair this client"));
     assert!(!paths.iter().any(|path| path == "/api/pair"));
+    assert!(!remembered);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_warn_mode_pairs_with_a_given_code_and_remembers_it() {
+    let (output, paths, remembered) =
+        run_unpaired_without_terminal(swage_protocol::client::access::AccessGateMode::Warn, true)
+            .await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "warn mode run failed: {stderr}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "proceeded\n");
+    assert_eq!(
+        paths.iter().filter(|path| *path == "/api/pair").count(),
+        1,
+        "a code given while the gate warns must be redeemed"
+    );
+    assert!(remembered, "the redeemed token must be remembered");
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_token_mode_with_piped_prompt_requires_explicit_pairing_without_terminal() {
-    let (output, paths) =
-        run_unpaired_without_terminal(swage_protocol::client::access::AccessGateMode::Token).await;
+    let (output, paths, _) =
+        run_unpaired_without_terminal(swage_protocol::client::access::AccessGateMode::Token, false)
+            .await;
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success());
     assert!(

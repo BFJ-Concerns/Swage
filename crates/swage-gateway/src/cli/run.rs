@@ -80,7 +80,14 @@ pub async fn run(args: &RunArgs) -> Result<(), ClientError> {
     let path = swage_client::pairing::token_path();
     let mut client = GatewayClient::with_saved_pairing(&url, &path)?;
     let access = client.access_status().await?;
-    if access.mode == swage_protocol::client::access::AccessGateMode::Token && !access.admitted {
+    // A code given on the command line pairs whenever the gate applies, so
+    // the client stays paired when warn is tightened back to token; only
+    // the token mode asks for one.
+    let pairs = access.gated
+        && !access.admitted
+        && (args.pairing_code.is_some()
+            || access.mode == swage_protocol::client::access::AccessGateMode::Token);
+    if pairs {
         let code = if let Some(code) = &args.pairing_code {
             code.clone()
         } else {
