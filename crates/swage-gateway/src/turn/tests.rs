@@ -10168,6 +10168,116 @@ async fn later_turn_rebuilds_tool_replay_from_persisted_compact_rows() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn later_snapshot_masks_registered_secret_before_argument_compaction() {
+    let _guard = crate::secret::tests::with_secret_env();
+    let secret = "unique-long-fixture-material-".repeat(110);
+    let text = format!("prefix {secret}");
+    let (state, session_id) = start_result_turn(text, Arc::new(FileReadMockTool)).await;
+    state
+        .secret_manager
+        .create_secret(crate::secret::CreateSecretRequest {
+            name: "Long provider key".into(),
+            material_kind: "provider_key".into(),
+            owner_kind: "service".into(),
+            backend_kind: "managed".into(),
+            scope_kind: "gateway".into(),
+            scope_id: None,
+            metadata: None,
+            value: Some(secret),
+            external_reference: None,
+        })
+        .await
+        .unwrap();
+    let thread = state.storage.list_by_session(session_id).await.unwrap()[0].id;
+    let first_turn = state.storage.list_turns_by_thread(thread).await.unwrap()[0].id;
+    let calls = state
+        .storage
+        .list_tool_calls_by_turn(first_turn)
+        .await
+        .unwrap();
+    let stored_arguments: serde_json::Value =
+        serde_json::from_str(&calls[0].model_arguments).unwrap();
+    let stored_prefix = stored_arguments["text"].as_str().unwrap();
+    assert_eq!(stored_prefix.len(), 2000);
+    assert!(stored_prefix.contains("unique-long-fixture-material-"));
+    state
+        .storage
+        .create_tool_call(NewToolCall {
+            execution: None,
+            turn_id: first_turn,
+            agent_id: calls[0].agent_id.clone(),
+            call_id: "malformed-call".into(),
+            tool: calls[0].tool.clone(),
+            arguments: "{".into(),
+            model_arguments: calls[0].model_arguments.clone(),
+            result: Some("Result of the call with malformed arguments".into()),
+            model_result: Some(swage_core::compact_tool_result_for_model(
+                "Result of the call with malformed arguments",
+                false,
+            )),
+            status: Some("success".into()),
+            duration_ms: None,
+            truncated: false,
+            total_bytes: None,
+            provider_round: calls[0].provider_round,
+            position: calls[0].position + 1,
+            parent_call_id: None,
+            display_summary: None,
+        })
+        .await
+        .unwrap();
+
+    let (provider, captured) = CapturingProvider::new(vec![
+        StreamChunk::Delta {
+            content: "done".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]);
+    state.replace_runtime(
+        state.active_config(),
+        Arc::new(provider),
+        crate::tool::ToolDispatcher::allow_all(vec![Arc::new(FileReadMockTool) as Arc<dyn Tool>]),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Continue",
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let turns = state.storage.list_turns_by_thread(thread).await.unwrap();
+    let later = turns.iter().find(|turn| turn.id != first_turn).unwrap();
+    let snapshot = state.storage.get_snapshot(later.id).await.unwrap().unwrap();
+    let request = captured.lock().unwrap();
+    let request = request.as_ref().unwrap();
+    let wire = serde_json::to_string(request).unwrap();
+    let replay: Vec<_> = request
+        .messages
+        .iter()
+        .filter_map(ChatMessage::tool_replay)
+        .flatten()
+        .collect();
+    assert!(replay.iter().any(|part| matches!(
+        part,
+        ToolReplayPart::ToolCall { call_id, arguments, .. }
+            if call_id == "malformed-call" && arguments == &serde_json::json!({})
+    )));
+    for content in [&wire, &snapshot] {
+        assert!(content.contains("prefix [REDACTED_SECRET]"));
+        assert!(!content.contains("unique-long-fixture-material-"));
+        assert!(content.contains("Result of the call with malformed arguments"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn later_turn_rebuilds_multi_round_tool_replay_as_separate_pairs() {
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
     let topic = storage.general_scope().await.expect("create default topic");
@@ -25018,7 +25128,7 @@ async fn start_result_turn(text: String, tool: Arc<dyn crate::tool::Tool>) -> (A
         vec![
             StreamChunk::ToolUse {
                 call_id: "c1".into(),
-                name: "echo".into(),
+                name: tool.name().into(),
                 arguments: serde_json::json!({ "text": text }),
             },
             StreamChunk::Done {

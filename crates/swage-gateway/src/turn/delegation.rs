@@ -1152,9 +1152,9 @@ impl DelegationHandler for GatewayDelegationHandler {
                     .contains(crate::tool::tool_result_read::TOOL_RESULT_READ_TOOL),
             );
             let history = match super::history::rebuild_thread_history_messages_with_retrieval(
-                self.state.storage.as_ref(),
+                &self.state,
                 existing.thread_id,
-                Some(retrieval),
+                retrieval,
             )
             .await
             {

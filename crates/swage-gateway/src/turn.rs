@@ -517,18 +517,14 @@ pub(super) async fn process_turn_with_composition_and_focus(
     )
     .await;
     let replay_retrieval = swage_core::ReplayRetrieval::with_read_tool(
-        offered_tools.contains(crate::tool::tool_result_read::TOOL_RESULT_READ_TOOL),
+        offered_tools.is_offered(crate::tool::tool_result_read::TOOL_RESULT_READ_TOOL),
     );
     let history_messages = record_failed_turn_and_release_on_error(
         state,
         session_id,
         prepared_turn_id,
-        history::rebuild_thread_history_messages_with_retrieval(
-            state.storage.as_ref(),
-            thread_id,
-            Some(replay_retrieval),
-        )
-        .await,
+        history::rebuild_thread_history_messages_with_retrieval(state, thread_id, replay_retrieval)
+            .await,
     )
     .await?;
     let memory_index = if session_carries_memory(&session) {

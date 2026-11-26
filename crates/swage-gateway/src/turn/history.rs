@@ -1,6 +1,7 @@
 use super::{
-    BTreeMap, ChatMessage, GatewayError, HashMap, HashSet, Role, ToolCall, ToolCallRecord,
-    ToolResult, Uuid, build_tool_round_messages,
+    AppState, BTreeMap, ChatMessage, GatewayError, HashMap, HashSet, Role, ToolCall,
+    ToolCallRecord, ToolResult, Uuid, build_tool_round_messages,
+    provider_record::{known_secret_values, redact_secret_values},
 };
 
 #[cfg(test)]
@@ -8,13 +9,35 @@ pub(super) async fn rebuild_thread_history_messages(
     storage: &dyn swage_storage::store::Storage,
     thread_id: Uuid,
 ) -> Result<Vec<ChatMessage>, GatewayError> {
-    rebuild_thread_history_messages_with_retrieval(storage, thread_id, None).await
+    rebuild_thread_history(storage, thread_id, None, Some(&[])).await
 }
 
 pub(super) async fn rebuild_thread_history_messages_with_retrieval(
+    state: &AppState,
+    thread_id: Uuid,
+    retrieval: swage_core::ReplayRetrieval,
+) -> Result<Vec<ChatMessage>, GatewayError> {
+    let secret_values = match known_secret_values(state).await {
+        Ok(values) => Some(values),
+        Err(_) => {
+            tracing::warn!(%thread_id, "omitting replayed arguments because secret redaction is unavailable");
+            None
+        }
+    };
+    rebuild_thread_history(
+        state.storage.as_ref(),
+        thread_id,
+        Some(retrieval),
+        secret_values.as_deref(),
+    )
+    .await
+}
+
+async fn rebuild_thread_history(
     storage: &dyn swage_storage::store::Storage,
     thread_id: Uuid,
     retrieval: Option<swage_core::ReplayRetrieval>,
+    secret_values: Option<&[String]>,
 ) -> Result<Vec<ChatMessage>, GatewayError> {
     let stored_history = storage.list_messages_by_thread(thread_id).await?;
     let mut rebuilt = Vec::new();
@@ -61,6 +84,7 @@ pub(super) async fn rebuild_thread_history_messages_with_retrieval(
             rebuilt.extend(compact_tool_replay_messages_with_retrieval(
                 &tool_calls,
                 retrieval,
+                secret_values,
             )?);
         }
 
@@ -85,6 +109,7 @@ pub(super) async fn rebuild_thread_history_messages_with_retrieval(
             rebuilt.extend(compact_tool_replay_messages_with_retrieval(
                 &tool_calls,
                 retrieval,
+                secret_values,
             )?);
         }
     }
@@ -96,12 +121,13 @@ pub(super) async fn rebuild_thread_history_messages_with_retrieval(
 pub(super) fn compact_tool_replay_messages(
     records: &[ToolCallRecord],
 ) -> Result<Vec<ChatMessage>, swage_core::StorageError> {
-    compact_tool_replay_messages_with_retrieval(records, None)
+    compact_tool_replay_messages_with_retrieval(records, None, Some(&[]))
 }
 
 fn compact_tool_replay_messages_with_retrieval(
     records: &[ToolCallRecord],
     retrieval: Option<swage_core::ReplayRetrieval>,
+    secret_values: Option<&[String]>,
 ) -> Result<Vec<ChatMessage>, swage_core::StorageError> {
     let parent_rounds: HashMap<&str, i32> = records
         .iter()
@@ -167,7 +193,10 @@ fn compact_tool_replay_messages_with_retrieval(
             tool_calls.push(ToolCall {
                 call_id: record.call_id.clone(),
                 name: record.tool.clone(),
-                arguments: parse_model_arguments(record)?,
+                arguments: match secret_values {
+                    Some(values) => parse_redacted_model_arguments(record, values)?,
+                    None => serde_json::json!({}),
+                },
             });
             tool_results.push(ToolResult {
                 call_id: record.call_id.clone(),
@@ -182,6 +211,28 @@ fn compact_tool_replay_messages_with_retrieval(
     }
 
     Ok(replay_messages)
+}
+
+fn parse_redacted_model_arguments(
+    record: &ToolCallRecord,
+    secret_values: &[String],
+) -> Result<serde_json::Value, swage_core::StorageError> {
+    if !secret_values.is_empty() {
+        // A bounded argument can contain only the start of a registered
+        // value. Inspect the original before applying the replay bound.
+        let Ok(mut arguments) = serde_json::from_str(&record.arguments) else {
+            tracing::warn!(
+                turn_id = %record.turn_id,
+                call_id = %record.call_id,
+                "omitting replayed arguments because the original arguments could not be decoded"
+            );
+            return Ok(serde_json::json!({}));
+        };
+        if redact_secret_values(&mut arguments, secret_values) {
+            return Ok(bounded_arguments(&arguments));
+        }
+    }
+    parse_model_arguments(record)
 }
 
 pub(super) fn parse_model_arguments(
@@ -208,10 +259,12 @@ pub(super) fn parse_model_arguments(
     );
     // Recover the row's original parameters, never a preview that may end
     // mid-JSON, using the same bound as newly stored model arguments.
-    Ok(
-        serde_json::from_str(&swage_core::compact_tool_arguments_for_model(&arguments))
-            .expect("compacted tool arguments are valid JSON"),
-    )
+    Ok(bounded_arguments(&arguments))
+}
+
+fn bounded_arguments(arguments: &serde_json::Value) -> serde_json::Value {
+    serde_json::from_str(&swage_core::compact_tool_arguments_for_model(arguments))
+        .expect("compacted tool arguments are valid JSON")
 }
 
 fn is_tool_argument_envelope(arguments: &serde_json::Value) -> bool {
