@@ -831,9 +831,7 @@ links and verifies it against the version and checksum pinned in
 `v8` crate's build script. The pin must match the `v8` package Cargo.lock
 resolves, so a dependency upgrade that moves V8 fails the fetch until the
 pin is updated on purpose. The prebuilt archive is pinned for x86-64 Linux
-with glibc. To compile the locked engine from source, install the [rusty_v8
-build prerequisites](https://github.com/denoland/rusty_v8#building-from-source)
-and run `V8_FROM_SOURCE=1 cargo build --locked --bin swage`.
+with glibc.
 
 Other useful recipes:
 
@@ -844,6 +842,15 @@ Other useful recipes:
   behaviour as the verify gate.
 - `just build-dev-embedded` — a debug build with the current frontend baked
   into the gateway binary.
+
+### Building V8 from source
+
+The experimental source build uses Cargo directly. After installing the
+[rusty_v8 build prerequisites](https://github.com/denoland/rusty_v8#building-from-source),
+run `V8_FROM_SOURCE=1 cargo build --locked --bin swage`. On x86-64 Linux
+with glibc, the locked V8 crate's source build stops because Ninja cannot
+find its ICU data file (`icudtl.dat`). Support for other targets remains
+unverified.
 
 ## Client-side route handling
 
