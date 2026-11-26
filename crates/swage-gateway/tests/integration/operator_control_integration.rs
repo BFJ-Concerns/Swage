@@ -904,6 +904,68 @@ async fn operator_run(state: &AppState, parent: Option<Uuid>) -> swage_storage::
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn operator_reads_a_failed_worker_from_the_journal_while_its_run_is_open() {
+    let state = test_state();
+    let router = build_router(state.clone());
+    let run = operator_run(&state, None).await;
+    // A call that missed its deadline stops the worker's turn, so the turn
+    // alone reads as cancelled; the journal records the call's failure.
+    let turn = operator_child(
+        &state,
+        swage_storage::SessionOrigin::WorkflowWorker { run_id: run.id },
+        TurnState::Cancelled,
+    )
+    .await;
+    let session_id = state
+        .storage
+        .get(turn.thread_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .session_id;
+    let entry = state
+        .storage
+        .create_workflow_journal_intent(swage_storage::NewWorkflowJournalIntent {
+            run_id: run.id,
+            seq: 1,
+            kind: "agent_call".into(),
+            args_hash: "1".into(),
+            request: json!({"agent": "gateway"}),
+            effect_kind: None,
+            idempotency_key: None,
+            target_kind: None,
+        })
+        .await
+        .unwrap();
+    state
+        .storage
+        .record_workflow_call_dispatch(
+            entry.id,
+            json!({"prompt": "Work", "attempts": [{
+                "cause": {"cause": "first"}, "opened_at": chrono::Utc::now(),
+                "session_id": session_id, "thread_id": turn.thread_id, "turn_id": turn.id
+            }]}),
+        )
+        .await
+        .unwrap();
+    state
+        .storage
+        .fail_workflow_journal_entry(entry.id, "AgentCallTimeoutError")
+        .await
+        .unwrap();
+
+    let (_, body) = get_json(&router, "/api/operator/overview").await;
+    let row = body["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == session_id.to_string())
+        .unwrap();
+    assert_eq!(row["ending"], "failed", "{body}");
+    assert_eq!(row["has_running_turn"], false, "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn operator_uses_the_run_accounts_failed_and_cut_short_partition() {
     let state = test_state();
     let router = build_router(state.clone());

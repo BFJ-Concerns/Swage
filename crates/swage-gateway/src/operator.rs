@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use swage_core::GatewayError;
 use swage_protocol::{
-    client::workflow::WorkflowRunTerminalAccount, hosting::OperatorSessionEnding,
+    client::workflow::{WorkflowJournalEntryStatus, WorkflowRunTerminalAccount},
+    hosting::OperatorSessionEnding,
 };
 use swage_storage::{ApprovalState, SessionListing, SessionOrigin, TurnState};
 
@@ -154,12 +155,7 @@ async fn list_operator_sessions(
             if let SessionOrigin::WorkflowWorker { run_id } = origin
                 && read_runs.insert(run_id)
                 && let Some(run) = state.storage.get_workflow_run(run_id).await?
-                && let Some(account) = run.terminal_account
             {
-                let account: WorkflowRunTerminalAccount =
-                    serde_json::from_value(account).map_err(|error| {
-                        GatewayError::ConfigError(format!("invalid run account: {error}"))
-                    })?;
                 let journal = crate::workflow::journal_with_live_workers(
                     state,
                     run_id,
@@ -167,26 +163,44 @@ async fn list_operator_sessions(
                 )
                 .await
                 .map_err(GatewayError::ConfigError)?;
-                let cancelled_workers = if matches!(
-                    account.ending,
-                    swage_protocol::client::workflow::WorkflowRunEnding::Cancelled
-                ) {
-                    &account.workers.cut_short[..]
+                if let Some(account) = run.terminal_account {
+                    let account: WorkflowRunTerminalAccount = serde_json::from_value(account)
+                        .map_err(|error| {
+                            GatewayError::ConfigError(format!("invalid run account: {error}"))
+                        })?;
+                    let cancelled_workers = if matches!(
+                        account.ending,
+                        swage_protocol::client::workflow::WorkflowRunEnding::Cancelled
+                    ) {
+                        &account.workers.cut_short[..]
+                    } else {
+                        &[]
+                    };
+                    for (workers, ending) in [
+                        (&account.workers.failed[..], OperatorSessionEnding::Failed),
+                        (cancelled_workers, OperatorSessionEnding::Cancelled),
+                    ] {
+                        for worker in workers {
+                            if let Some(worker_turn_id) = journal
+                                .iter()
+                                .find(|entry| entry.id == worker.journal_entry_id)
+                                .and_then(|entry| entry.agent_call.as_ref())
+                                .and_then(|call| call.turn_id)
+                            {
+                                worker_endings.insert(worker_turn_id, ending);
+                            }
+                        }
+                    }
                 } else {
-                    &[]
-                };
-                for (workers, ending) in [
-                    (&account.workers.failed[..], OperatorSessionEnding::Failed),
-                    (cancelled_workers, OperatorSessionEnding::Cancelled),
-                ] {
-                    for worker in workers {
-                        if let Some(worker_turn_id) = journal
-                            .iter()
-                            .find(|entry| entry.id == worker.journal_entry_id)
-                            .and_then(|entry| entry.agent_call.as_ref())
-                            .and_then(|call| call.turn_id)
+                    // While the run is open its journal is the record: a
+                    // worker whose call failed reads as failed even though
+                    // its own turn was stopped by the call's deadline.
+                    for entry in &journal {
+                        if entry.status == WorkflowJournalEntryStatus::Failed
+                            && let Some(turn_id) =
+                                entry.agent_call.as_ref().and_then(|call| call.turn_id)
                         {
-                            worker_endings.insert(worker_turn_id, ending);
+                            worker_endings.insert(turn_id, OperatorSessionEnding::Failed);
                         }
                     }
                 }
