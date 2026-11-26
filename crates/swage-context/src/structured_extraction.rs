@@ -199,13 +199,12 @@ in this shape:
 
 [{\"name\": <category>, \"items\": [{\"content\": <the item>, \"source_turns\": [<message numbers>]}]}]";
 
-/// Build the extraction prompt from conversation messages.
-///
-/// Numbers each message for source-turn referencing, then instructs the LLM
-/// to produce a JSON array of categorised extraction records.
+/// Build the extraction prompt from conversation messages: the instruction,
+/// then the messages inside the tags it names, each numbered so that an item
+/// can cite the messages it was drawn from.
 fn build_extraction_prompt(messages: &[ChatMessage]) -> String {
     let mut prompt = String::from(EXTRACTION_INSTRUCTIONS);
-    prompt.push_str("\n\nConversation:\n\n");
+    prompt.push_str("\n\n<conversation_to_record>\n");
 
     for (i, message) in messages.iter().enumerate() {
         let role_label = role_label_for_model_context(message.role());
@@ -213,7 +212,7 @@ fn build_extraction_prompt(messages: &[ChatMessage]) -> String {
         let _ = writeln!(prompt, "[Turn {i}] ({role_label}): {text}");
     }
 
-    prompt.push_str("\nJSON output:");
+    prompt.push_str("</conversation_to_record>\n\nJSON output:");
     prompt
 }
 
@@ -700,7 +699,13 @@ mod tests {
             ChatMessage::new(Role::Assistant, "Hi there"),
         ];
         let prompt = build_extraction_prompt(&messages);
-        assert!(prompt.contains("[Turn 0] (user): Hello"));
-        assert!(prompt.contains("[Turn 1] (assistant): Hi there"));
+        assert!(prompt.starts_with(EXTRACTION_INSTRUCTIONS));
+        assert!(EXTRACTION_INSTRUCTIONS.contains("`conversation_to_record`"));
+        assert!(
+            prompt.contains(
+                "<conversation_to_record>\n[Turn 0] (user): Hello\n[Turn 1] (assistant): Hi there\n</conversation_to_record>"
+            ),
+            "{prompt}"
+        );
     }
 }

@@ -303,14 +303,19 @@ async fn try_summarise(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let focus_instruction = focus
-        .map(|focus| format!("\n\nFocus instructions:\n{focus}"))
+    // Each part sits in the tags the instruction names, so that nothing in
+    // the conversation is read as the summariser's own instruction. The
+    // focus comes last, nearest the reply.
+    let focus_block = focus
+        .map(|focus| format!("\n\n<requested_focus>\n{focus}\n</requested_focus>"))
         .unwrap_or_default();
     let summarise_request = CompletionRequest {
         effort: None,
         messages: vec![ChatMessage::new(
             Role::User,
-            format!("{SUMMARY_INSTRUCTIONS}{focus_instruction}\n\nConversation:\n{old_text}"),
+            format!(
+                "{SUMMARY_INSTRUCTIONS}\n\n<conversation_to_summarise>\n{old_text}\n</conversation_to_summarise>{focus_block}"
+            ),
         )],
         model: None,
         max_tokens: Some(512),
@@ -1215,7 +1220,13 @@ mod tests {
             ContentPart::Text { text } => text,
             _ => panic!("expected text summarisation prompt"),
         };
-        assert!(!prompt.contains("Focus instructions:"));
+        assert!(prompt.starts_with(SUMMARY_INSTRUCTIONS));
+        assert!(
+            prompt.ends_with(
+                "<conversation_to_summarise>\nmessage one\nmessage two\n</conversation_to_summarise>"
+            ),
+            "{prompt}"
+        );
 
         // Summary message (system) + the 2 recent messages = 3 total.
         assert_eq!(result.len(), 3);
@@ -1261,7 +1272,15 @@ mod tests {
             ContentPart::Text { text } => text,
             _ => panic!("expected text summarisation prompt"),
         };
-        assert!(prompt.contains("Focus instructions:\nPreserve dates and named decisions"));
+        assert!(
+            prompt.ends_with(
+                "<conversation_to_summarise>\nold user detail\nold assistant detail\n</conversation_to_summarise>\n\n<requested_focus>\nPreserve dates and named decisions\n</requested_focus>"
+            ),
+            "{prompt}"
+        );
+        for tag in ["conversation_to_summarise", "requested_focus"] {
+            assert!(SUMMARY_INSTRUCTIONS.contains(&format!("`{tag}`")), "{tag}");
+        }
         assert_eq!(
             record.focus.as_deref(),
             Some("Preserve dates and named decisions")

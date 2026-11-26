@@ -217,14 +217,12 @@ drop, in this shape:
 
 Reply with [] when nothing should go.";
 
-/// Build the eviction prompt from conversation messages.
-///
-/// Numbers each message for index reference, then instructs the LLM to
-/// return a JSON array of eviction candidates. The instruction emphasises
-/// conservative removal — uncertain content must be kept.
+/// Build the eviction prompt from conversation messages: the instruction,
+/// then the messages inside the tags it names, each numbered so that the
+/// reply can list a message by its number.
 fn build_eviction_prompt(messages: &[ChatMessage]) -> String {
     let mut prompt = String::from(EVICTION_INSTRUCTIONS);
-    prompt.push_str("\n\nConversation:\n\n");
+    prompt.push_str("\n\n<conversation_to_prune>\n");
 
     for (i, message) in messages.iter().enumerate() {
         let role_label = role_label_for_model_context(message.role());
@@ -232,7 +230,7 @@ fn build_eviction_prompt(messages: &[ChatMessage]) -> String {
         let _ = writeln!(prompt, "[{i}] ({role_label}): {text}");
     }
 
-    prompt.push_str("\nJSON output:");
+    prompt.push_str("</conversation_to_prune>\n\nJSON output:");
     prompt
 }
 
@@ -421,6 +419,15 @@ mod tests {
 
         let prompt = build_eviction_prompt(&messages);
 
+        assert!(prompt.starts_with(EVICTION_INSTRUCTIONS));
+        assert!(EVICTION_INSTRUCTIONS.contains("`conversation_to_prune`"));
+        let (_, conversation) = prompt
+            .split_once("<conversation_to_prune>\n[0] (")
+            .expect("the conversation opens inside its tags");
+        assert!(
+            conversation.ends_with("\n</conversation_to_prune>\n\nJSON output:"),
+            "{prompt}"
+        );
         assert!(prompt.contains("tool_use id=call_search name=web_search"));
         assert!(prompt.contains(r#""query":"rust""#));
         assert!(prompt.contains("tool_result tool_use_id=call_search is_error=true"));
