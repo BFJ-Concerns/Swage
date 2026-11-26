@@ -42,18 +42,22 @@ impl Tool for TaskDefinitionTool {
         "Create, list, update, or delete durable task definitions: a named work contract — \
          instructions, a preferred model, narrowed tool grants and an output contract — that a \
          delegated child turn runs under when a delegation names it. Set `action` to `upsert` \
-         (create a definition, or replace one whole: an upsert stores exactly the fields given, \
-         so a field left out is cleared — restate every field that should remain), `list` (every \
-         stored definition), or `delete`.\n\n\
+         (store the definition `id` names: with nothing stored under that id the call creates \
+         it, and `instructions` is required; with one stored it changes only the fields the call \
+         gives — a field you leave out keeps its stored value, a field you give replaces it, and \
+         setting `model_id`, `tool_permissions`, `output_schema` or `output_max_retries` to null \
+         clears that field), `list` (every stored definition, with all its fields), or `delete`.\n\n\
          Reach for this when the person wants a repeatable contract for work handed to a child \
          turn, or wants one changed. A task definition has no entry in the new-session picker and \
          no name people choose; for an agent a person can pick when starting a session — with a \
          display name, a description and standing instructions of its own — use \
          `agent_definition` instead.\n\n\
-         Every upsert and delete is written to the audit trail with the definition's whole state \
-         before and after. Deleting is permanent (the definition can be recreated); a delegation \
-         that names a deleted definition is refused. `tool_permissions` can only narrow what the \
-         delegating context grants, never widen it."
+         An upsert's reply says whether it created the definition or updated it. Every upsert and \
+         delete is written to the audit trail with the definition's whole state before and \
+         after. Deleting is permanent (the definition can be recreated); a delegation that names \
+         a deleted definition is refused. `tool_permissions` can only narrow what the delegating \
+         context grants, never widen it. A `model_id` must be one the gateway's model catalogue \
+         configures; a refusal names the configured ids."
     }
     fn parameters(&self) -> Value {
         let string_array = || json!({"type":"array","items":{"type":"string"}});
@@ -63,23 +67,23 @@ impl Tool for TaskDefinitionTool {
                 "action":{
                     "type":"string",
                     "enum":["upsert","list","delete"],
-                    "description":"What to do: `upsert` stores the definition exactly as given, creating or replacing it whole; `list` returns every stored definition; `delete` removes one."
+                    "description":"What to do: `upsert` creates the definition `id` names or, when one is already stored, changes the fields given and leaves the rest as stored (to change part of a text, `list` first and give the whole revised text, since a text given replaces all of the stored one); `list` returns every stored definition; `delete` removes one."
                 },
                 "id":{
                     "type":"string",
-                    "description":"The definition's stable identifier — lowercase ASCII letters, digits and hyphens — that a delegation names to run under it. Required for upsert and delete."
+                    "description":"The definition's stable identifier — lowercase ASCII letters, digits and hyphens — that a delegation names to run under it. Required for upsert and delete. An upsert under an id with nothing stored creates a new definition, so to change an existing one give its id exactly as `list` shows it."
                 },
                 "instructions":{
                     "type":"string",
-                    "description":"The complete contract the child turn works to, as it will read it. Required on upsert; it replaces any stored text."
+                    "description":"The complete contract the child turn works to, as it will read it. Required when the upsert creates the definition. On a change, omit it to keep the stored text; a text given replaces the whole stored text, so include everything that should remain. It cannot be cleared: a definition always has instructions, and null or an empty text is refused."
                 },
                 "model_id":{
                     "type":["string","null"],
-                    "description":"The id of a model in the gateway's configured catalogue the child turn uses. Omit or null to keep the delegating context's model."
+                    "description":"The id of a model in the gateway's configured catalogue the child turn uses in place of the delegating context's model. Omit on create to keep the delegating context's model; on a change, null clears the preference and omitting keeps it. An id the catalogue does not configure is refused."
                 },
                 "tool_permissions":{
                     "type":["object","null"],
-                    "description":"Narrows the tools the child turn may call; the result intersects with what the delegating context grants and can only remove tools. Omit or null to leave the grants unchanged.",
+                    "description":"Narrows the tools the child turn may call; the result intersects with what the delegating context grants and can only remove tools. Omit on create to leave the grants unchanged; on a change, null removes the narrowing, omitting keeps it, and an object given replaces the stored one whole, so give every member.",
                     "properties":{
                         "allow":string_array(),
                         "deny":string_array(),
@@ -111,13 +115,13 @@ impl Tool for TaskDefinitionTool {
                 },
                 "output_schema":{
                     "type":["object","null"],
-                    "description":"A JSON Schema the child's final reply must satisfy; a reply that does not is retried. Omit or null for a free-form reply."
+                    "description":"A JSON Schema the child's final reply must satisfy; a reply that does not is retried. Omit on create for a free-form reply; on a change, null removes the contract and omitting keeps it."
                 },
                 "output_max_retries":{
                     "type":["integer","null"],
                     "minimum":0,
                     "maximum":u32::MAX,
-                    "description":"How many times a reply failing `output_schema` is retried before the delegation fails. Omit or null for the configured default."
+                    "description":"How many times a reply failing `output_schema` is retried before the delegation fails. Omit on create for the configured default; on a change, null restores that default and omitting keeps the stored value."
                 }
             },
             "required":["action"],
