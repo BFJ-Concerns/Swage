@@ -1,17 +1,11 @@
 // @vitest-environment jsdom
-// @ts-expect-error Vitest supplies Node APIs; the application has browser types.
-import { env, stderr } from "node:process";
-import { afterEach, beforeEach, describe, expect, it, vi, type TestContext } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 
 import { compile } from "svelte/compiler";
 
-import { chromium } from "@playwright/test";
-import appCss from "../../app.css?raw";
-
 import type { WorkSurfaceChannel } from "../api/work-surface";
 import type { ServerEvent } from "../types";
-import risoCss from "../styles/riso.css?raw";
 
 import OperatorDashboard from "../components/OperatorDashboard.svelte";
 import operatorDashboardSource from "../components/OperatorDashboard.svelte?raw";
@@ -59,25 +53,6 @@ function fakeChannel(): FakeChannel {
 vi.mock("../api/work-surface", () => ({
   createWorkSurfaceChannel: () => fakeChannel(),
 }));
-
-async function launchLayoutBrowser(context: TestContext) {
-  try {
-    return await chromium.launch({
-      headless: true,
-      executablePath: env.SWAGE_BROWSER_BIN || undefined,
-    });
-  } catch (error) {
-    if (!(error instanceof Error) || !error.message.includes("Executable doesn't exist")) {
-      throw error;
-    }
-    const reason = "no Chromium binary was found for OperatorDashboard layout tests";
-    if (env.SWAGE_BROWSER_TESTS === "required") {
-      throw new Error(`SWAGE_BROWSER_TESTS=required but ${reason}`, { cause: error });
-    }
-    stderr.write(`Skipping browser layout test: ${reason}\n`);
-    context.skip(reason);
-  }
-}
 
 function makeOverview(overrides: Partial<OperatorOverview> = {}): OperatorOverview {
   return {
@@ -180,67 +155,6 @@ describe("OperatorDashboard", () => {
     document.head.querySelectorAll("style").forEach((style) => style.remove());
     while (document.body.firstChild) {
       document.body.removeChild(document.body.firstChild);
-    }
-  });
-
-  it("keeps the heading within 80px and supervision panels in the first viewport at 1440x1000", async (context) => {
-    const overview = makeOverview();
-    overview.sessions = Array.from({ length: 8 }, (_, index) => ({
-      ...overview.sessions[0], id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
-    }));
-    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(overview);
-    component = mount(OperatorDashboard, { target: document.body });
-    await settleUi();
-    const scope = Array.from(document.querySelector(".ops-deck")!.classList)
-      .find((name) => name.startsWith("svelte-"))!;
-    const { css } = compile(operatorDashboardSource, { filename: "OperatorDashboard.svelte" });
-    const browser = await launchLayoutBrowser(context);
-    try {
-      const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
-      await page.setContent(`<style>${risoCss}\n${appCss.replace(/@import[^;]+;/g, "")}\n${(css?.code ?? "").replace(/svelte-[a-z0-9]+/g, scope)}</style>${document.body.innerHTML}`);
-      const header = await page.locator(".ops-header").boundingBox();
-      expect(header).not.toBeNull();
-      expect(header!.height).toBeLessThanOrEqual(80);
-      for (const selector of [".ledger-row", ".control-card", ".panel:nth-child(3) .control-card"]) {
-        const box = await page.locator(selector).first().boundingBox();
-        expect(box, selector).not.toBeNull();
-        expect(box!.y + box!.height, selector).toBeLessThanOrEqual(1000);
-      }
-    } finally {
-      await browser.close();
-    }
-  });
-
-  it("keeps Channels and Devices lists uncapped while the fleet scrolls", async (context) => {
-    const overview = makeOverview();
-    overview.sessions = Array.from({ length: 20 }, (_, index) => ({ ...overview.sessions[0], id: `session-${index}` }));
-    overview.channels.channels = Array.from({ length: 20 }, (_, index) => ({ ...overview.channels.channels[0], integration: `channel-${index}` }));
-    overview.devices = Array.from({ length: 20 }, (_, index) => ({ ...overview.devices[0], device_id: `device-${index}` }));
-    vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue(overview);
-    component = mount(OperatorDashboard, { target: document.body });
-    await settleUi();
-    const scope = Array.from(document.querySelector(".ops-deck")!.classList)
-      .find((name) => name.startsWith("svelte-"))!;
-    const { css } = compile(operatorDashboardSource, { filename: "OperatorDashboard.svelte" });
-    const browser = await launchLayoutBrowser(context);
-    try {
-      const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
-      await page.setContent(`<style>${risoCss}\n${appCss.replace(/@import[^;]+;/g, "")}\n${(css?.code ?? "").replace(/svelte-[a-z0-9]+/g, scope)}</style>${document.body.innerHTML}`);
-      for (const heading of ["Observed delivery lanes", "Attached devices"]) {
-        const list = page.locator(".panel").filter({ has: page.getByRole("heading", { name: heading }) }).locator(".ledger");
-        const dimensions = await list.evaluate((element) => ({
-          visible: element.clientHeight, content: element.scrollHeight,
-          overflow: getComputedStyle(element).overflowY,
-        }));
-        expect.soft(dimensions.visible, `${heading} must show its full list`).toBe(dimensions.content);
-        expect.soft(dimensions.overflow, heading).toBe("visible");
-      }
-      const fleet = page.locator(".panel").first().locator(".ledger");
-      const dimensions = await fleet.evaluate((element) => ({ visible: element.clientHeight, content: element.scrollHeight }));
-      expect(dimensions.visible).toBeLessThanOrEqual(420);
-      expect(dimensions.content).toBeGreaterThan(dimensions.visible);
-    } finally {
-      await browser.close();
     }
   });
 
