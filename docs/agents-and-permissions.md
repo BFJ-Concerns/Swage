@@ -554,7 +554,7 @@ the global setting, and an agent-level file can override the topic's.
 |---|---|---|
 | `assembly` | `"default"` | Which named context assembly to use |
 | `alternatives` | `[]` | Hidden alternative assemblies available for local selection |
-| `timeout` | `5` (seconds, 1–60) | How long assembly may take before timing out |
+| `timeout` | `5` (seconds, at least 1) | How long assembly may take before timing out |
 | `budget` | unset | Token budget for the assembled context; must be positive when set |
 | `compaction_threshold` | unset (100 messages) | When to compact — `{ messages = N }` or `{ tokens = N }` |
 | `diagnosis_reader_model` | unset (session's model) | Model for the diagnosis readers during wall succession |
