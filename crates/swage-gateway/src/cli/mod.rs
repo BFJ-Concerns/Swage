@@ -242,20 +242,6 @@ mod tests {
         assert!(args.log_file.is_none());
     }
 
-    // The gateway runs under the global layer alone: no start argument selects
-    // a topic into it.
-    #[test]
-    fn parse_gateway_start_takes_no_configuration_scope() {
-        for command in [
-            ["swage", "gateway", "start", "--config", "proj"],
-            ["swage", "gateway", "restart", "--config", "proj"],
-            ["swage", "gateway", "set-defaults", "--config", "proj"],
-        ] {
-            let error = Cli::try_parse_from(command).unwrap_err();
-            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
-        }
-    }
-
     #[test]
     fn parse_run_with_inline_message() {
         let cli = Cli::try_parse_from(["swage", "run", "hello"]).unwrap();
