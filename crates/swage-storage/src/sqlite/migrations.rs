@@ -96,9 +96,8 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// The execution boundary a turn ran inside, recorded when its dispatcher
-/// settled: the isolated, degraded, declared and its detail (the
-/// degradation reason or the declared boundary).
+/// A turn's execution isolation, recorded when its dispatcher settles:
+/// isolated or degraded, with the degradation reason stored as its detail.
 const ADD_TURN_EXECUTION_ISOLATION: &str = "
     ALTER TABLE turns ADD COLUMN isolation_kind TEXT;
     ALTER TABLE turns ADD COLUMN isolation_detail TEXT;

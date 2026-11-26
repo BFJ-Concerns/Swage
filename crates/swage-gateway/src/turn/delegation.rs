@@ -49,12 +49,13 @@ struct DelegatedSelection {
 }
 
 struct ResolvedNamedChild {
-    continuation: DelegatedChildContinuation,
+    session_id: Uuid,
+    thread_id: Uuid,
     metadata: serde_json::Value,
 }
 
-/// Look up a child this session has delegated to under `name`, and load
-/// everything it has heard and said so far.
+/// Look up a child this session has delegated to under `name`, validate its
+/// session and load its metadata.
 ///
 /// The agent is fixed by the call that opened the child: a later call naming
 /// it must be talking to the same agent, or it is a different child wearing a
@@ -113,17 +114,9 @@ async fn resolve_named_child(
             "child {name:?} is still taking its previous turn; named child turns are sequential"
         )));
     }
-    let history = super::rebuild_thread_history_messages(state.storage.as_ref(), thread_id)
-        .await
-        .map_err(|error| {
-            AgentError::InvalidConfig(format!("cannot reload child {name:?}: {error}"))
-        })?;
     Ok(Some(ResolvedNamedChild {
-        continuation: DelegatedChildContinuation {
-            session_id,
-            thread_id,
-            history,
-        },
+        session_id,
+        thread_id,
         metadata: child_session
             .metadata
             .unwrap_or_else(|| serde_json::json!({})),
@@ -1029,7 +1022,6 @@ impl DelegationHandler for GatewayDelegationHandler {
         if let Some(existing) = existing_named_child.as_ref() {
             session_metadata = existing.metadata.clone();
         }
-        let existing_child = existing_named_child.map(|child| child.continuation);
         let (mut target_agent_config, mut tool_root) = build_agent_config_for_topic_workspace(
             &self.state,
             target_agent_id.to_string(),
@@ -1042,7 +1034,7 @@ impl DelegationHandler for GatewayDelegationHandler {
         .await;
         target_agent_config.model_id = Some(selection.model_id);
         let mut worktree_owner_id = None;
-        let placement = if existing_child.is_some() {
+        let placement = if existing_named_child.is_some() {
             reauthorise_named_child_placement(
                 &self.state,
                 topic_id,
@@ -1150,6 +1142,42 @@ impl DelegationHandler for GatewayDelegationHandler {
         })?;
         let target_sandbox_guard = target_dispatcher_build.sandbox_guard;
         let target_dispatcher = target_dispatcher_build.dispatcher;
+
+        // The child's dispatcher determines whether replay can offer a full read.
+        let existing_child = if let Some(existing) = existing_named_child {
+            let name = child.expect("resolved child has a name");
+            let retrieval = swage_core::ReplayRetrieval::with_read_tool(
+                target_dispatcher
+                    .offered_tools()
+                    .contains(crate::tool::tool_result_read::TOOL_RESULT_READ_TOOL),
+            );
+            let history = match super::history::rebuild_thread_history_messages_with_retrieval(
+                self.state.storage.as_ref(),
+                existing.thread_id,
+                Some(retrieval),
+            )
+            .await
+            {
+                Ok(history) => history,
+                Err(error) => {
+                    shutdown_sandbox_guard(
+                        &target_sandbox_guard,
+                        "failed to shut down delegated sandbox after history reload error",
+                    )
+                    .await;
+                    return Err(AgentError::InvalidConfig(format!(
+                        "cannot reload child {name:?}: {error}"
+                    )));
+                }
+            };
+            Some(DelegatedChildContinuation {
+                session_id: existing.session_id,
+                thread_id: existing.thread_id,
+                history,
+            })
+        } else {
+            None
+        };
 
         let router = Arc::new(self.state.message_router());
         let executor = DelegationExecutor {

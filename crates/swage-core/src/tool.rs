@@ -61,6 +61,12 @@ const MODEL_ARGUMENT_STRING_CHARS: usize = 2000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactToolReplay {
+    /// The model's account of an elided replay, read before the fields it
+    /// explains: that the model received the result whole when the call
+    /// returned, and how this turn sees the rest. Written for the turn that
+    /// reads the replay (`with_elision_note`), never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     pub kind: String,
     pub bytes: usize,
     pub sha256: String,
@@ -76,7 +82,67 @@ impl CompactToolReplay {
     pub fn to_stable_json(&self) -> String {
         serde_json::to_string(self).expect("compact replay envelope serialises")
     }
+
+    /// The replay as the model of a later turn reads it. An elided result
+    /// carries the note that the earlier turn received it whole and the
+    /// route this turn has to the rest; a result replayed whole carries
+    /// none.
+    pub fn with_elision_note(mut self, retrieval: ReplayRetrieval) -> Self {
+        self.note = self.truncated.then(|| self.elision_note(retrieval));
+        self
+    }
+
+    fn elision_note(&self, retrieval: ReplayRetrieval) -> String {
+        let shown = self.preview.chars().count();
+        let bytes = self.bytes;
+        let route = match retrieval {
+            ReplayRetrieval::ByReference if self.full_result_ref.is_some() => {
+                ELIDED_READ_AGAIN_BY_REFERENCE
+            }
+            ReplayRetrieval::ByReference | ReplayRetrieval::None => ELIDED_NO_READ_AGAIN,
+        };
+        format!(
+            "You received this result whole when the call returned ({bytes} bytes; the sha256 \
+             is of all of it) and wrote your next reply with all of it in view. This is the \
+             conversation's record of it, kept to its first {shown} characters: the truncation \
+             is in the record, not in what you read. When asked about it, say what you read; \
+             do not call the reading partial or unverified because the record here is short. \
+             {route}"
+        )
+    }
 }
+
+/// How a turn reaches the whole of a tool result an earlier turn received,
+/// when its replay keeps only the opening characters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayRetrieval {
+    /// `tool_result_read` is among the turn's tools: the whole result is
+    /// read again by the replay's `full_result_ref`.
+    ByReference,
+    /// No tool of the turn reads a stored result again: the replay's head
+    /// is all of it the turn can read.
+    None,
+}
+
+impl ReplayRetrieval {
+    /// The retrieval a turn has when `tool_result_read` is, or is not,
+    /// among the tools it offers.
+    pub fn with_read_tool(offered: bool) -> Self {
+        if offered {
+            Self::ByReference
+        } else {
+            Self::None
+        }
+    }
+}
+
+const ELIDED_READ_AGAIN_BY_REFERENCE: &str = "\
+To see all of it again, call tool_result_read with this full_result_ref, copied \
+exactly, as reference.";
+
+const ELIDED_NO_READ_AGAIN: &str = "\
+No tool in this session shows it again: where you now need a detail this record \
+omits, say the record here omits it, not that you never read it.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolResultReference {
@@ -191,6 +257,7 @@ fn compact_tool_replay(
         sha256: sha256_hex(raw.as_bytes()),
         truncated: preview.len() < raw.len(),
         preview,
+        note: None,
         full_result_ref,
         is_error,
     }
@@ -390,6 +457,82 @@ mod tests {
             Some(reference.as_str())
         );
         assert_eq!(envelope.is_error, Some(false));
+    }
+
+    /// The stored envelope carries no note: the note is written for the
+    /// turn that reads the replay, by the route that turn has.
+    #[test]
+    fn an_elided_replay_notes_the_whole_delivery_and_the_read_route() {
+        let content = format!(
+            "{}MARKER-7f3a",
+            "x".repeat(MODEL_REPLAY_PREVIEW_CHARS + 500)
+        );
+        let reference = tool_result_reference("00000000-0000-0000-0000-000000000123", "call_1");
+        let stored = compact_tool_result_for_model_with_reference(&content, false, &reference);
+        assert!(!stored.contains("\"note\""));
+
+        let replay: CompactToolReplay = serde_json::from_str(&stored).unwrap();
+        let replay = replay.with_elision_note(ReplayRetrieval::ByReference);
+
+        let note = replay
+            .note
+            .as_deref()
+            .expect("an elided replay carries the note");
+        assert!(note.contains(&format!("first {MODEL_REPLAY_PREVIEW_CHARS} characters")));
+        assert!(note.contains("You received this result whole"));
+        assert!(note.contains(&format!("({} bytes", content.len())));
+        assert!(note.contains("not in what you read"));
+        assert!(note.contains("call tool_result_read with this full_result_ref"));
+        let parsed = parse_tool_result_reference(replay.full_result_ref.as_deref().unwrap());
+        assert!(
+            parsed.is_some(),
+            "the reference the note points at resolves"
+        );
+        assert!(
+            replay
+                .to_stable_json()
+                .contains("\"note\":\"You received this result whole")
+        );
+    }
+
+    #[test]
+    fn an_elided_replay_without_a_read_tool_says_no_tool_reads_the_rest() {
+        let content = "y".repeat(MODEL_REPLAY_PREVIEW_CHARS + 1);
+        let reference = tool_result_reference("turn_1", "call_1");
+        let stored = compact_tool_result_for_model_with_reference(&content, true, &reference);
+
+        let replay: CompactToolReplay = serde_json::from_str(&stored).unwrap();
+        let replay = replay.with_elision_note(ReplayRetrieval::with_read_tool(false));
+
+        let note = replay.note.as_deref().unwrap();
+        assert!(note.contains("You received this result whole"));
+        assert!(note.contains("No tool in this session shows it again"));
+        assert!(!note.contains("tool_result_read"));
+    }
+
+    #[test]
+    fn an_elided_replay_without_a_reference_offers_no_read_route() {
+        let content = "z".repeat(MODEL_REPLAY_PREVIEW_CHARS + 1);
+        let stored = compact_tool_result_for_model(&content, false);
+
+        let replay: CompactToolReplay = serde_json::from_str(&stored).unwrap();
+        let replay = replay.with_elision_note(ReplayRetrieval::ByReference);
+
+        let note = replay.note.as_deref().unwrap();
+        assert!(note.contains("No tool in this session shows it again"));
+        assert!(!note.contains("tool_result_read"));
+    }
+
+    #[test]
+    fn a_replay_carried_whole_takes_no_note() {
+        let reference = tool_result_reference("turn_1", "call_1");
+        let stored = compact_tool_result_for_model_with_reference("short", false, &reference);
+
+        let replay: CompactToolReplay = serde_json::from_str(&stored).unwrap();
+        let replay = replay.with_elision_note(ReplayRetrieval::ByReference);
+
+        assert_eq!(replay.note, None);
+        assert!(!replay.to_stable_json().contains("note"));
     }
 
     #[test]

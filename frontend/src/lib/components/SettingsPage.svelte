@@ -9,6 +9,7 @@
   this component just reads the tab and shows the matching field set.
 -->
 <script lang="ts">
+  import "./settings/controls.css";
   import { onDestroy, onMount, untrack } from "svelte";
   import { fetchSettings, restartGateway, saveSettings } from "../api/settings";
   import ScheduleAutomationPanel from "./ScheduleAutomationPanel.svelte";
@@ -124,7 +125,28 @@
     }, 4000);
     return () => window.clearTimeout(timer);
   });
+  const AUTOMATION_JSON_SAVE_ERROR = "Fix the invalid automation JSON before saving.";
+  const ARCHIVE_SAVE_ERROR = "Fix the archive delay in Automation before saving. It must be at least 1 day.";
   let error = $state<string | null>(null);
+  $effect(() => {
+    const currentTab = tab;
+    const invalidArchive = archiveDelayError;
+    untrack(() => {
+      if (currentTab !== "automation" && invalidArchive && settings) {
+        settings.sessions.archive_after_days = lastSavedArchiveDelay;
+      }
+      if (error === ARCHIVE_SAVE_ERROR && (!invalidArchive || currentTab !== "automation")) error = null;
+    });
+  });
+  $effect(() => {
+    if (tab !== "automation") {
+      // The panel discards invalid editor text when it unmounts. Its guard
+      // must describe the valid settings that remain, not the lost draft.
+      if (hasInvalidApprovalJson || error === AUTOMATION_JSON_SAVE_ERROR) error = null;
+      hasInvalidBundlesJson = false;
+      hasInvalidApprovalJson = false;
+    }
+  });
   const HOT_AUTOSAVE_TABS: ReadonlySet<SettingsTabId> = new Set([
     "providers",
     "generation",
@@ -211,7 +233,8 @@
     status = "";
     saveSucceeded = false;
     if (archiveDelayError) {
-      error = "Fix the archive delay in Automation before saving. It must be at least 1 day.";
+      error = ARCHIVE_SAVE_ERROR;
+      lastRejectedSettingsFingerprint = settingsFingerprint();
       return false;
     }
     if (delegationDepthError) {
@@ -220,8 +243,9 @@
     }
     const archiveDelayChanged = settings.sessions.archive_after_days !== lastSavedArchiveDelay;
     const holdSearchDraft = searchIsIncomplete(settings.tool_runtime.search);
+    const submittedSearchDraft = JSON.stringify(settings.tool_runtime.search);
     if (hasInvalidBundlesJson || hasInvalidApprovalJson) {
-      error = "Fix the invalid automation JSON before saving.";
+      error = AUTOMATION_JSON_SAVE_ERROR;
       return false;
     }
     for (const [id, preset] of Object.entries(settings.generation_presets)) {
@@ -246,7 +270,8 @@
       providerSaveInFlight = providerEditsPending;
       const submitted = JSON.parse(JSON.stringify({ ...settings, tool_runtime: toolRuntimeForSave(settings.tool_runtime) })) as SettingsPayload;
       const saved = await saveSettings(submitted);
-      const editedDuringSave = settingsFingerprint() !== submittedFingerprint;
+      const editedDuringSave = settingsFingerprint() !== submittedFingerprint
+        || JSON.stringify(settings.tool_runtime.search) !== submittedSearchDraft;
       const pendingSettings = settings;
       const searchDraft = settings.tool_runtime.search;
       settings = saved;
@@ -268,6 +293,8 @@
             provider.has_credential = savedProvider.has_credential;
           }
         }
+        pendingSettings.restart_required = saved.restart_required;
+        pendingSettings.can_restart = saved.can_restart;
         settings = pendingSettings;
       }
       if (holdSearchDraft) settings.tool_runtime.search = searchDraft;
@@ -400,6 +427,12 @@
 
 <svelte:window onbeforeunload={warnBeforeUnload} />
 
+{#snippet saveStatus()}
+<span class="autosave-state" class:saving={isPersisting}>
+            {tab === "providers" ? isPersisting ? "Saving…" : providerEditsPending ? saveFailed ? "Save failed" : "Changes not saved" : "Saved" : isPersisting ? "Autosaving" : "Autosave"}
+          </span>
+{/snippet}
+
 <div class="settings-pane" aria-label="Settings">
   {#if isShellTab}
     {@const heading = TAB_TITLES[tab]}
@@ -416,6 +449,9 @@
         <h1 class="title">{heading.title}</h1>
         <p class="sub">{heading.sub}</p>
       </div>
+      {#if shouldAutosaveSettings}
+        <div class="head-actions">{@render saveStatus()}</div>
+      {/if}
     </div>
 
     {#if isNonFunctionalTab}
@@ -491,9 +527,7 @@
       </div>
       <div class="head-actions">
         {#if shouldAutosaveSettings && tab !== "automation"}
-          <span class="autosave-state" class:saving={isPersisting}>
-            {tab === "providers" ? isPersisting ? "Saving…" : providerEditsPending ? saveFailed ? "Save failed" : "Changes not saved" : "Saved" : isPersisting ? "Autosaving" : "Autosave"}
-          </span>
+          {@render saveStatus()}
         {:else if !shouldAutosaveSettings}
           <button type="button" class="btn primary" onclick={() => persist()} disabled={isPersisting}>
             {isPersisting ? "Saving..." : "Save"}
@@ -540,9 +574,7 @@
         <section aria-label="Automation settings">
           <div class="head">
             <h3>Automation settings</h3>
-            <span class="autosave-state" class:saving={isPersisting}>
-              {isPersisting ? "Autosaving" : "Autosave"}
-            </span>
+            {@render saveStatus()}
           </div>
           <AutomationSettingsPanel
             bind:settings

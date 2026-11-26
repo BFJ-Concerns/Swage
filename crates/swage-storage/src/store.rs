@@ -493,7 +493,15 @@ pub trait OrientationCardStore: Send + Sync {
 }
 
 #[async_trait]
-pub trait SecretStore: Send + Sync {
+pub trait SecretStore: AuditStore + Send + Sync {
+    /// Commit managed credential creations, rotations and their audit events together.
+    /// A failure leaves all records, material and audit events unchanged.
+    async fn write_credentials_with_audit(
+        &self,
+        creations: Vec<NewSecretRecord>,
+        rotations: Vec<(Uuid, String)>,
+        events: Vec<NewAuditEvent>,
+    ) -> Result<(), StorageError>;
     async fn create_secret(&self, secret: NewSecretRecord) -> Result<SecretRecord, StorageError>;
     async fn list_secrets(&self) -> Result<Vec<SecretRecord>, StorageError>;
     async fn get_secret(&self, id: Uuid) -> Result<Option<SecretRecord>, StorageError>;
@@ -2395,6 +2403,15 @@ mod tests {
 
     #[async_trait]
     impl SecretStore for StubStorage {
+        async fn write_credentials_with_audit(
+            &self,
+            _: Vec<NewSecretRecord>,
+            _: Vec<(Uuid, String)>,
+            _: Vec<NewAuditEvent>,
+        ) -> Result<(), StorageError> {
+            unimplemented!()
+        }
+
         async fn create_secret(&self, _: NewSecretRecord) -> Result<SecretRecord, StorageError> {
             unimplemented!()
         }
