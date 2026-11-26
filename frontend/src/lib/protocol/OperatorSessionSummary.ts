@@ -9,7 +9,11 @@ topic_id?: string | null,
 /**
  * The topic's name, or "General" for a session without one.
  */
-topic_name: string, created_at: string, last_activity: string, message_preview?: string | null, has_interrupted_turn: boolean, has_active_connection: boolean, has_running_turn: boolean, ending?: OperatorSessionEnding | null, agent_id: string, parent_session_id?: string | null,
+topic_name: string, created_at: string, last_activity: string, message_preview?: string | null, has_interrupted_turn: boolean, has_active_connection: boolean, has_running_turn: boolean,
+/**
+ * The running turn is held on a request only the person can answer.
+ */
+awaiting_approval: boolean, ending?: OperatorSessionEnding | null, agent_id: string, parent_session_id?: string | null,
 /**
  * The schedule or workflow run that opened this session, when applicable.
  */

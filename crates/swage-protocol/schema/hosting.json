@@ -1171,6 +1171,10 @@
         "agent_id": {
           "type": "string"
         },
+        "awaiting_approval": {
+          "description": "The running turn is held on a request only the person can answer.",
+          "type": "boolean"
+        },
         "created_at": {
           "type": "string",
           "format": "date-time"
@@ -1250,6 +1254,7 @@
         "has_interrupted_turn",
         "has_active_connection",
         "has_running_turn",
+        "awaiting_approval",
         "agent_id",
         "activity"
       ]

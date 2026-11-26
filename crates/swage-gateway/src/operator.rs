@@ -237,6 +237,10 @@ async fn list_operator_sessions(
                 has_interrupted_turn: matches!(ending, Some(OperatorSessionEnding::Interrupted)),
                 has_active_connection: active_connections.contains(&session.id),
                 has_running_turn,
+                awaiting_approval: has_running_turn
+                    && current_turn
+                        .as_ref()
+                        .is_some_and(|turn| turn.state == TurnState::AwaitingApproval),
                 ending,
                 agent_id: session.agent_id.clone(),
                 parent_session_id: parent_session(state, &origin).await?,

@@ -858,6 +858,7 @@ async fn operator_activity_describes_active_turn_before_newer_failure() {
         .unwrap();
     assert_eq!(row["activity"], "awaiting_approval", "{body}");
     assert_eq!(row["has_running_turn"], true);
+    assert_eq!(row["awaiting_approval"], true, "{body}");
     assert!(row["ending"].is_null());
     state
         .storage
@@ -872,6 +873,7 @@ async fn operator_activity_describes_active_turn_before_newer_failure() {
         .find(|row| row["id"] == session_id.to_string())
         .unwrap();
     assert_eq!(row["has_running_turn"], false);
+    assert_eq!(row["awaiting_approval"], false);
     assert_eq!(row["ending"], "failed", "latest ended turn {}", newer.id);
 }
 

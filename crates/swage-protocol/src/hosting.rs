@@ -125,6 +125,8 @@ pub struct OperatorSessionSummary {
     pub has_interrupted_turn: bool,
     pub has_active_connection: bool,
     pub has_running_turn: bool,
+    /// The running turn is held on a request only the person can answer.
+    pub awaiting_approval: bool,
     pub ending: Option<OperatorSessionEnding>,
     pub agent_id: String,
     pub parent_session_id: Option<Uuid>,
