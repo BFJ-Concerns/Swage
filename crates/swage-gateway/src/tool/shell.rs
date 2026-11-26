@@ -44,7 +44,20 @@ impl Tool for ShellTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command in the workspace directory."
+        "Run a command line with `sh` in the session's working directory and return what it \
+         printed. `output` holds its standard output, then its standard error after a \
+         `stderr:` label; `exit_code` is its exit status, and `success` is true only when \
+         that is zero, so a command that ran and failed is reported as failed. Each call \
+         starts a new shell: a change of directory or a variable set in one call is gone in \
+         the next. A command still running at the installation's time limit is stopped, \
+         along with every process it started, and the call fails saying so. Output beyond \
+         the installation's limit is cut and flagged for the stream it came from \
+         (`stdout_truncated`, `stderr_truncated`), and the result then gives the path of a \
+         file holding that whole stream, which `file_read` opens. Unless the operator has \
+         lifted it, the command runs sandboxed: it can change files under the working \
+         directory and little outside it, so a write refused elsewhere is that boundary and \
+         not a fault to retry. The file tools read, write, edit and search files directly; \
+         this tool is for running programs."
     }
 
     fn execution_outcome(
@@ -64,7 +77,7 @@ impl Tool for ShellTool {
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The shell command to execute."
+                    "description": "The command line, as `sh` reads it: pipes, redirections and several commands joined together all work."
                 }
             },
             "required": ["command"]

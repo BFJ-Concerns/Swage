@@ -669,7 +669,8 @@ mod tests {
     }
 
     fn http_provider(adapter: &str, base_url: &str) -> Box<dyn LlmProvider> {
-        let config = crate::ProviderConfig::new("test-key", "unserved-model", base_url);
+        let config = crate::ProviderConfig::new("test-key", "unserved-model", base_url)
+            .with_provider_id(format!("{adapter}-test-route"));
         match adapter {
             "openai" => Box::new(crate::openai::OpenAiProvider::from_config(config)),
             "responses" => Box::new(crate::responses::ResponsesProvider::from_config(config)),
@@ -820,7 +821,20 @@ mod tests {
                         .count(),
                     3
                 );
-                assert!(matches!(chunks.last(), Some(StreamChunk::Error { .. })));
+                let Some(StreamChunk::Error { message }) = chunks.last() else {
+                    panic!("{adapter}: HTTP {status} must produce a terminal error");
+                };
+                match status {
+                    429 => assert_eq!(
+                        message,
+                        &format!("rate limited by provider {adapter}-test-route")
+                    ),
+                    529 => assert_eq!(
+                        message,
+                        &format!("provider {adapter}-test-route overloaded: {body}")
+                    ),
+                    _ => {}
+                }
             }
         }
     }
@@ -1130,7 +1144,12 @@ mod tests {
         let retry = RetryProvider::new(
             FailN::new(
                 10,
-                crate::http::map_http_error(529, "capacity exhausted".into(), Some(5)),
+                crate::http::map_http_error(
+                    "test-provider",
+                    529,
+                    "capacity exhausted".into(),
+                    Some(5),
+                ),
             ),
             RetryConfig {
                 max_retries: 2,

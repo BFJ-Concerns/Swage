@@ -2364,6 +2364,23 @@ impl Hook for BlockInboundHook {
     }
 }
 
+struct BlockAfterResponseHook;
+
+#[async_trait]
+impl Hook for BlockAfterResponseHook {
+    fn name(&self) -> &str {
+        "block-after-response"
+    }
+
+    async fn execute(&self, event: &HookEvent) -> HookOutcome {
+        if matches!(event, HookEvent::AfterResponse { .. }) {
+            HookOutcome::Block("final response blocked by test hook".into())
+        } else {
+            HookOutcome::Continue
+        }
+    }
+}
+
 struct ModifyInboundHook;
 
 #[async_trait]
@@ -7508,6 +7525,91 @@ async fn cancelled_turn_stores_partial_and_marks_cancelled() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_reports_interruption_live_and_in_the_reloaded_conversation() {
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session_id = storage
+        .create_session(new_session(topic.id))
+        .await
+        .unwrap()
+        .id;
+    ThreadStore::create(
+        storage.as_ref(),
+        NewThread {
+            session_id,
+            agent_id: "gateway".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let state = AppState::for_test(
+        storage.clone(),
+        storage.clone(),
+        Arc::new(PendingProvider),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let running_state = state.clone();
+    let handle = tokio::spawn(async move {
+        process_turn(
+            &running_state,
+            session_id,
+            None,
+            "Hi",
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !matches!(
+            rx.recv().await.expect("turn event"),
+            ServerEvent::Token { .. }
+        ) {}
+    })
+    .await
+    .unwrap();
+    crate::shutdown::shutdown_active_turns(&state).await;
+    handle.await.unwrap().unwrap();
+
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ServerEvent::Cancelled {}))
+    );
+    let live_reason = events
+        .iter()
+        .find_map(|event| match event {
+            ServerEvent::Error { code, message } if code == "gateway_shutdown" => {
+                Some(message.as_str())
+            }
+            _ => None,
+        })
+        .unwrap();
+    let conversation = crate::service::ConversationService::new(storage.clone(), storage.clone())
+        .get_conversation(session_id)
+        .await
+        .unwrap();
+    let partial = conversation.messages.last().unwrap();
+    assert_eq!(partial.content, INTERRUPTED_PARTIAL);
+    assert_eq!(
+        partial.turn_state,
+        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+    );
+    assert_eq!(partial.failure_message.as_deref(), Some(live_reason));
+    let turn = storage
+        .get_turn(partial.turn_id.unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(turn.failure_message.as_deref(), Some(live_reason));
+}
+
 #[tokio::test]
 async fn cancelled_turn_without_partial_stores_no_assistant_response() {
     let storage = Arc::new(MockStorage::new());
@@ -7965,6 +8067,24 @@ async fn provider_retry_events_name_the_requested_turn_model() {
             "retry status must name the request model"
         );
     }
+    let live_failure = events
+        .iter()
+        .find_map(|event| match event {
+            ServerEvent::Error { message, .. } => Some(message.as_str()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(live_failure.contains(&requested_model));
+    let conversation =
+        crate::service::ConversationService::new(state.storage.clone(), state.topic_store.clone())
+            .get_conversation(session_id)
+            .await
+            .unwrap();
+    assert_eq!(conversation.messages.len(), 1);
+    assert_eq!(
+        conversation.messages[0].failure_message.as_deref(),
+        Some(live_failure)
+    );
 }
 
 #[tokio::test]
@@ -7998,6 +8118,176 @@ async fn provider_error_marks_turn_failed() {
     let thread_id = threads[0].id;
     let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
     assert_eq!(turns[0].state, TurnState::Failed);
+}
+
+#[tokio::test]
+async fn provider_failure_keeps_partial_response_with_its_tool_calls() {
+    let (state, session_id, _) = make_state_with_capturing_tools(vec![
+        vec![
+            StreamChunk::Delta {
+                content: "Starting. ".into(),
+            },
+            StreamChunk::ToolUse {
+                call_id: "effect-before-failure".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({"text": "echoed"}),
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "Partial reply".into(),
+            },
+            StreamChunk::Error {
+                message: "provider disconnected".into(),
+            },
+        ],
+    ])
+    .await;
+    let mut config = state.active_config();
+    config.set_default_model_id("partial-response-model".to_owned());
+    state.replace_runtime(
+        crate::test_support::with_mock_provider_entries(config),
+        state.active_provider(),
+        crate::tool::ToolDispatcher::allow_all(vec![Arc::new(EchoMockTool) as Arc<dyn Tool>]),
+    );
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Use echo",
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .unwrap();
+    let reply = read_failed_reply(&state, session_id, &mut rx).await;
+    assert_eq!(reply.content, "Starting. Partial reply");
+    assert_eq!(reply.tool_calls[0].call_id, "effect-before-failure");
+    let failure = reply.failure_message.unwrap();
+    assert!(failure.contains("partial-response-model"));
+    assert!(failure.contains("provider disconnected"));
+}
+
+#[tokio::test]
+async fn after_response_block_keeps_only_the_streamed_reply_and_tool_calls() {
+    for retry_text in [None, Some(r#"{"answer": "Echoed."}"#)] {
+        let mut rounds = vec![
+            vec![
+                StreamChunk::Delta {
+                    content: "I will use echo.".into(),
+                },
+                StreamChunk::ToolUse {
+                    call_id: "echo-before-block".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::json!({"text": "echoed"}),
+                },
+            ],
+            vec![],
+            vec![],
+        ];
+        let schema = retry_text.map(|content| {
+            rounds.push(vec![StreamChunk::Delta {
+                content: content.into(),
+            }]);
+            serde_json::json!({"type": "object", "required": ["answer"]})
+        });
+        let (mut state, session_id) = make_state_with_tools(rounds).await;
+        let mut hook_registry = HookRegistry::new();
+        hook_registry.register(HookRegistration::new(Arc::new(BlockAfterResponseHook)));
+        state.hook_registry = Some(Arc::new(hook_registry));
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            "Use echo",
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            schema,
+        )
+        .await
+        .unwrap();
+
+        let reply = read_failed_reply(&state, session_id, &mut rx).await;
+        assert_eq!(
+            reply.content,
+            format!("I will use echo.{}", retry_text.unwrap_or_default())
+        );
+        assert_eq!(reply.tool_calls[0].call_id, "echo-before-block");
+        assert!(
+            reply
+                .failure_message
+                .unwrap()
+                .contains("final response blocked")
+        );
+    }
+}
+
+async fn read_failed_reply(
+    state: &AppState,
+    session_id: Uuid,
+    rx: &mut mpsc::UnboundedReceiver<ServerEvent>,
+) -> swage_protocol::client::conversation::MessageView {
+    let mut live_reply = String::new();
+    let mut live_failure = None;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            ServerEvent::Token { content } => live_reply.push_str(&content),
+            ServerEvent::Error { code, message } if code == "agent_error" => {
+                assert!(
+                    live_failure.replace(message).is_none(),
+                    "one terminal error"
+                );
+            }
+            ServerEvent::OutputSchemaFailed {
+                failure_message, ..
+            } => {
+                assert!(
+                    live_failure.replace(failure_message).is_none(),
+                    "one terminal error"
+                );
+            }
+            ServerEvent::TurnComplete { .. } => panic!("the failed turn must not complete"),
+            _ => {}
+        }
+    }
+    let crate::error::Json(conversation) = crate::handlers::get_conversation(
+        axum::extract::State(state.clone()),
+        crate::error::Path(session_id),
+    )
+    .await
+    .unwrap();
+    let mut replies = conversation
+        .messages
+        .into_iter()
+        .filter(|message| message.role == "assistant");
+    let reply = replies
+        .next()
+        .expect("reload should include the partial reply");
+    assert!(replies.next().is_none(), "one assistant reply");
+    assert_eq!(reply.content, live_reply);
+    assert_eq!(
+        reply.failure_message.as_deref(),
+        Some(live_failure.as_deref().unwrap())
+    );
+    assert_eq!(
+        reply.turn_state,
+        Some(swage_protocol::client::conversation::TurnState::Failed)
+    );
+    let turn = state
+        .storage
+        .get_turn(reply.turn_id.unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        turn.assistant_response.as_deref(),
+        Some(live_reply.as_str())
+    );
+    reply
 }
 
 #[tokio::test]
@@ -8929,6 +9219,71 @@ async fn make_state_with_tool_provider_and_storage(
         None,
     );
     (state, session_id, storage)
+}
+
+#[tokio::test]
+async fn closing_account_fallback_reaches_the_live_and_reloaded_conversation() {
+    use swage_agent::closing_account::{CLOSING_ACCOUNT_REQUEST, ENDED_WITHOUT_ACCOUNT};
+
+    let (state, session_id, captured) = make_state_with_capturing_tools(vec![
+        vec![
+            StreamChunk::Delta {
+                content: "I will use echo.".into(),
+            },
+            StreamChunk::ToolUse {
+                call_id: "closing-account-tool".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({"text": "echoed"}),
+            },
+        ],
+        vec![StreamChunk::Done {
+            finish_reason: Some(FinishReason::Stop),
+        }],
+        vec![StreamChunk::Done {
+            finish_reason: Some(FinishReason::Stop),
+        }],
+    ])
+    .await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let subscription = Arc::new(Mutex::new(SubscriptionState::new(true)));
+    process_turn(&state, session_id, None, "Use echo", tx, subscription, None)
+        .await
+        .unwrap();
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let completed = events
+        .iter()
+        .position(|event| matches!(event, ServerEvent::TurnComplete { .. }))
+        .unwrap();
+    let ServerEvent::TurnComplete { turn_id, .. } = &events[completed] else {
+        unreachable!()
+    };
+    let live: String = events[..completed]
+        .iter()
+        .filter_map(|event| match event {
+            ServerEvent::Token { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(live, format!("I will use echo.\n\n{ENDED_WITHOUT_ACCOUNT}"));
+
+    {
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            requests[2].messages.last().unwrap().text_content(),
+            CLOSING_ACCOUNT_REQUEST
+        );
+    }
+    let turn = state.storage.get_turn(*turn_id).await.unwrap().unwrap();
+    assert_eq!(turn.assistant_response.as_deref(), Some(live.as_str()));
+    let conversation =
+        crate::service::ConversationService::new(state.storage.clone(), state.topic_store.clone())
+            .get_conversation(session_id)
+            .await
+            .unwrap();
+    let reply = conversation.messages.last().unwrap();
+    assert_eq!(reply.content, live);
+    assert_eq!(reply.tool_calls[0].call_id, "closing-account-tool");
 }
 
 pub(crate) async fn make_state_with_capturing_tools(
@@ -16035,7 +16390,7 @@ async fn session_variant_lookup_failure_serves_default_without_recording_a_draw(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn session_variant_task_prompt_records_once_for_two_real_turns() {
+async fn session_prompt_variants_are_recorded_at_the_start_of_the_first_turn() {
     let root = tempfile::tempdir().unwrap();
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
     let topic = storage.general_scope().await.unwrap();
@@ -16111,21 +16466,22 @@ async fn session_variant_task_prompt_records_once_for_two_real_turns() {
         .list_audit_events_by_session(session.id)
         .await
         .unwrap();
-    let draws: Vec<_> = events
+    let first_turn = turns
         .iter()
-        .filter(|e| e.entity_id == crate::experimentation::LOCATION_TASK_PROMPT)
-        .collect();
-    assert_eq!(
-        draws.len(),
-        1,
-        "a task session must not redraw its prompt on continuation"
-    );
-    assert!(
-        turns
-            .iter()
-            .any(|turn| serde_json::json!(turn.id) == draws[0].metadata["turn_id"]),
-        "the draw must identify its first real turn"
-    );
+        .find(|turn| turn.user_input.as_deref() == Some("first"))
+        .unwrap();
+    for location in [
+        crate::experimentation::LOCATION_TASK_PROMPT,
+        crate::experimentation::LOCATION_CLOSING_ACCOUNT_REQUEST,
+    ] {
+        let draws: Vec<_> = events.iter().filter(|e| e.entity_id == location).collect();
+        assert_eq!(draws.len(), 1, "{location} must have one session draw");
+        assert_eq!(
+            draws[0].metadata["turn_id"],
+            serde_json::json!(first_turn.id),
+            "{location} must bind when the session starts its first turn"
+        );
+    }
 }
 
 #[tokio::test]
@@ -22370,16 +22726,25 @@ async fn approval_scope_expired_live_waiter_records_expired_feedback() {
 }
 
 #[tokio::test]
-async fn settlement_schema_exhaustion_keeps_reason_in_poll_and_history() {
-    let (state, session_id) = make_state_with_session(vec![
+async fn settlement_schema_exhaustion_keeps_streamed_reply_and_reason_in_history() {
+    let mut rounds = vec![vec![
         StreamChunk::Delta {
-            content: "not json".into(),
+            content: "I will use echo. ".into(),
         },
-        StreamChunk::Done {
-            finish_reason: None,
+        StreamChunk::ToolUse {
+            call_id: "echo-before-schema-failure".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({"text": "echoed"}),
         },
-    ])
-    .await;
+    ]];
+    rounds.extend(
+        ["bad one ", "bad two ", "bad three ", "bad four"].map(|content| {
+            vec![StreamChunk::Delta {
+                content: content.into(),
+            }]
+        }),
+    );
+    let (state, session_id) = make_state_with_tools(rounds).await;
     let (tx, mut rx) = mpsc::unbounded_channel();
     process_turn(
         &state,
@@ -22392,42 +22757,24 @@ async fn settlement_schema_exhaustion_keeps_reason_in_poll_and_history() {
     )
     .await
     .unwrap();
-    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, ServerEvent::OutputSchemaFailed { .. })),
-        "real schema exhaustion: {events:?}"
+
+    let reply = read_failed_reply(&state, session_id, &mut rx).await;
+    assert_eq!(
+        reply.content,
+        "I will use echo. bad one bad two bad three bad four"
     );
-    let thread = state
-        .storage
-        .list_by_session(session_id)
-        .await
-        .unwrap()
-        .remove(0);
-    let turn = state
-        .storage
-        .list_turns_by_thread(thread.id)
-        .await
-        .unwrap()
-        .remove(0);
-    let reason = turn
+    assert_eq!(reply.tool_calls.len(), 1);
+    assert_eq!(reply.tool_calls[0].call_id, "echo-before-schema-failure");
+    let reason = reply
         .failure_message
         .expect("schema exhaustion must persist its reason");
-    let live = events
-        .iter()
-        .find_map(|event| {
-            let value = serde_json::to_value(event).unwrap();
-            (value["type"] == "output_schema_failed").then_some(value)
-        })
-        .unwrap();
     assert_eq!(
-        live["failure_message"], reason,
-        "live and stored schema causes must match"
+        reason,
+        "Structured output validation failed after 4 attempts: no JSON found in response"
     );
     let poll = crate::handlers::get_turn(
         axum::extract::State(state.clone()),
-        crate::error::Path(turn.id),
+        crate::error::Path(reply.turn_id.unwrap()),
     )
     .await
     .unwrap()
@@ -22435,20 +22782,6 @@ async fn settlement_schema_exhaustion_keeps_reason_in_poll_and_history() {
     assert_eq!(
         serde_json::to_value(poll).unwrap()["failure_message"],
         reason
-    );
-    let history = crate::service::ConversationService::new(
-        Arc::clone(&state.storage),
-        Arc::clone(&state.topic_store),
-    )
-    .get_conversation(session_id)
-    .await
-    .unwrap();
-    assert!(
-        history
-            .messages
-            .iter()
-            .any(|m| m.failure_message.as_deref() == Some(reason.as_str())),
-        "history must keep the same cause"
     );
 }
 
@@ -22459,6 +22792,9 @@ async fn settlement_identical_failure_bound_ends_unattended_turn_with_cause() {
         let rounds = (0..4)
             .map(|n| {
                 vec![
+                    StreamChunk::Delta {
+                        content: format!("Trying the tool ({n}). "),
+                    },
                     StreamChunk::ToolUse {
                         call_id: format!("failure-{n}"),
                         name: "unavailable_tool".into(),
@@ -22504,7 +22840,7 @@ async fn settlement_identical_failure_bound_ends_unattended_turn_with_cause() {
             state.active_provider(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
         );
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::unbounded_channel();
         let _ = process_turn_with_composition(
             &state,
             session_id,
@@ -22538,18 +22874,14 @@ async fn settlement_identical_failure_bound_ends_unattended_turn_with_cause() {
             limit,
             "no further provider round after the bound"
         );
-        assert!(
-            turn.failure_message.unwrap().contains("unavailable_tool"),
-            "the underlying cause remains visible"
-        );
-        assert_eq!(
-            storage
-                .list_tool_calls_by_turn(turn.id)
-                .await
-                .unwrap()
-                .len(),
-            limit
-        );
+        let reply = read_failed_reply(&state, session_id, &mut rx).await;
+        assert!(reply.content.starts_with("Trying the tool (0). "));
+        assert!(reply.failure_message.unwrap().contains("unavailable_tool"));
+        assert_eq!(reply.tool_calls.len(), limit);
+        for (n, call) in reply.tool_calls.iter().enumerate() {
+            assert_eq!(call.call_id, format!("failure-{n}"));
+            assert_eq!(call.status.as_deref(), Some("error"));
+        }
     }
 }
 
@@ -22911,6 +23243,22 @@ async fn interrupt_policy_expiry_records_unexecuted_call_and_timeout_terminal_ev
         .await
         .unwrap()
         .remove(0);
+    let conversation =
+        crate::service::ConversationService::new(state.storage.clone(), state.topic_store.clone())
+            .get_conversation(session_id)
+            .await
+            .unwrap();
+    let expired = conversation.messages.last().unwrap();
+    assert_eq!(
+        expired.turn_state,
+        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+    );
+    assert!(
+        expired
+            .failure_message
+            .as_deref()
+            .is_some_and(|reason| reason.contains("approval timed out"))
+    );
     let calls = state
         .storage
         .list_tool_calls_by_turn(turn.id)
@@ -23156,22 +23504,17 @@ async fn orientation_environment_carries_every_readable_workspace_from_resolved_
     let mut actual = environment
         .workspaces
         .iter()
-        .map(|workspace| {
-            (
-                workspace.path.as_str(),
-                workspace.can_write,
-                workspace.is_trusted,
-            )
-        })
+        .map(|workspace| (workspace.path.as_str(), workspace.can_write))
         .collect::<Vec<_>>();
     actual.sort_unstable();
     assert_eq!(
         actual,
         vec![
-            ("/projects/source", true, true),
-            ("/references/other", false, true),
-            ("/references/pack", false, true)
-        ]
+            ("/projects/source", true),
+            ("/references/other", false),
+            ("/references/pack", false)
+        ],
+        "an attachment the operator has not trusted is not listed"
     );
     let mut placed_session = session.clone();
     placed_session.metadata = Some(serde_json::json!({ "worker_placement_can_write": false }));
@@ -23182,7 +23525,6 @@ async fn orientation_environment_carries_every_readable_workspace_from_resolved_
         vec![swage_context::orientation::ReadableWorkspace {
             path: "/projects/source".into(),
             can_write: false,
-            is_trusted: true,
         }],
         "a placed worker must not advertise sibling topic workspaces"
     );
@@ -23221,7 +23563,6 @@ async fn orientation_environment_includes_subdirectory_placement_with_its_write_
             vec![swage_context::orientation::ReadableWorkspace {
                 path: placement.display().to_string(),
                 can_write,
-                is_trusted: true,
             }],
             "the placement must inherit parent trust and advertise its own write grant"
         );

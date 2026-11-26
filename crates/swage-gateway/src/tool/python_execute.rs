@@ -70,7 +70,7 @@ impl Tool for PythonExecuteTool {
             "properties": {
                 "code": {
                     "type": "string",
-                    "description": "Python source code to execute."
+                    "description": "The program's source. It prints whatever should come back."
                 }
             },
             "required": ["code"]
