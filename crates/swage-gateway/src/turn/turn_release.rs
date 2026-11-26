@@ -37,9 +37,11 @@ pub(super) async fn release_active_turn(
         let result = relay.finish().await;
         state.active_turns.lock().await.remove(&session_id);
         state.turn_event_deliveries.lock().await.remove(&turn_id);
+        crate::service::announce_session_updated(state, session_id);
         result
     } else {
         state.active_turns.lock().await.remove(&session_id);
+        crate::service::announce_session_updated(state, session_id);
         Ok(())
     }
 }

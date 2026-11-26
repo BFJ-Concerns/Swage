@@ -20358,3 +20358,54 @@ mod dispatch_attempt_reader_tests {
         }
     }
 }
+
+/// A run starting and reaching its terminal state reaches the signal channel
+/// that views of running work listen on, so a list of live runs refetches as
+/// the run changes rather than waiting for the person to refresh it.
+#[tokio::test(flavor = "multi_thread")]
+async fn run_start_and_completion_reach_the_signal_channel() {
+    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+    let topic = storage.general_scope().await.expect("topic");
+    let state = AppState::for_test(
+        Arc::clone(&storage) as Arc<dyn Storage>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
+        Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let mut events = state.broadcast.subscribe();
+    let Json(started) = start_inline_run(
+        State(state.clone()),
+        Path(topic.id),
+        Json(StartInlineWorkflowRunRequest {
+            source: "return null".into(),
+            args: Value::Null,
+            budget: None,
+        }),
+    )
+    .await
+    .expect("start");
+    let mut signalled_start = false;
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let event = events.recv().await.expect("broadcast open");
+            if !crate::websocket::work_surface::is_work_surface_signal(&event) {
+                continue;
+            }
+            match event {
+                ServerEvent::WorkflowRunStarted { event } if event.run.id == started.id => {
+                    signalled_start = true;
+                }
+                ServerEvent::WorkflowRunCompleted { event } if event.run.id == started.id => {
+                    break event.run;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the run's completion is signalled");
+    assert!(signalled_start, "the run's start is signalled");
+    assert_ne!(completed.state, WorkflowRunState::Running);
+}

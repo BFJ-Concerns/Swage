@@ -688,10 +688,12 @@ async fn track_delegated_session(
                     let session_id = started.child_session_id;
                     let turn_id = started.child_turn_id;
                     state.active_turns.lock().await.insert(session_id, token);
+                    crate::service::announce_session_updated(state, session_id);
                     if let Some(sender) = forward_started { let _ = sender.send(started); }
                     let result = execution.await;
                     announce_delegated_outcome(state, session_id, turn_id, &result).await;
                     state.active_turns.lock().await.remove(&session_id);
+                    crate::service::announce_session_updated(state, session_id);
                     drain_queue_after_delegated_turn(state, session_id, turn_id).await;
                     result
                 }
@@ -704,6 +706,7 @@ async fn track_delegated_session(
                 let session_id = started.child_session_id;
                 let turn_id = started.child_turn_id;
                 announce_delegated_outcome(state, session_id, turn_id, &result).await;
+                crate::service::announce_session_updated(state, session_id);
                 if let Some(sender) = forward_started { let _ = sender.send(started); }
                 drain_queue_after_delegated_turn(state, session_id, turn_id).await;
             }
@@ -1768,6 +1771,7 @@ mod settlement_tests {
             },
         ])
         .await;
+        let mut signals = state.broadcast.subscribe();
         let thread_id = state.storage.list_by_session(session_id).await.unwrap()[0].id;
         let turn = state
             .storage
@@ -1865,6 +1869,19 @@ mod settlement_tests {
         .await
         .expect("tracked child should return its durable result");
         assert!(!state.active_turns.lock().await.contains_key(&session_id));
+        // Views of running work hear the child start and settle, as they do
+        // for a turn started in the child's own conversation.
+        let mut session_signals = 0;
+        while let Ok(event) = signals.try_recv() {
+            if matches!(event, crate::websocket::ServerEvent::SessionUpdated { session_id: signalled } if signalled == session_id)
+            {
+                session_signals += 1;
+            }
+        }
+        assert!(
+            session_signals >= 2,
+            "the child signals when it registers and when it settles; saw {session_signals}"
+        );
         (state, session_id, receiver)
     }
 

@@ -4918,6 +4918,24 @@
             "type": "object"
           },
           {
+            "description": "A session's list-visible state changed: a turn began or settled on\nit, so it is running, idle, or left interrupted. Clients showing\nsession lists refetch — the event is the signal, not the content.",
+            "properties": {
+              "session_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "type": {
+                "const": "session_updated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
             "description": "A message was recorded on a conversation by something other than the\nperson at this client — a schedule's brief, a delegation's completion\nnotice, a notice from the platform — so open views append it where it\nbelongs without reloading. Carries the recorded message itself, the\nsame view the conversation's detail would return.",
             "properties": {
               "message": {
