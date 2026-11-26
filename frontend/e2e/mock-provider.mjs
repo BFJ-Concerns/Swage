@@ -67,6 +67,18 @@ async function handle(request, response) {
     event(response, "message_delta", { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 1 } });
     event(response, "message_stop", { type: "message_stop" });
     response.end();
+  } else if (serialised.includes("render code and links")) {
+    await textResponse(response, [[
+      "Fixture **bold** <em>markup</em>",
+      "",
+      "```javascript",
+      'const answer = "green";',
+      "```",
+      "",
+      "[Here](#test-anchor) [Top](#) [Settings](/settings/display) [Settings fragment](/settings/display#test-anchor)",
+      "",
+      '<span id="test-anchor">Anchor text</span>',
+    ].join("\n")]);
   } else if (serialised.includes("cancel this turn")) {
     await textResponse(response, ["Partial response before cancellation. ", "This tail must never render."], 8_000);
   } else if (serialised.includes("reconnect this turn")) {

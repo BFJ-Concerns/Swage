@@ -118,6 +118,35 @@ async function sendNewConversation(page: Page, prompt: string, effort?: "high"):
   await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
 }
 
+test("colours code tokens and follows message links with native fragment behaviour", async ({ page }) => {
+  await page.goto("/");
+  await openComposer(page);
+  await sendNewConversation(page, "render code and links");
+
+  const code = page.locator("pre code").filter({ hasText: 'const answer = "green";' });
+  const tokenColours = () => code.evaluate((block) => [
+    getComputedStyle(block).color,
+    ...Array.from(block.querySelectorAll("span"), (span) => getComputedStyle(span).color),
+  ]);
+  for (const theme of ["Light", "Dark"]) {
+    await page.getByRole("button", { name: `${theme} theme` }).click();
+    const colours = await tokenColours();
+    expect(new Set(colours).size).toBeGreaterThanOrEqual(3);
+  }
+
+  await page.getByRole("link", { name: "Here", exact: true }).click();
+  await expect(page.locator(":target")).toHaveText("Anchor text");
+  await page.getByRole("link", { name: "Top", exact: true }).click();
+  await expect(page).toHaveURL(/#$/);
+  await expect(page.locator(":target")).toHaveCount(0);
+
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  await expect(page).toHaveURL(/\/settings\/display$/);
+  await page.goBack();
+  await page.getByRole("link", { name: "Settings fragment", exact: true }).click();
+  await expect(page).toHaveURL(/\/settings\/display#test-anchor$/);
+});
+
 const effortJourneyPrompts = [
   "first high effort conversation",
   "second high effort conversation",
