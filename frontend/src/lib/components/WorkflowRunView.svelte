@@ -37,10 +37,8 @@
       const refreshed = await fetchWorkflowRun(runId);
       if (run?.id === runId && refreshed) detail = refreshed;
     } catch (error) {
-      if (run?.id === runId) {
-        cancelError = error instanceof Error ? error.message : String(error);
-        if (!requested && cancellingRunId === runId) cancellingRunId = null;
-      }
+      cancelError = error instanceof Error ? error.message : String(error);
+      if (!requested) cancellingRunId = null;
     }
   }
 
