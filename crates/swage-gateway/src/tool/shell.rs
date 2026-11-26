@@ -47,6 +47,17 @@ impl Tool for ShellTool {
         "Execute a shell command in the workspace directory."
     }
 
+    fn execution_outcome(
+        &self,
+        result: &Value,
+    ) -> swage_protocol::client::conversation::ToolExecution {
+        if result["success"] == false {
+            swage_protocol::client::conversation::ToolExecution::failed()
+        } else {
+            swage_protocol::client::conversation::ToolExecution::succeeded()
+        }
+    }
+
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
@@ -125,34 +136,38 @@ impl Tool for ShellTool {
             Ok::<_, ToolError>((stdout, stderr))
         };
 
-        // Safe to abandon on timeout: read_fut owns only local pipe handles and
-        // output buffers — no shared or persisted state. The timeout arm below
-        // kills the child and discards the partial buffers, so dropping the
-        // future leaves nothing half-written.
-        let read_result = tokio::time::timeout(self.timeout, read_fut).await;
+        // Pipe EOF does not mean the command has exited. Both output collection
+        // and process exit share one deadline; timeout stops the process group.
+        let execution = async {
+            let (stdout, stderr) = read_fut.await?;
+            let exit_status = child.wait().await.map_err(|e| ToolError::ExecutionFailed {
+                name: self.name().to_owned(),
+                message: format!("Failed to wait for command: {e}"),
+            })?;
+            Ok::<_, ToolError>((stdout, stderr, exit_status))
+        };
+        let result = Box::pin(tokio::time::timeout(self.timeout, execution)).await;
 
-        match read_result {
+        match result {
             Err(_elapsed) => {
                 // Timeout expired — stop the process group to free resources.
                 kill_child(&mut child, &mut process_group).await;
                 Err(ToolError::ExecutionFailed {
                     name: self.name().to_owned(),
-                    message: format!("Command timed out after {:.1}s", self.timeout.as_secs_f64()),
+                    message: format!(
+                        "Command timed out after {:.1}s (shell_timeout_secs)",
+                        self.timeout.as_secs_f64()
+                    ),
                 })
             }
 
             Ok(Err(e)) => {
-                // I/O error reading output — stop the process group and propagate.
+                // Output or process-wait error — stop the group and propagate.
                 kill_child(&mut child, &mut process_group).await;
                 Err(e)
             }
 
-            Ok(Ok((stdout, stderr))) => {
-                // Reap the child to get the exit status.
-                let exit_status = child.wait().await.map_err(|e| ToolError::ExecutionFailed {
-                    name: self.name().to_owned(),
-                    message: format!("Failed to wait for command: {e}"),
-                })?;
+            Ok(Ok((stdout, stderr, exit_status))) => {
                 process_group.disarm();
 
                 let stdout_str = String::from_utf8_lossy(&stdout.bytes);
@@ -181,10 +196,11 @@ impl Tool for ShellTool {
 
                 let mut output = truncated_output_value(&combined, self.max_output_bytes);
                 output["exit_code"] = json!(exit_status.code());
+                output["success"] = json!(exit_status.success());
                 if stdout.truncated {
                     output["stdout_truncated"] = json!(true);
                     output["stdout_total_bytes"] = json!(stdout.total_bytes);
-                    if let Some(path) = stdout.artifact_relative_path {
+                    if let Some(path) = stdout.reported_artifact_path {
                         output["stdout_artifact_path"] = json!(path);
                         output["stdout_follow_up"] = shell_output_follow_up(&path);
                     }
@@ -192,7 +208,7 @@ impl Tool for ShellTool {
                 if stderr.truncated {
                     output["stderr_truncated"] = json!(true);
                     output["stderr_total_bytes"] = json!(stderr.total_bytes);
-                    if let Some(path) = stderr.artifact_relative_path {
+                    if let Some(path) = stderr.reported_artifact_path {
                         output["stderr_artifact_path"] = json!(path);
                         output["stderr_follow_up"] = shell_output_follow_up(&path);
                     }
@@ -207,7 +223,7 @@ struct BoundedRead {
     bytes: Vec<u8>,
     total_bytes: usize,
     truncated: bool,
-    artifact_relative_path: Option<String>,
+    reported_artifact_path: Option<String>,
 }
 
 struct ShellOutputArtifactPaths {
@@ -281,8 +297,8 @@ where
         bytes: buf,
         total_bytes: total,
         truncated,
-        artifact_relative_path: truncated
-            .then(|| artifact_path.map(|path| path.relative))
+        reported_artifact_path: truncated
+            .then(|| artifact_path.map(|path| path.reported))
             .flatten(),
     })
 }
@@ -443,8 +459,59 @@ mod tests {
         assert!(result.is_err(), "timeout should produce an error");
         let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("timed out"),
+            msg.contains("timed out after 0.2s") && msg.contains("shell_timeout_secs"),
             "error message should mention timeout: {msg:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn timeout_stops_command_after_both_output_streams_close() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let context = ctx_in_dir_with_ids(&workspace);
+        let t = ShellTool {
+            timeout: Duration::from_millis(200),
+            max_output_bytes: 1024 * 1024,
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            t.execute(
+                json!({"command": "echo $$ > shell.pid; exec 1>&- 2>&-; sh -c 'echo $$ > descendant.pid; sleep 2; touch finished' & wait"}),
+                &context,
+            ),
+        )
+        .await
+        .expect("closing output streams must not bypass the shell deadline");
+        let error = result.expect_err("the command must time out before it finishes");
+        let message = error.to_string();
+        assert!(
+            message.contains("timed out after 0.2s") && message.contains("shell_timeout_secs"),
+            "{message}"
+        );
+        let pid: libc::pid_t = std::fs::read_to_string(workspace.path().join("shell.pid"))
+            .expect("the actual shell must record its PID")
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "the shell must stop");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert!(
+            workspace.path().join("descendant.pid").exists(),
+            "the descendant must actually start before the deadline"
+        );
+        tokio::time::sleep(Duration::from_millis(2100)).await;
+        assert!(
+            !workspace.path().join("finished").exists(),
+            "the command's descendants must stop at the deadline"
+        );
+        let next = t
+            .execute(json!({"command": "printf fresh"}), &context)
+            .await;
+        assert_eq!(
+            next.expect("the next shell call must work")["output"],
+            "fresh"
         );
     }
 
@@ -592,5 +659,43 @@ mod tests {
                 || canonical.to_str().unwrap().contains(output),
             "pwd output {output:?} should match workspace {canonical:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    #[tokio::test]
+    async fn regression_output_uses_runtime_directory_and_reads_back() {
+        use swage_tool::context::{MockToolContext, ToolOutputLocation, serialise_tool_context};
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("notes"), "reference").unwrap();
+        let mut base = MockToolContext::new("agent", "session");
+        base.working_directory = workspace.path().into();
+        let mut ctx = serialise_tool_context(&base);
+        ctx.tool_output_directory = Some(ToolOutputLocation {
+            directory: runtime.path().into(),
+        });
+        let result = ShellTool {
+            timeout: Duration::from_secs(5),
+            max_output_bytes: 16,
+        }
+        .execute(json!({"command":"ls -la; seq 1 100"}), &ctx)
+        .await
+        .unwrap();
+        let path = result["stdout_artifact_path"].as_str().unwrap();
+        assert!(
+            std::path::Path::new(path).starts_with(runtime.path()),
+            "{result}"
+        );
+        assert!(!workspace.path().join(".swage").exists());
+        let read = crate::tool::file_read::FileReadTool {
+            max_output_bytes: 10000,
+        }
+        .execute(result["stdout_follow_up"]["arguments"].clone(), &ctx)
+        .await
+        .unwrap();
+        assert!(read["output"].as_str().unwrap().contains("100\n"), "{read}");
     }
 }

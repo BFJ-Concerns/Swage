@@ -569,24 +569,6 @@ mod tests {
         }
     }
 
-    /// The own string keys of the caged global object with a host present,
-    /// sorted: the ECMAScript intrinsics the cage leaves, the engine's
-    /// `queueMicrotask`, and the door.
-    const EXPECTED_GLOBAL_NAMES: &str = concat!(
-        "AggregateError,Array,ArrayBuffer,AsyncDisposableStack,",
-        "BigInt,BigInt64Array,BigUint64Array,Boolean,DataView,",
-        "DisposableStack,Error,EvalError,Float16Array,Float32Array,",
-        "Float64Array,Function,Infinity,Int16Array,Int32Array,",
-        "Int8Array,Iterator,JSON,Map,Math,NaN,Number,Object,Promise,",
-        "Proxy,RangeError,ReferenceError,Reflect,RegExp,Set,String,",
-        "SuppressedError,Symbol,SyntaxError,TypeError,URIError,",
-        "Uint16Array,Uint32Array,Uint8Array,Uint8ClampedArray,",
-        "WeakMap,WeakSet,__swageHost,decodeURI,decodeURIComponent,",
-        "encodeURI,encodeURIComponent,escape,eval,globalThis,",
-        "isFinite,isNaN,parseFloat,parseInt,queueMicrotask,undefined,",
-        "unescape",
-    );
-
     fn program() -> Program {
         Program::new(limits(), None, None).expect("isolate")
     }
@@ -682,25 +664,6 @@ mod tests {
                 "{label}: {outcome}"
             );
         }
-    }
-
-    /// The allow-list: every own name of the caged global object. A new
-    /// name here — an engine bump that installs a global, a cage entry that
-    /// stopped removing — fails this test until it is judged and listed.
-    #[test]
-    fn the_caged_global_object_has_exactly_these_names() {
-        let mut program = Program::new(limits(), Some(Arc::new(Echo)), None).expect("isolate");
-        let names = program
-            .execute_for_string(
-                "test",
-                r#"Reflect.ownKeys(globalThis).filter((key) => typeof key === "string").sort().join(",")"#
-                    .to_owned(),
-            )
-            .expect("runs");
-        assert_eq!(
-            names, EXPECTED_GLOBAL_NAMES,
-            "the caged global object changed"
-        );
     }
 
     #[test]

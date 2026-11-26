@@ -63,6 +63,7 @@ impl TruncationCompactor {
                     failure_reason: None,
                     focus: None,
                     diagnosis: None,
+                    calls: Vec::new(),
                 },
             );
         }
@@ -127,6 +128,7 @@ impl TruncationCompactor {
                 failure_reason: None,
                 focus: None,
                 diagnosis: None,
+                calls: Vec::new(),
             },
         )
     }

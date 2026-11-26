@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
-  import { discoverModels, fetchProviderSignIn, signOutProvider, startProviderSignIn } from "../../api/settings";
+  import { onDestroy, onMount, untrack } from "svelte";
+  import { discoverModels, fetchProviderSecrets, fetchProviderSignIn, signOutProvider, startProviderSignIn } from "../../api/settings";
   import type { DiscoveredModel, ModelSettings, SettingsResponse } from "../../types";
   import type { ProviderSignInState } from "../../protocol/ProviderSignInState";
   import { providerBaseUrlError } from "./provider-endpoint";
@@ -28,16 +28,47 @@
   let deviceCode = $state<{ code: string; verificationUrl: string } | null>(null);
   const signInPolls = new Map<string, ReturnType<typeof setTimeout>>();
 
+  let secrets = $state<import("../../protocol/SecretResponse").SecretResponse[]>([]);
+  let secretsError = $state("");
+  let secretsRequested = false;
+  let secretsRequest = 0;
+
+  // SettingsPage replaces savedProviderIds after each successful save. Read
+  // missing records then, rather than reacting to unsaved credential edits.
+  $effect(() => {
+    const savedIds = savedProviderIds;
+    untrack(() => {
+      const hasMissingCredential = [...savedIds].some((id) => {
+        const reference = settings.providers[id]?.api_key_secret_ref;
+        return reference && !secrets.some((secret) => secret.reference === reference);
+      });
+      if (!secretsRequested || hasMissingCredential) void loadSecrets();
+    });
+  });
+
+  async function loadSecrets(): Promise<void> {
+    secretsRequested = true;
+    const request = ++secretsRequest;
+    try {
+      const response = await fetchProviderSecrets();
+      if (request !== secretsRequest) return;
+      secrets = response.secrets.filter((secret) => secret.material_kind === "provider_key" && secret.status === "active").sort((a, b) => a.name.localeCompare(b.name));
+      secretsError = "";
+    } catch {
+      if (request === secretsRequest) secretsError = "Could not load stored credentials. Reload to try again, or paste a key.";
+    }
+  }
+
   const PROVIDER_KINDS = [
-    { id: "OpenAi", label: "OpenAI", protocol: "openai" },
-    { id: "OpenAiResponses", label: "OpenAI Responses", protocol: "openai-responses" },
-    { id: "Anthropic", label: "Anthropic", protocol: "anthropic" },
-    { id: "Google", label: "Google", protocol: "google" },
-    { id: "OpenRouter", label: "OpenRouter", protocol: "openrouter" },
-    { id: "OpenAiCompatible", label: "OpenAI compatible", protocol: "openai" },
+    { description: "Use the OpenAI Chat Completions API.", id: "OpenAi", label: "OpenAI", protocol: "openai" },
+    { description: "Use the OpenAI Responses API when your endpoint supports Responses.", id: "OpenAiResponses", label: "OpenAI Responses", protocol: "openai-responses" },
+    { description: "Use the Anthropic Messages API.", id: "Anthropic", label: "Anthropic", protocol: "anthropic" },
+    { description: "Use the Google Gemini API.", id: "Google", label: "Google", protocol: "google" },
+    { description: "Use OpenRouter to access its model catalogue.", id: "OpenRouter", label: "OpenRouter", protocol: "openrouter" },
+    { description: "Use a proxy or local server offering the OpenAI Chat Completions API.", id: "OpenAiCompatible", label: "OpenAI compatible", protocol: "openai" },
   ] as const satisfies readonly ProviderKindDefinition[];
-  const providerIds = $derived(Object.keys(settings.providers));
-  const modelIds = $derived(Object.keys(settings.models));
+  const providerIds = $derived(Object.keys(settings.providers).sort());
+  const modelIds = $derived(Object.keys(settings.models).sort());
   const defaultModel = $derived(settings.models[settings.default_model] ?? null);
   // Discovered models that have already been added under this provider — used
   // to mark the chip as ADDED rather than silently overwriting on re-click.
@@ -176,7 +207,7 @@
 
   function providerModels(providerId: string): [string, ModelSettings][] {
     if (!settings) return [];
-    return Object.entries(settings.models).filter(([, model]) => model.provider_id === providerId);
+    return Object.entries(settings.models).filter(([, model]) => model.provider_id === providerId).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
   }
 
   function slugifyProviderName(value: string): string {
@@ -202,13 +233,13 @@
     if (!settings) return id;
     const provider = settings.providers[id];
     if (!provider) return id;
-    if (provider.protocol === "openai" && provider.base_url) return "OpenAI compatible";
-    return PROVIDER_KINDS.find((kind) => kind.protocol === provider.protocol && kind.id !== "OpenAiCompatible")?.label ?? id;
+    return provider.display_name?.trim() || id;
   }
 
   function pickProviderKind(kind: ProviderKindDefinition): void {
     const id = nextProviderId(slugifyProviderName(kind.label));
     settings.providers[id] = {
+      display_name: kind.label,
       protocol: kind.protocol,
       base_url: kind.id === "OpenRouter" ? "https://openrouter.ai/api/v1" : null,
       api_key_secret_ref: null,
@@ -233,6 +264,7 @@
     const baseId = slugifyProviderName(name) || "openai-compatible";
     const id = nextProviderId(baseId);
     settings.providers[id] = {
+      display_name: name.trim() || "OpenAI compatible",
       protocol: "openai",
       base_url: baseUrl,
       api_key_secret_ref: null,
@@ -248,7 +280,7 @@
 
   function removeProvider(id: string): void {
 
-    for (const modelId of Object.keys(settings.models)) {
+    for (const modelId of Object.keys(settings.models).sort()) {
       if (settings.models[modelId].provider_id === id) removeModel(modelId);
     }
     delete settings.providers[id];
@@ -309,13 +341,13 @@
 </script>
 
 <div class="provider-settings-surface">
-  <ProviderDefaultModel {modelIds} defaultModel={settings.default_model} onselect={setDefaultModel} />
+  <ProviderDefaultModel models={settings.models} providerName={providerDisplayName} {modelIds} defaultModel={settings.default_model} onselect={setDefaultModel} />
   <ProviderCreation kinds={PROVIDER_KINDS} onpick={pickProviderKind} oncompatible={commitCompatibleProvider} onclearerror={() => error = null} />
 
 {#each providerIds as id, ix (id)}
   {@const provider = settings.providers[id]}
   <ProviderConfiguration
-    {id} index={ix} {provider} displayName={providerDisplayName(id)} models={providerModels(id)}
+    {secrets} {secretsError} {id} index={ix} {provider} kindLabel={provider.protocol === "openai" && provider.base_url ? "OpenAI compatible" : PROVIDER_KINDS.find((kind) => kind.protocol === provider.protocol)?.label ?? provider.protocol} displayName={providerDisplayName(id)} models={providerModels(id)}
     defaultModel={settings.default_model} saved={savedProviderIds.has(id)} signInState={signInByProvider[id]}
     {deviceCode} selected={selectedProvider === id} query={modelQuery} {discoveredModels} {addedModelIds} {isPersisting}
     onremoveprovider={removeProvider} onmanualadd={addManualModel} onremovemodel={removeModel} ondefault={setDefaultModel}
@@ -323,77 +355,10 @@
     onbegin={beginSignIn} oncheck={loadSignInState} oncopy={copyDeviceCode} onend={endSignIn}
   />
 {:else}
-  <div class="field"><div class="key">No providers<small>Swage will start without messaging until a model/provider pair exists.</small></div><div class="val"><p class="empty">Add a provider above. Nothing is assumed.</p></div></div>
+  <div class="field"><div class="key">No providers<small>Swage is running. To send messages, add a provider and a model.</small></div><div class="val"><p class="empty">Add a provider above. Nothing is assumed.</p></div></div>
   {/each}
 </div>
 
 <style>
-  .provider-settings-surface {
-    display: flex;
-    flex-direction: column;
-    gap: 18px;
-  }
-
-  .field {
-    display: grid;
-    grid-template-columns: 220px 1fr;
-    gap: 24px;
-    border-top: 1px solid var(--rule-soft);
-    padding: 14px 0;
-    align-items: baseline;
-  }
-
-  .key {
-    font-family: var(--font-mono);
-    font-weight: 500;
-    font-size: 11px;
-    line-height: 1.5;
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
-  }
-
-  .key small {
-    display: block;
-    margin-top: 4px;
-    font-family: var(--font-body);
-    font-weight: 400;
-    font-size: 11px;
-    line-height: 1.4;
-    letter-spacing: 0;
-    text-transform: none;
-    color: var(--ink-soft);
-  }
-
-  .val {
-    display: flex;
-    gap: 10px;
-    flex-wrap: wrap;
-  }
-
-  .empty {
-    margin: 0;
-    display: inline-flex;
-    align-items: center;
-    gap: 12px;
-    font-family: var(--font-mono);
-    font-weight: 500;
-    font-size: 10px;
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
-    color: var(--ink-soft);
-  }
-
-  .empty::before {
-    content: "";
-    flex: 0 0 22px;
-    height: 1px;
-    background: var(--rule-soft);
-  }
-
-  @media (max-width: 760px) {
-    .field {
-      grid-template-columns: 1fr;
-      gap: 10px;
-    }
-  }
+  .provider-settings-surface { display: flex; flex-direction: column; gap: 18px; }
 </style>

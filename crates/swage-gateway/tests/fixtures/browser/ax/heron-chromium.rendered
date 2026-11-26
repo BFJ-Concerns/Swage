@@ -1,0 +1,279 @@
+url: https://fixture.local/heron-chromium
+title: Fixture Login
+snapshot: 1
+
+- RootWebArea "Heron - Wikipedia" ref=s1e1
+  - main
+    - navigation "Namespaces"
+      - list
+        - listitem
+          - link "Article" ref=s1e2
+            - StaticText "Article"
+        - listitem
+          - link "Talk" ref=s1e3
+            - StaticText "Talk"
+    - generic "Heron"
+      - note
+        - StaticText "For other uses, see"
+        - link "Heron (disambiguation)" ref=s1e4
+        - StaticText "."
+      - table
+        - row
+          - columnheader "Herons Temporal range: Early Oligocene–Holocene 32–0 Ma [1] PreꞒ Ꞓ O S D C P T J K Pg N"
+            - StaticText "Herons"
+            - LineBreak
+            - StaticText "Temporal range: Early"
+            - link "Oligocene" ref=s1e5
+            - StaticText "–Holocene"
+            - StaticText "32–0"
+            - link "Ma" ref=s1e6
+            - superscript
+              - link "[1]" ref=s1e7
+                - StaticText "["
+                - StaticText "1"
+                - StaticText "]"
+            - link "PreꞒ" ref=s1e8
+            - link "Ꞓ" ref=s1e9
+            - link "O" ref=s1e10
+            - link "S" ref=s1e11
+            - link "D" ref=s1e12
+            - link "C" ref=s1e13
+            - link "P" ref=s1e14
+            - link "T" ref=s1e15
+            - link "J" ref=s1e16
+            - link "K" ref=s1e17
+            - link "Pg" ref=s1e18
+            - link "N" ref=s1e19
+        - row
+          - cell
+            - link ref=s1e20
+              - image
+        - row
+          - columnheader "Scientific classification Edit this classification"
+            - link "Scientific classification" ref=s1e21
+            - link "Edit this classification" ref=s1e22
+              - image "Edit this classification"
+        - row
+          - cell "Kingdom:"
+          - cell "Animalia"
+            - link "Animalia" ref=s1e23
+        - row
+          - cell "Phylum:"
+          - cell "Chordata"
+            - link "Chordata" ref=s1e24
+        - row
+          - cell "Class:"
+          - cell "Aves"
+            - link "Aves" ref=s1e25
+        - row
+          - cell "Order:"
+          - cell "Pelecaniformes"
+            - link "Pelecaniformes" ref=s1e26
+        - row
+          - cell "Suborder:"
+          - cell "Ardei"
+            - link "Ardei" ref=s1e27
+        - row
+          - cell "Family:"
+          - cell "Ardeidae Leach, 1820"
+            - link "Ardeidae" ref=s1e28
+            - LineBreak
+            - link "Leach" ref=s1e29
+            - StaticText ", 1820"
+        - row
+          - columnheader "Type genus"
+            - link "Type genus" ref=s1e30
+        - row
+          - cell "Ardea Linnaeus, 1758"
+            - link "Ardea" ref=s1e31
+            - LineBreak
+            - link "Linnaeus" ref=s1e32
+            - StaticText ", 1758"
+        - row
+          - columnheader "Genera"
+        - row
+          - cell "18 extant, see text"
+            - paragraph
+              - StaticText "18 extant, see"
+              - link "text" ref=s1e33
+        - row
+          - columnheader "Synonyms"
+            - link "Synonyms" ref=s1e34
+        - row
+          - cell "Cochlearidae"
+            - paragraph
+              - StaticText "Cochlearidae"
+      - paragraph
+        - StaticText "Herons"
+        - StaticText "are long-legged, long-necked, freshwater and coastal"
+        - link "birds" ref=s1e35
+        - StaticText "in the family"
+        - StaticText "Ardeidae"
+        - StaticText ", with 75 recognised"
+        - link "species" ref=s1e36
+        - StaticText ", some of which are referred to as"
+        - link "egrets" ref=s1e37
+        - StaticText "or"
+        - link "bitterns" ref=s1e38
+        - StaticText "rather than herons. Members of the genus"
+        - link "Botaurus" ref=s1e39
+        - StaticText "are referred to as bitterns, and, together with the"
+        - link "zigzag heron" ref=s1e40
+        - StaticText ", or zigzag bittern, in the"
+        - link "monotypic" ref=s1e41
+        - StaticText "genus"
+        - StaticText "Zebrilus"
+        - StaticText ", form a"
+        - link "monophyletic" ref=s1e42
+        - StaticText "group,"
+        - link "Botaurinae" ref=s1e43
+        - StaticText ", within the Ardeidae family."
+        - link "Egrets" ref=s1e44
+        - StaticText "do not form a biologically distinct group from herons, and tend to be named differently because they are mainly white or have decorative plumes in breeding plumage. Herons, by evolutionary adaptation, have long beaks."
+      - paragraph
+        - StaticText "The classification of individual heron and egret species is fraught with difficulty, and no clear consensus exists about the correct placement of many species into either of the two major genera,"
+        - link "Ardea" ref=s1e45
+        - StaticText "and"
+        - link "Egretta" ref=s1e46
+        - StaticText ". Similarly, the relationships of the"
+        - link "genera" ref=s1e47
+        - StaticText "in the family are not completely resolved. However, one species formerly considered to constitute a separate"
+        - link "monotypic" ref=s1e48
+        - StaticText "family, the Cochlearidae or the"
+        - link "boat-billed heron" ref=s1e49
+        - StaticText ", is now regarded as a member of the Ardeidae."
+      - paragraph
+        - StaticText "Although herons resemble birds in some other families, such as the"
+        - link "storks" ref=s1e50
+        - StaticText ","
+        - link "ibises" ref=s1e51
+        - StaticText ","
+        - link "spoonbills" ref=s1e52
+        - StaticText ", and"
+        - link "cranes" ref=s1e53
+        - StaticText ", they differ from these in flying with their necks retracted, not outstretched. They are also one of the bird groups that have"
+        - link "powder down" ref=s1e54
+        - StaticText ". Some members of this group nest"
+        - link "colonially" ref=s1e55
+        - StaticText "in trees, while others, notably the bitterns, use"
+        - link "reed beds" ref=s1e56
+        - StaticText "."
+      - region "Description"
+        - heading "Description"
+        - link "edit" ref=s1e57
+        - figure
+          - link "A beige heron with yellow legs and bill stands hunched on a wire mesh above water, its neck folded tightly to its body and hidden among feathers." ref=s1e58
+            - image "A beige heron with yellow legs and bill stands hunched on a wire mesh above water, its neck folded tightly to its body and hidden among feathers."
+          - Figcaption
+            - link "Yellow bittern" ref=s1e59
+            - StaticText "with its neck fully retracted."
+        - paragraph
+          - StaticText "The herons are medium- to large-sized birds with long legs and necks. They exhibit very little"
+          - link "sexual dimorphism" ref=s1e60
+          - StaticText "in size. The smallest species is usually considered the"
+          - link "dwarf bittern" ref=s1e61
+          - StaticText ", which measures"
+          - StaticText "25–30"
+          - StaticText "cm (10–12"
+          - StaticText "in)"
+          - StaticText "in length, although all the species in the genus"
+          - link "Ixobrychus" ref=s1e62
+          - StaticText "are small and many broadly overlap in size. The largest species of heron is the"
+          - link "goliath heron" ref=s1e63
+          - StaticText ", which stands up to"
+          - StaticText "152"
+          - StaticText "cm (60"
+          - StaticText "in)"
+          - StaticText "tall."
+        - figure
+          - link ref=s1e64
+            - image
+          - Figcaption
+            - StaticText "X-ray of the cervical vertebrae in the neck of an unidentified heron"
+        - paragraph
+          - StaticText "All herons can retract their necks by folding them into a tight S-shape, due to the modified shape of the cervical vertebrae, of which they have 20 or 21; the neck is retracted during flight, unlike most other long-necked birds. The neck is longer in the day herons than the night herons and bitterns. The legs are long and strong, and in almost every species are unfeathered from the lower part of the"
+          - link "tibia" ref=s1e65
+          - StaticText "(the exception is the"
+          - link "zigzag heron" ref=s1e66
+          - StaticText "). In flight, the legs and feet are generally held in a horizontal position, pointing backwards. Toes are long and thin, with three pointing forwards and one backwards."
+          - superscript
+            - link "[8]" ref=s1e67
+              - StaticText "["
+              - StaticText "8"
+              - StaticText "]"
+        - figure
+          - link "two herons, one with white plumage and one with slate grey, on a rock in the surf of the ocean" ref=s1e68
+            - image "two herons, one with white plumage and one with slate grey, on a rock in the surf of the ocean"
+          - Figcaption
+            - StaticText "The"
+            - link "Pacific reef heron" ref=s1e69
+            - StaticText "has two"
+            - link "colour morphs" ref=s1e70
+            - StaticText ", the light and the dark."
+        - figure
+          - link "A close-up of white heron with a droplet of water on its beak." ref=s1e71
+            - image "A close-up of white heron with a droplet of water on its beak."
+          - Figcaption
+            - StaticText "A white heron with a droplet of water on its beak in Forest Park."
+        - paragraph
+          - StaticText "The"
+          - link "bill" ref=s1e72
+          - StaticText "is generally long and harpoon-like. It can vary from extremely narrow, as in the"
+          - link "agami heron" ref=s1e73
+          - StaticText ", to wider as in the"
+          - link "grey heron" ref=s1e74
+          - StaticText ". The most atypical heron bill is owned by the"
+          - link "boat-billed heron" ref=s1e75
+          - StaticText ", which has a broad, thick bill. Herons' bills and other bare parts of the body are usually yellow, black, or brown, although this can vary during the breeding season. The wings are broad and long, exhibiting 10 or 11"
+          - link "primary feathers" ref=s1e76
+          - StaticText "(the boat-billed heron has only nine), 15–20 secondaries, and 12 rectrices (10 in the bitterns). The feathers of the herons are soft and the"
+          - link "plumage" ref=s1e77
+          - StaticText "is usually blue, black, brown, grey, or white, and can often be strikingly complex. Amongst the day herons, little sexual dimorphism in plumage is seen (except in the pond herons); however, for the night herons and smaller bitterns, plumage differences between the sexes are the rule. Many species also have different"
+          - link "colour morphs" ref=s1e78
+          - StaticText "."
+          - superscript
+            - link "[8]" ref=s1e79
+              - StaticText "["
+              - StaticText "8"
+              - StaticText "]"
+          - StaticText "In the"
+          - link "Pacific reef heron" ref=s1e80
+          - StaticText ", both dark and light colour morphs exist, and the percentage of each morph varies geographically; its white morphs only occur in areas with coral beaches."
+          - superscript
+            - link "[9]" ref=s1e81
+              - StaticText "["
+              - StaticText "9"
+              - StaticText "]"
+      - region "Distribution and habitat"
+        - heading "Distribution and habitat"
+        - link "edit" ref=s1e82
+        - figure
+          - link "Lava heron, grey with a long bill and red feet and with small fish in bill amongst grey rocks" ref=s1e83
+            - image "Lava heron, grey with a long bill and red feet and with small fish in bill amongst grey rocks"
+          - Figcaption
+            - link "Lava herons" ref=s1e84
+            - StaticText "are endemic to the"
+            - link "Galápagos Islands" ref=s1e85
+            - StaticText ", where they feed on fish and crabs in the intertidal and mangrove areas."
+        - paragraph
+          - StaticText "The herons are a widespread family with a"
+          - link "cosmopolitan distribution" ref=s1e86
+          - StaticText ". They exist on all continents except"
+          - link "Antarctica" ref=s1e87
+          - StaticText "and are present in most habitats except the coldest extremes of the Arctic, extremely high mountains, and the driest deserts. Almost all species are associated with water; they are essentially non-swimming waterbirds that feed on the margins of lakes, rivers, swamps, ponds, and the sea. They are predominantly found in lowland areas, although some species live in alpine areas, and the majority of species occur in the tropics."
+          - superscript
+            - link "[8]" ref=s1e88
+              - StaticText "["
+              - StaticText "8"
+              - StaticText "]"
+        - paragraph
+          - StaticText "The herons are a highly mobile family, with most species being at least partially"
+          - link "migratory" ref=s1e89
+          - StaticText "; for example, the"
+          - link "grey heron" ref=s1e90
+          - StaticText "is mostly sedentary in Britain, but mostly migratory in Scandinavia. Birds are particularly inclined to disperse widely after breeding, but before the annual migration, where the species is colonial, searching out new feeding areas and reducing the pressures on feeding grounds near the colony. The migration typically occurs at night, usually as individuals or in small groups."
+          - superscript
+            - link "[8]" ref=s1e91
+              - StaticText "["
+              - StaticText "8"
+              - StaticText "]"

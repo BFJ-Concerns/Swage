@@ -44,6 +44,8 @@ pub enum Protocol {
 /// Connection settings for one configured LLM provider.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderEndpointConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub protocol: Protocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_secret_ref: Option<String>,
@@ -68,6 +70,7 @@ pub struct ProviderEndpointConfig {
 impl Default for ProviderEndpointConfig {
     fn default() -> Self {
         Self {
+            display_name: None,
             protocol: Protocol::OpenAi,
             api_key_secret_ref: None,
             api_key_env: None,
@@ -260,6 +263,16 @@ impl Default for ToolPermissionConfig {
             "session-authoring".to_string(),
             vec!["session_values".to_string()],
         );
+        // Authoring the durable definitions — the agents a person can pick
+        // and the task contracts a child runs under — as one grantable
+        // power, so an agent can be kept from reshaping who runs with what.
+        bundles.insert(
+            "definition-authoring".to_string(),
+            vec![
+                "agent_definition".to_string(),
+                "task_definition".to_string(),
+            ],
+        );
         // Knowledge-base access at registry grain: reading the topic's
         // gathered evidence and writing captures into it are separate powers,
         // so gathering workers can hold write without every reader gaining it.
@@ -306,23 +319,13 @@ impl Default for ToolPermissionConfig {
     }
 }
 
-/// Tools that act outside the conversation — running commands or code,
-/// writing files, operating a page — and so prompt before each call in an
-/// attended session. Unattended sessions run on their grants alone.
+/// Tools that run commands or code or write files, and so prompt before each
+/// call in an attended session. Unattended sessions run on their grants alone.
 fn default_high_risk_tool_approvals() -> Vec<RequireApprovalEntry> {
-    [
-        "shell",
-        "file_edit",
-        "file_write",
-        "python_execute",
-        "browser_click",
-        "browser_type",
-        "browser_select",
-        "browser_scroll",
-    ]
-    .into_iter()
-    .map(|tool| RequireApprovalEntry::Simple(tool.to_string()))
-    .collect()
+    ["shell", "file_edit", "file_write", "python_execute"]
+        .into_iter()
+        .map(|tool| RequireApprovalEntry::Simple(tool.to_string()))
+        .collect()
 }
 
 /// Settings for the gateway-hosted browser tools.
@@ -362,6 +365,8 @@ impl Default for BrowserToolConfig {
 /// Tool execution settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolConfig {
+    /// Identical failing calls permitted within one unattended turn.
+    pub max_identical_failures: u32,
     /// Maximum seconds a shell command may run before being killed.
     pub shell_timeout_secs: u64,
     /// Python execution settings shared by python-backed features.
@@ -385,6 +390,7 @@ pub struct ToolConfig {
 impl Default for ToolConfig {
     fn default() -> Self {
         Self {
+            max_identical_failures: 3,
             shell_timeout_secs: 30,
             python_execute: PythonExecuteToolConfig::default(),
             max_output_bytes: 100_000,
@@ -753,7 +759,7 @@ impl Default for SchedulingConfig {
 
 // Declared once in swage-protocol: the wire type and the resolved config
 // type are one definition, with the partial, schema and semantics beside it.
-pub use swage_protocol::client::settings::{MemoryConfig, SessionsConfig};
+pub use swage_protocol::client::settings::{AttachmentsConfig, MemoryConfig, SessionsConfig};
 
 /// Model routes for voice. Voice speaks only to the default provider's
 /// endpoint; each id is the model that endpoint serves for that audio API.
@@ -868,6 +874,8 @@ pub struct ResolvedConfig {
     pub sessions: SessionsConfig,
     /// `[memory]` — when the curator passes over an attended conversation.
     pub memory: MemoryConfig,
+    /// Image reference schemes admitted before provider capability checks.
+    pub attachments: AttachmentsConfig,
     /// Model routes for transcription and speech synthesis.
     pub voice: VoiceConfig,
     /// Named generation parameter presets available to model entries.
@@ -876,6 +884,10 @@ pub struct ResolvedConfig {
     pub channels: ChannelsConfig,
     /// Assembled instruction text from all hierarchy levels, in order.
     pub instructions: String,
+    /// Source level of each instruction file or definition overlay.
+    /// Runtime metadata retained with the text, never reconstructed from it.
+    #[serde(skip)]
+    pub instruction_sources: Vec<HierarchyLevel>,
     /// When true, the entire permission and approval system is bypassed:
     /// tool allow/deny lists are ignored, `require_approval` gates do not
     /// fire, and out-of-workspace location prompts are auto-approved. The
@@ -1421,16 +1433,7 @@ timeout_policy = "reject"
                 .iter()
                 .map(RequireApprovalEntry::tool_name)
                 .collect::<Vec<_>>(),
-            vec![
-                "shell",
-                "file_edit",
-                "file_write",
-                "python_execute",
-                "browser_click",
-                "browser_type",
-                "browser_select",
-                "browser_scroll"
-            ]
+            vec!["shell", "file_edit", "file_write", "python_execute"]
         );
     }
 
@@ -1519,6 +1522,7 @@ timeout_policy = "reject"
         bundles.insert("safe".to_string(), vec!["echo".into()]);
 
         let original = ToolConfig {
+            max_identical_failures: 3,
             shell_timeout_secs: 60,
             python_execute: PythonExecuteToolConfig::default(),
             max_output_bytes: 50_000,

@@ -43,12 +43,20 @@ pub async fn serve_frontend(headers: HeaderMap, uri: Uri) -> Response {
         return response;
     }
 
-    // Strip the leading slash for rust-embed key lookup (keys use bare paths).
-    let asset_key = path.trim_start_matches('/');
+    serve_embedded_path(path, FrontendAssets::get)
+}
+
+fn serve_embedded_path(
+    path: &str,
+    get_asset: impl Fn(&str) -> Option<rust_embed::EmbeddedFile>,
+) -> Response {
+    // Embedded keys are bare filenames, while request paths may escape them.
+    let asset_key =
+        percent_encoding::percent_decode_str(path.trim_start_matches('/')).decode_utf8_lossy();
 
     // Try to serve the requested file directly.
-    if let Some(file) = FrontendAssets::get(asset_key) {
-        return serve_static_file(asset_key, file);
+    if let Some(file) = get_asset(&asset_key) {
+        return serve_static_file(&asset_key, file);
     }
 
     // A path with a filename extension names a resource, not a client-side
@@ -61,7 +69,7 @@ pub async fn serve_frontend(headers: HeaderMap, uri: Uri) -> Response {
 
     // SPA fallback: serve index.html for paths the client router owns. This
     // includes the root path ("") and routes such as /conversations/:id.
-    if let Some(file) = FrontendAssets::get("index.html") {
+    if let Some(file) = get_asset("index.html") {
         return serve_index(file);
     }
 
@@ -171,6 +179,25 @@ fn host_without_port(host: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Embed)]
+    #[folder = "../../frontend/public"]
+    struct TestAssets;
+
+    #[tokio::test]
+    async fn escaped_font_path_serves_embedded_font() {
+        let response = serve_embedded_path("/fonts/HankenGrotesk%5Bwght%5D.ttf", TestAssets::get);
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "font/ttf");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            body.as_ref(),
+            include_bytes!("../../../frontend/public/fonts/HankenGrotesk[wght].ttf")
+        );
+    }
 
     #[test]
     fn dev_redirect_preserves_host_path_and_query() {

@@ -2,7 +2,7 @@ use crate::error::{ConfigProblem, ConfigProblemKind};
 use crate::merge::PartialConfig;
 use crate::model::ResolvedConfig;
 use std::path::Path;
-use swage_protocol::client::settings::{MemoryConfig, SessionsConfig};
+use swage_protocol::client::settings::{AttachmentsConfig, MemoryConfig, SessionsConfig};
 use swage_protocol::client::settings_section::{
     SettingsProblem, SettingsSection, SettingsSectionSchema,
 };
@@ -51,6 +51,7 @@ where
 const DECLARED_SECTIONS: &[&dyn DeclaredSection] = &[
     &Declared::<SessionsConfig>(std::marker::PhantomData),
     &Declared::<MemoryConfig>(std::marker::PhantomData),
+    &Declared::<AttachmentsConfig>(std::marker::PhantomData),
 ];
 
 fn declared_section(name: &str) -> Option<&'static dyn DeclaredSection> {
@@ -191,6 +192,7 @@ fn known_fields_for(section: &str) -> &'static [&'static str] {
         // Scalar tool settings plus flattened permission fields (allow, deny,
         // bundles, require_approval) which live at the [tools] level in TOML.
         "tools" => &[
+            "max_identical_failures",
             "shell_timeout_secs",
             "python_execute",
             "max_output_bytes",
@@ -299,6 +301,7 @@ fn check_field_type(
             ("boolean", matches!(value, Value::Boolean(_)))
         }
         ("logging", "level") => ("string", matches!(value, Value::String(_))),
+        ("tools", "max_identical_failures") => ("integer", matches!(value, Value::Integer(_))),
         ("tools", "shell_timeout_secs") => ("integer", matches!(value, Value::Integer(_))),
         ("tools", "python_execute") => ("table", matches!(value, Value::Table(_))),
         ("tools", "max_output_bytes") => ("integer", matches!(value, Value::Integer(_))),
@@ -435,13 +438,13 @@ fn check_field_semantics(
         }
         ("context", "timeout") => {
             if let Value::Integer(t) = value
-                && (*t < 1 || *t > 60)
+                && *t < 1
             {
                 problems.push(make_problem(
                     file_path,
                     Some(field_path.to_string()),
                     ConfigProblemKind::SemanticError {
-                        message: format!("context.timeout must be between 1 and 60, got {t}"),
+                        message: format!("context.timeout must be a positive integer, got {t}"),
                     },
                 ));
             }
@@ -1164,6 +1167,17 @@ pub fn validate_resolved_catalog_references(
                 Some(format!("models.entries.{model_id}.capabilities.effort")),
                 ConfigProblemKind::SemanticError {
                     message: format!("model '{model_id}' declares an effort capability that cannot be honoured: {message}"),
+                },
+            ));
+        }
+        if model.capabilities.output_limit == Some(0) {
+            problems.push(make_problem(
+                file_path,
+                Some(format!("models.entries.{model_id}.capabilities.output_limit")),
+                ConfigProblemKind::SemanticError {
+                    message: format!(
+                        "model '{model_id}' declares an output limit of zero tokens; declare the most output tokens one response may carry, or leave it unset"
+                    ),
                 },
             ));
         }
@@ -1989,6 +2003,18 @@ allowed_fields = ["user"]
     }
 
     #[test]
+    fn tools_failure_bound_rejects_non_integer_values() {
+        let problems = validate_toml_string(
+            "[tools]\nmax_identical_failures = \"three\"",
+            &path("config.toml"),
+        );
+        assert!(problems.iter().any(|problem| {
+            problem.field_path.as_deref() == Some("tools.max_identical_failures")
+                && matches!(&problem.kind, ConfigProblemKind::TypeError { .. })
+        }));
+    }
+
+    #[test]
     fn context_assembly_wrong_type_produces_error() {
         let toml = "[context]\nassembly = 42";
         let problems = validate_toml_string(toml, &path("config.toml"));
@@ -2002,7 +2028,6 @@ allowed_fields = ["user"]
 
     #[test]
     fn context_timeout_zero_produces_semantic_error() {
-        // timeout range is 1-60; 0 is out of range
         let toml = "[context]\ntimeout = 0";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
@@ -2014,21 +2039,10 @@ allowed_fields = ["user"]
     }
 
     #[test]
-    fn context_timeout_above_max_produces_semantic_error() {
-        let toml = "[context]\ntimeout = 61";
-        let problems = validate_toml_string(toml, &path("config.toml"));
-        assert!(
-            problems
-                .iter()
-                .any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
-            "timeout=61 should produce SemanticError"
-        );
-    }
-
-    #[test]
-    fn context_timeout_boundary_valid() {
-        // 1 and 60 are the inclusive bounds — should produce no errors
-        for timeout in [1_i64, 60] {
+    fn context_timeout_takes_any_positive_number_of_seconds() {
+        // The timeout only stops a hung assembly script; any positive
+        // value does that, so none is too long to choose.
+        for timeout in [1_i64, 60, 61, 3_600] {
             let toml = format!("[context]\ntimeout = {timeout}");
             let problems = validate_toml_string(&toml, &path("config.toml"));
             assert!(
@@ -2281,6 +2295,33 @@ allowed_fields = ["user"]
             matches!(&problems[0].kind, ConfigProblemKind::UnknownField { section, name } if section == "memory" && name == "curation_delay"),
             "an undeclared field is unknown: {problems:?}"
         );
+    }
+
+    #[test]
+    fn delegation_depth_file_validation_uses_the_declaration() {
+        let valid = validate_toml_string(
+            "[sessions]\nmax_delegation_depth = 2\n",
+            &path("config.toml"),
+        );
+        assert!(
+            valid.is_empty(),
+            "the declared depth is a recognised setting: {valid:?}"
+        );
+        let invalid = validate_toml_string(
+            "[sessions]\nmax_delegation_depth = 0\n",
+            &path("config.toml"),
+        );
+        assert!(
+            invalid
+                .iter()
+                .any(|problem| matches!(&problem.kind, ConfigProblemKind::SemanticError { .. })),
+            "zero is refused by the declaration: {invalid:?}"
+        );
+        let wrong_kind = validate_toml_string(
+            "[sessions]\nmax_delegation_depth = 'two'\n",
+            &path("config.toml"),
+        );
+        assert_eq!(wrong_kind.len(), 1);
     }
 
     #[test]
@@ -2546,6 +2587,7 @@ message_ttl_secs = 86400
                         max_tokens: 10,
                         can_disable: false,
                     }),
+                    output_limit: None,
                 },
                 ..Default::default()
             },
@@ -2562,5 +2604,71 @@ message_ttl_secs = 86400
             }),
             "{problems:?}"
         );
+    }
+
+    #[test]
+    fn an_output_limit_of_zero_is_a_semantic_problem() {
+        let mut config = ResolvedConfig::default();
+        config.models.default = "m".into();
+        config.models.entries.insert(
+            "m".into(),
+            crate::ModelEndpointConfig {
+                provider_id: "p".into(),
+                model_id: "m".into(),
+                capabilities: crate::ModelCapabilitiesConfig {
+                    output_limit: Some(0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        config
+            .providers
+            .entries
+            .insert("p".into(), crate::ProviderEndpointConfig::default());
+        let problems = validate_resolved_catalog_references(&config, Path::new("config.toml"));
+        assert!(
+            problems.iter().any(|problem| {
+                problem.field_path.as_deref() == Some("models.entries.m.capabilities.output_limit")
+                    && problem.to_string().contains("zero tokens")
+            }),
+            "{problems:?}"
+        );
+    }
+    #[test]
+    fn image_scheme_settings_refuse_bad_shapes_and_scheme_forms() {
+        for body in [
+            "[attachments]\naccepted_schemes = ['https', 'data']",
+            "[attachments]\naccepted_schemes = ['HTTP', 'custom+v1.test-2']",
+        ] {
+            assert!(
+                validate_toml_string(body, &path("config.toml")).is_empty(),
+                "{body}"
+            );
+        }
+        for body in [
+            "[attachments]\naccepted_schemes = []",
+            "[attachments]\naccepted_schemes = ['https:']",
+            "[attachments]\naccepted_schemes = ['1http']",
+            "[attachments]\naccepted_schemes = ['']",
+            "[attachments]\naccepted_schemes = ['file/path']",
+            "[attachments]\naccepted_schemes = [' http']",
+            "[attachments]\naccepted_schemes = [42]",
+            "[attachments]\naccepted_schemes = 'https'",
+            "[attachments]\nunknown = ['https']",
+        ] {
+            let problems = validate_toml_string(body, &path("config.toml"));
+            assert!(
+                !problems.is_empty(),
+                "invalid scheme settings accepted: {body}"
+            );
+            assert!(
+                problems.iter().all(|p| p
+                    .field_path
+                    .as_deref()
+                    .is_some_and(|field| field.starts_with("attachments"))),
+                "{problems:?}"
+            );
+        }
     }
 }

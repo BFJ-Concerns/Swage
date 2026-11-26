@@ -165,10 +165,13 @@ impl ReleaseOptions {
     }
 }
 
+#[derive(Clone)]
 struct InstallOptions {
     prefix: PathBuf,
     skip_frontend: bool,
     lan_mode: bool,
+    host: Option<String>,
+    port: Option<u16>,
 }
 
 impl InstallOptions {
@@ -177,6 +180,8 @@ impl InstallOptions {
             prefix: home_dir()?.join(".local/bin"),
             skip_frontend: false,
             lan_mode: false,
+            host: None,
+            port: None,
         };
 
         while let Some(arg) = args.next() {
@@ -187,9 +192,15 @@ impl InstallOptions {
                 }
                 "--skip-frontend" => options.skip_frontend = true,
                 "--lan" => options.lan_mode = true,
+                "--host" => {
+                    options.host = Some(args.next().ok_or("missing value after --host")?);
+                }
+                "--port" => {
+                    options.port = Some(args.next().ok_or("missing value after --port")?.parse()?);
+                }
                 "-h" | "--help" => {
                     println!(
-                        "Usage: cargo run -p xtask -- install [--prefix DIR] [--skip-frontend] [--lan]"
+                        "Usage: cargo run -p xtask -- install [--prefix DIR] [--skip-frontend] [--lan] [--host HOST] [--port PORT]"
                     );
                     std::process::exit(0);
                 }
@@ -200,6 +211,30 @@ impl InstallOptions {
             }
         }
 
+        if (options.host.is_some() || options.port.is_some()) && !options.lan_mode {
+            return Err(
+                "--host and --port require --lan; the default installation stays loopback-only"
+                    .into(),
+            );
+        }
+        Ok(options)
+    }
+
+    fn with_missing_lan_defaults(&self, path: &Path) -> Result<Self> {
+        let saved: Value = match fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Value::Null,
+            Err(error) => return Err(error.into()),
+        };
+        let mut options = self.clone();
+        // Initialise an unset LAN binding without forwarding an override for
+        // a saved field. The CLI merges omitted fields with its persisted state.
+        if options.host.is_none() && saved.get("host").is_none_or(Value::is_null) {
+            options.host = Some("0.0.0.0".into());
+        }
+        if options.port.is_none() && saved.get("port").is_none_or(Value::is_null) {
+            options.port = Some(3000);
+        }
         Ok(options)
     }
 }
@@ -390,7 +425,15 @@ fn run_test_suite() -> Result<()> {
                 "Running Rust tests (nextest)",
                 command(
                     "cargo",
-                    ["nextest", "run", "--workspace", "--profile", "ci"],
+                    [
+                        "nextest",
+                        "run",
+                        "--workspace",
+                        "--profile",
+                        "ci",
+                        "--success-output",
+                        "immediate",
+                    ],
                 ),
             );
             record_stage_result(
@@ -403,7 +446,16 @@ fn run_test_suite() -> Result<()> {
         Ok("cargo") | Err(_) => record_stage_result(
             &mut failures,
             "Running Rust tests",
-            command("cargo", ["test", "--workspace", "--no-fail-fast"]),
+            command(
+                "cargo",
+                [
+                    "test",
+                    "--workspace",
+                    "--no-fail-fast",
+                    "--",
+                    "--show-output",
+                ],
+            ),
         ),
         Ok(other) => return Err(format!("unknown SWAGE_TEST_RUNNER '{other}'").into()),
     }
@@ -781,11 +833,9 @@ fn release(options: &ReleaseOptions) -> Result<()> {
             ],
         ),
     )?;
-    ensure_file(
-        "target/release/swage",
-        "release binary was not produced: target/release/swage",
-    )?;
-    println!("==> Built target/release/{BINARY_NAME}");
+    let binary = release_binary_path(&cargo_target_directory()?);
+    ensure_file(&binary, "release binary was not produced")?;
+    println!("==> Built {}", binary.display());
     Ok(())
 }
 
@@ -819,25 +869,31 @@ fn install(options: &InstallOptions) -> Result<()> {
 
     fs::create_dir_all(&options.prefix)?;
     let installed_binary = options.prefix.join(BINARY_NAME);
-    publish_binary_atomically(Path::new("target/release/swage"), &installed_binary)?;
+    publish_binary_atomically(
+        &release_binary_path(&cargo_target_directory()?),
+        &installed_binary,
+    )?;
     println!("==> Installed swage to {}", installed_binary.display());
 
-    if options.lan_mode {
-        run_command("Configuring gateway to bind 0.0.0.0:3000 by default", {
-            let mut command = Command::new(&installed_binary);
-            command
-                .arg("gateway")
-                .arg("install")
-                .arg("--host")
-                .arg("0.0.0.0")
-                .arg("--port")
-                .arg("3000");
-            command
-        })?;
-    }
+    let options = if options.lan_mode {
+        let path = swage_config::discovery::effective_root_path().join("service.json");
+        let options = options.with_missing_lan_defaults(&path)?;
+        run_command(
+            "Saving gateway binding defaults",
+            lan_configuration_command(&installed_binary, &options),
+        )?;
+        options
+    } else {
+        options.clone()
+    };
 
     hot_swap_gateway_if_running(&installed_binary)?;
-    print_install_next_steps(&options.prefix, options.lan_mode);
+    print_install_next_steps(
+        &options.prefix,
+        options.lan_mode,
+        options.host.as_deref(),
+        options.port,
+    )?;
     Ok(())
 }
 
@@ -869,14 +925,35 @@ fn temporary_install_path(installed_binary: &Path) -> Result<PathBuf> {
     Ok(installed_binary.with_file_name(format!(".{file_name}.installing.{}", std::process::id())))
 }
 
+fn release_binary_path(target_directory: &Path) -> PathBuf {
+    target_directory.join("release").join(BINARY_NAME)
+}
+
+fn lan_configuration_command(binary: &Path, options: &InstallOptions) -> Command {
+    let mut command = Command::new(binary);
+    command.args(["gateway", "set-defaults"]);
+    if let Some(host) = &options.host {
+        command.args(["--host", host]);
+    }
+    if let Some(port) = options.port {
+        command.args(["--port", &port.to_string()]);
+    }
+    command
+}
+
 fn hot_swap_gateway_if_running(installed_binary: &Path) -> Result<()> {
     let status = Command::new(installed_binary)
         .args(["gateway", "status"])
-        .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()?;
+        .output()?;
 
-    if !status.success() {
+    // Status also succeeds when no gateway exists. Its healthy-running line
+    // is emitted only after the process and live health check both succeed.
+    if !status.status.success()
+        || !String::from_utf8_lossy(&status.stdout)
+            .lines()
+            .any(|line| line.starts_with("Gateway is running (PID "))
+    {
         return Ok(());
     }
 
@@ -1326,37 +1403,76 @@ fn print_dev_urls(options: &DevOptions) {
     println!();
 }
 
-fn print_install_next_steps(prefix: &Path, lan_mode: bool) {
-    println!();
-    println!("Next steps:");
+fn print_install_next_steps(
+    prefix: &Path,
+    lan_mode: bool,
+    host: Option<&str>,
+    port: Option<u16>,
+) -> io::Result<()> {
+    write_install_next_steps(&mut std::io::stdout(), prefix, lan_mode, host, port)
+}
+
+fn write_install_next_steps(
+    output: &mut impl std::io::Write,
+    prefix: &Path,
+    lan_mode: bool,
+    host: Option<&str>,
+    port: Option<u16>,
+) -> std::io::Result<()> {
+    writeln!(output)?;
+    writeln!(output, "Next steps:")?;
     if path_contains(prefix) {
-        println!("  1. Start the gateway: swage gateway start");
+        writeln!(output, "  1. Start the gateway: swage gateway start")?;
     } else {
-        println!("  1. {} is not on PATH yet.", prefix.display());
-        println!(
+        writeln!(output, "  1. {} is not on PATH yet.", prefix.display())?;
+        writeln!(
+            output,
             "     fish: set -U fish_user_paths {} $fish_user_paths",
             prefix.display()
-        );
-        println!(
+        )?;
+        writeln!(
+            output,
             "     bash: echo 'export PATH=\"{}:$PATH\"' >> ~/.bashrc",
             prefix.display()
-        );
-        println!("  2. Start the gateway: swage gateway start");
+        )?;
+        writeln!(output, "  2. Start the gateway: swage gateway start")?;
     }
 
     if lan_mode {
-        println!("  2. Open the UI:");
-        println!("     Local: http://127.0.0.1:3000");
-        println!(
-            "     LAN:   http://{}:3000",
-            lan_ip().unwrap_or_else(|| "<this-machine-ip>".to_string())
-        );
-        println!();
-        println!("LAN exposure warning:");
-        println!("  The gateway has no authentication. Only use --lan on networks you trust.");
+        if let (Some(host), Some(port)) = (host, port)
+            && port != 0
+        {
+            let host = if host == "0.0.0.0" {
+                lan_ip().unwrap_or_else(|| "<this-machine-ip>".to_string())
+            } else {
+                host.to_owned()
+            };
+            writeln!(output, "  2. Open the UI:")?;
+            writeln!(
+                output,
+                "     LAN:   http://{}:{port}",
+                if host.contains(':') {
+                    format!("[{}]", host.trim_start_matches('[').trim_end_matches(']'))
+                } else {
+                    host.to_owned()
+                }
+            )?;
+            writeln!(output)?;
+        } else {
+            writeln!(
+                output,
+                "  2. Find the bound address after startup: swage gateway status"
+            )?;
+        }
+        writeln!(output, "LAN exposure warning:")?;
+        writeln!(
+            output,
+            "  The gateway has no authentication. Only use --lan on networks you trust."
+        )?;
     } else {
-        println!("  2. Open http://127.0.0.1:3000 in a browser.");
+        writeln!(output, "  2. Open http://127.0.0.1:3000 in a browser.")?;
     }
+    Ok(())
 }
 
 fn warn_if_vite_proxy_mismatch(gateway_port: &str) -> Result<()> {
@@ -1417,12 +1533,14 @@ fn option_value(arg: &str) -> &str {
 
 fn print_help() {
     println!(
-        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check (workspace and frontend type check only)\n  check-gate (full static rung)\n  check-design-tokens\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan]"
+        "Usage: cargo run -p xtask -- <command>\n\nCommands:\n  setup\n  build-dev [--embed-frontend]\n  dev [--gateway-port PORT] [--vite-host HOST] [--vite-port PORT]\n  fmt\n  fmt-check\n  check (workspace and frontend type check only)\n  check-gate (full static rung)\n  check-design-tokens\n  clippy\n  test\n  test-lib <package> [filter...]\n  test-integration <package> <test-target> [filter...]\n  verify (alias: ci)\n  sweep\n  release [--force-frontend]\n  install [--prefix DIR] [--skip-frontend] [--lan] [--host HOST] [--port PORT]"
     );
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{InstallOptions, lan_configuration_command, release_binary_path};
+    use std::path::Path;
     use std::path::PathBuf;
 
     use super::{
@@ -1479,6 +1597,245 @@ mod tests {
                 .parse()
                 .unwrap_or_else(|_| panic!("cannot parse documented gate count {other:?}")),
         }
+    }
+
+    #[test]
+    fn explicit_binding_requires_lan() {
+        for args in [["--host", "127.0.0.1"], ["--port", "3000"]] {
+            let result = InstallOptions::parse(args.into_iter().map(str::to_owned));
+            assert!(
+                result.is_err(),
+                "explicit {args:?} was silently accepted without --lan"
+            );
+            assert!(result.err().unwrap().to_string().contains("--lan"));
+        }
+        assert!(InstallOptions::parse(std::iter::empty()).is_ok());
+    }
+
+    fn next_steps(host: &str, port: u16) -> String {
+        let mut output = Vec::new();
+        super::write_install_next_steps(
+            &mut output,
+            Path::new("/isolated/bin"),
+            true,
+            Some(host),
+            Some(port),
+        )
+        .unwrap();
+        String::from_utf8(output).unwrap()
+    }
+
+    #[test]
+    fn next_steps_bracket_ipv6_once() {
+        for (host, expected) in [
+            ("::1", "http://[::1]:4321"),
+            ("[::1]", "http://[::1]:4321"),
+            ("192.0.2.10", "http://192.0.2.10:4321"),
+            ("gateway.example", "http://gateway.example:4321"),
+        ] {
+            let output = next_steps(host, 4321);
+            let urls: Vec<_> = output
+                .split_whitespace()
+                .filter(|word| word.contains("://"))
+                .collect();
+            assert_eq!(urls, [expected], "{output}");
+        }
+    }
+
+    #[test]
+    fn next_steps_find_ephemeral_port_through_status() {
+        let output = next_steps("[::1]", 0);
+        assert!(
+            !output.contains("http://"),
+            "ephemeral port is not a usable URL: {output}"
+        );
+        assert!(output.contains("swage gateway status"), "{output}");
+    }
+
+    #[cfg(unix)]
+    fn assert_hot_swap(status_output: &str, status_code: u8, expected_restart: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::var_os("SWAGE_TEST_SCRATCH_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!(
+                "install-fake-{}-{status_code}-{expected_restart}",
+                std::process::id()
+            ));
+        std::fs::create_dir(&root).unwrap();
+        let binary = root.join("swage");
+        let calls = root.join("calls");
+        // Only this fake can be executed; it records whether restart was requested.
+        std::fs::write(&binary, format!(
+            "#!/bin/sh\ncase \"$*\" in\n'gateway status') printf '%s\\n' '{status_output}'; exit {status_code};;\n'gateway restart') printf restart > \"${{0%/*}}/calls\";;\n*) exit 99;;\nesac\n"
+        )).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let result = super::hot_swap_gateway_if_running(&binary);
+        let restarted = calls.exists();
+        std::fs::remove_dir_all(&root).unwrap();
+        result.unwrap();
+        assert_eq!(
+            restarted, expected_restart,
+            "status {status_output:?} with exit {status_code}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absent_gateway_stays_stopped() {
+        assert_hot_swap("Gateway is not running", 0, false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_status_cannot_trigger_restart() {
+        assert_hot_swap("Gateway is running (PID 123)", 1, false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proven_running_gateway_is_restarted() {
+        assert_hot_swap(
+            "Gateway is running (PID 123)\n  Address: http://127.0.0.1:4321",
+            0,
+            true,
+        );
+    }
+
+    #[test]
+    fn lan_install_saves_the_requested_binding_with_a_valid_command() {
+        let parsed = InstallOptions::parse(
+            ["--lan", "--host", "192.0.2.10", "--port", "4321"]
+                .into_iter()
+                .map(str::to_owned),
+        );
+        assert!(parsed.is_ok(), "caller-supplied binding was refused");
+        let options = parsed.unwrap();
+        let command = lan_configuration_command(Path::new("/isolated/swage"), &options);
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "gateway",
+                "set-defaults",
+                "--host",
+                "192.0.2.10",
+                "--port",
+                "4321"
+            ]
+        );
+    }
+
+    fn lan_args_with_saved_defaults(flags: &[&str], saved: Option<&str>) -> Vec<String> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT_ROOT: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::var_os("SWAGE_TEST_SCRATCH_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!(
+                "install-binding-{}-{}",
+                std::process::id(),
+                NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
+            ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("service.json");
+        if let Some(saved) = saved {
+            std::fs::write(&path, saved).unwrap();
+        }
+        let parsed = InstallOptions::parse(flags.iter().map(|flag| (*flag).to_owned())).unwrap();
+        let options = parsed.with_missing_lan_defaults(&path).unwrap();
+        let command = lan_configuration_command(Path::new("/isolated/swage"), &options);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap().to_owned())
+            .collect();
+        std::fs::remove_dir_all(&root).unwrap();
+        args
+    }
+
+    #[test]
+    fn lan_defaults_preserve_unspecified_saved_bindings() {
+        let saved = r#"{"host":"[::1]","port":6789,"config":"chosen-topic"}"#;
+        for (flags, expected) in [
+            (
+                vec!["--lan", "--port", "4321"],
+                vec!["gateway", "set-defaults", "--port", "4321"],
+            ),
+            (
+                vec!["--lan", "--host", "192.0.2.10"],
+                vec!["gateway", "set-defaults", "--host", "192.0.2.10"],
+            ),
+            (vec!["--lan"], vec!["gateway", "set-defaults"]),
+            (
+                vec!["--lan", "--host", "0.0.0.0", "--port", "3000"],
+                vec![
+                    "gateway",
+                    "set-defaults",
+                    "--host",
+                    "0.0.0.0",
+                    "--port",
+                    "3000",
+                ],
+            ),
+        ] {
+            assert_eq!(
+                lan_args_with_saved_defaults(&flags, Some(saved)),
+                expected,
+                "{flags:?}"
+            );
+        }
+        assert_eq!(
+            lan_args_with_saved_defaults(&["--lan"], Some(r#"{"host":"[::1]","port":0}"#)),
+            ["gateway", "set-defaults"]
+        );
+        for saved in [
+            None,
+            Some(r#"{"host":null,"port":null,"config":"chosen-topic"}"#),
+        ] {
+            assert_eq!(
+                lan_args_with_saved_defaults(&["--lan"], saved),
+                [
+                    "gateway",
+                    "set-defaults",
+                    "--host",
+                    "0.0.0.0",
+                    "--port",
+                    "3000"
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn next_steps_for_unspecified_bindings_use_status() {
+        for (host, port) in [(None, Some(4321)), (Some("127.0.0.1"), None), (None, None)] {
+            let mut output = Vec::new();
+            super::write_install_next_steps(
+                &mut output,
+                Path::new("/isolated/bin"),
+                true,
+                host,
+                port,
+            )
+            .unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert!(
+                !output.contains("://"),
+                "unspecified saved binding was guessed: {output}"
+            );
+            assert!(output.contains("swage gateway status"), "{output}");
+        }
+    }
+
+    #[test]
+    fn release_artifact_uses_the_resolved_target_directory() {
+        assert_eq!(
+            release_binary_path(Path::new("/custom/cargo-output")),
+            PathBuf::from("/custom/cargo-output/release/swage")
+        );
     }
 
     #[test]

@@ -42,6 +42,7 @@ async function handle(request, response) {
       process.env.SWAGE_E2E_PROVIDER_REQUESTS,
       `${JSON.stringify({
         prompt: body.messages.at(-1)?.content ?? null,
+        system: body.system ?? null,
         effort: body.output_config?.effort ?? null,
       })}\n`,
     );

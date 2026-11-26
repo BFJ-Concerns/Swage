@@ -15,6 +15,8 @@ use swage_core::{
     ToolCompletionRequest, ToolCompletionResponse,
 };
 
+use swage_core::{ProviderAttemptOutcome, ProviderAttemptRecord};
+
 use crate::provider::{
     LlmProvider, contains_user_visible_content, may_forward_before_attempt_commits,
     spawn_stream_forwarder,
@@ -120,7 +122,9 @@ impl RetryProvider {
     /// The result is floored at `retry_after` extracted from a `RateLimited`
     /// error, ensuring the provider's hint is always respected.
     fn compute_backoff(&self, attempt: u32, error: &ProviderError) -> Duration {
-        let retry_after = if let ProviderError::RateLimited { retry_after, .. } = error {
+        let retry_after = if let ProviderError::RateLimited { retry_after, .. }
+        | ProviderError::Overloaded { retry_after, .. } = error
+        {
             *retry_after
         } else {
             None
@@ -135,6 +139,17 @@ impl RetryProvider {
 /// Streaming adapters expose rendered errors here, so only the leading status
 /// token is authoritative. Provider body text must never supply a status or
 /// override the envelope.
+/// The output limit the inner provider fills in for the model a request
+/// names, when the request sets none of its own. A refused attempt of such a
+/// request after which this has changed taught the provider the model's
+/// limit — an undocumented model's refusal states it — so the request it
+/// would send now differs from the refused one, and is sent at once as a new
+/// attempt, outside the transient-retry budget and without backoff. That
+/// happens once per call: a second change is treated as an ordinary failure.
+fn provider_output_limit(inner: &dyn LlmProvider, model: Option<&str>) -> Option<u32> {
+    inner.output_limit(model.unwrap_or_else(|| inner.model_id()))
+}
+
 fn is_permanent_stream_error(message: &str) -> bool {
     if message.starts_with("authentication failed for provider ") {
         return true;
@@ -176,6 +191,10 @@ impl LlmProvider for RetryProvider {
         self.inner.effort_capability(model)
     }
 
+    fn output_limit(&self, model: &str) -> Option<u32> {
+        self.inner.output_limit(model)
+    }
+
     async fn count_tokens(
         &self,
         request: &CompletionRequest,
@@ -194,9 +213,19 @@ impl LlmProvider for RetryProvider {
         request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
         let mut attempt = 0u32;
+        let mut resent_at_learned_limit = false;
         loop {
+            let limit_before = provider_output_limit(self.inner.as_ref(), request.model.as_deref());
             match self.inner.complete(request.clone()).await {
                 Ok(response) => return Ok(response),
+                Err(_)
+                    if !resent_at_learned_limit
+                        && request.max_tokens.is_none()
+                        && provider_output_limit(self.inner.as_ref(), request.model.as_deref())
+                            != limit_before =>
+                {
+                    resent_at_learned_limit = true;
+                }
                 Err(err) if err.is_retriable() && attempt < self.config.max_retries => {
                     let delay = self.compute_backoff(attempt, &err);
                     tokio::time::sleep(delay).await;
@@ -214,9 +243,19 @@ impl LlmProvider for RetryProvider {
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, ProviderError> {
         let mut attempt = 0u32;
+        let mut resent_at_learned_limit = false;
         loop {
+            let limit_before = provider_output_limit(self.inner.as_ref(), request.model.as_deref());
             match self.inner.complete_with_tools(request.clone()).await {
                 Ok(response) => return Ok(response),
+                Err(_)
+                    if !resent_at_learned_limit
+                        && request.max_tokens.is_none()
+                        && provider_output_limit(self.inner.as_ref(), request.model.as_deref())
+                            != limit_before =>
+                {
+                    resent_at_learned_limit = true;
+                }
                 Err(err) if err.is_retriable() && attempt < self.config.max_retries => {
                     let delay = self.compute_backoff(attempt, &err);
                     tokio::time::sleep(delay).await;
@@ -244,9 +283,38 @@ impl LlmProvider for RetryProvider {
         spawn_stream_forwarder(move |tx| async move {
             let mut attempt = 0u32;
             let mut active_retry: Option<u32> = None;
+            let mut resent_at_learned_limit = false;
 
             loop {
                 if tx.is_closed() {
+                    return;
+                }
+                let limit_before = provider_output_limit(inner.as_ref(), request.model.as_deref());
+                let snapshot = inner.provider_request_snapshot(&request, true);
+                let mut attempt_record = ProviderAttemptRecord {
+                    provider: snapshot["provider"]
+                        .as_str()
+                        .unwrap_or("generic")
+                        .to_owned(),
+                    model_id: snapshot["body"]["model"]
+                        .as_str()
+                        .or(request.model.as_deref())
+                        .unwrap_or_else(|| inner.model_id())
+                        .to_owned(),
+                    route_id: "direct".into(),
+                    request: Some(snapshot),
+                    id: format!("{:032x}", rand::random::<u128>()),
+                    round: 0,
+                    attempt: attempt + u32::from(resent_at_learned_limit) + 1,
+                    started_at_ms: now_ms(),
+                    ended_at_ms: None,
+                    outcome: ProviderAttemptOutcome::Outstanding,
+                    error: None,
+                };
+                if tx
+                    .send(StreamChunk::ProviderAttempt(attempt_record.clone()))
+                    .is_err()
+                {
                     return;
                 }
                 let mut stream = inner.stream(request.clone());
@@ -258,6 +326,14 @@ impl LlmProvider for RetryProvider {
                     () = tx.closed() => return,
                     chunk = stream.next() => chunk,
                 } {
+                    match &chunk {
+                        StreamChunk::Error { message }
+                        | StreamChunk::ProviderAnomaly { message } => {
+                            settle_attempt(&tx, &mut attempt_record, Some(message.clone()));
+                        }
+                        StreamChunk::Done { .. } => settle_attempt(&tx, &mut attempt_record, None),
+                        _ => {}
+                    }
                     match chunk {
                         StreamChunk::Error { message } if !output_started => {
                             retryable_error = Some((message, false));
@@ -318,6 +394,7 @@ impl LlmProvider for RetryProvider {
                 }
 
                 let Some((message, is_anomaly)) = retryable_error else {
+                    settle_attempt(&tx, &mut attempt_record, None);
                     if let Some(retry_attempt) = active_retry.take()
                         && tx
                             .send(StreamChunk::ProviderRetrySettled {
@@ -337,6 +414,16 @@ impl LlmProvider for RetryProvider {
                     }
                     return;
                 };
+
+                if !is_anomaly
+                    && !resent_at_learned_limit
+                    && request.max_tokens.is_none()
+                    && provider_output_limit(inner.as_ref(), request.model.as_deref())
+                        != limit_before
+                {
+                    resent_at_learned_limit = true;
+                    continue;
+                }
 
                 if attempt >= config.max_retries
                     || (!is_anomaly && is_permanent_stream_error(&message))
@@ -390,6 +477,33 @@ impl LlmProvider for RetryProvider {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn settle_attempt(
+    tx: &tokio::sync::mpsc::UnboundedSender<StreamChunk>,
+    record: &mut ProviderAttemptRecord,
+    error: Option<String>,
+) {
+    if record.ended_at_ms.is_some() {
+        return;
+    }
+    record.ended_at_ms = Some(now_ms());
+    record.outcome = if error.is_some() {
+        ProviderAttemptOutcome::Failed
+    } else {
+        ProviderAttemptOutcome::Succeeded
+    };
+    record.error = error;
+    let _ = tx.send(StreamChunk::ProviderAttempt(record.clone()));
+}
 
 #[cfg(test)]
 mod tests {
@@ -565,12 +679,22 @@ mod tests {
         }
     }
 
+    // Attempt records are asserted through the gateway's stored turn. These
+    // tests pin retry control, progress and content independently of that trail.
+    fn progress_and_output(
+        stream: Pin<Box<dyn Stream<Item = StreamChunk> + Send>>,
+    ) -> Pin<Box<dyn Stream<Item = StreamChunk> + Send>> {
+        Box::pin(stream.filter(|chunk| {
+            futures::future::ready(!matches!(chunk, StreamChunk::ProviderAttempt(_)))
+        }))
+    }
+
     async fn http_error_chunks(adapter: &str, endpoint: &ErrorEndpoint) -> Vec<StreamChunk> {
         let retry =
             RetryProvider::new_erased(http_provider(adapter, &endpoint.base_url), zero_backoff());
         tokio::time::timeout(
             Duration::from_secs(5),
-            retry.stream(completion_req()).collect(),
+            progress_and_output(retry.stream(completion_req())).collect(),
         )
         .await
         .expect("the local HTTP rejection must terminate the stream")
@@ -1001,6 +1125,32 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test(start_paused = true)]
+    async fn overload_exhaustion_preserves_category_and_retry_after() {
+        let hint = Duration::from_secs(5);
+        let retry = RetryProvider::new(
+            FailN::new(
+                10,
+                crate::http::map_http_error(529, "capacity exhausted".into(), Some(5)),
+            ),
+            RetryConfig {
+                max_retries: 2,
+                initial_backoff: Duration::ZERO,
+                max_backoff: Duration::ZERO,
+            },
+        );
+        let started = tokio::time::Instant::now();
+        let error = retry.complete(completion_req()).await.unwrap_err();
+        assert!(
+            matches!(error, ProviderError::Overloaded { retry_after: Some(value), .. } if value == hint),
+            "exhaustion must keep overload distinct: {error}"
+        );
+        assert!(
+            started.elapsed() >= hint * 2,
+            "overload must retain its retry-after floor"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn complete_waits_at_least_retry_after_on_rate_limit() {
         // Zero initial_backoff so jitter contributes nothing; only retry_after remains.
         let retry_after_hint = Duration::from_secs(5);
@@ -1094,7 +1244,7 @@ mod tests {
     async fn stream_forwards_first_chunk_before_inner_stream_finishes() {
         let (inner, mut inner_tx, _) = ControlledProvider::new();
         let retry = RetryProvider::new(inner, zero_backoff());
-        let mut stream = retry.stream(completion_req());
+        let mut stream = progress_and_output(retry.stream(completion_req()));
 
         inner_tx
             .send(StreamChunk::Delta {
@@ -1294,7 +1444,7 @@ mod tests {
     async fn stream_forwards_post_output_error_without_retrying() {
         let (inner, mut inner_tx, _) = ControlledProvider::new();
         let retry = RetryProvider::new(inner, zero_backoff());
-        let mut stream = retry.stream(completion_req());
+        let mut stream = progress_and_output(retry.stream(completion_req()));
 
         inner_tx
             .send(StreamChunk::Delta {
@@ -1381,7 +1531,7 @@ mod tests {
                 max_backoff: Duration::from_secs(60),
             },
         );
-        let mut stream = retry.stream(completion_req());
+        let mut stream = progress_and_output(retry.stream(completion_req()));
 
         assert!(matches!(
             stream.next().await,
@@ -1404,7 +1554,7 @@ mod tests {
     async fn dropping_receiver_drops_active_inner_stream() {
         let (inner, mut inner_tx, dropped) = ControlledProvider::new();
         let retry = RetryProvider::new(inner, zero_backoff());
-        let mut stream = retry.stream(completion_req());
+        let mut stream = progress_and_output(retry.stream(completion_req()));
 
         inner_tx
             .send(StreamChunk::Delta {
@@ -1445,6 +1595,10 @@ mod tests {
                 levels: vec![swage_core::Effort::Low],
                 can_disable: false,
             })
+        }
+
+        fn output_limit(&self, _: &str) -> Option<u32> {
+            Some(4321)
         }
 
         async fn count_tokens(&self, _: &CompletionRequest) -> Result<Option<u64>, ProviderError> {
@@ -1495,6 +1649,12 @@ mod tests {
     fn effort_capability_delegates_to_the_wrapped_provider() {
         let provider = RetryProvider::with_defaults(CountingProbe);
         assert!(provider.effort_capability("any").is_some());
+    }
+
+    #[test]
+    fn output_limit_delegates_to_the_wrapped_provider() {
+        let provider = RetryProvider::with_defaults(CountingProbe);
+        assert_eq!(provider.output_limit("any"), Some(4321));
     }
 
     #[test]

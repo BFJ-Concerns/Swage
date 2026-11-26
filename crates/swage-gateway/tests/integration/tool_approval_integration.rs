@@ -176,13 +176,38 @@ async fn start_test_server_with_tools(
     tools: Vec<Arc<dyn swage_tool::tool::Tool>>,
 ) -> (Router, SocketAddr, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(provider),
         config,
         swage_gateway::tool::ToolDispatcher::allow_all(tools),
         None,
+    );
+    let router = build_router(state);
+
+    let (addr, _server) = start_live_server(router.clone()).await;
+
+    (router, addr, storage)
+}
+
+/// Like `start_test_server_with_tools`, but serving from `data_root`, so a test
+/// can place gateway-owned files there before the gateway reads them.
+async fn start_test_server_with_tools_at(
+    provider: impl LlmProvider + 'static,
+    config: ResolvedConfig,
+    tools: Vec<Arc<dyn swage_tool::tool::Tool>>,
+    data_root: &std::path::Path,
+) -> (Router, SocketAddr, Arc<SqliteStorage>) {
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
+        Arc::new(provider),
+        config,
+        swage_gateway::tool::ToolDispatcher::allow_all(tools),
+        None,
+        data_root.to_path_buf(),
     );
     let router = build_router(state);
 
@@ -1459,7 +1484,7 @@ async fn native_approval_scope_with_workspace(scope: &str, read: bool, symlink: 
     // A fresh gateway has no session grant cache: permanent access must load from storage.
     let (router, addr) = if scope == "permanent" {
         let provider = MockProvider::new(vec![next(), native_done()]);
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(provider),
@@ -1808,4 +1833,158 @@ async fn native_file_approval_missing_search_grants_only_that_directory() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_file_approval_symlinked_workspace_releases_sibling_write() {
     native_approval_scope_with_workspace("session", false, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shipped_guidance_reads_without_approval_and_stays_read_only() {
+    let guard = SwageHomeGuard::isolate();
+    let data_root = guard._temp_dir.path();
+    let files = tempfile::tempdir().unwrap();
+    let project = files.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let projection = data_root.join("generated/shipped-skills");
+    let skill = projection.join("workflow-authoring/SKILL.md");
+    let workflow = projection.join("research/workflows/research-sweep.js");
+    let source = include_str!("../../../../shipped/skills/workflow-authoring/SKILL.md");
+    let script = include_str!("../../../../shipped/skills/research/workflows/research-sweep.js");
+    // These are read inputs only; authority comes from the real turn context.
+    std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(workflow.parent().unwrap()).unwrap();
+    std::fs::write(&skill, source).unwrap();
+    std::fs::write(&workflow, script).unwrap();
+    let outside = files.path().join("outside.txt");
+    std::fs::write(&outside, "outside marker").unwrap();
+    let sibling = data_root.join("generated/unrelated.txt");
+    std::fs::write(&sibling, "unrelated generated marker").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, projection.join("escape.txt")).unwrap();
+
+    // Reconstruct the gateway state under the same data root, without carrying
+    // any approval or workspace grant for shipped content to the next instance.
+    for _ in 0..2 {
+        let mut calls = vec![
+            ("skill", "file_read", json!({"path": skill}), false),
+            ("workflow", "file_read", json!({"path": workflow}), false),
+            (
+                "list",
+                "file_list",
+                json!({"path": projection.join("research/workflows")}),
+                false,
+            ),
+            (
+                "search",
+                "file_search",
+                json!({"path": projection.join("research/workflows"), "pattern": "export const defaults"}),
+                false,
+            ),
+            ("outside", "file_read", json!({"path": outside}), true),
+            ("sibling", "file_read", json!({"path": sibling}), true),
+            (
+                "parent",
+                "file_list",
+                json!({"path": data_root.join("generated")}),
+                true,
+            ),
+        ];
+        #[cfg(unix)]
+        calls.push((
+            "escape",
+            "file_read",
+            json!({"path": projection.join("escape.txt")}),
+            true,
+        ));
+        calls.push((
+            "write",
+            "file_write",
+            json!({"path": skill, "content": "mutated"}),
+            false,
+        ));
+        let responses = calls
+            .iter()
+            .flat_map(|(id, tool, args, _)| [native_call(id, tool, args.clone()), native_done()])
+            .collect();
+        let mut config = ResolvedConfig::default();
+        config.sandbox.enabled = false;
+        config.sandbox.allow_degraded_execution = true;
+        // Exercise location approvals, without per-tool write approval masking
+        // the projection's own write refusal.
+        config.tools.permissions.require_approval.clear();
+        let (router, addr, storage) = start_test_server_with_tools_at(
+            MockProvider::new(responses),
+            config,
+            native_file_tools(),
+            data_root,
+        )
+        .await;
+        let (_, conversation) = http(&router, "POST", "/api/conversations").await;
+        let id = conversation["id"].as_str().unwrap();
+        attach_native_workspace(&storage, id, &project).await;
+        let (mut sink, mut stream) = connect_ws(addr, id).await;
+        for (call_id, _, _, needs_approval) in calls {
+            if call_id == "write" {
+                // Even an explicit overlapping read-write workspace must not
+                // turn shipped product content into an editable resource.
+                attach_native_workspace(&storage, id, &projection).await;
+            }
+            let approvals_before = storage.list_approvals().await.unwrap().len();
+            ws_send(
+                &mut sink,
+                json!({"type": "send_message", "content": call_id}),
+            )
+            .await;
+            let complete = tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    let event = ws_recv_lenient(&mut stream).await.unwrap();
+                    if event["type"] == "approval_required" {
+                        assert!(
+                            needs_approval,
+                            "shipped call {call_id} requested approval: {event}"
+                        );
+                        assert_eq!(event["kind"], "location");
+                        let (status, body) = live_http_json(
+                            addr,
+                            reqwest::Method::POST,
+                            &format!("/api/approvals/{}", event["approval_id"].as_str().unwrap()),
+                            Some(json!({"decision": "rejected", "scope": "once"})),
+                        )
+                        .await;
+                        assert_eq!(status, StatusCode::OK, "{body}");
+                    }
+                    if event["type"] == "turn_complete" {
+                        break event;
+                    }
+                    assert_ne!(event["type"], "error", "{event}");
+                }
+            })
+            .await
+            .expect("native shipped-content turn completes");
+            assert_eq!(
+                storage.list_approvals().await.unwrap().len() - approvals_before,
+                usize::from(needs_approval),
+                "approval rows for {call_id}"
+            );
+            let call = native_result(&storage, &complete, call_id).await;
+            let result = call.result.as_deref().unwrap();
+            if needs_approval {
+                assert_ne!(call.status.as_deref(), Some("success"), "{result}");
+            } else if call_id == "write" {
+                assert_eq!(call.status.as_deref(), Some("error"), "{result}");
+                assert!(
+                    result.contains("shipped skills have read-only access"),
+                    "{result}"
+                );
+                assert_eq!(std::fs::read_to_string(&skill).unwrap(), source);
+            } else {
+                assert_eq!(call.status.as_deref(), Some("success"), "{result}");
+                let expected = match call_id {
+                    "skill" => "Authoring and running workflows",
+                    "workflow" => "export const defaults",
+                    "list" | "search" => "research-sweep.js",
+                    _ => unreachable!(),
+                };
+                assert!(result.contains(expected), "{result}");
+            }
+        }
+        sink.close().await.unwrap();
+    }
 }

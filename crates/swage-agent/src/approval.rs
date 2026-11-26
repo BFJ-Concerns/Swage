@@ -72,7 +72,9 @@ pub(crate) enum ApprovalGateOutcome {
     /// Human rejected — deliver this
     /// feedback string as the tool result.
     Rejected { feedback: String },
-    /// Timeout with interrupt policy — the turn must be interrupted.
+    /// Approval expired before execution and the policy interrupts the turn.
+    TimedOut,
+    /// The gate was interrupted without a timeout decision.
     Interrupted,
 }
 
@@ -91,7 +93,7 @@ pub(crate) struct ToolDispatchResult {
     pub is_error: bool,
     pub status: String,
     pub approval_note: Option<String>,
-    pub execution_prevented: bool,
+    pub execution: swage_protocol::client::conversation::ToolExecution,
 }
 
 impl From<(String, bool, String)> for ToolDispatchResult {
@@ -99,9 +101,22 @@ impl From<(String, bool, String)> for ToolDispatchResult {
         Self {
             content,
             is_error,
-            status,
+            status: status.clone(),
             approval_note: None,
-            execution_prevented: false,
+            execution: if status == "success" {
+                swage_protocol::client::conversation::ToolExecution::succeeded()
+            } else if matches!(
+                status.as_str(),
+                "blocked" | "rejected" | "expired" | "refused"
+            ) {
+                swage_protocol::client::conversation::ToolExecution::refused()
+            } else {
+                swage_protocol::client::conversation::ToolExecution {
+                    outcome: swage_protocol::client::conversation::ToolOutcome::Failed,
+                    stage: swage_protocol::client::conversation::ToolExecutionStage::Unknown,
+                    completion: swage_protocol::client::conversation::ToolCompletion::Unknown,
+                }
+            },
         }
     }
 }
@@ -116,8 +131,8 @@ impl ToolDispatchResult {
 }
 
 /// Record how the person approved the call without altering its payload.
-/// Success confirms execution; validation or access failures prevent it.
-/// Other errors do not establish whether execution began.
+/// Execution metadata distinguishes rejection before dispatch from validation
+/// after execution; the payload alone cannot establish that distinction.
 pub(crate) fn with_user_approval_note(
     mut result: ToolDispatchResult,
     scope: ApprovalDecisionScope,
@@ -131,12 +146,13 @@ pub(crate) fn with_user_approval_note(
         // A later gate on the same call denied it; that denial is the outcome.
         return result;
     }
-    let outcome = if result.status == "success" {
-        "; it ran after approval"
-    } else if result.execution_prevented {
-        "; it did not run"
-    } else {
-        ""
+    let outcome = match result.execution.stage {
+        swage_protocol::client::conversation::ToolExecutionStage::NotStarted => "; it did not run",
+        swage_protocol::client::conversation::ToolExecutionStage::Started
+        | swage_protocol::client::conversation::ToolExecutionStage::Finished => {
+            "; it ran after approval"
+        }
+        swage_protocol::client::conversation::ToolExecutionStage::Unknown => "",
     };
     let note = format!("[The user approved this tool call {how}{outcome}.]");
     result.approval_note = Some(match result.approval_note {

@@ -81,7 +81,20 @@ async fn graceful_stop(
     let client = GatewayClient::new(&meta.address);
 
     if let Err(e) = client.shutdown().await {
-        eprintln!("Gateway is not responding. Use --force to terminate the process.");
+        match &e {
+            ClientError::Gateway { message, .. } => eprintln!(
+                "Gateway refused to shut down: {message}. Run stop on the gateway's machine, or use --force to terminate the local process."
+            ),
+            ClientError::UnexpectedResponse { status, body, .. } => eprintln!(
+                "Gateway refused to shut down (HTTP {status}): {body}. Check the response, or use --force to terminate the local process."
+            ),
+            ClientError::ConnectionFailed { .. } | ClientError::RequestFailed { .. } => {
+                eprintln!("Gateway is not responding. Use --force to terminate the process.");
+            }
+            _ => eprintln!(
+                "Gateway shutdown failed: {e}. Use --force to terminate the local process."
+            ),
+        }
         return Err(e);
     }
 

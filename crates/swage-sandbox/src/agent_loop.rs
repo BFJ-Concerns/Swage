@@ -19,7 +19,9 @@ use crate::ipc::agent::AgentConnection;
 use crate::ipc::message::{ErrorCategory, IpcMessage};
 use crate::ipc::transport::IpcTransport;
 
-fn child_sandbox_config_from_env() -> Result<Option<crate::config::SandboxConfig>, SandboxError> {
+/// Read the host-provided configuration used by sandbox-mode tool setup.
+pub fn child_sandbox_config_from_env() -> Result<Option<crate::config::SandboxConfig>, SandboxError>
+{
     let Some(config_json) = std::env::var("SWAGE_SANDBOX_CONFIG_JSON").ok() else {
         return Ok(None);
     };
@@ -57,6 +59,7 @@ fn apply_child_landlock_from_env() -> Result<(), SandboxError> {
 /// path operations.
 struct SandboxToolContext {
     working_directory: PathBuf,
+    tool_output_directory: Option<PathBuf>,
     // Allowed paths are empty by default; the Landlock layer enforces kernel-
     // level restrictions, so the context doesn't need to duplicate them.
 }
@@ -76,6 +79,10 @@ impl ToolContext for SandboxToolContext {
 
     fn working_directory(&self) -> &Path {
         &self.working_directory
+    }
+
+    fn tool_output_directory(&self) -> Option<&Path> {
+        self.tool_output_directory.as_deref()
     }
 
     fn allowed_paths(&self) -> &[PathBuf] {
@@ -105,10 +112,18 @@ pub(crate) async fn run_loop(
     mut conn: AgentConnection,
     tools: Vec<Box<dyn Tool>>,
 ) -> Result<(), SandboxError> {
-    let working_directory = child_sandbox_config_from_env()?
+    let config = child_sandbox_config_from_env()?;
+    let tool_output_directory = config
+        .as_ref()
+        .and_then(|config| config.tool_output_location.as_ref())
+        .map(|location| location.directory.clone());
+    let working_directory = config
         .map(|config| config.working_directory)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
-    let ctx = SandboxToolContext { working_directory };
+    let ctx = SandboxToolContext {
+        working_directory,
+        tool_output_directory,
+    };
 
     // Index tools by name for O(1) lookup per request.
     let tool_map: HashMap<String, Box<dyn Tool>> = tools

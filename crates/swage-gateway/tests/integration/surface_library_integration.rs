@@ -22,7 +22,7 @@ use swage_storage::SqliteStorage;
 use swage_storage::store::{AuditStore, SurfaceStore};
 
 fn router_over(storage: Arc<SqliteStorage>) -> Router {
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(StubProvider),
@@ -516,7 +516,7 @@ async fn a_failed_save_audit_leaves_no_library_entry() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_seeded_surface_announces_the_same_refetch_signal_as_a_manual_add() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(StubProvider),
@@ -758,7 +758,7 @@ async fn the_library_tool_narrows_by_topic_tags_widens_on_request_and_adds_by_ch
     use swage_tool::context::MockToolContext;
 
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(StubProvider),
@@ -892,4 +892,98 @@ async fn the_library_tool_narrows_by_topic_tags_widens_on_request_and_adds_by_ch
         vec!["## Yesterday: shipped the gateway", "## Blockers: none"]
     );
     let _ = sprint_entry;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workspace_copy_mode_survives_reopen_and_library_removal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("surfaces.db");
+    let storage = Arc::new(SqliteStorage::open(&path).unwrap());
+    let router = router_over(Arc::clone(&storage));
+    let topic = make_topic(&router, "Origin").await;
+    let origin = make_session(&router, Some(&topic)).await;
+    let original = make_populated_surface(&router, &origin).await;
+    let entry = save(&router, &original, &[]).await;
+    let general = make_session(&router, None).await;
+    let mut copies = Vec::new();
+    for (session, shape_only) in [(&origin, false), (&general, true)] {
+        let (status, copy) = http_json(
+            &router,
+            "POST",
+            &format!("/api/sessions/{session}/surfaces"),
+            Some(json!({"title": "Copy", "library_entry_id": entry})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(copy["shape_only"], shape_only);
+        copies.push((copy["id"].as_str().unwrap().to_string(), shape_only));
+    }
+    http_json(
+        &router,
+        "DELETE",
+        &format!("/api/surface-library/{entry}"),
+        None,
+    )
+    .await;
+    drop(router);
+    drop(storage);
+    let router = router_over(Arc::new(SqliteStorage::open(&path).unwrap()));
+    for (id, shape_only) in copies {
+        let (_, copy) = http_json(&router, "GET", &format!("/api/surfaces/{id}"), None).await;
+        assert_eq!(copy["shape_only"], shape_only);
+        assert_eq!(
+            copy["modules"][0]["source"].as_str().unwrap().is_empty(),
+            shape_only
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workspace_http_rename_and_resolution_reach_the_record() {
+    let (router, storage) = make_test_router();
+    let session = make_session(&router, None).await;
+    let id = make_populated_surface(&router, &session).await;
+    let (status, renamed) = http_json(
+        &router,
+        "POST",
+        &format!("/api/surfaces/{id}"),
+        Some(json!({"title": "Boreal"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(renamed["title"], "Boreal");
+    let module = &renamed["modules"][0]["id"];
+    let (_, note) = http_json(
+        &router,
+        "POST",
+        &format!("/api/surfaces/{id}/annotations"),
+        Some(json!({"module_id": module, "body": "Accepted", "tags": []})),
+    )
+    .await;
+    let note_id = note["id"].as_str().unwrap();
+    let (status, resolved) = http_json(
+        &router,
+        "POST",
+        &format!("/api/surfaces/{id}/annotations/{note_id}/resolve"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(resolved["resolved_at"].is_string());
+    let (_, read) = http_json(&router, "GET", &format!("/api/surfaces/{id}"), None).await;
+    assert_eq!(
+        read["modules"][0]["annotations"][0]["resolved_at"],
+        resolved["resolved_at"]
+    );
+    let events = storage.list_audit_events().await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.event_kind == "surface_renamed" && e.metadata["author"] == "user")
+    );
+    assert!(
+        events.iter().any(
+            |e| e.event_kind == "surface_annotation_resolved" && e.metadata["author"] == "user"
+        )
+    );
 }

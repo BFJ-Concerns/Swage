@@ -2,9 +2,11 @@
   Message history display — renders the active conversation's messages.
   Handles markdown rendering, syntax highlighting, auto-scroll, and streaming.
 -->
-<script lang="ts">
-  import DOMPurify from "dompurify";
+<script module lang="ts">
   import { marked, Tokenizer } from "marked";
+  import DOMPurify from "dompurify";
+  import { conversationPath, parseRoute } from "../router";
+
   import { markedHighlight } from "marked-highlight";
   import hljs from "highlight.js/lib/core";
   import bash from "highlight.js/lib/languages/bash";
@@ -22,16 +24,27 @@
   import xml from "highlight.js/lib/languages/xml";
   import yaml from "highlight.js/lib/languages/yaml";
 
-  import type { ConversationStore } from "../stores/conversations";
-  import type { StreamingStore } from "../stores/streaming";
-  import { authorLabel, isPersonsMessage } from "../message-authorship";
-  import {
-    DEFAULT_DISPLAY_PREFERENCES,
-    type DisplayPreferences,
-  } from "../display-preferences";
-  import type { ToolCallView } from "../types";
-  import ToolCallDisplay from "./ToolCallDisplay.svelte";
-  import TurnContextInspectorTrigger from "./TurnContextInspectorTrigger.svelte";
+  const childSessionAddress = /^(?:swage:\/\/session|\/sessions)\/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+  // Canonicalise child-session addresses before DOMPurify checks the URI.
+  // This instance owns the hook so other rendered surfaces are unaffected.
+  const markdownSanitiser = DOMPurify();
+  markdownSanitiser.addHook("uponSanitizeAttribute", (node, attribute) => {
+    if (node.nodeName !== "A" || attribute.attrName !== "href" ||
+        node.getAttribute("href") !== attribute.attrValue) return;
+    let url: URL;
+    try {
+      url = new URL(attribute.attrValue, window.location.href);
+    } catch {
+      return;
+    }
+    // Fragments keep browser scrolling, including on child-session paths.
+    if (url.hash) return;
+    const childAddress = url.protocol === "swage:"
+      ? attribute.attrValue.split("?")[0]
+      : url.origin === window.location.origin ? url.pathname : "";
+    const childId = childSessionAddress.exec(childAddress)?.[1];
+    if (childId) attribute.attrValue = conversationPath(childId) + url.search;
+  });
 
   // ---- Markdown configuration -----------------------------------------------
   // Module-level setup: runs once when this module is first imported.
@@ -89,6 +102,21 @@
       },
     }),
   );
+</script>
+
+<script lang="ts">
+  import { on } from "svelte/events";
+
+  import type { ConversationStore } from "../stores/conversations";
+  import type { StreamingStore } from "../stores/streaming";
+  import { authorLabel, isPersonsMessage } from "../message-authorship";
+  import {
+    DEFAULT_DISPLAY_PREFERENCES,
+    type DisplayPreferences,
+  } from "../display-preferences";
+  import type { ToolCallView } from "../types";
+  import ToolCallDisplay from "./ToolCallDisplay.svelte";
+  import TurnContextInspectorTrigger from "./TurnContextInspectorTrigger.svelte";
 
   /**
    * Build a display tree from a flat tool_calls list returned by the API.
@@ -114,7 +142,7 @@
     // DOMPurify sanitises the output to prevent XSS via crafted tool results
     // or prompt injection carrying malicious HTML/script payloads.
     const raw = marked.parse(content) as string;
-    return DOMPurify.sanitize(raw);
+    return markdownSanitiser.sanitize(raw);
   }
 
   // ---- Props ----------------------------------------------------------------
@@ -125,9 +153,36 @@
     /** Injected by App.svelte — provides streaming state. */
     streamingStore?: StreamingStore;
     displayPreferences?: DisplayPreferences;
+    onNavigate?: (path: string) => void;
   }
 
-  let { store, streamingStore, displayPreferences = DEFAULT_DISPLAY_PREFERENCES }: Props = $props();
+  let { store, streamingStore, onNavigate, displayPreferences = DEFAULT_DISPLAY_PREFERENCES }: Props = $props();
+
+  function messageLinks(node: HTMLElement) {
+    return {
+      destroy: on(node, "click", (event) => {
+        if (!onNavigate || event.defaultPrevented || event.button !== 0 ||
+            event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+        const link = event.target instanceof Element ? event.target.closest("a[href]") : null;
+        if (!(link instanceof HTMLAnchorElement) || !node.contains(link) ||
+            link.hasAttribute("download") || (link.target && link.target !== "_self")) return;
+        const url = new URL(link.href);
+        // Fragments keep browser scrolling, including on child-session paths.
+        if (url.hash) return;
+        if (url.origin !== window.location.origin) return;
+        // Unknown paths are gateway resources.
+        try {
+          if (parseRoute(url.pathname).path !== url.pathname) return;
+        } catch {
+          // Malformed encoded addresses are not app routes.
+          return;
+        }
+        const path = url.pathname + url.search;
+        event.preventDefault();
+        onNavigate(path);
+      }),
+    };
+  }
 
   // ---- Auto-scroll ----------------------------------------------------------
 
@@ -150,7 +205,7 @@
   $effect(() => {
     // These accesses establish reactive tracking once the stores use $state.
     void (store?.activeConversation?.messages?.length ?? 0);
-    void (streamingStore?.streamFor?.(store?.activeConversation?.id ?? null).streamedContent.length ?? 0);
+    void streamedContent.length;
 
     if (!userScrolledUp && scrollEl) {
       requestAnimationFrame(() => {
@@ -168,10 +223,32 @@
   const stream = $derived(
     streamingStore?.streamFor?.(store?.activeConversation?.id ?? null),
   );
-  const isStreaming = $derived(stream?.isStreaming ?? streamingStore?.isStreaming ?? false);
-  const streamedContent = $derived(stream?.streamedContent ?? streamingStore?.streamedContent ?? "");
-  const turnError = $derived(stream?.turnError ?? streamingStore?.turnError ?? null);
-  const providerRetry = $derived(stream?.providerRetry ?? streamingStore?.providerRetry ?? null);
+  const streamInView = $derived(
+    (stream?.threadId ?? store?.activeConversation?.root_thread_id ?? null) ===
+      (store?.activeThreadId ?? store?.activeConversation?.root_thread_id ?? null),
+  );
+  const isStreaming = $derived(streamInView && (stream?.isStreaming ?? streamingStore?.isStreaming ?? false));
+  const streamedContent = $derived(streamInView ? (stream?.streamedContent ?? streamingStore?.streamedContent ?? "") : "");
+  const turnError = $derived(streamInView ? (stream?.turnError ?? streamingStore?.turnError ?? null) : null);
+  const providerRetry = $derived(streamInView ? (stream?.providerRetry ?? streamingStore?.providerRetry ?? null) : null);
+  const recordedFailure = $derived(messages.at(-1)?.failure_message === turnError?.message);
+  function errorSummary(detail: string, model?: string | null, catalogueSelection = false): string {
+    // The diagnostic belongs to this failure; a conversation selection can
+    // already have changed or still reflect a previous turn.
+    const provider = detail.match(/^(?:provider error: )?provider '([^']+)' at /)?.[1];
+    let reportedCause: string | undefined;
+    const jsonStart = detail.indexOf("{");
+    if (jsonStart >= 0) {
+      try {
+        const body = JSON.parse(detail.slice(jsonStart));
+        if (typeof body?.error?.message === "string" && !body.error.message.includes("{")) reportedCause = body.error.message;
+      } catch { /* Unstructured diagnostics remain in Technical details. */ }
+    }
+    const route = provider ? ` to provider ${provider}` : "";
+    const namedModel = catalogueSelection && provider && model?.startsWith(`${provider}:`) ? model.slice(provider.length + 1) : model;
+    const selection = namedModel ? ` using model ${namedModel}` : "";
+    return `The request${route}${selection} failed. ${reportedCause ? `Reported cause: ${reportedCause}` : "See the details for the reported cause."}`;
+  }
   const retryWaitSeconds = $derived(
     providerRetry ? Math.max(1, Math.ceil(providerRetry.wait_ms / 1000)) : 0,
   );
@@ -179,18 +256,18 @@
   // A turn blocked on the user's decision is not generating: its approval
   // card speaks for it, so no empty generating bubble stands in.
   const awaitingApproval = $derived(
-    (stream?.pendingApproval ?? streamingStore?.pendingApproval ?? null) !== null,
+    streamInView && (stream?.pendingApproval ?? streamingStore?.pendingApproval ?? null) !== null,
   );
   const isGenerating = $derived(isStreaming && !awaitingApproval);
   // Live tool calls for the current in-progress turn.
-  const activeToolCalls = $derived(stream?.activeToolCalls ?? streamingStore?.activeToolCalls ?? []);
+  const activeToolCalls = $derived(streamInView ? (stream?.activeToolCalls ?? streamingStore?.activeToolCalls ?? []) : []);
 
   // A turn that ended without a reply carries its account — state, tool
   // calls, failure explanation — on its request, since no assistant message
   // exists to hold it.
   function endedWithoutReply(message: (typeof messages)[number]): boolean {
     if (!isPersonsMessage(message)) return false;
-    if (message.turn_state !== "failed" && message.turn_state !== "interrupted") return false;
+    if (message.turn_state !== "failed" && message.turn_state !== "interrupted" && message.turn_state !== "cancelled") return false;
     if (!message.turn_id) {
       // A request settled live, before the gateway's record names its turn:
       // a reply would follow it directly.
@@ -249,7 +326,7 @@
   // live region below updates a handful of times per turn, not per token.
   const streamingStatus = $derived(
     turnError
-      ? `Error: ${turnError.message}`
+      ? errorSummary(turnError.message, turnError.selectedModelId, true)
       : providerRetry
         ? `Retrying provider: attempt ${providerRetry.attempt} of ${providerRetry.max_retries}`
         : isStreaming
@@ -271,6 +348,7 @@
   bind:this={scrollEl}
   onscroll={handleScroll}
   role="region"
+  use:messageLinks
   aria-label="Conversation messages"
 >
   <!-- Dedicated, throttled assistive status — see streamingStatus above. -->
@@ -332,8 +410,8 @@
         {:else}
           <!-- Assistant messages render as markdown. -->
           <div
-            class="message-content assistant-content markdown-body"
-            class:interrupted={message.turn_state === "interrupted" ||
+            class="message-content assistant-content markdown-body riso-tables"
+            class:interrupted={message.turn_state === "interrupted" || message.turn_state === "cancelled" ||
               message.turn_state === "failed" || message.turn_state === "incomplete"}
           >
             {#if shouldRenderMarkdown}
@@ -344,7 +422,9 @@
               <div class="plain-body">{message.content}</div>
             {/if}
 
-            {#if message.turn_state === "interrupted"}
+            {#if message.turn_state === "cancelled"}
+              <p class="interrupted-notice">Response cancelled</p>
+            {:else if message.turn_state === "interrupted"}
               <!-- Subtle notice below the partial response. -->
               <p class="interrupted-notice">↩ Response interrupted</p>
             {:else if message.turn_state === "incomplete"}
@@ -369,16 +449,13 @@
             </div>
           {/if}
           <p class="interrupted-notice">
-            {message.turn_state === "interrupted" ? "↩ Interrupted before a reply" : "⚠ No reply — the turn failed"}
+            {message.turn_state === "cancelled" ? "Cancelled before a reply" : message.turn_state === "interrupted" ? "↩ Interrupted before a reply" : "⚠ No reply — the turn failed"}
           </p>
         {/if}
         {#if message.failure_message}
-          <div class="turn-error" role="alert">
-            <span class="error-icon" aria-hidden="true">⚠</span>
-            <span class="error-message">{message.failure_message}</span>
-          </div>
+          {@render failureNotice(message.failure_message, message.model, retryContent(message))}
         {/if}
-        {#if retryContent(message) !== null && !isStreaming}
+        {#if !message.failure_message && retryContent(message) !== null && !isStreaming}
           <button class="branch-link" onclick={() => retry(retryContent(message)!)}>Retry</button>
         {/if}
         {#if shouldShowModel(message.role) && message.model}
@@ -431,7 +508,7 @@
     {#if isGenerating || streamedContent}
       <div class="message assistant streaming" aria-label="Assistant message">
         <span class="role-label">Assistant</span>
-        <div class="message-content assistant-content markdown-body">
+        <div class="message-content assistant-content markdown-body riso-tables">
           {#if shouldRenderMarkdown}
             <!-- Incremental markdown render — re-parses on each token. -->
             <!-- eslint-disable-next-line svelte/no-at-html-tags -->
@@ -466,17 +543,22 @@
     {/if}
 
     <!-- ---- Turn error: shown inline after any partial response ---- -->
-    {#if turnError}
-      <div class="turn-error" role="alert">
-        <span class="error-icon" aria-hidden="true">⚠</span>
-        <span class="error-message">{turnError.message}</span>
-      </div>
-      {#if lastPersonsMessage && !isStreaming}
-        <button class="branch-link" onclick={() => retry(lastPersonsMessage.content)}>Retry</button>
-      {/if}
+    {#if turnError && !recordedFailure}
+      {@render failureNotice(turnError.message, turnError.selectedModelId, lastPersonsMessage?.content ?? null, true)}
     {/if}
   {/if}
 </div>
+
+{#snippet failureNotice(detail: string, model: string | null | undefined, content: string | null, catalogueSelection = false)}
+  <div class="turn-error" role="alert">
+    <span class="error-icon" aria-hidden="true">⚠</span>
+    <div class="error-message">
+      <p>{errorSummary(detail, model, catalogueSelection)}</p>
+      <div class="error-actions"><button class="branch-link" disabled={isStreaming || content === null} onclick={() => content !== null && retry(content)}>Retry</button><a href="/settings/providers">Provider settings</a></div>
+      <details><summary>Technical details</summary><pre>{detail}</pre></details>
+    </div>
+  </div>
+{/snippet}
 
 <div class="turn-context-inspector-outlet" bind:this={inspectorTarget}></div>
 
@@ -657,6 +739,7 @@
   }
 
   .plain-body {
+    max-width: 80ch;
     white-space: pre-wrap;
   }
 
@@ -759,11 +842,18 @@
     font-weight: 500;
     font-size: var(--font-label-sm);
     letter-spacing: 0.08em;
-    text-transform: uppercase;
+    text-transform: none;
     color: var(--error);
-    max-width: 80ch;
+    max-width: min(100%, 80ch);
+    box-sizing: border-box;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
+  .error-message { min-width: 0; }
+  .error-message p { margin: 0 0 8px; }
+  .error-message pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .error-actions { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 8px; }
   .error-icon {
     flex-shrink: 0;
   }
@@ -848,31 +938,6 @@
     text-decoration: underline;
     text-decoration-thickness: 1px;
     text-underline-offset: 2px;
-  }
-
-  .markdown-body :global(table) {
-    border-collapse: collapse;
-    width: 100%;
-    margin: 0.5em 0;
-    font-size: 0.875em;
-    border: 1px solid var(--ink);
-  }
-
-  .markdown-body :global(th),
-  .markdown-body :global(td) {
-    border: 1px solid var(--rule-soft);
-    padding: 6px 10px;
-    text-align: left;
-  }
-
-  .markdown-body :global(th) {
-    background: var(--ink);
-    color: var(--paper);
-    font-family: var(--font-mono);
-    font-weight: 500;
-    font-size: 11px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
   }
 
   /* An assistant reply spans the column, so its prose carries the readable

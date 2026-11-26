@@ -22,6 +22,7 @@ pub struct RecordedDelivery {
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct ChannelInboundResponse {
+    pub queued: Option<crate::client::conversation::QueuedMessageView>,
     pub session_id: Uuid,
     pub delivered_to: Vec<DeliveryTarget>,
     pub response: String,

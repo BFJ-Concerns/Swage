@@ -1073,7 +1073,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "fetch-v8"
-version = "0.2.0"
+version = "0.0.1"
 dependencies = [
  "sha2",
  "toml",
@@ -3353,7 +3353,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "swage"
-version = "0.2.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -3377,7 +3377,7 @@ dependencies = [
 
 [[package]]
 name = "swage-agent"
-version = "0.2.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3404,7 +3404,7 @@ dependencies = [
 
 [[package]]
 name = "swage-client"
-version = "0.2.0"
+version = "0.0.1"
 dependencies = [
  "chrono",
  "futures",
@@ -3422,7 +3422,7 @@ dependencies = [
 
 [[package]]
 name = "swage-codex"
-version = "0.2.0"
+version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3436,7 +3436,7 @@ dependencies = [
 
 [[package]]
 name = "swage-config"
-version = "0.2.0"
+version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3449,7 +3449,7 @@ dependencies = [
 
 [[package]]
 name = "swage-context"
-version = "0.2.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3472,7 +3472,7 @@ dependencies = [
 
 [[package]]
 name = "swage-core"
-version = "0.2.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3490,7 +3490,7 @@ dependencies = [
 
 [[package]]
 name = "swage-device"
-version = "0.2.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -3509,7 +3509,7 @@ dependencies = [
 
 [[package]]
 name = "swage-gateway"
-version = "0.2.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -3524,6 +3524,7 @@ dependencies = [
  "jsonschema",
  "libc",
  "mime_guess",
+ "percent-encoding",
  "rand 0.10.2",
  "reqwest",
  "rusqlite",
@@ -3538,6 +3539,7 @@ dependencies = [
  "swage-context",
  "swage-core",
  "swage-device",
+ "swage-gateway",
  "swage-hook",
  "swage-protocol",
  "swage-provider",
@@ -3562,7 +3564,7 @@ dependencies = [
 
 [[package]]
 name = "swage-hook"
-version = "0.2.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "regex",
@@ -3575,7 +3577,7 @@ dependencies = [
 
 [[package]]
 name = "swage-isolate"
-version = "0.2.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "deno_core",
@@ -3588,7 +3590,7 @@ dependencies = [
 
 [[package]]
 name = "swage-protocol"
-version = "0.2.0"
+version = "0.0.1"
 dependencies = [
  "chrono",
  "schemars",
@@ -3601,7 +3603,7 @@ dependencies = [
 
 [[package]]
 name = "swage-provider"
-version = "0.2.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3619,7 +3621,7 @@ dependencies = [
 
 [[package]]
 name = "swage-python"
-version = "0.2.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "serde",
@@ -3636,7 +3638,7 @@ dependencies = [
 
 [[package]]
 name = "swage-safety"
-version = "0.2.0"
+version = "0.0.1"
 dependencies = [
  "aho-corasick",
  "regex",
@@ -3645,7 +3647,7 @@ dependencies = [
 
 [[package]]
 name = "swage-sandbox"
-version = "0.2.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3653,6 +3655,7 @@ dependencies = [
  "serde",
  "serde_json",
  "swage-core",
+ "swage-protocol",
  "swage-tool",
  "tempfile",
  "thiserror",
@@ -3663,7 +3666,7 @@ dependencies = [
 
 [[package]]
 name = "swage-storage"
-version = "0.2.0"
+version = "0.0.1"
 dependencies = [
  "aes-gcm-siv",
  "async-trait",
@@ -3686,7 +3689,7 @@ dependencies = [
 
 [[package]]
 name = "swage-tool"
-version = "0.2.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "jsonschema",
@@ -3695,6 +3698,7 @@ dependencies = [
  "swage-core",
  "swage-protocol",
  "swage-safety",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
@@ -3703,7 +3707,7 @@ dependencies = [
 
 [[package]]
 name = "swage-workflow"
-version = "0.2.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -4883,10 +4887,11 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.2.0"
+version = "0.0.1"
 dependencies = [
  "serde_json",
  "sha2",
+ "swage-config",
  "swage-workflow",
 ]
 

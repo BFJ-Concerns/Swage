@@ -6,7 +6,8 @@ use super::{
 use swage_context::briefing::BriefingElement;
 use swage_context::named_element::discover_named_elements;
 use swage_context::orientation::{
-    AvailableSkill, ChannelOrientation, OrientationElement, SessionEnvironment, ToolRoot,
+    AvailableSkill, ChannelOrientation, OrientationElement, ReadableWorkspace, SessionEnvironment,
+    ToolRoot,
 };
 use swage_context::working_norms::{WorkingNormsElement, WorkingNormsScaffold};
 use swage_core::ScopeLocation;
@@ -17,8 +18,10 @@ use swage_config::RESERVED_WORKFLOW_AGENT_ID;
 /// Build the context assembly elements for a turn.
 ///
 /// Constructs typed elements from the resolved turn inputs:
-/// - `OrientationElement` — baseline identity, place, and capability; always
-///   produces content, so an empty configuration still orients the session
+/// - `OrientationElement` — baseline identity, place, and capability, its tool
+///   preferences following `offered_tools`, the tools the turn offers the
+///   model; always produces content, so an empty configuration still orients
+///   the session
 /// - `PromptsElement` — from the merged instruction string, followed by the
 ///   operator-guidance rules (the standard agent-guidance files, resolved by
 ///   `operator_guidance_rules` from the config root and trusted workspaces)
@@ -36,38 +39,28 @@ use swage_config::RESERVED_WORKFLOW_AGENT_ID;
 /// discard.
 pub(crate) fn build_assembly_elements(
     instructions: &str,
+    instruction_sources: &[HierarchyLevel],
     operator_guidance: Vec<PromptRule>,
     active_skills: Vec<ActiveSkill>,
     history: Vec<ChatMessage>,
     memory: Option<MemoryIndexElement>,
     environment: SessionEnvironment,
     available_skills: Vec<AvailableSkill>,
+    offered_tools: std::collections::BTreeSet<String>,
     model_id: &str,
     working_norms_scaffold: WorkingNormsScaffold,
     hierarchy: &[(HierarchyLevel, PathBuf)],
     requested_elements: Option<&[String]>,
 ) -> Vec<Box<dyn ContextElement>> {
-    // Construct a single PromptRule from the resolved instructions string.
-    // The config resolver has already merged hierarchy levels and assembled
-    // the text — we wrap it as a single Global-level rule so the PromptsElement
-    // produces the expected system message.
-    let mut rules = if instructions.is_empty() {
-        vec![]
-    } else {
-        vec![PromptRule {
-            priority: 0,
-            content: instructions.to_string(),
-            source_level: HierarchyLevel::Global,
-            file_path: PathBuf::from("resolved-instructions"),
-        }]
-    };
-    // Operator guidance extends the resolved baseline rather than replacing
-    // it: the rules arrive pre-ordered (global config root before trusted
-    // workspace roots) and append after the resolved instructions.
-    rules.extend(operator_guidance);
-
     let mut elements: Vec<Box<dyn ContextElement>> = vec![
-        Box::new(OrientationElement::new(environment, available_skills)),
+        Box::new(OrientationElement::new(
+            environment,
+            available_skills,
+            offered_tools,
+        )),
+        Box::new(swage_context::current_time::CurrentTimeElement::new(
+            chrono::Utc::now(),
+        )),
         // Models arrive over the proxy bare: the norms their own harness
         // would have supplied come from the assembly, keyed by the coming
         // turn's model family.
@@ -75,7 +68,11 @@ pub(crate) fn build_assembly_elements(
             model_id,
             working_norms_scaffold,
         )),
-        Box::new(PromptsElement::new(rules)),
+        Box::new(PromptsElement::from_resolved_instructions(
+            instructions,
+            instruction_sources,
+            operator_guidance,
+        )),
         Box::new(SkillsElement::new(active_skills)),
     ];
     let hierarchy_refs = hierarchy
@@ -144,6 +141,7 @@ pub(crate) fn build_session_environment(
     topic: &swage_storage::Topic,
     tool_root: &ResolvedToolRoot,
     session: &swage_storage::Session,
+    workspace_policy: &super::TrustedWorkspacePolicy,
 ) -> SessionEnvironment {
     let session_metadata = session.metadata.as_ref();
     // A channel session's origin was stamped at session creation; surface the
@@ -187,6 +185,42 @@ pub(crate) fn build_session_environment(
             ToolRootSource::ManagedScratch => {
                 ToolRoot::ManagedScratch(tool_root.path.display().to_string())
             }
+        },
+        workspaces: {
+            let placement_can_write = session_metadata
+                .and_then(|metadata| metadata.get(super::WORKER_PLACEMENT_CAN_WRITE_METADATA_KEY))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let mut workspaces = Vec::new();
+            for workspace in workspace_policy
+                .active_workspace
+                .iter()
+                .chain(&workspace_policy.attachments)
+                .filter(|workspace| workspace.can_read)
+            {
+                let (path, can_write) = if tool_root.source == ToolRootSource::WorkerPlacement {
+                    if tool_root.path.starts_with(&workspace.path) {
+                        // The placement is the effective root; its write grant
+                        // is resolved independently of the topic attachment.
+                        (&tool_root.path, placement_can_write)
+                    } else if workspace.path.starts_with(&tool_root.path) {
+                        (&workspace.path, workspace.can_write && placement_can_write)
+                    } else {
+                        continue;
+                    }
+                } else {
+                    (&workspace.path, workspace.can_write)
+                };
+                let readable = ReadableWorkspace {
+                    path: path.display().to_string(),
+                    can_write,
+                    is_trusted: workspace.is_trusted,
+                };
+                if !workspaces.contains(&readable) {
+                    workspaces.push(readable);
+                }
+            }
+            workspaces
         },
         // The session row's creation time, not the turn's clock: the block
         // renders identically on every turn of the session, keeping the

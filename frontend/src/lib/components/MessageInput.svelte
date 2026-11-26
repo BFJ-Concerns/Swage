@@ -41,6 +41,8 @@
   // Local draft content — cleared after every successful send.
   let content = $state("");
   let selectedModel = $state("");
+  let modelSessionId = $state<string | null | undefined>(undefined);
+  let modelDefaultId = $state<string | null | undefined>(undefined);
   let selectedEffort = $state<"" | Effort>("");
   let effortSessionId = $state<string | null | undefined>(undefined);
 
@@ -55,7 +57,11 @@
 
   $effect(() => {
     const fallback = selectedModelId ?? modelOptions[0] ?? "";
-    if (!selectedModel || !modelOptions.includes(selectedModel)) selectedModel = fallback;
+    if (sessionId !== modelSessionId || selectedModelId !== modelDefaultId || !modelOptions.includes(selectedModel)) {
+      selectedModel = fallback;
+      modelSessionId = sessionId;
+      modelDefaultId = selectedModelId;
+    }
   });
 
   // Direct reference to the textarea DOM node for height adjustment and refocus.

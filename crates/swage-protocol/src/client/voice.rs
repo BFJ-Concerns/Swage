@@ -9,6 +9,10 @@ use ts_rs::TS;
 pub struct VoiceCapabilitiesResponse {
     pub transcription: bool,
     pub synthesis: bool,
+    /// Whether the configured speech model's availability is still unverified.
+    #[serde(default)]
+    #[ts(optional, as = "Option<_>")]
+    pub synthesis_unverified: bool,
     pub default_voice: Option<String>,
     #[serde(default)]
     #[ts(optional, as = "Option<_>")]

@@ -153,7 +153,7 @@ describe("reconnect reconciliation", () => {
     // Force the refresh to remain pending while a newer turn becomes live:
     // a message sent meanwhile was queued, and the gateway started the next
     // turn on it when the old one ended.
-    store.handleServerEvent({ type: "queue_drained", session_id: "conv-1", turn_id: "newer-turn", queued_ids: [] });
+    store.handleServerEvent({ type: "queue_drained", thread_id: "main-thread", session_id: "conv-1", turn_id: "newer-turn", queued_ids: [] });
     store.handleServerEvent({ type: "token", content: "new live content" });
 
     store.reconcileAfterReconnect(recoveredTurnGeneration);
@@ -229,7 +229,7 @@ describe("startTurn", () => {
     // The old turn ends and the queue runs: the view sees a turn start.
     store.handleServerEvent({ type: "turn_complete", turn_id: "t-1" });
     expect(store.isStreaming).toBe(false);
-    store.handleServerEvent({ type: "queue_drained", session_id: "conv-9", turn_id: "t-2", queued_ids: ["q-1"] });
+    store.handleServerEvent({ type: "queue_drained", thread_id: "main-thread", session_id: "conv-9", turn_id: "t-2", queued_ids: ["q-1"] });
     expect(conv.clearQueuedMessages).toHaveBeenCalledWith("conv-9", ["q-1"]);
     expect(store.isStreaming).toBe(true);
     expect(store.streamedContent).toBe("");
@@ -696,7 +696,7 @@ describe("error events", () => {
 
   const offscreenTerminalEvents: ServerEvent[] = [
     { type: "error", code: "provider_error", message: "stopped" },
-    { type: "output_schema_failed", turn_id: "turn-a", attempts: 1, errors: [] },
+    { type: "output_schema_failed", failure_message: "Structured output validation failed after 3 attempts: /answer: is required", turn_id: "turn-a", attempts: 1, errors: [] },
     { type: "shutdown", reason: "stopped" },
   ];
 
@@ -780,6 +780,7 @@ describe("cancelled events", () => {
       .filter((m) => m.role === "assistant");
     expect(assistantMessages).toHaveLength(1);
     expect(assistantMessages[0].content).toBe("begun answer");
+    expect(assistantMessages[0].turn_state).toBe("cancelled");
   });
 
   it("does not push when cancelled with no content accumulated", () => {
@@ -1079,6 +1080,9 @@ describe("cancelled preserves activeToolCalls", () => {
 
     expect(store.activeToolCalls).toHaveLength(1);
     expect(store.activeToolCalls[0].call_id).toBe("c1");
+    expect(store.activeToolCalls[0].status).toBe("cancelled");
+    expect(store.activeToolCalls[0].result).toContain("cancelled");
+    expect(store.activeToolCalls[0].result).not.toContain("did not report");
   });
 });
 
@@ -1139,7 +1143,7 @@ describe("output_schema_failed events", () => {
     store.startTurn("question");
 
     store.handleServerEvent({
-      type: "output_schema_failed",
+      type: "output_schema_failed", failure_message: "Structured output validation failed after 3 attempts: /answer: is required",
       turn_id: "t-1",
       attempts: 3,
       errors: [{ path: "/answer", message: "is required" }],
@@ -1160,7 +1164,7 @@ describe("output_schema_failed events", () => {
     store.startTurn("question");
     store.handleServerEvent({ type: "token", content: "partial" });
     store.handleServerEvent({
-      type: "output_schema_failed",
+      type: "output_schema_failed", failure_message: "Structured output validation failed after 3 attempts: /answer: is required",
       turn_id: "t-1",
       attempts: 2,
       errors: [{ path: "", message: "response was not valid JSON" }],
@@ -1420,5 +1424,46 @@ describe("output-limit completion", () => {
     expect(conversations.getMessages()[0].turn_state).toBe("incomplete");
     expect(conversations.getMessages()[0].content).toBe("The answer ends at a");
     expect(store.isStreaming).toBe(false);
+  });
+});
+
+describe("approval timeout interruption", () => {
+  it.each(["partial answer", ""])("keeps the interrupted state for partial content %j", (content) => {
+    const conv = createMockConversationStore();
+    const settleUnansweredRequest = vi.fn();
+    const store = createStreamingStore({ conversationStore: { ...conv, settleUnansweredRequest } });
+    store.startTurn("Use echo");
+    if (content) store.handleServerEvent({ type: "token", content });
+    store.handleServerEvent({ type: "error", code: "approval_timeout", message: "approval timed out before tool execution; turn interrupted" });
+    if (content) {
+      expect(conv.getMessages().find((m) => m.role === "assistant")?.turn_state).toBe("interrupted");
+    } else {
+      expect(settleUnansweredRequest).toHaveBeenCalledWith({ turn_state: "interrupted", tool_calls: [] }, "test-conversation");
+    }
+    expect(store.turnError?.message).toContain("approval timed out");
+    expect(store.isStreaming).toBe(false);
+  });
+});
+
+describe("queued turn model identity", () => {
+  it("uses the last drained submission and clears it before an unrelated turn", () => {
+    const conv = createMockConversationStore();
+    const conn = createMockConnectionStore();
+    const store = createStreamingStore({ conversationStore: conv, connectionStore: conn });
+    store.startTurn("Active", "active-model");
+    for (const [id, model] of [["q-1", "first-queued"], ["q-2", "last-queued"]]) {
+      store.startTurn(id, model);
+      const clientId = conn.sendMessage.mock.calls.at(-1)![5] as string;
+      store.handleServerEvent({ type: "message_queued", session_id: "test-conversation", queued: {
+        id, client_id: clientId, origin: "user", content: id, queued_at: "2026-10-15T12:00:00Z",
+      } });
+    }
+    store.handleServerEvent({ type: "turn_complete", turn_id: "active" });
+    store.handleServerEvent({ type: "queue_drained", thread_id: "main-thread", session_id: "test-conversation", turn_id: "queued", queued_ids: ["q-1", "q-2"] });
+    store.handleServerEvent({ type: "error", code: "provider_error", message: "Rejected" });
+    expect(store.turnError?.selectedModelId).toBe("last-queued");
+    store.handleServerEvent({ type: "queue_drained", thread_id: "main-thread", session_id: "test-conversation", turn_id: "external", queued_ids: ["external-q"] });
+    store.handleServerEvent({ type: "error", code: "provider_error", message: "Rejected" });
+    expect(store.turnError?.selectedModelId).toBeUndefined();
   });
 });

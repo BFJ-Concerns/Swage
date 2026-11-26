@@ -79,6 +79,8 @@ export interface SurfacesStore {
     tags?: string[],
   ): Promise<void>;
   removeAnnotation(surfaceId: string, annotationId: string): Promise<void>;
+  renameSurface(surfaceId: string, title: string): Promise<void>;
+  resolveAnnotation(surfaceId: string, annotationId: string): Promise<void>;
   // Release the live channel. The app-lifetime store never needs this;
   // tests and short-lived surfaces do.
   stopListening(): void;
@@ -284,6 +286,17 @@ export function createSurfacesStore(options?: SurfacesStoreOptions): SurfacesSto
       annotationId: string,
     ): Promise<void> {
       await surfacesApi.deleteSurfaceAnnotation(annotationId);
+      await refreshActive(surfaceId);
+    },
+
+    async renameSurface(surfaceId, title): Promise<void> {
+      await surfacesApi.renameSurface(surfaceId, title);
+      await refreshActive(surfaceId);
+      if (currentSessionId) await refreshList(currentSessionId);
+    },
+
+    async resolveAnnotation(surfaceId, annotationId): Promise<void> {
+      await surfacesApi.resolveSurfaceAnnotation(surfaceId, annotationId);
       await refreshActive(surfaceId);
     },
 

@@ -25,7 +25,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.0.1"
 edition = "2024"
 rust-version = "1.98"
 license = "AGPL-3.0-or-later"
@@ -136,16 +136,15 @@ serde_json = "1"
 toml = "1.1"
 
 # Error handling
-thiserror = "=2.0.19"
+thiserror = "2.0.19"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-async-trait = "=0.1.91"
-futures = "=0.3.33"
-# The embedded JavaScript engine: V8 through deno_core, one isolate per
-# program. The V8 static library it links is pinned by version and checksum in
-# v8-archive.toml and fetched by `cargo xtask fetch-v8`.
+async-trait = "0.1.91"
+futures = "0.3.33"
+# The embedded JavaScript engine runs each program in its own V8 isolate.
+# The static library is pinned by version and checksum in v8-archive.toml.
 deno_core = "0.412"
 
 # Identifiers and time
@@ -171,7 +170,7 @@ axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.7", features = ["cors", "trace"] }
 
 # Database
-rusqlite = { version = "=0.40.1", features = ["bundled"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
 
 # Pattern matching (leak detection)
 aho-corasick = "1"
@@ -179,6 +178,7 @@ regex = "1"
 
 # URL handling
 url = "2"
+percent-encoding = "2"
 
 # Frontend embedding
 rust-embed = { version = "8", features = ["mime-guess"] }
@@ -188,7 +188,7 @@ mime_guess = "2"
 libc = "0.2"
 
 # JSON Schema validation
-jsonschema = "=0.49.6"
+jsonschema = "0.49.6"
 
 # Wire-contract projections (swage-protocol): TypeScript bindings and JSON Schema
 ts-rs = { version = "12", features = ["uuid-impl", "chrono-impl"] }

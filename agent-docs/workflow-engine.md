@@ -34,8 +34,9 @@ serialisation, so the cap is a soft admission gate on `start_run`
 callers rather than a hard gateway-wide limit.
 
 `start_run` validates the budget, creates a `NewWorkflowRun` record
-(with `source_hash` as SHA-256 of source, `engine_version` the
-`v8-<version>` string `swage_workflow::engine_version()` returns), then calls `launch_existing_run`.
+(with `source_hash` as SHA-256 of source and `engine_version` as the
+`v8-<version>` returned by `swage_workflow::engine_version()`), then calls
+`launch_existing_run`.
 
 `launch_existing_run` is the shared path for new and resumed runs:
 

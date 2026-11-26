@@ -1237,3 +1237,91 @@ async fn output_limit_marks_the_detached_child_and_parent_notice_incomplete() {
         "parent's notice must reach its open view"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn default_delegated_child_discovers_topic_workflows() {
+    use swage_storage::store::{ThreadStore, ToolCallStore, TurnStore};
+    let mut rounds = vec![vec![
+        StreamChunk::ToolUse {
+            call_id: "discover-child".into(),
+            name: "delegate".into(),
+            arguments: json!({"target_agent": "gateway", "task": "Check workflows"}),
+        },
+        StreamChunk::Done {
+            finish_reason: Some(FinishReason::ToolUse),
+        },
+    ]];
+    rounds.extend(crate::support::workflow_discovery_rounds());
+    rounds.push(vec![StreamChunk::Done {
+        finish_reason: Some(FinishReason::Stop),
+    }]);
+    let (gateway, storage) = start_test_server_with_config(
+        MockProvider::new(rounds),
+        ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(swage_tool::delegate::DelegateTool) as Arc<dyn swage_gateway::tool::Tool>,
+            Arc::new(swage_gateway::tool::workflow_list::WorkflowListTool),
+            Arc::new(swage_gateway::tool::workflow_run::WorkflowRunTool),
+        ]),
+    )
+    .await;
+    let (status, topic) = live_http_json(
+        gateway.address,
+        "POST".parse().unwrap(),
+        "/api/topics",
+        Some(json!({"name": "Workflow discovery", "slug": "workflow-discovery"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{topic}");
+    let topic_id = topic["id"].as_str().unwrap();
+    let (status, saved) = live_http_json(
+        gateway.address,
+        "POST".parse().unwrap(),
+        &format!("/api/topics/{topic_id}/workflow-scripts"),
+        Some(json!({
+            "name": "fleet-hold",
+            "description": "Saved workflow",
+            "source": "return { done: true };",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (status, created) = live_http_json(
+        gateway.address,
+        "POST".parse().unwrap(),
+        &format!("/api/topics/{topic_id}/sessions"),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().unwrap();
+    let (mut sink, mut stream) = connect_ws(gateway.address, id).await;
+    ws_send(
+        &mut sink,
+        json!({"type": "send_message", "content": "Check workflows in a child"}),
+    )
+    .await;
+    ws_collect_until(&mut stream, "turn_complete", Duration::from_secs(30)).await;
+    let threads = storage.list_by_session(id.parse().unwrap()).await.unwrap();
+    let parent = storage
+        .list_turns_by_thread(threads[0].id)
+        .await
+        .unwrap()
+        .remove(0);
+    let calls = storage.list_tool_calls_by_turn(parent.id).await.unwrap();
+    let delegated = calls.iter().find(|call| call.tool == "delegate").unwrap();
+    let result: Value = serde_json::from_str(delegated.result.as_deref().unwrap()).unwrap();
+    let child_thread = result["child_thread_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("delegation failed: {result}"))
+        .parse()
+        .unwrap();
+    let child = storage
+        .list_turns_by_thread(child_thread)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(child.parent_turn_id, Some(parent.id));
+    assert_eq!(child.agent_id, "gateway");
+    crate::support::assert_workflow_discovery(storage.as_ref(), child.id).await;
+}

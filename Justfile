@@ -29,10 +29,10 @@ build-dev-embedded: fetch-v8
 dev gateway_port="3000" vite_port="5173" vite_host="0.0.0.0": fetch-v8
     cargo run -p xtask -- dev --gateway-port {{ gateway_port }} --vite-port {{ vite_port }} --vite-host {{ vite_host }}
 
-fmt:
+fmt: fetch-v8
     cargo run -p xtask -- fmt
 
-fmt-check:
+fmt-check: fetch-v8
     cargo run -p xtask -- fmt-check
 
 # Workspace and frontend type check only.
@@ -77,11 +77,11 @@ release: fetch-v8
 release-force: fetch-v8
     cargo run -p xtask -- release --force-frontend
 
-install prefix="${HOME}/.local/bin":
+install prefix="${HOME}/.local/bin": fetch-v8
     cargo run -p xtask -- install --prefix {{ prefix }}
 
-install-lan prefix="${HOME}/.local/bin":
-    cargo run -p xtask -- install --prefix {{ prefix }} --lan
+install-lan prefix=(env("HOME") / ".local/bin") host="0.0.0.0" port="3000": fetch-v8
+    cargo run -p xtask -- install --prefix {{ quote(prefix) }} --lan --host {{ quote(host) }} --port {{ quote(port) }}
 
 install-hooks:
     git config core.hooksPath .githooks
