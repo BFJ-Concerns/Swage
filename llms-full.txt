@@ -26,9 +26,10 @@ and optional output schema. Each definition carries a stable `id` that sessions 
 
 ### How the overlay works
 
-When a session starts, the gateway resolves the file-based configuration
-cascade (Global → Topic → Agent `.toml` files) into a resolved config, then
-overlays the agent definition on top:
+At each turn, the gateway overlays the session's topic and agent layers
+(their `config.toml` files and `instructions/` directories, Global → Topic →
+Agent) on the running configuration — the global layer as loaded at startup
+and replaced by Settings saves — then overlays the agent definition on top:
 
 1. Instructions are appended after operator instructions.
 2. Tool permissions are intersected — allow sets are intersected, deny sets are
@@ -474,7 +475,10 @@ on (`SandboxConfig::default()` in `swage-protocol/src/client/settings.rs`). A
 topic inherits sandbox settings from the global configuration; an agent can
 override them. When `sandbox.enabled` resolves to `false`, local gateway turns
 run unsandboxed without requiring `allow_degraded_execution`. The persisted
-turn boundary is `Degraded` with reason `sandbox_disabled_by_configuration`.
+turn boundary is `SandboxDisabled`, and the audit trail carries an
+`execution_sandbox_disabled` event; `Degraded` and
+`execution_isolation_degraded` are kept for a sandbox that was meant to run
+and could not.
 
 To turn sandboxing off for a topic, add this to its `config.toml`:
 
@@ -572,7 +576,7 @@ The `[context]` section of the configuration cascade (Global → Topic → Agent
 |---|---|---|---|
 | `assembly` | string | `"default"` | Named context assembly to use |
 | `alternatives` | array of strings | `[]` | Named assemblies registered as hidden alternatives; selection records the chosen name locally |
-| `timeout` | integer (1–60) | `5` | Assembly timeout in seconds |
+| `timeout` | positive integer | `5` | Assembly timeout in seconds |
 | `budget` | integer or absent | absent | Context token budget; must be positive when set |
 | `compaction_threshold` | `{ messages = N }` or `{ tokens = N }`, or absent | absent (100 messages) | Size past which a turn's context is compacted; `N` must be positive |
 | `diagnosis_reader_model` | string or absent | absent (session's own model) | Model entry or alias for the diagnosis readers during wall succession |
@@ -633,9 +637,11 @@ are made by editing `config.toml`. Restart the gateway to apply them:
 - **Desktop app:** quit and reopen the app.
 - **Standalone process:** stop and start the process.
 
-Sessions whose topic or agent has its own `config.toml` re-resolve the full
-configuration hierarchy (global file included) on each turn, so edits can
-reach those sessions without a restart.
+Only the global `config.toml` needs the restart: it is read when the gateway
+starts and rewritten by Settings saves, which apply at once. A topic's or
+agent's `config.toml` and `instructions/` are read at each turn and overlaid
+on the running configuration, so an edit there applies to the next turn
+under that scope, in every session alike, with no restart.
 
 ### Global switch
 
@@ -672,8 +678,10 @@ forced_variant = "family-fallback"
 Restart the gateway after changing either key.
 
 Location ids are application-defined strings. The shipped locations are
-`context.assembly`, `context.working_norms`, `task.prompt`, and
-`prompts.memory_curator`.
+`context.assembly`, `context.working_norms`, `task.prompt`,
+`prompts.memory_curator`, and `prompts.succession_summary` (the instruction a
+conversation summary is written under, selected when a session first needs a
+summary).
 
 ### Alternatives
 
@@ -727,7 +735,7 @@ baseline element was declared omitted and the script added nothing else),
 the assembly also falls back to the default.
 
 The other shipped locations (`context.working_norms`, `task.prompt`,
-`prompts.memory_curator`) have their alternatives defined in the gateway
+`prompts.memory_curator`, `prompts.succession_summary`) have their alternatives defined in the gateway
 source and cannot be extended through configuration. For
 `context.working_norms` the registered variants are `authored-v1` (the
 default) and `family-fallback`.
@@ -930,6 +938,39 @@ entirely.
 
 CLI examples assume `swage` is on `PATH`; see the build and `PATH` steps in
 the [README quick start](../README.md#quick-start).
+
+## Access gate beyond loopback
+
+`crates/swage-gateway/src/access_gate.rs` is an axum layer on every `/api/`
+route. It applies only when the bound host is not loopback, and admits a
+request that comes from the gateway's own machine (loopback, or the one
+specific address bound) or presents the token: `Authorization: Bearer`,
+`X-Swage-Token`, the `swage_token` cookie, or `token` in a WebSocket
+upgrade's query. `/api/health`, `/api/access` and `/api/pair` are ungated;
+assets outside `/api/` are never gated.
+
+- The token is `gateway-token` in the data root, created `0600` at startup
+  when absent.
+- `POST /api/pair/codes` issues a ten-minute one-time code to the
+  gateway's own machine only (`swage gateway pair`); `POST /api/pair`
+  redeems it for the token, also set as a 400-day `HttpOnly` cookie.
+- Clients remember the token per gateway origin: `swage-client`'s
+  `pairing.rs` (`$SWAGE_HOME/client-pairings.json`) for `swage run`,
+  `desktop/src/pairing.mjs` (`gateway-pairings.json` in the Electron
+  profile) for the desktop shell; the web UI shows `PairingDialog.svelte`
+  when a request is refused with `unauthorised`.
+- `[server] access` (`token`, `warn`, `off`) is read per request from the
+  active configuration, so a change from Settings → Security applies at
+  once. `swage run --pairing-code` pairs whenever the gate applies, warn
+  included.
+
+Settings → Security (`security_settings.rs`, `GET`/`PUT
+/api/settings/security` and `/api/topics/{id}/settings/security`) reads
+and writes the sandbox toggle, the approval list and, for the install
+only, the access gate; each save writes one `configuration_change` audit
+event naming the checks left relaxed. Every writer of a configuration file
+— general settings, security settings, permanent approvals — holds
+`AppState::config_updates` for its read-modify-write.
 
 ## Settings memory view
 
@@ -2090,8 +2131,9 @@ serialisation, so the cap is a soft admission gate on `start_run`
 callers rather than a hard gateway-wide limit.
 
 `start_run` validates the budget, creates a `NewWorkflowRun` record
-(with `source_hash` as SHA-256 of source, `engine_version:
-"rquickjs-0.12.0"`), then calls `launch_existing_run`.
+(with `source_hash` as SHA-256 of source, `engine_version` as
+`QUICKJS_ENGINE_VERSION`, the locked rquickjs release), then calls
+`launch_existing_run`.
 
 `launch_existing_run` is the shared path for new and resumed runs:
 

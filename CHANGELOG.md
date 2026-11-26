@@ -6,6 +6,8 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- A gateway bound beyond loopback serves another machine only once it has paired with the gateway's token, which the gateway generates on first start. `swage gateway pair` prints a one-time code on the gateway's machine; the web UI, the desktop app and `swage run` (`--pairing-code`, or a prompt on its terminal) pair once with it and remember the token. Loopback stays tokenless. `[server] access` relaxes the gate for the whole install to `warn` (admitted and logged) or `off`.
+- Settings → Security, for the install and for each topic under its own Security tab, shows the sandbox, approval prompts and (for the install) the access gate as they apply there, with each relaxed check and the scope that relaxed it, and edits them. Approval-gated tools are chosen from the registered tools with a timeout for each. A save applies to the next turn without a restart and is recorded once in the audit trail.
 - Agents can create and edit agent definitions through conversation, making them available in Settings and the new-session picker; each change records the previous and new definition in configuration history.
 - Delegation chains stop at a configurable depth, including cycles (default: four child levels). Settings → Automation edits `sessions.max_delegation_depth`; a refused delegation records its depth reason and returns it to the delegating model.
 
@@ -110,6 +112,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- The sandbox toggle and the approval-gated tools list move from Settings → Automation to Settings → Security.
 - The workflow-authoring and project-docs skills are rewritten for any installation. The workflow-authoring skill names no model in its examples (a worker with no `model` runs on the configured default), gives each function's error names, and no longer assumes two model families or the development-process skills are in reach.
 - The shipped default agent's description says what it gives a session: no instructions of its own, with the model and tools the installation's settings provide.
 - The text the gateway itself gives a model is rewritten to say what is wanted and only what holds in every session: the common and family working norms, the orientation, the framing of memory, the memory curator's instructions, the instructions for conversation summaries and stall diagnoses, the note on a shortened tool result, and the lead-in to an active skill. A conversation summary now opens with the rules the user set that are still in force, written as instructions, and a continuing session is told those rules still apply.
