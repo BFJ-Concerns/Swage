@@ -1,18 +1,20 @@
-//! Commit signing on the host for sandboxed git: the operator's SSH signing
-//! key never enters the sandbox.
+//! Commit signing on the host for sandboxed git: the operator's signing key
+//! never enters the sandbox.
 //!
 //! Git in the sandbox is configured to sign with the `swage` binary as its
-//! `gpg.ssh.program`, and to name the operator's public key as a literal
-//! (`key::…`), so nothing under `~/.ssh` is read inside. The program speaks
-//! `ssh-keygen`'s signing interface (`-Y sign -n <namespace> -f <key> <file>`),
-//! forwards the payload over the turn's private IPC socket, and writes the
-//! signature the gateway answers with beside the file. The gateway signs on
-//! the host with `ssh-keygen` against the key the operator configured — a
-//! private key file beside the public one, or the operator's agent — refuses
-//! any other key, and records every signing with the key named and the turn
-//! attributed. A host that cannot sign answers a refusal, and git fails the
-//! commit with the cause: never an unsigned commit under a configuration
-//! that signs.
+//! signing program, which forwards each payload over the turn's private IPC
+//! socket and hands git the signature the gateway answers with. For SSH the
+//! program speaks `ssh-keygen`'s signing interface (`-Y sign -n <namespace>
+//! -f <key> <file>`) and git names the operator's public key as a literal
+//! (`key::…`), so nothing under `~/.ssh` is read inside; the gateway signs
+//! with `ssh-keygen` against the key the operator configured — a private
+//! key file beside the public one, or the operator's agent. For OpenPGP the
+//! program speaks `gpg`'s (`--status-fd=2 -bsau <key>`, the payload on
+//! standard input) and the gateway signs with the operator's own `gpg`
+//! program and key, through their gpg-agent. Any other key is refused, and
+//! every signing is recorded with the key named and the turn attributed. A
+//! host that cannot sign answers a refusal, and git fails the commit with
+//! the cause: never an unsigned commit under a configuration that signs.
 
 use std::{
     path::{Path, PathBuf},
@@ -33,16 +35,35 @@ pub const SOCKET_ENV: &str = "SWAGE_GIT_SIGNER_SOCKET";
 /// whether commits and tags sign by default.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SigningConfig {
-    /// `gpg.format`: `ssh`, which the host signs with, or another format
-    /// (`openpgp`, `x509`) it cannot forward yet and refuses with the cause.
+    /// `gpg.format`: `ssh` or `openpgp`, which the host signs with, or
+    /// another format (`x509`) it cannot forward yet and refuses with the
+    /// cause.
     pub format: String,
     /// The key the host signs with, or the reason it cannot: a signing
     /// configuration whose key the host cannot use still reaches the
     /// sandbox, so git fails the commit with that reason rather than
     /// committing unsigned.
-    pub material: Result<KeyMaterial, String>,
+    pub material: Result<SigningKey, String>,
     pub commit_gpgsign: bool,
     pub tag_gpgsign: bool,
+}
+
+/// The key the host signs with, in the operator's format.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SigningKey {
+    Ssh(KeyMaterial),
+    Openpgp(OpenPgpKey),
+}
+
+/// The operator's OpenPGP signing key as the host uses it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenPgpKey {
+    /// What git names to `gpg -u`: `user.signingkey`, or the committer's
+    /// identity where none is set, as git itself falls back to.
+    pub key: String,
+    /// The operator's signing program: `gpg.openpgp.program`, `gpg.program`,
+    /// or `gpg`.
+    pub program: String,
 }
 
 /// The operator's SSH signing key as the host uses it.
@@ -81,14 +102,17 @@ impl SigningConfig {
         let format = host_git_config(workspace, &["--get", "gpg.format"])
             .await
             .unwrap_or_else(|| "openpgp".to_owned());
-        let material = if format != "ssh" {
-            Err(format!(
-                "the operator signs with {format}, which sandboxed git cannot forward yet"
-            ))
-        } else if let Some(signing_key) = signing_key {
-            key_material(&signing_key)
-        } else {
-            Err("the operator's signing key comes from gpg.ssh.defaultKeyCommand, which sandboxed git cannot forward yet".to_owned())
+        let material = match format.as_str() {
+            "ssh" => match signing_key {
+                Some(signing_key) => key_material(&signing_key).map(SigningKey::Ssh),
+                None => Err("the operator's signing key comes from gpg.ssh.defaultKeyCommand, which sandboxed git cannot forward yet".to_owned()),
+            },
+            "openpgp" => openpgp_key(workspace, signing_key)
+                .await
+                .map(SigningKey::Openpgp),
+            other => Err(format!(
+                "the operator signs with {other}, which sandboxed git cannot forward yet"
+            )),
         };
         if let Err(reason) = &material {
             tracing::warn!(
@@ -109,7 +133,7 @@ impl SigningConfig {
     pub fn from_signing_key(signing_key: &str, commit_gpgsign: bool, tag_gpgsign: bool) -> Self {
         Self {
             format: "ssh".to_owned(),
-            material: key_material(signing_key),
+            material: key_material(signing_key).map(SigningKey::Ssh),
             commit_gpgsign,
             tag_gpgsign,
         }
@@ -119,10 +143,48 @@ impl SigningConfig {
     /// none.
     fn key_identity(&self) -> String {
         match &self.material {
-            Ok(material) => material.fingerprint(),
+            Ok(SigningKey::Ssh(material)) => material.fingerprint(),
+            Ok(SigningKey::Openpgp(key)) => format!("openpgp:{}", key.key),
             Err(_) => "(no usable key)".to_owned(),
         }
     }
+}
+
+/// The operator's OpenPGP key and signing program as the host's git reads
+/// them for the workspace. With no `user.signingkey`, git signs as the
+/// committer, so the key is the host's committer identity.
+async fn openpgp_key(workspace: &Path, signing_key: Option<String>) -> Result<OpenPgpKey, String> {
+    let key = match signing_key {
+        Some(key) => key,
+        None => host_committer_identity(workspace).await.ok_or_else(|| {
+            "the operator signs with OpenPGP but neither user.signingkey nor a committer identity is configured".to_owned()
+        })?,
+    };
+    let program = match host_git_config(workspace, &["--get", "gpg.openpgp.program"]).await {
+        Some(program) => program,
+        None => host_git_config(workspace, &["--get", "gpg.program"])
+            .await
+            .unwrap_or_else(|| "gpg".to_owned()),
+    };
+    Ok(OpenPgpKey { key, program })
+}
+
+/// `Name <email>`, as git names the committer to `gpg -u`.
+async fn host_committer_identity(workspace: &Path) -> Option<String> {
+    let output = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["var", "GIT_COMMITTER_IDENT"])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let ident = String::from_utf8_lossy(&output.stdout);
+    // The identity is followed by a timestamp and a zone.
+    let ident = ident.trim().rsplitn(3, ' ').nth(2)?.to_owned();
+    (!ident.is_empty()).then_some(ident)
 }
 
 /// The material a `user.signingkey` value names, or why it cannot be used.
@@ -296,6 +358,7 @@ impl SignerServer {
                         Ok(response) => response,
                         Err(_) => GitSignResponse {
                             signature: None,
+                            status: None,
                             refusal: Some(format!(
                                 "the host did not sign within {} seconds; a key on a hardware token or behind a passphrase prompt waits longer than a sandboxed commit can",
                                 SIGNING_TIMEOUT.as_secs()
@@ -310,7 +373,7 @@ impl SignerServer {
                     // The signing is attributed before the signature leaves;
                     // a record that cannot be written releases nothing.
                     let (key_name, key_file, public_key) = match &served.material {
-                        Ok(material) => (
+                        Ok(SigningKey::Ssh(material)) => (
                             Some(material.name()),
                             material
                                 .key_file
@@ -318,7 +381,12 @@ impl SignerServer {
                                 .map(|path| path.display().to_string()),
                             Some(material.public_key.clone()),
                         ),
+                        Ok(SigningKey::Openpgp(key)) => (Some(key.key.clone()), None, None),
                         Err(_) => (None, None, None),
+                    };
+                    let namespace = match &request {
+                        GitSignRequest::Ssh { namespace, .. } => Some(namespace.clone()),
+                        GitSignRequest::Openpgp { .. } => None,
                     };
                     storage
                         .create_audit_event(swage_storage::NewAuditEvent {
@@ -328,18 +396,22 @@ impl SignerServer {
                             entity_id: served.key_identity(),
                             event_kind: "git_signing".into(),
                             summary: format!(
-                                "Signing with {} for namespace {}: {outcome}",
+                                "Signing with {}{}: {outcome}",
                                 key_name
                                     .clone()
                                     .unwrap_or_else(|| "no usable key".to_owned()),
-                                request.namespace
+                                namespace
+                                    .as_deref()
+                                    .map(|namespace| format!(" for namespace {namespace}"))
+                                    .unwrap_or_default()
                             ),
                             metadata: serde_json::json!({
                                 "key": key_name,
                                 "key_file": key_file,
                                 "public_key": public_key,
                                 "fingerprint": served.key_identity(),
-                                "namespace": request.namespace,
+                                "format": served.format,
+                                "namespace": namespace,
                                 "turn_id": turn_id,
                                 "outcome": outcome,
                                 "refusal": response.refusal,
@@ -370,8 +442,9 @@ impl SignerServer {
     /// this binary as the signing program — for SSH with the operator's
     /// public key as a literal (nothing under `~/.ssh` is read inside), or
     /// a placeholder the host refuses with the cause when it has no usable
-    /// key; for any other format, as a `gpg.program` that refuses, so a
-    /// commit that signs fails with the cause rather than going unsigned.
+    /// key; for OpenPGP with the operator's key named, and for a format the
+    /// host cannot forward as a program the host refuses, so a commit that
+    /// signs fails with the cause rather than going unsigned.
     /// Appended to the git configuration the credential helper owns, so the
     /// two compose in either order.
     pub fn configure(
@@ -388,15 +461,26 @@ impl SignerServer {
             ("commit.gpgsign", self.signing.commit_gpgsign.to_string()),
             ("tag.gpgsign", self.signing.tag_gpgsign.to_string()),
         ];
-        if self.signing.format == "ssh" {
-            let literal = match &self.signing.material {
-                Ok(material) => material.public_key.clone(),
-                Err(_) => UNAVAILABLE_KEY.to_owned(),
-            };
-            pairs.push(("gpg.ssh.program", binary));
-            pairs.push(("user.signingkey", format!("key::{literal}")));
-        } else {
-            pairs.push(("gpg.program", binary));
+        match (self.signing.format.as_str(), &self.signing.material) {
+            ("ssh", material) => {
+                let literal = match material {
+                    Ok(SigningKey::Ssh(material)) => material.public_key.clone(),
+                    _ => UNAVAILABLE_KEY.to_owned(),
+                };
+                pairs.push(("gpg.ssh.program", binary));
+                pairs.push(("user.signingkey", format!("key::{literal}")));
+            }
+            (_, material) => {
+                // Every other format's program is this one: OpenPGP signs
+                // on the host, and a format the host cannot forward is
+                // refused there with its cause.
+                for program in ["gpg.program", "gpg.openpgp.program", "gpg.x509.program"] {
+                    pairs.push((program, binary.clone()));
+                }
+                if let Ok(SigningKey::Openpgp(key)) = material {
+                    pairs.push(("user.signingkey", key.key.clone()));
+                }
+            }
         }
         crate::git_credential::append_git_config(config, &pairs);
         Ok(())
@@ -411,39 +495,127 @@ const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(5);
 const SIGNING_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Sign on the host, or say why not: the host must have a usable key, the
-/// key must be the operator's configured one, and `ssh-keygen` must be able
-/// to sign with it — the private file beside the public one, or the
-/// operator's agent.
+/// request must name the operator's configured key in their format, and the
+/// operator's signer must sign with it — `ssh-keygen` with the private file
+/// beside the public one or the operator's agent, or their `gpg`.
 async fn sign(signing: &SigningConfig, request: &GitSignRequest) -> GitSignResponse {
     let refuse = |refusal: String| GitSignResponse {
         signature: None,
+        status: None,
         refusal: Some(refusal),
     };
-    let material = match &signing.material {
-        Ok(material) => material,
+    let key = match &signing.material {
+        Ok(key) => key,
         Err(reason) => return refuse(reason.clone()),
     };
-    if request.public_key.trim() != material.public_key.trim() {
-        return refuse("the requested key is not the operator's configured signing key".into());
-    }
-    if request.namespace.is_empty() || request.namespace.contains(['\n', '\0']) {
-        return refuse("the signing namespace is not a name".into());
-    }
-    let payload = match base64::engine::general_purpose::STANDARD.decode(&request.payload) {
-        Ok(payload) => payload,
-        Err(error) => return refuse(format!("the payload could not be read: {error}")),
+    let decode = |payload: &str| {
+        base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .map_err(|error| format!("the payload could not be read: {error}"))
     };
-    let scratch = match Scratch::create() {
-        Ok(scratch) => scratch,
-        Err(error) => return refuse(format!("the host could not stage the payload: {error}")),
-    };
-    match sign_in(&scratch.0, material, &request.namespace, &payload).await {
-        Ok(signature) => GitSignResponse {
-            signature: Some(signature),
-            refusal: None,
-        },
-        Err(refusal) => refuse(refusal),
+    match (request, key) {
+        (
+            GitSignRequest::Ssh {
+                namespace,
+                public_key,
+                payload,
+            },
+            SigningKey::Ssh(material),
+        ) => {
+            if public_key.trim() != material.public_key.trim() {
+                return refuse(
+                    "the requested key is not the operator's configured signing key".into(),
+                );
+            }
+            if namespace.is_empty() || namespace.contains(['\n', '\0']) {
+                return refuse("the signing namespace is not a name".into());
+            }
+            let payload = match decode(payload) {
+                Ok(payload) => payload,
+                Err(refusal) => return refuse(refusal),
+            };
+            let scratch = match Scratch::create() {
+                Ok(scratch) => scratch,
+                Err(error) => {
+                    return refuse(format!("the host could not stage the payload: {error}"));
+                }
+            };
+            match sign_in(&scratch.0, material, namespace, &payload).await {
+                Ok(signature) => GitSignResponse {
+                    signature: Some(signature),
+                    status: None,
+                    refusal: None,
+                },
+                Err(refusal) => refuse(refusal),
+            }
+        }
+        (
+            GitSignRequest::Openpgp {
+                key: requested,
+                payload,
+            },
+            SigningKey::Openpgp(key),
+        ) => {
+            if requested.trim() != key.key.trim() {
+                return refuse(
+                    "the requested key is not the operator's configured signing key".into(),
+                );
+            }
+            let payload = match decode(payload) {
+                Ok(payload) => payload,
+                Err(refusal) => return refuse(refusal),
+            };
+            match sign_openpgp(key, &payload).await {
+                Ok((signature, status)) => GitSignResponse {
+                    signature: Some(signature),
+                    status: Some(status),
+                    refusal: None,
+                },
+                Err(refusal) => refuse(refusal),
+            }
+        }
+        _ => refuse(format!(
+            "the request does not sign in the operator's format, {}",
+            signing.format
+        )),
     }
+}
+
+/// Sign with the operator's own OpenPGP program, as their git on the host
+/// would call it. Git reads the status lines for the signature's creation;
+/// a signer that wrote none did not sign.
+async fn sign_openpgp(key: &OpenPgpKey, payload: &[u8]) -> Result<(String, String), String> {
+    let mut child = tokio::process::Command::new(&key.program)
+        .args(["--status-fd=2", "-bsau", &key.key])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| format!("{} could not run on the host: {error}", key.program))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(payload)
+            .await
+            .map_err(|error| format!("the payload could not reach {}: {error}", key.program))?;
+    }
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|error| format!("{} did not finish: {error}", key.program))?;
+    let status = String::from_utf8_lossy(&output.stderr).into_owned();
+    if !output.status.success() || !status.contains("[GNUPG:] SIG_CREATED ") {
+        let said: Vec<&str> = status
+            .lines()
+            .filter(|line| !line.starts_with("[GNUPG:]"))
+            .collect();
+        return Err(format!(
+            "the host could not sign with OpenPGP key {}: {}",
+            key.key,
+            said.join("; ").trim()
+        ));
+    }
+    Ok((String::from_utf8_lossy(&output.stdout).into_owned(), status))
 }
 
 /// A private directory the payload and signature are staged in, removed
@@ -550,19 +722,16 @@ pub fn is_signing_invocation(args: &[std::ffi::OsString]) -> bool {
 /// With `ssh-keygen`'s arguments, `-Y sign` goes to the host over the
 /// socket, and any other operation (`verify`, `find-principals`, …) is
 /// `ssh-keygen`'s own and runs it unchanged, so verification inside the
-/// sandbox behaves as git expects. With `gpg`'s arguments — the operator
-/// signs with a format the host cannot forward — it refuses, so the commit
-/// fails with the cause. Returns the exit code.
+/// sandbox behaves as git expects. With `gpg`'s, `-bsau <key>` goes to the
+/// host with the payload from standard input, and any other operation is
+/// `gpg`'s own. Returns the exit code.
 pub async fn run_signer(args: &[std::ffi::OsString]) -> std::io::Result<i32> {
     let text: Vec<String> = args
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
     let Some(at) = text.iter().position(|arg| arg == "-Y") else {
-        eprintln!(
-            "swage: commit not signed: the operator signs with OpenPGP, which sandboxed git cannot forward yet"
-        );
-        return Ok(1);
+        return run_gpg_signer(args, &text).await;
     };
     let operation = text.get(at + 1).cloned().unwrap_or_default();
     if operation != "sign" {
@@ -604,7 +773,7 @@ pub async fn run_signer(args: &[std::ffi::OsString]) -> std::io::Result<i32> {
         .ok_or_else(|| std::io::Error::other("git signing socket is unavailable"))?;
     let response = request_signature(
         Path::new(&socket),
-        &GitSignRequest {
+        &GitSignRequest::Ssh {
             namespace,
             public_key: public_key.trim().to_owned(),
             payload: base64::engine::general_purpose::STANDARD.encode(&payload),
@@ -628,15 +797,70 @@ pub async fn run_signer(args: &[std::ffi::OsString]) -> std::io::Result<i32> {
     }
 }
 
+/// `gpg`'s side of [`run_signer`]: git signs with `--status-fd=<n> -bsau
+/// <key>`, the payload on standard input, and reads the signature from
+/// standard output and the status lines from the named descriptor.
+async fn run_gpg_signer(args: &[std::ffi::OsString], text: &[String]) -> std::io::Result<i32> {
+    let Some(key) = text
+        .iter()
+        .position(|arg| arg == "-bsau")
+        .and_then(|at| text.get(at + 1))
+    else {
+        let status = tokio::process::Command::new("gpg")
+            .args(args)
+            .status()
+            .await?;
+        return Ok(status.code().unwrap_or(1));
+    };
+    let mut payload = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::stdin(), &mut payload)?;
+    let socket = std::env::var_os(SOCKET_ENV)
+        .ok_or_else(|| std::io::Error::other("git signing socket is unavailable"))?;
+    let response = request_signature(
+        Path::new(&socket),
+        &GitSignRequest::Openpgp {
+            key: key.clone(),
+            payload: base64::engine::general_purpose::STANDARD.encode(&payload),
+        },
+    )
+    .await?;
+    let Some(signature) = response.signature else {
+        eprintln!(
+            "swage: commit not signed: {}",
+            response
+                .refusal
+                .unwrap_or_else(|| "the host refused to sign".into())
+        );
+        return Ok(1);
+    };
+    use std::io::Write;
+    let status = response.status.unwrap_or_default();
+    let to_stdout = text.iter().any(|arg| arg == "--status-fd=1");
+    std::io::stdout().write_all(signature.as_bytes())?;
+    if to_stdout {
+        std::io::stdout().write_all(status.as_bytes())?;
+    } else {
+        std::io::stderr().write_all(status.as_bytes())?;
+    }
+    Ok(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ssh(key: SigningKey) -> KeyMaterial {
+        match key {
+            SigningKey::Ssh(material) => material,
+            other => panic!("not an SSH key: {other:?}"),
+        }
+    }
 
     #[test]
     fn a_signing_key_literal_needs_no_file_and_a_path_reads_its_public_half() {
         let literal =
             SigningConfig::from_signing_key("key::ssh-ed25519 AAAAC3 fixture", true, false);
-        let material = literal.material.clone().expect("a literal key configures");
+        let material = ssh(literal.material.clone().expect("a literal key configures"));
         assert_eq!(material.key_file, None);
         assert_eq!(material.public_key, "ssh-ed25519 AAAAC3 fixture");
         assert!(literal.commit_gpgsign && !literal.tag_gpgsign);
@@ -646,18 +870,21 @@ mod tests {
         let private = dir.path().join("key");
         std::fs::write(&private, "-----BEGIN OPENSSH PRIVATE KEY-----\n").unwrap();
         std::fs::write(dir.path().join("key.pub"), "ssh-ed25519 AAAAC3 fixture\n").unwrap();
-        let by_private = SigningConfig::from_signing_key(private.to_str().unwrap(), false, true)
-            .material
-            .expect("a private key path finds its public half");
+        let by_private =
+            ssh(
+                SigningConfig::from_signing_key(private.to_str().unwrap(), false, true)
+                    .material
+                    .expect("a private key path finds its public half"),
+            );
         assert_eq!(by_private.public_key, "ssh-ed25519 AAAAC3 fixture");
         assert_eq!(by_private.key_file.as_deref(), Some(private.as_path()));
-        let by_public = SigningConfig::from_signing_key(
+        let by_public = ssh(SigningConfig::from_signing_key(
             dir.path().join("key.pub").to_str().unwrap(),
             false,
             false,
         )
         .material
-        .expect("a public key path reads itself");
+        .expect("a public key path reads itself"));
         assert_eq!(by_public.public_key, "ssh-ed25519 AAAAC3 fixture");
     }
 
@@ -679,7 +906,7 @@ mod tests {
 
         let refused = sign(
             &signing,
-            &GitSignRequest {
+            &GitSignRequest::Ssh {
                 namespace: "git".into(),
                 public_key: UNAVAILABLE_KEY.into(),
                 payload: base64::engine::general_purpose::STANDARD.encode(b"tree"),
@@ -728,7 +955,7 @@ mod tests {
         assert_eq!(signing.format, "ssh");
         assert!(signing.commit_gpgsign, "a bare boolean reads as true");
         assert!(!signing.tag_gpgsign);
-        let material = signing.material.expect("the public key is read");
+        let material = ssh(signing.material.expect("the public key is read"));
         assert_eq!(material.public_key, "ssh-ed25519 AAAAC3 operator");
 
         let unconfigured = dir.path().join("plain");
@@ -742,6 +969,94 @@ mod tests {
         // Another workspace with no signing configuration of its own reads
         // the operator's global configuration alone, whatever that is.
         let _ = SigningConfig::from_host_git(&unconfigured).await;
+    }
+
+    /// An operator who signs with OpenPGP is read with their key and
+    /// program, and without a key git signs as the committer. The repository
+    /// sets every value read, since the host's reader also sees the
+    /// machine's own global configuration.
+    #[tokio::test]
+    async fn an_openpgp_configuration_names_the_key_and_program_git_would_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .expect("git runs");
+            assert!(output.status.success(), "{args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Operator"]);
+        git(&["config", "user.email", "operator@example.invalid"]);
+        git(&["config", "commit.gpgsign", "true"]);
+        git(&["config", "gpg.format", "openpgp"]);
+        git(&["config", "user.signingkey", "0xFIXTURE"]);
+        git(&["config", "gpg.openpgp.program", "gpg2"]);
+
+        let signing = SigningConfig::from_host_git(dir.path())
+            .await
+            .expect("the workspace signs");
+        assert_eq!(signing.format, "openpgp");
+        assert_eq!(
+            signing.material,
+            Ok(SigningKey::Openpgp(OpenPgpKey {
+                key: "0xFIXTURE".into(),
+                program: "gpg2".into(),
+            }))
+        );
+        assert_eq!(
+            host_committer_identity(dir.path()).await.as_deref(),
+            Some("Operator <operator@example.invalid>")
+        );
+    }
+
+    /// The host signs only with the operator's key, in their format.
+    #[tokio::test]
+    async fn the_host_refuses_another_key_or_another_format() {
+        let signing = SigningConfig {
+            format: "openpgp".into(),
+            material: Ok(SigningKey::Openpgp(OpenPgpKey {
+                key: "0xOPERATOR".into(),
+                program: "/nonexistent/gpg".into(),
+            })),
+            commit_gpgsign: true,
+            tag_gpgsign: false,
+        };
+        let payload = base64::engine::general_purpose::STANDARD.encode(b"tree");
+        let other_key = sign(
+            &signing,
+            &GitSignRequest::Openpgp {
+                key: "0xSTRANGER".into(),
+                payload: payload.clone(),
+            },
+        )
+        .await;
+        assert!(
+            other_key
+                .refusal
+                .as_deref()
+                .is_some_and(|refusal| refusal.contains("not the operator's configured")),
+            "{other_key:?}"
+        );
+        let other_format = sign(
+            &signing,
+            &GitSignRequest::Ssh {
+                namespace: "git".into(),
+                public_key: "ssh-ed25519 AAAA".into(),
+                payload,
+            },
+        )
+        .await;
+        assert!(
+            other_format
+                .refusal
+                .as_deref()
+                .is_some_and(|refusal| refusal.contains("operator's format")),
+            "{other_format:?}"
+        );
     }
 
     /// A key's identity in the record is its fingerprint, the same for the

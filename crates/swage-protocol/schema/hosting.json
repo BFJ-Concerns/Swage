@@ -1031,27 +1031,58 @@
       }
     },
     "GitSignRequest": {
-      "description": "One request to sign a git payload on the host, from the sandboxed git's\nsigning program over the turn's private IPC socket: the SSH signing\nnamespace git names (`git`), the public key git was configured with, and\nthe payload, base64-encoded.",
-      "type": "object",
-      "properties": {
-        "namespace": {
-          "type": "string"
+      "description": "One request to sign a git payload on the host, from the sandboxed git's\nsigning program over the turn's private IPC socket, in the operator's\nsigning format. The payload is base64-encoded.",
+      "oneOf": [
+        {
+          "description": "`ssh-keygen -Y sign`: the signing namespace git names (`git`) and the\npublic key git was configured with.",
+          "type": "object",
+          "properties": {
+            "format": {
+              "type": "string",
+              "const": "ssh"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "string"
+            },
+            "public_key": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "format",
+            "namespace",
+            "public_key",
+            "payload"
+          ]
         },
-        "payload": {
-          "type": "string"
-        },
-        "public_key": {
-          "type": "string"
+        {
+          "description": "`gpg -bsau <key>`: the key git names.",
+          "type": "object",
+          "properties": {
+            "format": {
+              "type": "string",
+              "const": "openpgp"
+            },
+            "key": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "format",
+            "key",
+            "payload"
+          ]
         }
-      },
-      "required": [
-        "namespace",
-        "public_key",
-        "payload"
       ]
     },
     "GitSignResponse": {
-      "description": "The SSH signature (`ssh-keygen -Y sign`'s armoured output) for the\npayload, or the refusal that explains why the host did not sign.",
+      "description": "The armoured signature for the payload, or the refusal that explains why\nthe host did not sign. An OpenPGP signature comes with the signer's\nstatus lines, which git reads to confirm the signature was made.",
       "type": "object",
       "properties": {
         "refusal": {
@@ -1061,6 +1092,12 @@
           ]
         },
         "signature": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
           "type": [
             "string",
             "null"

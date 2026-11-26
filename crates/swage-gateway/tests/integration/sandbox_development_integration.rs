@@ -1414,3 +1414,143 @@ async fn a_masked_token_inside_a_writable_cache_reads_as_empty() {
     assert!(!output.contains("fixture-registry-token"), "{output}");
     assert!(output.contains("cache-written"), "{:?}", result.output);
 }
+
+/// An operator who signs with OpenPGP commits from the sandbox signed with
+/// their own key, by their own gpg on the host; the keyring never enters
+/// the sandbox.
+#[tokio::test(flavor = "multi_thread")]
+async fn sandboxed_git_commits_are_signed_with_the_operators_openpgp_key() {
+    use swage_gateway::git_signer::{SignerServer, SigningConfig};
+    use swage_sandbox::Sandbox;
+
+    let mut env = ProcessEnvGuard::new();
+    env.set_var("GIT_CONFIG_GLOBAL", "/dev/null");
+    env.set_var("GIT_CONFIG_NOSYSTEM", "1");
+    env.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    let root = tempfile::Builder::new()
+        .prefix("t")
+        .tempdir_in(
+            std::env::var_os("XDG_RUNTIME_DIR")
+                .unwrap_or_else(|| std::env::temp_dir().into_os_string()),
+        )
+        .unwrap();
+    let runtime_root = root.path().join("r");
+    std::fs::create_dir(&runtime_root).unwrap();
+    env.set_var("XDG_RUNTIME_DIR", &runtime_root);
+    // A disposable keyring with one passphrase-less signing key.
+    let gnupg = root.path().join("g");
+    std::fs::create_dir(&gnupg).unwrap();
+    std::fs::set_permissions(&gnupg, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    env.set_var("GNUPGHOME", &gnupg);
+    let generated = std::process::Command::new("gpg")
+        .args([
+            "--batch",
+            "--pinentry-mode",
+            "loopback",
+            "--passphrase",
+            "",
+            "--quick-gen-key",
+            "Operator <operator@example.invalid>",
+            "ed25519",
+            "sign",
+            "never",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let listed = std::process::Command::new("gpg")
+        .args(["--list-secret-keys", "--with-colons"])
+        .output()
+        .unwrap();
+    let fingerprint = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("fpr:::::::::"))
+        .map(|rest| rest.trim_end_matches(':').to_owned())
+        .expect("the key's fingerprint");
+
+    let repo = root.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["config", "user.email", "operator@example.invalid"][..],
+        &["config", "user.name", "Operator"][..],
+        &["config", "user.signingkey", &fingerprint][..],
+        &["config", "commit.gpgsign", "true"][..],
+    ] {
+        let done = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(done.status.success(), "{args:?}");
+    }
+    let signing = SigningConfig::from_host_git(&repo)
+        .await
+        .expect("the workspace signs");
+    assert!(signing.material.is_ok(), "{:?}", signing.material);
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let signer = SignerServer::start(storage.clone(), None, None, signing).unwrap();
+    let mut policy = SandboxConfig::builder()
+        .working_directory(root.path())
+        .write_path(root.path())
+        .masked_path(&runtime_root)
+        .masked_path(&gnupg)
+        .build()
+        .unwrap();
+    signer.configure(&mut policy).unwrap();
+    policy
+        .environment
+        .insert("HOME".into(), root.path().display().to_string());
+    let mut sandbox = swage_sandbox::BubblewrapSandbox::new(
+        policy,
+        swage_sandbox::llm_handler::HostLlmHandler::new(|_| async {
+            unreachable!("git uses no model")
+        }),
+    );
+    sandbox.spawn_agent().await.expect("sandbox starts");
+    let result = sandbox
+        .execute_tool(
+            "shell",
+            json!({"command": format!(
+                "cd {} && ls {} | wc -l && git commit -q --allow-empty -m signed",
+                repo.display(), gnupg.display()
+            )}),
+        )
+        .await
+        .unwrap();
+    sandbox.shutdown().await.unwrap();
+    let output = result.output["output"].as_str().unwrap_or_default();
+    assert_eq!(
+        result.output["exit_code"], 0,
+        "the sandboxed commit must succeed: {output}"
+    );
+    assert!(
+        output.trim_start().starts_with('0'),
+        "the keyring stays masked inside the sandbox: {output}"
+    );
+    let verified = std::process::Command::new("git")
+        .args(["verify-commit", "HEAD"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    let _ = std::process::Command::new("gpgconf")
+        .args(["--kill", "gpg-agent"])
+        .output();
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    let events = storage.list_audit_events().await.unwrap();
+    assert!(
+        events.iter().any(|event| event.event_kind == "git_signing"
+            && event.metadata["outcome"] == "signed"
+            && event.metadata["format"] == "openpgp"
+            && event.metadata["key"] == fingerprint.as_str()),
+        "{events:?}"
+    );
+}

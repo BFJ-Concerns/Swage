@@ -2,8 +2,7 @@
 
 /**
  * One request to sign a git payload on the host, from the sandboxed git's
- * signing program over the turn's private IPC socket: the SSH signing
- * namespace git names (`git`), the public key git was configured with, and
- * the payload, base64-encoded.
+ * signing program over the turn's private IPC socket, in the operator's
+ * signing format. The payload is base64-encoded.
  */
-export type GitSignRequest = { namespace: string, public_key: string, payload: string, };
+export type GitSignRequest = { "format": "ssh", namespace: string, public_key: string, payload: string, } | { "format": "openpgp", key: string, payload: string, };

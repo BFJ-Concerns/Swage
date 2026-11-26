@@ -488,10 +488,13 @@ conditional includes and all. A key the operator has not configured is
 refused, and a host that cannot sign — a key with no readable public half,
 a key named by a key command, a signing that waits on a hardware token or
 a passphrase — fails the commit with the cause rather than leaving it
-unsigned. An operator who signs with OpenPGP gets the same: sandboxed git
-is given a signing program that refuses, so a commit that signs fails with
-that cause until the format is carried; the gateway log says why at the
-turn's start.
+unsigned. An operator who signs with OpenPGP is served the same way: the
+sandboxed git's signing program forwards each payload, and the gateway
+signs with the operator's own `gpg` (`gpg.openpgp.program` or
+`gpg.program`) and key — `user.signingkey`, or the committer identity git
+signs as without one — through their gpg-agent; the keyring stays masked.
+A format the host cannot forward (`x509`) fails the commit with that
+cause, which the gateway log also gives at the turn's start.
 
 ### Network
 

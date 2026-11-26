@@ -407,23 +407,30 @@ pub struct GitCredentialResponse {
 }
 
 /// One request to sign a git payload on the host, from the sandboxed git's
-/// signing program over the turn's private IPC socket: the SSH signing
-/// namespace git names (`git`), the public key git was configured with, and
-/// the payload, base64-encoded.
+/// signing program over the turn's private IPC socket, in the operator's
+/// signing format. The payload is base64-encoded.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
-#[ts(optional_fields = nullable)]
-pub struct GitSignRequest {
-    pub namespace: String,
-    pub public_key: String,
-    pub payload: String,
+#[serde(tag = "format", rename_all = "snake_case")]
+pub enum GitSignRequest {
+    /// `ssh-keygen -Y sign`: the signing namespace git names (`git`) and the
+    /// public key git was configured with.
+    Ssh {
+        namespace: String,
+        public_key: String,
+        payload: String,
+    },
+    /// `gpg -bsau <key>`: the key git names.
+    Openpgp { key: String, payload: String },
 }
 
-/// The SSH signature (`ssh-keygen -Y sign`'s armoured output) for the
-/// payload, or the refusal that explains why the host did not sign.
+/// The armoured signature for the payload, or the refusal that explains why
+/// the host did not sign. An OpenPGP signature comes with the signer's
+/// status lines, which git reads to confirm the signature was made.
 #[derive(Debug, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[ts(optional_fields = nullable)]
 pub struct GitSignResponse {
     pub signature: Option<String>,
+    pub status: Option<String>,
     pub refusal: Option<String>,
 }
 
