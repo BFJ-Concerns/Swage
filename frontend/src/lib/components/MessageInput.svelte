@@ -40,7 +40,14 @@
 
   // Local draft content — cleared after every successful send.
   let content = $state("");
-  let selectedModel = $state("");
+  let modelOverride = $state("");
+  const preferredModel = $derived(canSelectAgent
+    ? agentDefinitions.find((definition) => definition.id === selectedAgentId)?.model_id
+    : undefined);
+  const modelFallback = $derived(preferredModel && modelOptions.includes(preferredModel)
+    ? preferredModel
+    : selectedModelId ?? modelOptions[0] ?? "");
+  const selectedModel = $derived(modelOverride || modelFallback);
   let modelSessionId = $state<string | null | undefined>(undefined);
   let modelDefaultId = $state<string | null | undefined>(undefined);
   let selectedEffort = $state<"" | Effort>("");
@@ -56,9 +63,9 @@
   });
 
   $effect(() => {
-    const fallback = selectedModelId ?? modelOptions[0] ?? "";
-    if (sessionId !== modelSessionId || selectedModelId !== modelDefaultId || !modelOptions.includes(selectedModel)) {
-      selectedModel = fallback;
+    if (sessionId !== modelSessionId || (!canSelectAgent && selectedModelId !== modelDefaultId) ||
+        (modelOverride && !modelOptions.includes(modelOverride))) {
+      modelOverride = "";
       modelSessionId = sessionId;
       modelDefaultId = selectedModelId;
     }
@@ -104,7 +111,10 @@
     // a reason to refuse: the gateway queues the message for the next turn.
     if (!store || !trimmed || hasNoConfiguredModels) return;
 
-    store.startTurn(trimmed, selectedModel || null, selectedAgentId || null, selectedEffort || null);
+    // At session start the gateway resolves the agent's current preference
+    // unless the person explicitly chose a model in the composer.
+    const requestedModel = canSelectAgent && selectedAgentId ? modelOverride : selectedModel;
+    store.startTurn(trimmed, requestedModel || null, selectedAgentId || null, selectedEffort || null);
 
     // Clear draft and return focus to the textarea so the user can keep typing.
     content = "";
@@ -157,7 +167,8 @@
         {#if modelOptions.length > 0}
           <select
             class="model-select"
-            bind:value={selectedModel}
+            value={selectedModel}
+            onchange={(event) => { modelOverride = event.currentTarget.value; }}
             aria-label="Model"
             disabled={!store || isStreamingHere}
           >

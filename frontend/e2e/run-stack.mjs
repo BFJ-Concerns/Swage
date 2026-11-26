@@ -37,6 +37,10 @@ default = "e2e-model"
 provider_id = "e2e"
 model_id = "e2e-model"
 
+[models.entries.preferred-model]
+provider_id = "e2e"
+model_id = "preferred-model"
+
 [sandbox]
 enabled = false
 allow_degraded_execution = true

@@ -404,6 +404,7 @@ pub async fn create_agent_definition(
     State(state): State<AppState>,
     Json(request): Json<CreateAgentDefinitionRequest>,
 ) -> Result<Json<AgentDefinitionMutationResponse>, ApiError> {
+    let _write = state.agent_definition_writes.lock().await;
     let definition = new_agent_definition(
         request.id,
         UpdateAgentDefinitionRequest {
@@ -428,6 +429,7 @@ pub async fn update_agent_definition(
     Path(agent_id): Path<String>,
     Json(request): Json<UpdateAgentDefinitionRequest>,
 ) -> Result<Json<AgentDefinitionMutationResponse>, ApiError> {
+    let _write = state.agent_definition_writes.lock().await;
     let change = crate::service::upsert_agent_definition(
         &state,
         new_agent_definition(agent_id, request),
@@ -443,6 +445,7 @@ pub async fn delete_agent_definition(
     Path(agent_id): Path<String>,
     Query(query): Query<AgentDefinitionScopeQuery>,
 ) -> Result<Json<AgentDefinitionMutationResponse>, ApiError> {
+    let _write = state.agent_definition_writes.lock().await;
     let change = crate::service::delete_agent_definition(
         &state,
         &agent_id,
