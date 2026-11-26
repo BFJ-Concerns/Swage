@@ -123,6 +123,29 @@ describe("ConversationList", () => {
     }
   });
 
+  it("reads the latest sidebar rows on return without a new socket signal", async () => {
+    const summary = makeConversationSummary({ id: "existing", message_preview: "Previous request", latest_turn_state: "failed" });
+    const list = vi.spyOn(api, "listConversations").mockResolvedValue([summary]);
+    try {
+      const store = createConversationStore();
+      await store.loadConversations("research");
+      component = mount(ConversationList, { target: document.body, props: { store } });
+      await vi.waitFor(() => expect(document.querySelector(".conversation-item")?.textContent)
+        .toContain("Last response failed"));
+      await unmount(component);
+      component = undefined;
+
+      list.mockResolvedValue([{ ...summary, message_preview: "New reply", latest_turn_state: "completed" }]);
+      component = mount(ConversationList, { target: document.body, props: { store } });
+      await vi.waitFor(() => expect(document.querySelector(".conversation-item")?.textContent)
+        .toContain("New reply"));
+      expect(document.querySelector(".conversation-item")?.textContent).not.toContain("Last response failed");
+      expect(list).toHaveBeenLastCalledWith("research");
+    } finally {
+      list.mockRestore();
+    }
+  });
+
   // --- Empty state ---
 
   it("shows empty state message when there are no conversations", () => {
