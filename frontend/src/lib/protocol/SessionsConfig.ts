@@ -10,4 +10,8 @@ export type SessionsConfig = {
  * a new turn on an archived session brings it back. Archiving is
  * visibility only — nothing is cancelled and nothing queued is blocked.
  */
-archive_after_days: number, };
+archive_after_days: number,
+/**
+ * Maximum number of child levels in a delegation chain.
+ */
+max_delegation_depth: number, };

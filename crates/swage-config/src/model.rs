@@ -44,6 +44,8 @@ pub enum Protocol {
 /// Connection settings for one configured LLM provider.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderEndpointConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub protocol: Protocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_secret_ref: Option<String>,
@@ -68,6 +70,7 @@ pub struct ProviderEndpointConfig {
 impl Default for ProviderEndpointConfig {
     fn default() -> Self {
         Self {
+            display_name: None,
             protocol: Protocol::OpenAi,
             api_key_secret_ref: None,
             api_key_env: None,
@@ -260,6 +263,16 @@ impl Default for ToolPermissionConfig {
             "session-authoring".to_string(),
             vec!["session_values".to_string()],
         );
+        // Authoring the durable definitions — the agents a person can pick
+        // and the task contracts a child runs under — as one grantable
+        // power, so an agent can be kept from reshaping who runs with what.
+        bundles.insert(
+            "definition-authoring".to_string(),
+            vec![
+                "agent_definition".to_string(),
+                "task_definition".to_string(),
+            ],
+        );
         // Knowledge-base access at registry grain: reading the topic's
         // gathered evidence and writing captures into it are separate powers,
         // so gathering workers can hold write without every reader gaining it.
@@ -352,6 +365,8 @@ impl Default for BrowserToolConfig {
 /// Tool execution settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolConfig {
+    /// Identical failing calls permitted within one unattended turn.
+    pub max_identical_failures: u32,
     /// Maximum seconds a shell command may run before being killed.
     pub shell_timeout_secs: u64,
     /// Python execution settings shared by python-backed features.
@@ -375,6 +390,7 @@ pub struct ToolConfig {
 impl Default for ToolConfig {
     fn default() -> Self {
         Self {
+            max_identical_failures: 3,
             shell_timeout_secs: 30,
             python_execute: PythonExecuteToolConfig::default(),
             max_output_bytes: 100_000,
@@ -1510,6 +1526,7 @@ timeout_policy = "reject"
         bundles.insert("safe".to_string(), vec!["echo".into()]);
 
         let original = ToolConfig {
+            max_identical_failures: 3,
             shell_timeout_secs: 60,
             python_execute: PythonExecuteToolConfig::default(),
             max_output_bytes: 50_000,

@@ -289,13 +289,14 @@ pub async fn create_channel_link_code(
     state: &AppState,
     request: CreateChannelLinkCodeRequest,
 ) -> Result<ChannelLinkCodeResponse, GatewayError> {
+    let integration = request.integration.as_metadata_value();
     let expires_at = Utc::now() + Duration::hours(24);
     let link_code = Uuid::new_v4().to_string();
     state
         .storage
         .save_channel_link_code(swage_storage::model::ChannelLinkCode {
             code: link_code.clone(),
-            integration: request.integration.as_metadata_value().into(),
+            integration: integration.into(),
             topic_id: request.topic_id,
             agent_id: request.agent_id,
             home_target: request
@@ -306,7 +307,33 @@ pub async fn create_channel_link_code(
             expires_at,
         })
         .await?;
+    let stored = state
+        .storage
+        .list_channel_link_codes()
+        .await?
+        .into_iter()
+        .find(|code| code.code == link_code)
+        .ok_or_else(|| GatewayError::ConfigError("issued channel link code is missing".into()))?;
+    let mut snapshot = serde_json::to_value(stored)
+        .map_err(|error| GatewayError::ConfigError(error.to_string()))?;
+    snapshot["code"] = serde_json::json!("[REDACTED]");
+    crate::config_change::record_config_change(
+        state,
+        crate::config_change::ConfigChange {
+            entity_kind: "channel_link_code",
+            // The credential must not become the entity's public audit address.
+            entity_id: &Uuid::new_v4().to_string(),
+            action: "create_channel_link_code",
+            source: "operator_http",
+            session_id: None,
+            summary: &format!("issued a {integration} channel link code"),
+            prior_state: None,
+            new_state: Some(snapshot),
+        },
+    )
+    .await?;
     Ok(ChannelLinkCodeResponse {
+        integration: integration.into(),
         link_code,
         expires_at,
     })
@@ -797,9 +824,107 @@ pub async fn list_channel_link_codes(
             .await?
             .into_iter()
             .map(|code| ChannelLinkCodeResponse {
+                integration: code.integration,
                 link_code: code.code,
                 expires_at: code.expires_at,
             })
             .collect(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use swage_storage::{AuditStore, SqliteStorage};
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn issuing_channel_codes_records_scope_without_the_credential() {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let state = AppState::new(
+            storage.clone(),
+            storage.clone(),
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            Default::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        let topic = Uuid::new_v4();
+        let issued = create_channel_link_code(
+            &state,
+            CreateChannelLinkCodeRequest {
+                integration: ExternalChannelIntegration::Telegram,
+                topic_id: Some(topic),
+                agent_id: Some("assistant".into()),
+                home_target: None,
+            },
+        )
+        .await
+        .unwrap();
+        let events = storage.list_audit_events().await.unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "issuing a code must record exactly one audit event"
+        );
+        let event = &events[0];
+        assert_eq!(event.event_kind, "configuration_change");
+        assert_eq!(event.metadata["action"], "create_channel_link_code");
+        let snapshot = &event.metadata["new_state"];
+        assert_eq!(snapshot["integration"], "telegram");
+        assert_eq!(snapshot["topic_id"], topic.to_string());
+        assert_eq!(snapshot["agent_id"], "assistant");
+        assert_eq!(snapshot["code"], "[REDACTED]");
+        assert!(
+            !serde_json::to_string(event)
+                .unwrap()
+                .contains(&issued.link_code)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn channel_code_issue_and_list_preserve_each_integration() {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let state = AppState::new(
+            storage.clone(),
+            storage,
+            Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            Default::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+        );
+        for integration in [
+            ExternalChannelIntegration::Telegram,
+            ExternalChannelIntegration::DevDm,
+            ExternalChannelIntegration::DevThread,
+        ] {
+            let issued = create_channel_link_code(
+                &state,
+                CreateChannelLinkCodeRequest {
+                    integration: integration.clone(),
+                    topic_id: None,
+                    agent_id: None,
+                    home_target: None,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(&issued).unwrap()["integration"],
+                integration.as_metadata_value(),
+                "issued code must identify its integration"
+            );
+            let listed = list_channel_link_codes(&state).await.unwrap();
+            let code = listed
+                .0
+                .iter()
+                .find(|code| code.link_code == issued.link_code)
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(code).unwrap()["integration"],
+                integration.as_metadata_value(),
+                "listed code must retain its stored integration"
+            );
+        }
+    }
 }

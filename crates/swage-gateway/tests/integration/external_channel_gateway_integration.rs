@@ -76,7 +76,7 @@ impl LlmProvider for MockProvider {
 
 async fn start_test_server(provider: impl LlmProvider + 'static) -> SocketAddr {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
@@ -124,7 +124,7 @@ async fn queued_channel_drain_carries_the_created_turn_id_into_the_delivery_reco
         .await
         .expect("queue inbound message");
 
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(MockProvider::new(vec![vec![
@@ -213,7 +213,7 @@ async fn start_file_backed_test_server(
     provider: impl LlmProvider + 'static,
 ) -> SocketAddr {
     let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
@@ -791,7 +791,14 @@ async fn unavailable_webhook_target_fails_explicitly() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["code"], "delivery_failed");
+    assert!(
+        !body["message"]
+            .as_str()
+            .unwrap()
+            .contains("validation error")
+    );
     assert!(
         body["message"]
             .as_str()
@@ -817,7 +824,7 @@ async fn busy_channel_messages_join_the_shared_queue_and_deliver_its_single_repl
     let directory = tempfile::tempdir().unwrap();
     let database_path = directory.path().join("busy-channel.db");
     let storage = Arc::new(SqliteStorage::open(&database_path).unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         storage.clone(),
         storage.clone(),
         Arc::new(MockProvider::new(vec![vec![
@@ -1030,7 +1037,7 @@ async fn competing_channel_turn_claim_queues_inputs_without_an_in_memory_guard()
     let directory = tempfile::tempdir().unwrap();
     let database_path = directory.path().join("competing-channel.db");
     let storage = Arc::new(SqliteStorage::open(&database_path).unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         storage.clone(),
         storage.clone(),
         Arc::new(MockProvider::new(vec![vec![

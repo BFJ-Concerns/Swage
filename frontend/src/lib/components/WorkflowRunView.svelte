@@ -7,6 +7,7 @@
   because it is the record of an ending rather than a progress reading.
 -->
 <script lang="ts">
+  import { formatRunTime } from "../run-times";
   import { conversationPath } from "../router";
   import type { WorkflowRunDetailResponse } from "../protocol/WorkflowRunDetailResponse";
   import type { WorkflowRunEnding } from "../protocol/WorkflowRunEnding";
@@ -112,10 +113,9 @@
   );
 
   function describeInterruption(interruption: { detected_at: string; run_state: string }): string {
-    const when = new Date(interruption.detected_at).toLocaleString();
     return interruption.run_state === "parked"
-      ? `${when} — the gateway stopped while this run was parked; its wait outlived the gateway`
-      : `${when} — the gateway stopped while this run was executing; the calls it had in flight were cut off`;
+      ? `the gateway stopped while this run was parked; its wait outlived the gateway`
+      : `the gateway stopped while this run was executing; the calls it had in flight were cut off`;
   }
 
   function renderOutput(output: unknown): string {
@@ -136,7 +136,7 @@
       <h2>{run.script_name ?? "Inline workflow"}</h2>
       <p class="state">{run.state}</p>
       <p class="identity">Run {run.id}</p>
-      <p>Started <time>{run.created_at}</time>{#if run.completed_at} · Ended <time>{run.completed_at}</time>{/if}</p>
+      <p>Started {@render recordedTime(run.created_at)}{#if run.completed_at} · Ended {@render recordedTime(run.completed_at)}{/if}</p>
       {#if run.dispatching_session_id}
         <a href={conversationPath(run.dispatching_session_id)} onclick={(event) => navigate(event, conversationPath(run.dispatching_session_id!))}>Launching conversation</a>
       {/if}
@@ -147,7 +147,7 @@
         <h3>Interruptions</h3>
         <ul>
           {#each run.interruptions as interruption, index (index)}
-            <li class="detail">{describeInterruption(interruption)}</li>
+            <li class="detail">{@render recordedTime(interruption.detected_at)} — {describeInterruption(interruption)}</li>
           {/each}
         </ul>
       </section>
@@ -158,10 +158,10 @@
         <h3>Ending</h3>
         <p class="ending-line">{describeEnding(account.ending)}</p>
         {#if account.cancellation}
-          <p>Cancelled by {account.cancellation.source} at {account.cancellation.requested_at}{account.cancellation.actor ? ` (${account.cancellation.actor})` : ""}{account.cancellation.session_id ? ` in session ${account.cancellation.session_id}` : ""}</p>
+          <p>Cancelled by {account.cancellation.source} at {@render recordedTime(account.cancellation.requested_at)}{account.cancellation.actor ? ` (${account.cancellation.actor})` : ""}{account.cancellation.session_id ? ` in session ${account.cancellation.session_id}` : ""}</p>
         {/if}
         {#if account.ending.ending === "threw" && account.ending.error.includes("\n")}
-          <details><summary>Engine details</summary><pre>{account.ending.error}</pre></details>
+          <details><summary>Error details</summary><pre>{account.ending.error}</pre></details>
         {/if}
         {#if redispatchedAny}
           <p class="detail disclosure">
@@ -232,10 +232,10 @@
       {#if run.state === "parked"}
         <section class="awaited" aria-label="Awaited work">
           <h3>Waiting for</h3>
-          {#if run.wake_at}<p>Timer wakes at <time>{run.wake_at}</time></p>{/if}
+          {#if run.wake_at && waits.some((entry) => entry.kind === "timer")}<p>Timer wakes at {@render recordedTime(run.wake_at)}</p>{/if}
           {#each detail?.holds ?? [] as hold (hold.id)}
             {#if hold.state === "open"}
-              <p>{hold.content}</p>
+              <p>Decision hold: {hold.content}</p>
               <p>Permitted verdicts: {hold.verdicts.join(", ")}</p>
               <p>An agent answers this decision through its granted tool.</p>
             {/if}
@@ -255,6 +255,10 @@
     {/if}
   {/if}
 </main>
+
+{#snippet recordedTime(stamp: string)}
+  <time datetime={stamp} title={stamp}>{formatRunTime(stamp)}</time>
+{/snippet}
 
 {#snippet outputValue(value: unknown)}
   {#if Array.isArray(value)}

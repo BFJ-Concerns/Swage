@@ -112,6 +112,25 @@ describe("RecentSessions", () => {
     expect(onSelectSession).toHaveBeenCalledWith("worker-1");
   });
 
+  it("searches sixty filter topics and preserves All sessions", async () => {
+    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValue([]);
+    const topics = Array.from({ length: 60 }, (_, i) => ({ id: `t-${i}`, name: `Topic ${i}`, slug: `t-${i}`, description: "", created_at: "" }));
+    component = mount(RecentSessions, { target: document.body, props: { topics } });
+    await settle();
+    const search = document.querySelector<HTMLInputElement>('input[aria-label="Search topic filters"]');
+    expect(search).not.toBeNull();
+    flushSync(() => { search!.value = "59"; search!.dispatchEvent(new Event("input", { bubbles: true })); });
+    expect(document.querySelector('[aria-label="Topic filter"]')?.textContent).not.toContain("Topic 58");
+    flushSync(() => buttonNamed("Topic 59").click());
+    await settle();
+    expect(sessionsApi.listRecentSessions).toHaveBeenLastCalledWith("t-59", false);
+    flushSync(() => buttonNamed("All sessions").click());
+    await settle();
+    expect(sessionsApi.listRecentSessions).toHaveBeenLastCalledWith(null, false);
+    flushSync(() => { search!.value = ""; search!.dispatchEvent(new Event("input", { bubbles: true })); });
+    expect(document.querySelectorAll('.filter')).toHaveLength(61);
+  });
+
   it("narrows to a topic with the filter and returns to all sessions", async () => {
     vi.mocked(sessionsApi.listRecentSessions)
       .mockResolvedValueOnce([conversationEntry(makeSession({ id: "a" })), conversationEntry(makeSession({ id: "b", topic_id: "topic-ops", topic_name: "Ops" }))])

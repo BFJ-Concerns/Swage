@@ -467,7 +467,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let storage =
             Arc::new(swage_storage::SqliteStorage::open(&root.path().join("router.db")).unwrap());
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(MockProvider::new(vec![])),

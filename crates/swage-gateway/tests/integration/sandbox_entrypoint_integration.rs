@@ -31,35 +31,8 @@ fn test_config(temp_dir: &tempfile::TempDir) -> SandboxConfig {
 
 #[tokio::test]
 async fn bubblewrap_sandbox_real_binary_runs_git_and_standard_device_io_through_shell() {
-    let bwrap = match find_bwrap() {
-        Ok(path) => path,
-        Err(error) => {
-            eprintln!("bubblewrap consumer unavailable: {error}");
-            return;
-        }
-    };
-    // Presence does not imply this host permits the namespaces the sandbox uses.
-    let probe = std::process::Command::new(bwrap)
-        .args([
-            "--unshare-all",
-            "--die-with-parent",
-            "--ro-bind",
-            "/",
-            "/",
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            "true",
-        ])
-        .output()
-        .expect("invoke real bubblewrap namespace probe");
-    if !probe.status.success() {
-        eprintln!(
-            "bubblewrap consumer unavailable: namespace probe {}: {}",
-            probe.status,
-            String::from_utf8_lossy(&probe.stderr)
-        );
+    let name = "bubblewrap_sandbox_real_binary_runs_git_and_standard_device_io_through_shell";
+    if !bubblewrap_check_available(name) {
         return;
     }
 
@@ -143,6 +116,7 @@ async fn bubblewrap_sandbox_real_binary_runs_git_and_standard_device_io_through_
         "/dev/tty must reach its ordinary headless ENXIO rather than a Landlock denial: {tty:?}"
     );
     sandbox.shutdown().await.unwrap();
+    eprintln!("bubblewrap check completed: {name}");
 }
 
 #[tokio::test]
@@ -349,8 +323,8 @@ async fn assert_abandoned_shell_command_stops(sandbox: &dyn Sandbox, workspace: 
 
 #[tokio::test]
 async fn bubblewrap_sandbox_real_binary_stops_abandoned_shell_command() {
-    if find_bwrap().is_err() {
-        eprintln!("skipping real bubblewrap integration test: bwrap is not installed");
+    let name = "bubblewrap_sandbox_real_binary_stops_abandoned_shell_command";
+    if !bubblewrap_check_available(name) {
         return;
     }
 
@@ -363,6 +337,7 @@ async fn bubblewrap_sandbox_real_binary_stops_abandoned_shell_command() {
     assert_abandoned_shell_command_stops(&sandbox, temp_dir.path()).await;
 
     sandbox.shutdown().await.unwrap();
+    eprintln!("bubblewrap check completed: {name}");
 }
 
 #[tokio::test]
@@ -383,26 +358,9 @@ async fn native_file_mutations_in_sandbox_child_refuse_without_attachment_author
     let mut env_guard = ProcessEnvGuard::new();
     env_guard.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
     for bubblewrap in [false, true] {
-        if bubblewrap {
-            let available = match find_bwrap() {
-                Ok(path) => tokio::process::Command::new(path)
-                    .args(["--unshare-all", "--ro-bind", "/", "/", "--", "/bin/true"])
-                    .output()
-                    .await
-                    .map_err(|error| error.to_string())
-                    .and_then(|output| {
-                        if output.status.success() {
-                            Ok(())
-                        } else {
-                            Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
-                        }
-                    }),
-                Err(error) => Err(error.to_string()),
-            };
-            if let Err(reason) = available {
-                eprintln!("skipping native file mutation bubblewrap leg: {reason}");
-                continue;
-            }
+        let name = "native_file_mutations_in_sandbox_child_refuse_without_attachment_authority";
+        if bubblewrap && !bubblewrap_check_available(name) {
+            continue;
         }
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("existing.txt"), "original").unwrap();
@@ -444,9 +402,205 @@ async fn native_file_mutations_in_sandbox_child_refuse_without_attachment_author
             std::fs::read_to_string(root.path().join("existing.txt")).unwrap(),
             "original"
         );
+        if bubblewrap {
+            eprintln!("bubblewrap check completed: {name}");
+        }
         eprintln!(
             "native file mutation refusal passed: {}",
             if bubblewrap { "bubblewrap" } else { "fallback" }
+        );
+    }
+}
+
+async fn assert_configured_shell_timeout(
+    sandbox: &dyn Sandbox,
+    workspace: &std::path::Path,
+    seconds: u64,
+) {
+    let command = "echo $$ > shell.pid; printf before > marker; sleep 10; printf after >> marker";
+    let mut call = Box::pin(sandbox.execute_tool("shell", json!({"command": command})));
+    let pid = tokio::select! {
+        result = call.as_mut() => panic!("the shell must start before its deadline: {result:?}"),
+        pid = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if let Some(pid) = std::fs::read_to_string(workspace.join("shell.pid")).ok()
+                    .and_then(|pid| host_pid_of(&["sh", "-c", command], pid.trim())) {
+                    break pid;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }) => pid.expect("the real shell must write its PID"),
+    };
+    assert!(
+        is_live(pid),
+        "the shell must actually run before timing out"
+    );
+    let first = tokio::time::timeout(std::time::Duration::from_secs(seconds + 2), call).await;
+    let next = sandbox
+        .execute_tool("shell", json!({"command": "cat marker"}))
+        .await;
+    let stopped = !is_live(pid);
+    sandbox.shutdown().await.unwrap();
+    let result = first
+        .expect("the configured shell deadline must finish the call")
+        .expect("a shell timeout must be a tool result, not an IPC wait failure");
+    let error = result
+        .error
+        .expect("the command must time out rather than finish");
+    assert!(
+        error.contains(&format!("timed out after {seconds}.0s"))
+            && error.contains("shell_timeout_secs"),
+        "{error}"
+    );
+    assert!(stopped, "the timed-out shell process must be stopped");
+    let next = next.expect("the next independent shell call must return its own result");
+    assert!(next.error.is_none(), "{next:?}");
+    assert_eq!(next.output["output"], "before");
+}
+
+#[tokio::test]
+async fn fallback_sandbox_real_binary_uses_configured_shell_timeout_then_serves_next_call() {
+    let mut env_guard = ProcessEnvGuard::new();
+    env_guard.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    for seconds in [1, 2] {
+        let root = crate::support::scratch_tempdir();
+        let tools = swage_config::ToolConfig {
+            shell_timeout_secs: seconds,
+            ..Default::default()
+        };
+        let runtime = serde_json::from_value(serde_json::to_value(tools).unwrap()).unwrap();
+        let config = SandboxConfig::builder()
+            .working_directory(root.path())
+            .tool_runtime(runtime)
+            .build()
+            .unwrap();
+        let mut sandbox = FallbackSandbox::new(config, test_llm_handler());
+        sandbox.spawn_agent().await.unwrap();
+        assert_configured_shell_timeout(&sandbox, root.path(), seconds).await;
+    }
+}
+
+#[tokio::test]
+async fn bubblewrap_sandbox_real_binary_uses_configured_shell_timeout_then_serves_next_call() {
+    // A missing or unavailable namespace is reported, never counted as this leg's proof.
+    let bwrap = match find_bwrap() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("bubblewrap consumer unavailable: {error}");
+            return;
+        }
+    };
+    let probe = std::process::Command::new(bwrap)
+        .args(["--unshare-all", "--ro-bind", "/", "/", "--", "/bin/true"])
+        .output()
+        .unwrap();
+    if !probe.status.success() {
+        eprintln!(
+            "bubblewrap consumer unavailable: {}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        return;
+    }
+    let mut env_guard = ProcessEnvGuard::new();
+    env_guard.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    for seconds in [1, 2] {
+        let root = crate::support::scratch_tempdir();
+        let tools = swage_config::ToolConfig {
+            shell_timeout_secs: seconds,
+            ..Default::default()
+        };
+        let runtime = serde_json::from_value(serde_json::to_value(tools).unwrap()).unwrap();
+        let config = SandboxConfig::builder()
+            .working_directory(root.path())
+            .tool_runtime(runtime)
+            .build()
+            .unwrap();
+        let mut sandbox = BubblewrapSandbox::new(config, test_llm_handler());
+        sandbox.spawn_agent().await.unwrap();
+        assert_configured_shell_timeout(&sandbox, root.path(), seconds).await;
+    }
+}
+// Probe the same namespace boundary the real child needs. A present but
+// unusable executable is a named fallback, not evidence of sandbox execution.
+fn bubblewrap_check_available(name: &str) -> bool {
+    let available = find_bwrap()
+        .map_err(|error| error.to_string())
+        .and_then(|path| {
+            std::process::Command::new(path)
+                .args(["--unshare-all", "--ro-bind", "/", "/", "--", "/bin/true"])
+                .output()
+                .map_err(|error| error.to_string())
+        })
+        .and_then(|output| {
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ))
+            }
+        });
+    match available {
+        Ok(()) => {
+            eprintln!("bubblewrap check executing: {name}");
+            true
+        }
+        Err(reason) => {
+            eprintln!("bubblewrap check fallback: {name}: {reason}");
+            false
+        }
+    }
+}
+
+#[test]
+fn bubblewrap_disabled_reports_each_named_fallback() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = tempfile::tempdir().unwrap();
+    let bwrap = fixture.path().join("bwrap");
+    std::fs::write(
+        &bwrap,
+        "#!/bin/sh\necho disabled-for-reporting-test >&2\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&bwrap, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(std::iter::once(fixture.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    for name in [
+        "bubblewrap_sandbox_real_binary_runs_git_and_standard_device_io_through_shell",
+        "bubblewrap_sandbox_real_binary_stops_abandoned_shell_command",
+        "native_file_mutations_in_sandbox_child_refuse_without_attachment_authority",
+    ] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("sandbox_entrypoint_integration::{name}"),
+                "--nocapture",
+            ])
+            .env("PATH", &path)
+            .output()
+            .unwrap();
+        let log = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        eprintln!("{log}");
+        assert!(output.status.success(), "child test failed: {log}");
+        assert!(
+            log.contains(&format!("bubblewrap check fallback: {name}:")),
+            "missing named fallback: {log}"
+        );
+        assert!(
+            log.contains("disabled-for-reporting-test"),
+            "missing fallback cause: {log}"
+        );
+        assert!(
+            !log.contains("bubblewrap check completed:"),
+            "disabled check claimed completion: {log}"
         );
     }
 }

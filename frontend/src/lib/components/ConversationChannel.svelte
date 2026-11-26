@@ -179,7 +179,7 @@
     </div>
   {/if}
   {#if activeConversation}<ConnectionIndicator store={connectionStore} {onRetry} />{/if}
-  <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} />
+  <MessageDisplay store={conversationStore} {streamingStore} {displayPreferences} {onNavigate} />
   <!-- Pinned to the foot of the channel's scroll, so a turn waiting on the
        user's decision shows its approval card in view however long the
        history above it is. -->

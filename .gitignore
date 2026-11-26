@@ -39,7 +39,7 @@ blob-report/
 /target/
 
 # Node
-node_modules/
+node_modules
 dist/
 
 # Python (for embedded runtime build artifacts)

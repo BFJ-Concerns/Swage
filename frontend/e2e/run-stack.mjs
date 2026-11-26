@@ -65,7 +65,7 @@ async function stop(code = 0) {
   if (stopping) return;
   stopping = true;
   for (const child of children) child.kill("SIGTERM");
-  await Promise.all(children.map((child) => child.exitCode !== null
+  await Promise.all(children.map((child) => (child.exitCode !== null || child.signalCode !== null)
     ? Promise.resolve()
     : new Promise((done) => child.once("exit", done))));
   await rm(swageRoot, { recursive: true, force: true });
@@ -96,6 +96,7 @@ start(join(targetDir, "debug/swage"), [
   env: {
     ...process.env,
     SWAGE_HOME: swageRoot,
+    XDG_RUNTIME_DIR: join(swageRoot, "run"),
     SWAGE_E2E_PROVIDER_KEY: "test-only",
     SWAGE_MANAGED_SECRET_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
   },

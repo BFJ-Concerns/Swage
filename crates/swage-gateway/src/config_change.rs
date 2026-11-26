@@ -11,9 +11,10 @@
 //! not a derived diff: a reader maps the event to the setting that changed
 //! by comparing the two states under a named action.
 //!
-//! The apply and its record are separate storage writes, so a crash or
-//! storage failure between them can leave an applied change without its
-//! record. That window is not silently accepted: a recording failure turns
+//! Transactional stores use `config_change_event` to commit the mutation
+//! and its record together. For other stores, they are separate writes, so
+//! a crash or storage failure between them can leave an applied change
+//! without its record. That window is not silently accepted: a recording failure turns
 //! the whole operation into an error naming the applied-but-unrecorded
 //! state, so no caller ever reports a recorded change that is not one.
 
@@ -56,20 +57,7 @@ pub async fn record_config_change(
     let summary = change.summary.to_owned();
     state
         .storage
-        .create_audit_event(swage_storage::NewAuditEvent {
-            id: Uuid::new_v4().to_string(),
-            session_id: change.session_id,
-            entity_kind: change.entity_kind.to_owned(),
-            entity_id: change.entity_id.to_owned(),
-            event_kind: "configuration_change".to_owned(),
-            summary: summary.clone(),
-            metadata: serde_json::json!({
-                "action": change.action,
-                "source": change.source,
-                "prior_state": change.prior_state,
-                "new_state": change.new_state,
-            }),
-        })
+        .create_audit_event(config_change_event(change))
         .await
         .map(|_| ())
         .map_err(|error| {
@@ -78,4 +66,22 @@ pub async fn record_config_change(
                  the configuration is changed without a record — reconcile before further changes"
             ))
         })
+}
+
+/// Build the configuration-change event for a store that commits it with its mutation.
+pub(crate) fn config_change_event(change: ConfigChange<'_>) -> swage_storage::NewAuditEvent {
+    swage_storage::NewAuditEvent {
+        id: Uuid::new_v4().to_string(),
+        session_id: change.session_id,
+        entity_kind: change.entity_kind.to_owned(),
+        entity_id: change.entity_id.to_owned(),
+        event_kind: "configuration_change".to_owned(),
+        summary: change.summary.to_owned(),
+        metadata: serde_json::json!({
+            "action": change.action,
+            "source": change.source,
+            "prior_state": change.prior_state,
+            "new_state": change.new_state,
+        }),
+    }
 }

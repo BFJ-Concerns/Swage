@@ -45,6 +45,10 @@ pub enum ErrorCode {
     SignInFailed,
     /// The provider runtime could not be started or reached.
     ProviderRuntimeUnavailable,
+    /// The gateway could not deliver output to its destination.
+    DeliveryFailed,
+    /// Automated execution did not produce its required result.
+    RuntimeError,
     /// An unexpected failure inside the gateway.
     InternalError,
 }
@@ -59,8 +63,8 @@ impl ErrorCode {
             Self::Conflict | Self::TurnInProgress | Self::AlreadyConnected => 409,
             Self::UnsupportedMediaType => 415,
             Self::ValidationError | Self::SignInUnsupported => 422,
-            Self::InternalError => 500,
-            Self::ProviderError | Self::SignInFailed => 502,
+            Self::InternalError | Self::RuntimeError => 500,
+            Self::ProviderError | Self::SignInFailed | Self::DeliveryFailed => 502,
             Self::ProviderRuntimeUnavailable => 503,
         }
     }
@@ -108,6 +112,8 @@ mod tests {
             ErrorCode::SignInUnsupported,
             ErrorCode::SignInFailed,
             ErrorCode::ProviderRuntimeUnavailable,
+            ErrorCode::DeliveryFailed,
+            ErrorCode::RuntimeError,
             ErrorCode::InternalError,
         ];
         for code in codes {

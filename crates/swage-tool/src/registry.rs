@@ -33,6 +33,8 @@ const PROTECTED_NAMES: &[&str] = &[
     "delegate",
     "schedule",
     "wake_me_later",
+    "agent_definition",
+    "task_definition",
 ];
 
 /// Registry of tools available for dispatch.
@@ -122,6 +124,12 @@ impl ToolRegistry {
 
     /// Look up a registered tool by exact name.
     ///
+    /// Whether `name` is a built-in tool's: reserved on every host, whether
+    /// or not this host registered the tool.
+    pub fn is_protected(&self, name: &str) -> bool {
+        self.protected.contains(name)
+    }
+
     /// Returns `None` for unknown names. Built-ins registered through
     /// [`register_builtin`](Self::register_builtin) live in the same map and
     /// are returned here like any other tool.

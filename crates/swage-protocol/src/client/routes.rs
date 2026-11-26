@@ -14,7 +14,10 @@ use std::borrow::Cow;
 use schemars::JsonSchema;
 
 use super::{
-    channel::{ChannelLinkCodeListResponse, ChannelLinkListResponse},
+    channel::{
+        ChannelLinkCodeListResponse, ChannelLinkCodeResponse, ChannelLinkListResponse,
+        CreateChannelLinkCodeRequest,
+    },
     context::TurnContextResponse,
     conversation::{
         ConversationBranchListResponse, ConversationBranchResponse, ConversationDetail,
@@ -195,6 +198,20 @@ pub fn routes() -> Vec<Route> {
             response: Response {
                 status: 200,
                 body: schema::<ChannelLinkListResponse>(),
+            },
+        },
+        Route {
+            operation_id: "create_channel_link_code",
+            method: Method::Post,
+            path: "/api/onboarding/channels/link-codes",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "Issue a single-use channel link code.",
+            request_optional: false,
+            request: schema::<CreateChannelLinkCodeRequest>(),
+            response: Response {
+                status: 201,
+                body: schema::<ChannelLinkCodeResponse>(),
             },
         },
         Route {
@@ -941,6 +958,20 @@ pub fn routes() -> Vec<Route> {
             response: Response {
                 status: 200,
                 body: schema::<DeleteSurfaceAnnotationResponse>(),
+            },
+        },
+        Route {
+            operation_id: "list_secrets",
+            method: Method::Get,
+            path: "/api/secrets",
+            path_parameters: vec![],
+            query_parameters: vec![],
+            summary: "List governed secrets without revealing values.",
+            request_optional: false,
+            request: None,
+            response: Response {
+                status: 200,
+                body: schema::<crate::hosting::SecretListResponse>(),
             },
         },
         Route {

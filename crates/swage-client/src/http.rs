@@ -1006,7 +1006,7 @@ mod tests {
     use crate::error::ErrorCode;
     // Shared crate-wide lock — prevents races with runtime.rs tests that also
     // manipulate XDG_RUNTIME_DIR during parallel test execution.
-    use crate::test_helpers::ENV_LOCK;
+    use crate::test_helpers::with_temp_xdg;
 
     #[test]
     fn new_strips_trailing_slash() {
@@ -1022,59 +1022,51 @@ mod tests {
 
     #[test]
     fn from_runtime_returns_gateway_not_running_when_no_metadata() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let tmpdir = tempfile::TempDir::new().unwrap();
-        // SAFETY: single-threaded within the lock.
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", tmpdir.path()) };
-        let result = GatewayClient::from_runtime();
-        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+        with_temp_xdg(|_dir| {
+            let result = GatewayClient::from_runtime();
 
-        match result {
-            Err(ClientError::GatewayNotRunning { .. }) => {}
-            other => panic!("expected GatewayNotRunning, got: {other:?}"),
-        }
+            match result {
+                Err(ClientError::GatewayNotRunning { .. }) => {}
+                other => panic!("expected GatewayNotRunning, got: {other:?}"),
+            }
+        });
     }
 
     #[test]
     fn from_runtime_returns_gateway_not_running_for_stale_pid() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let tmpdir = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", tmpdir.path()) };
+        with_temp_xdg(|_dir| {
+            // 4_194_304 is Linux max_pid — never assigned to a real process.
+            let meta = RuntimeMetadata {
+                pid: 4_194_304,
+                address: "http://127.0.0.1:3000".to_string(),
+                started_at: chrono::Utc::now(),
+            };
+            meta.save().unwrap();
+            let result = GatewayClient::from_runtime();
 
-        // 4_194_304 is Linux max_pid — never assigned to a real process.
-        let meta = RuntimeMetadata {
-            pid: 4_194_304,
-            address: "http://127.0.0.1:3000".to_string(),
-            started_at: chrono::Utc::now(),
-        };
-        meta.save().unwrap();
-        let result = GatewayClient::from_runtime();
-        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
-
-        #[cfg(target_os = "linux")]
-        match result {
-            Err(ClientError::GatewayNotRunning { .. }) => {}
-            other => panic!("expected GatewayNotRunning for stale PID, got: {other:?}"),
-        }
-        // On non-Linux is_stale() always returns false, so the client succeeds.
-        #[cfg(not(target_os = "linux"))]
-        assert!(result.is_ok());
+            #[cfg(target_os = "linux")]
+            match result {
+                Err(ClientError::GatewayNotRunning { .. }) => {}
+                other => panic!("expected GatewayNotRunning for stale PID, got: {other:?}"),
+            }
+            // On non-Linux is_stale() always returns false, so the client succeeds.
+            #[cfg(not(target_os = "linux"))]
+            assert!(result.is_ok());
+        });
     }
 
     #[test]
     fn from_runtime_constructs_client_from_live_metadata() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let tmpdir = tempfile::TempDir::new().unwrap();
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", tmpdir.path()) };
+        with_temp_xdg(|_dir| {
+            // Use the current process PID — is_stale() will return false.
+            let meta =
+                RuntimeMetadata::new(std::process::id(), "http://127.0.0.1:3000".to_string());
+            meta.save().unwrap();
+            let result = GatewayClient::from_runtime();
 
-        // Use the current process PID — is_stale() will return false.
-        let meta = RuntimeMetadata::new(std::process::id(), "http://127.0.0.1:3000".to_string());
-        meta.save().unwrap();
-        let result = GatewayClient::from_runtime();
-        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
-
-        let client = result.expect("from_runtime should succeed with live PID metadata");
-        assert_eq!(client.base_url(), "http://127.0.0.1:3000");
+            let client = result.expect("from_runtime should succeed with live PID metadata");
+            assert_eq!(client.base_url(), "http://127.0.0.1:3000");
+        });
     }
 
     // health() and shutdown() require a live gateway — covered by integration tests.

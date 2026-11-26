@@ -569,6 +569,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_receive_keeps_partial_frame_for_next_call() {
+        use tokio::io::AsyncWriteExt;
+        let (host, peer) = UnixStream::pair().unwrap();
+        let sandbox = BubblewrapSandbox::with_transport(
+            test_config(),
+            no_op_llm_handler(),
+            IpcTransport::new(host),
+        );
+        let (read, mut write) = peer.into_split();
+        let mut read = tokio::io::BufReader::new(read);
+        let first = sandbox.execute_tool("echo", json!({}));
+        let peer = async {
+            let mut line = String::new();
+            tokio::io::AsyncBufReadExt::read_line(&mut read, &mut line)
+                .await
+                .unwrap();
+            let request: IpcMessage = serde_json::from_str(&line).unwrap();
+            let IpcMessage::ToolCallRequest { request_id, .. } = request else {
+                panic!("expected request")
+            };
+            let frame = serde_json::to_vec(&IpcMessage::ToolCallResult {
+                request_id,
+                output: json!("old"),
+                duration_ms: 1,
+                error: None,
+            })
+            .unwrap();
+            write.write_all(&frame[..8]).await.unwrap();
+            frame
+        };
+        let (cancelled, frame) = tokio::join!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), first),
+            peer
+        );
+        assert!(cancelled.is_err());
+        write.write_all(&frame[8..]).await.unwrap();
+        write.write_all(b"\n").await.unwrap();
+        let peer = async {
+            loop {
+                let mut line = String::new();
+                tokio::io::AsyncBufReadExt::read_line(&mut read, &mut line)
+                    .await
+                    .unwrap();
+                if let IpcMessage::ToolCallRequest { request_id, .. } =
+                    serde_json::from_str(&line).unwrap()
+                {
+                    let frame = serde_json::to_vec(&IpcMessage::ToolCallResult {
+                        request_id,
+                        output: json!("fresh"),
+                        duration_ms: 1,
+                        error: None,
+                    })
+                    .unwrap();
+                    write.write_all(&frame).await.unwrap();
+                    write.write_all(b"\n").await.unwrap();
+                    break;
+                }
+            }
+        };
+        let (result, ()) = tokio::join!(sandbox.execute_tool("echo", json!({})), peer);
+        assert_eq!(
+            result
+                .expect("a split late result must not corrupt the next call")
+                .output,
+            json!("fresh")
+        );
+    }
+
+    #[tokio::test]
     async fn spawn_agent_timeout_kills_spawned_bwrap_child() {
         let _env_guard = crate::SANDBOX_TEST_ENV_LOCK.lock().await;
         let temp_dir = tempfile::tempdir().unwrap();

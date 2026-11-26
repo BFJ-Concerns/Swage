@@ -241,6 +241,7 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
                     name: tool_name.to_string(),
                     message: "device execution needs the live gateway state".to_string(),
                 })?;
+            ctx.mark_execution_started();
             // Gateway runtime storage is not a path on the paired machine.
             let mut device_ctx = serialise_tool_context(ctx);
             device_ctx.tool_output_directory = None;
@@ -255,19 +256,32 @@ impl ToolExecutionStrategy for GatewayExecutionStrategy {
         }
 
         if tool.requires_device_execution() {
-            tool.execute(resolved_params, &gateway_ctx).await
+            ctx.mark_execution_started();
+            tool.execute(resolved_params, &gateway_ctx)
+                .await
+                .map_err(ToolError::execution_uncertain)
         } else {
             // Secret-aware tools run on the host so raw values never enter sandbox IPC.
             if !tool.device_secret_keys().is_empty() {
-                return tool.execute(resolved_params, &gateway_ctx).await;
+                ctx.mark_execution_started();
+                return tool
+                    .execute(resolved_params, &gateway_ctx)
+                    .await
+                    .map_err(ToolError::execution_uncertain);
             }
             match &self.inner {
                 Some(strategy) => {
+                    ctx.mark_execution_started();
                     strategy
                         .execute(tool, tool_name, &resolved_params, &gateway_ctx)
                         .await
                 }
-                None => tool.execute(resolved_params, &gateway_ctx).await,
+                None => {
+                    ctx.mark_execution_started();
+                    tool.execute(resolved_params, &gateway_ctx)
+                        .await
+                        .map_err(ToolError::execution_uncertain)
+                }
             }
         }
     }

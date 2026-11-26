@@ -38,6 +38,7 @@ use schemars::JsonSchema;
 #[derive(JsonSchema)]
 #[allow(dead_code)]
 pub struct ClientSurface {
+    secret_list: crate::hosting::SecretListResponse,
     api_error: error::ApiErrorBody,
     client_event: websocket::ClientEvent,
     server_event: websocket::ServerEvent,

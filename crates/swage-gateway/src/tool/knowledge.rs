@@ -1178,6 +1178,7 @@ mod tests {
         let relative = artifact.reported;
         storage
             .create_tool_call(NewToolCall {
+                execution: None,
                 turn_id: fetch_turn.id,
                 agent_id: "gateway".into(),
                 call_id: "fetch-1".into(),
@@ -1567,7 +1568,7 @@ mod tests {
             .unwrap();
 
         let provider = Arc::new(MockProvider::new(vec![]));
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider as Arc<dyn LlmProvider>,
@@ -1765,7 +1766,7 @@ mod tests {
             .await
             .unwrap();
         let provider = Arc::new(MockProvider::new(vec![]));
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider as Arc<dyn LlmProvider>,
@@ -1875,7 +1876,7 @@ mod tests {
             .await
             .unwrap();
         let provider = Arc::new(MockProvider::new(vec![]));
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider as Arc<dyn LlmProvider>,

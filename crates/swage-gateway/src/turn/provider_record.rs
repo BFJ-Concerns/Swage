@@ -363,6 +363,22 @@ pub(super) fn record_effort_snapshot(
         serde_json::to_value(resolved).expect("resolved effort serialises");
 }
 
+/// Record the output limit the turn's request carries beside the effort:
+/// the tokens sent and which source named them. Absent from the snapshot
+/// when no source declared one — the adapter's protocol floor then applies,
+/// and the per-round request record shows what went on the wire.
+pub(super) fn record_output_limit_snapshot(
+    report_json: &mut serde_json::Value,
+    resolved: swage_core::ResolvedOutputLimit,
+) {
+    normalise_report_object(report_json);
+    if !report_json["provider_visible"].is_object() {
+        report_json["provider_visible"] = serde_json::json!({});
+    }
+    report_json["provider_visible"]["output_limit"] =
+        serde_json::to_value(resolved).expect("resolved output limit serialises");
+}
+
 pub(super) fn record_effective_model_snapshot(
     report_json: &mut serde_json::Value,
     catalogue_entry: &str,

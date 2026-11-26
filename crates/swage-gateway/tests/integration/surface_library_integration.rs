@@ -22,7 +22,7 @@ use swage_storage::SqliteStorage;
 use swage_storage::store::{AuditStore, SurfaceStore};
 
 fn router_over(storage: Arc<SqliteStorage>) -> Router {
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(StubProvider),
@@ -516,7 +516,7 @@ async fn a_failed_save_audit_leaves_no_library_entry() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_seeded_surface_announces_the_same_refetch_signal_as_a_manual_add() {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(StubProvider),
@@ -758,7 +758,7 @@ async fn the_library_tool_narrows_by_topic_tags_widens_on_request_and_adds_by_ch
     use swage_tool::context::MockToolContext;
 
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(StubProvider),

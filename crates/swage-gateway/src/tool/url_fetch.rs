@@ -79,6 +79,14 @@ impl Tool for UrlFetchTool {
         true
     }
 
+    fn validate_call(&self, params: &Value) -> Result<(), ToolError> {
+        optional_offset_bytes(params, self.name())?;
+        if let Some(url) = params["url"].as_str() {
+            parse_fetch_url(url, self.name())?;
+        }
+        Ok(())
+    }
+
     async fn execute(&self, params: Value, ctx: &dyn ToolContext) -> Result<Value, ToolError> {
         let url = params["url"]
             .as_str()
@@ -106,6 +114,21 @@ impl Tool for UrlFetchTool {
                 message: format!("Failed to build HTTP client: {e}"),
             })?;
 
+        self.fetch_and_retain(client, parsed_url, url, offset_bytes, ctx)
+            .await
+            .map_err(ToolError::after_execution)
+    }
+}
+
+impl UrlFetchTool {
+    async fn fetch_and_retain(
+        &self,
+        client: reqwest::Client,
+        parsed_url: reqwest::Url,
+        url: String,
+        offset_bytes: usize,
+        ctx: &dyn ToolContext,
+    ) -> Result<Value, ToolError> {
         let mut response = client.get(parsed_url.clone()).send().await.map_err(|e| {
             let message = if e.is_timeout() {
                 format!(

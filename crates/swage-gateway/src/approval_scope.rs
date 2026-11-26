@@ -52,7 +52,14 @@ pub(crate) async fn claim_approval_waiter(
         // Keep the sender alive until expiry and turn settlement finish.
         channels.remove(&approval.id)
     };
-    expire_approval(state, approval, turn).await?;
+    let live = abandoned_waiter.as_ref().is_some_and(|slot| {
+        slot.sender
+            .as_ref()
+            .is_some_and(|sender| !sender.is_closed())
+    });
+    // A live gate owns timeout policy and turn continuation. Dropping its
+    // sender wakes it only after the expiry row is durable.
+    expire_approval(state, approval, if live { None } else { turn }).await?;
     drop(abandoned_waiter);
     Err(ApiError::conflict(
         "approval request expired; retry the operation".to_string(),
@@ -73,11 +80,26 @@ pub(crate) async fn decide_approval(
         ApprovalDecisionValue::Approved => ApprovalState::Approved,
         ApprovalDecisionValue::Rejected => ApprovalState::Rejected,
     };
-    let settled = state
+    let settled = match state
         .storage
         .update_approval_state(approval.id, outcome, decision.reason.as_deref())
         .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
+    {
+        Ok(settled) => settled,
+        Err(error) => {
+            // Keep the receiver open after a failed write. A competing client
+            // still sees a claimed slot until the sender is restored.
+            if let Some(slot) = state
+                .approval_channels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_mut(&approval.id)
+            {
+                slot.sender = Some(sender);
+            }
+            return Err(ApiError::internal(error.to_string()));
+        }
+    };
     if !settled {
         let current = state
             .storage

@@ -176,13 +176,38 @@ async fn start_test_server_with_tools(
     tools: Vec<Arc<dyn swage_tool::tool::Tool>>,
 ) -> (Router, SocketAddr, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(provider),
         config,
         swage_gateway::tool::ToolDispatcher::allow_all(tools),
         None,
+    );
+    let router = build_router(state);
+
+    let (addr, _server) = start_live_server(router.clone()).await;
+
+    (router, addr, storage)
+}
+
+/// Like `start_test_server_with_tools`, but serving from `data_root`, so a test
+/// can place gateway-owned files there before the gateway reads them.
+async fn start_test_server_with_tools_at(
+    provider: impl LlmProvider + 'static,
+    config: ResolvedConfig,
+    tools: Vec<Arc<dyn swage_tool::tool::Tool>>,
+    data_root: &std::path::Path,
+) -> (Router, SocketAddr, Arc<SqliteStorage>) {
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let state = AppState::new_with_config_root(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
+        Arc::new(provider),
+        config,
+        swage_gateway::tool::ToolDispatcher::allow_all(tools),
+        None,
+        data_root.to_path_buf(),
     );
     let router = build_router(state);
 
@@ -995,7 +1020,7 @@ async fn agent_scoped_routing_isolates_approval_events() {
     let _guard = SwageHomeGuard::isolate();
 
     // Agent-scoped routing is tested at the unit level in the gateway's
-    // approval routing tests (task) and via the re-emission tests
+    // approval routing tests and via the re-emission tests
     // which verify that approvals for other agents are NOT re-emitted.
     // A full two-agent WebSocket test requires multi-agent session setup
     // which is not yet available in the inter-agent communication stack.
@@ -1003,7 +1028,7 @@ async fn agent_scoped_routing_isolates_approval_events() {
     // The routing infrastructure is in place and unit-tested. The cross-agent
     // isolation is verified by `approvals_for_other_agent_not_re_emitted_on_connect`.
     eprintln!(
-        "Agent-scoped routing is unit-tested via [byi8] and re-emission tests — \
+        "Agent-scoped routing is covered by unit and re-emission tests — \
                full multi-agent WebSocket integration deferred until inter-agent communication is available"
     );
 }
@@ -1459,7 +1484,7 @@ async fn native_approval_scope_with_workspace(scope: &str, read: bool, symlink: 
     // A fresh gateway has no session grant cache: permanent access must load from storage.
     let (router, addr) = if scope == "permanent" {
         let provider = MockProvider::new(vec![next(), native_done()]);
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(provider),
@@ -1884,9 +1909,13 @@ async fn shipped_guidance_reads_without_approval_and_stays_read_only() {
         // Exercise location approvals, without per-tool write approval masking
         // the projection's own write refusal.
         config.tools.permissions.require_approval.clear();
-        let (router, addr, storage) =
-            start_test_server_with_tools(MockProvider::new(responses), config, native_file_tools())
-                .await;
+        let (router, addr, storage) = start_test_server_with_tools_at(
+            MockProvider::new(responses),
+            config,
+            native_file_tools(),
+            data_root,
+        )
+        .await;
         let (_, conversation) = http(&router, "POST", "/api/conversations").await;
         let id = conversation["id"].as_str().unwrap();
         attach_native_workspace(&storage, id, &project).await;

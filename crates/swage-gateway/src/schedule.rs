@@ -320,6 +320,15 @@ pub async fn update_schedule(
     update_schedule_change(state, schedule_id, request, "operator_http", None).await
 }
 
+pub(crate) fn validate_schedule_agent_update(has_agent_id: bool) -> Result<(), GatewayError> {
+    if has_agent_id {
+        return Err(GatewayError::ValidationError(
+            "A schedule's agent is fixed when the schedule is created. To change it, create a new schedule with that agent.".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn update_schedule_change(
     state: &AppState,
     schedule_id: Uuid,
@@ -327,11 +336,7 @@ pub(crate) async fn update_schedule_change(
     source: &str,
     session_id: Option<Uuid>,
 ) -> Result<wire::Schedule, GatewayError> {
-    if request.agent_id.is_some() {
-        return Err(GatewayError::ValidationError(
-            "A schedule's agent is fixed when the schedule is created. To change it, create a new schedule with that agent.".into(),
-        ));
-    }
+    validate_schedule_agent_update(request.agent_id.is_some())?;
     let rearm = request.spec.is_some();
     let intended = resolve_update_schedule(state, schedule_id, request).await?;
     validate_schedule_shape(&intended)?;
@@ -1184,7 +1189,8 @@ async fn run_body(
     let (session_id, agent_id, input) = match &schedule.session_policy {
         SessionPolicy::Fresh { topic_id, agent_id } => {
             let service =
-                ConversationService::new(state.storage.clone(), state.topic_store.clone());
+                ConversationService::new(state.storage.clone(), state.topic_store.clone())
+                    .with_config(state.active_config(), state.config_root.clone());
             let conversation = service
                 .create_session_in_topic_for_agent(
                     topic_id.expect("stored fresh policy has a scope id"),
@@ -1304,7 +1310,7 @@ async fn run_body(
     deliver_run_output(state, schedule, run.id, session_id, turn_id, &output)
         .await
         .map_err(|error| RunFailure {
-            message: format!("delivery failed: {error}"),
+            message: format!("This run could not send its output: {error}."),
             output: Some(output.clone()),
             delivery_attempted: true,
         })?;
@@ -1398,7 +1404,9 @@ pub(crate) async fn settle_queued_run(
             state,
             &schedule,
             run_id,
-            format!("queued turn ended {}", turn.state),
+            turn.failure_message
+                .clone()
+                .unwrap_or_else(|| format!("queued turn ended {}", turn.state)),
             turn.assistant_response.clone(),
             false,
         )
@@ -1424,7 +1432,7 @@ pub(crate) async fn settle_queued_run(
                     state,
                     &schedule,
                     run_id,
-                    format!("delivery failed: {error}"),
+                    format!("This run could not send its output: {error}."),
                     Some(output),
                     true,
                 )

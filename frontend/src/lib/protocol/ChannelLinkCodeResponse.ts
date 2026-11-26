@@ -3,4 +3,4 @@
 /**
  * A short-lived, single-use channel link code.
  */
-export type ChannelLinkCodeResponse = { link_code: string, expires_at: string, };
+export type ChannelLinkCodeResponse = { integration: string, link_code: string, expires_at: string, };

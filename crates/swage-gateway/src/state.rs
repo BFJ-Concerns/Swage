@@ -34,30 +34,6 @@ use crate::{
     telegram::TelegramClient, tool::ToolDispatcher, websocket::ServerEvent,
 };
 
-/// The environment variable an install sets to declare the boundary every
-/// turn runs inside — `SWAGE_EXECUTION_BOUNDARY=container` in the container
-/// image. It is read from the process environment only: the declaration
-/// belongs to the install, never to configuration an operator edits.
-pub const EXECUTION_BOUNDARY_ENV: &str = "SWAGE_EXECUTION_BOUNDARY";
-
-fn declared_execution_boundary_from_env() -> Option<String> {
-    std::env::var(EXECUTION_BOUNDARY_ENV)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-/// Rootless in-process state must never discover the operator's data directory.
-fn application_config_root(
-    root_override: Option<PathBuf>,
-) -> (PathBuf, Option<Arc<tempfile::TempDir>>) {
-    if let Some(root) = root_override {
-        return (root, None);
-    }
-    let root = Arc::new(tempfile::tempdir().expect("temporary application configuration root"));
-    (root.path().to_path_buf(), Some(root))
-}
-
 /// A gate's sender and its claim, retained until the gate settles.
 pub struct ApprovalWaiter {
     pub(crate) sender: Option<oneshot::Sender<ApprovalDecision>>,
@@ -88,10 +64,10 @@ impl ApprovalWaiter {
 /// concurrent modification from multiple handler tasks.
 #[derive(Clone)]
 pub struct AppState {
+    #[cfg(feature = "test-fixtures")]
+    pub(crate) test_root: Option<Arc<tempfile::TempDir>>,
     /// Configuration root selected when this gateway instance was constructed.
     pub config_root: PathBuf,
-    /// Keeps an isolated root alive until the last state clone is dropped.
-    _temporary_config_root: Option<Arc<tempfile::TempDir>>,
     /// Persistent storage backend (sessions, threads, turns, messages, tool calls).
     pub storage: Arc<dyn Storage>,
     /// Topic storage backend. Separate from `storage` because `TopicStore` is
@@ -188,12 +164,6 @@ pub struct AppState {
     pub restart_required: Arc<AtomicBool>,
     /// Whether this process can restart itself via the desktop/runtime wrapper.
     pub managed_gateway: bool,
-    /// The execution boundary the install declares for every turn — a
-    /// container image sets it — read from the process environment
-    /// (`EXECUTION_BOUNDARY_ENV`), never from operator-editable
-    /// configuration. When set, no per-turn sandbox is built and every turn's
-    /// record names this boundary.
-    pub declared_execution_boundary: Option<String>,
     /// Hot-swapped runtime config used by new turns and settings reads.
     pub runtime_config: Arc<RwLock<ResolvedConfig>>,
     /// Hot-swapped provider catalogue used by new turns.
@@ -303,9 +273,6 @@ impl AppState {
         })
     }
 
-    /// Construct state under an explicit `SWAGE_HOME`, or an owned temporary
-    /// root when none is supplied. Persistent gateways use
-    /// [`Self::new_with_config_root`] with their startup root.
     pub fn new(
         storage: Arc<dyn Storage>,
         topic_store: Arc<dyn TopicStore>,
@@ -314,9 +281,9 @@ impl AppState {
         tool_dispatcher: ToolDispatcher,
         hook_registry: Option<Arc<HookRegistry>>,
     ) -> Self {
-        let (config_root, temporary_root) =
-            application_config_root(std::env::var_os("SWAGE_HOME").map(PathBuf::from));
-        let mut state = Self::new_with_config_root(
+        let config_root = swage_config::discovery::resolve_root()
+            .unwrap_or_else(|_| swage_config::discovery::effective_root_path());
+        Self::new_with_config_root(
             storage,
             topic_store,
             provider,
@@ -324,9 +291,7 @@ impl AppState {
             tool_dispatcher,
             hook_registry,
             config_root,
-        );
-        state._temporary_config_root = temporary_root;
-        state
+        )
     }
 
     /// Construct application state with a root already selected by the caller.
@@ -374,8 +339,9 @@ impl AppState {
             });
         }
         Self {
+            #[cfg(feature = "test-fixtures")]
+            test_root: None,
             config_root,
-            _temporary_config_root: None,
             storage: storage.clone(),
             topic_store,
             provider: provider.clone(),
@@ -409,7 +375,6 @@ impl AppState {
             managed_gateway: std::env::var("SWAGE_MANAGED_GATEWAY")
                 .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
-            declared_execution_boundary: declared_execution_boundary_from_env(),
             runtime_config: Arc::new(RwLock::new(config)),
             runtime_provider: Arc::new(RwLock::new(provider)),
             runtime_tool_dispatcher: Arc::new(RwLock::new(tool_dispatcher)),
@@ -676,28 +641,6 @@ mod codex_runtime_audit_tests {
     use super::*;
     use swage_storage::SqliteStorage;
 
-    #[test]
-    fn rootless_state_owns_an_isolated_root() {
-        let (path, owner) = application_config_root(None);
-        let other_owner = owner.clone();
-        assert!(path.is_dir());
-        let (other_path, _other_root) = application_config_root(None);
-        assert_ne!(path, other_path);
-        drop(owner);
-        assert!(path.is_dir(), "a clone retains the root");
-        drop(other_owner);
-        assert!(!path.exists(), "the last owner cleans up its root");
-    }
-
-    #[test]
-    fn an_explicit_state_root_is_retained_without_ownership() {
-        let fixture = tempfile::tempdir().unwrap();
-        let (path, owner) = application_config_root(Some(fixture.path().to_path_buf()));
-        assert_eq!(path, fixture.path());
-        assert!(owner.is_none());
-        assert!(path.is_dir());
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn lifecycle_events_are_recorded_at_gateway_grain() {
         let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
@@ -793,7 +736,7 @@ mod tests {
 
     fn make_minimal_state() -> AppState {
         let storage = Arc::new(MockStorage::new());
-        AppState::new(
+        AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
             Arc::new(MockProvider::new(vec![])) as Arc<dyn swage_provider::LlmProvider>,
@@ -851,7 +794,7 @@ mod tests {
     #[test]
     fn appstate_new_initialises_approval_channels() {
         let storage = Arc::new(MockStorage::new());
-        let state = AppState::new(
+        let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
             Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
             Arc::new(MockProvider::new(vec![])) as Arc<dyn swage_provider::LlmProvider>,
@@ -860,5 +803,16 @@ mod tests {
             None,
         );
         assert!(state.approval_channels.lock().unwrap().is_empty());
+    }
+}
+
+impl AppState {
+    /// The inter-agent message router over this gateway's store and its
+    /// lifecycle hooks: every path that sends or delivers an agent message —
+    /// a delegation, a Result carried into a thread, the agent-message API —
+    /// builds its router here, so no path delivers past the hooks another
+    /// honours.
+    pub(crate) fn message_router(&self) -> swage_agent::MessageRouter {
+        swage_agent::MessageRouter::new(self.storage.clone(), self.hook_registry.clone())
     }
 }

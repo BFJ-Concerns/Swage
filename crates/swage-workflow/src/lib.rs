@@ -23,7 +23,9 @@ pub use host::{
 pub use model::EffectKind;
 pub use recovery::{EffectRecoveryHost, recover_started_effect};
 
-/// Runtime version recorded on durable workflow runs.
+/// Runtime version recorded on durable workflow runs. The workspace takes any
+/// compatible rquickjs release; the lockfile fixes the one built, and a test
+/// holds this string to it.
 pub const QUICKJS_ENGINE_VERSION: &str = "rquickjs-0.12.2";
 
 /// Hash a canonical JSON host-call request for durable replay matching.
@@ -33,4 +35,27 @@ pub fn journal_args_hash(request: &serde_json::Value) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::QUICKJS_ENGINE_VERSION;
+
+    /// The version a run records is the rquickjs the workspace lockfile
+    /// resolves, so a lockfile update cannot leave runs naming the old one.
+    #[test]
+    fn the_recorded_engine_version_is_the_locked_rquickjs() {
+        let lock = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock"));
+        let locked = lock
+            .split("[[package]]")
+            .find(|entry| entry.contains("\nname = \"rquickjs\"\n"))
+            .and_then(|entry| {
+                entry
+                    .lines()
+                    .find_map(|line| line.strip_prefix("version = \""))
+                    .and_then(|version| version.strip_suffix('"'))
+            })
+            .expect("Cargo.lock resolves rquickjs");
+        assert_eq!(QUICKJS_ENGINE_VERSION, format!("rquickjs-{locked}"));
+    }
 }

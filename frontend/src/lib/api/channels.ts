@@ -1,3 +1,4 @@
+import type { CreateChannelLinkCodeRequest } from "../protocol/CreateChannelLinkCodeRequest";
 import * as generated from "../protocol/client";
 
 export async function listChannelStatuses() {
@@ -10,4 +11,8 @@ export async function listChannelLinks() {
 
 export async function listChannelLinkCodes() {
   return generated.listChannelLinkCodes();
+}
+
+export async function createChannelLinkCode(request: CreateChannelLinkCodeRequest) {
+  return generated.createChannelLinkCode(request);
 }

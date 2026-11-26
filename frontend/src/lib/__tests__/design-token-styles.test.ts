@@ -3,6 +3,8 @@
  * authored component styles, so a future literal reintroduced while retinting
  * one of these surfaces fails alongside the component's behavioural tests.
  */
+// @ts-expect-error Vitest supplies Node APIs; the application has browser types.
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import appLayout from "../components/AppLayout.svelte?raw";
@@ -27,7 +29,11 @@ import providerCreation from "../components/settings/ProviderCreation.svelte?raw
 import providerDefaultModel from "../components/settings/ProviderDefaultModel.svelte?raw";
 import providerModelManagement from "../components/settings/ProviderModelManagement.svelte?raw";
 
+// Vitest stubs CSS imports, including ?raw. Read the authored declarations.
+const settingsControls = readFileSync("src/lib/components/settings/controls.css", "utf8");
+
 const RETINTED_COMPONENTS = {
+  SettingsControls: settingsControls,
   AppLayout: appLayout,
   ConnectionIndicator: connectionIndicator,
   ConversationChannel: conversationChannel,

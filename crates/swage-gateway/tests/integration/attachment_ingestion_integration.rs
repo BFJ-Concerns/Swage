@@ -67,7 +67,7 @@ fn test_state(
     workflow_capabilities: WorkflowCapabilities,
 ) -> (AppState, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::open(db_path).unwrap());
-    let mut state = AppState::new(
+    let mut state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(MockProvider),
