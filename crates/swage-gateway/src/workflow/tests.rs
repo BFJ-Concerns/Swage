@@ -103,7 +103,7 @@ fn research_sweep_id(topic_id: Uuid) -> Uuid {
     crate::synthetic_id::synthetic_id(
         CARRIED_WORKFLOW_ID_DOMAIN,
         topic_id,
-        "research/research-sweep",
+        "shipped:research/research-sweep",
     )
 }
 
@@ -1598,6 +1598,53 @@ async fn captured_sources_query_journals_the_run_scoped_store_read() {
     drop(tx);
     host.await.expect("host loop");
     assert_eq!(replayed, reading, "replay must use the journalled reading");
+}
+
+/// A skill a person authors under a shipped skill's name, carrying a
+/// workflow of the shipped one's name, is a different workflow: its id is not
+/// the shipped workflow's, so a run of it never resolves the shipped grants,
+/// even in a scope where the shipped skill is the one discovery finds.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_authored_carrier_of_a_shipped_name_never_takes_the_shipped_grants() {
+    let (state, storage) = workflow_test_state();
+    let topic = storage.general_scope().await.expect("topic");
+    let source = "return typeof capturedSources;";
+    let authored_skill = swage_config::skill::parse_skill_source(
+        "---\ndescription: A person's own research skill.\n---\n\nInstructions.\n",
+        std::path::Path::new("/agent/skills/research/SKILL.md"),
+        "research",
+        swage_config::HierarchyLevel::Global,
+    )
+    .expect("authored skill");
+    assert!(!authored_skill.shipped);
+    let authored = EffectiveWorkflow::from_carried(
+        topic.id,
+        &authored_skill,
+        "research-sweep".into(),
+        source.into(),
+        false,
+    )
+    .expect("authored carried workflow");
+    assert_ne!(authored.id, research_sweep_id(topic.id));
+
+    let run = storage
+        .create_workflow_run(NewWorkflowRun {
+            inline_workflow_id: Some(authored.id),
+            inline_workflow_name: Some("research-sweep".into()),
+            inline_workflow_version: Some(1),
+            carrying_skill: Some("research".into()),
+            source: Some(source.into()),
+            source_hash: source_hash(source),
+            ..swage_storage::fixtures::new_workflow_run(topic.id)
+        })
+        .await
+        .expect("authored carrier's run");
+    assert!(
+        !captured_sources_grant_for_run(&state, &run)
+            .await
+            .expect("resolve the authored carrier's grant"),
+        "the shipped research skill's grant must not reach a person's workflow of the same name"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

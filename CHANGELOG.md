@@ -176,6 +176,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- A workflow carried by a topic's or a person's own skill no longer shares its id with a shipped workflow of the same skill and workflow name, so a run of it never resolves the shipped workflow's grants, whichever skill the resolving scope discovers.
 - `tool_result_read` masks registered secret values in the stored result it returns, as the conversation's history does, instead of reading them back whole.
 - An error that ends no turn — a message that could not be queued, a skill or approval request the gateway could not carry out — no longer marks the running request failed, and a gateway shutdown shows an unanswered request as interrupted, as the record says.
 - The project-docs skill no longer hands agent-guidance changes to a skill Swage does not ship: it reports proposed changes to `AGENTS.md`, and edits that file only when the request covers it.

@@ -167,7 +167,7 @@ impl EffectiveWorkflow {
         source: String,
         captured_sources_grant: bool,
     ) -> Result<Self, String> {
-        let identity = format!("{}/{}", skill.name, name);
+        let identity = carried_workflow_identity(skill, &name);
         let meta = swage_workflow::script_meta(&source).map_err(|error| {
             format!(
                 "workflow {name} carried by skill {} has invalid metadata: {error}",
@@ -192,6 +192,17 @@ impl EffectiveWorkflow {
             task: meta.task,
         })
     }
+}
+
+/// The name a carried workflow's id is derived from. It names where the
+/// carrying skill comes from as well as the skill and the workflow: a skill
+/// the product ships and a skill a topic or a person authors under the same
+/// name carry workflows with different ids, so resolving a run's workflow by
+/// id never lands on the other one's source or grants, whichever of the two
+/// discovery happens to find in the scope that resolves it.
+fn carried_workflow_identity(skill: &SkillDefinition, workflow: &str) -> String {
+    let provenance = if skill.shipped { "shipped" } else { "authored" };
+    format!("{provenance}:{}/{workflow}", skill.name)
 }
 
 async fn carried_workflows(
