@@ -100,9 +100,9 @@ override, but `undefined` at the call site falls back to the default.
 | `wait({ watches?, timerMs? })` | `Promise<WakeResult>` | Races handle completions against a journalled timer. Returns `{wake: "completion", handle, value/error}` or `{wake: "timer"}`. |
 | `workflow(name, args?)` | `Promise<Value>` | Child workflow call. Only present when `capabilities.composition` is true. |
 | `deliver(payload, options?)` | `Promise<EffectReceipt>` | Delivery effect. Only present when `capabilities.delivery` is true. |
-| `postEvent(kind, payload?)` | `Promise<Value>` | Appends to the run's durable pending-event queue and resolves to the stored event `{ seq, kind, payload, source }`. `kind` is any namespaced name — two or more non-empty segments joined by `.`, `:`, `/`, `_` or `-` (`worker.report`, `decision.needed`); a bare word such as `escalation` is refused with `RunEventError`. |
+| `postEvent(kind, payload?)` | `Promise<Value>` | Appends to the run's durable pending-event queue and resolves to the stored event `{ seq, kind, payload, source }`. `kind` is any namespaced name — two or more non-empty segments joined by `.`, `:` or `/`, each made of ASCII letters, digits, `_` and `-` (`worker.report`, `decision.needed`); a bare word such as `escalation` is refused with `RunEventError`, and so is `worker-report`, which is one segment. |
 | `awaitEvent({ kinds })` | `Promise<Value>` | Parks the run until an undelivered event whose `kind` is in `kinds` (each namespaced) arrives, and resolves to the earliest such event in the same `{ seq, kind, payload, source }` shape, marking it delivered. Replay returns the recorded event. |
-| `hold({ content, verdicts })` | `Promise<{ verdict }>` | Parks the run on a decision: `content` is the question, `verdicts` the accepted answers (at least two distinct strings, or the raise is refused). Resolves with the chosen verdict once a person at the run page or an agent holding the `workflow_hold` tool answers; see *Decision holds*. |
+| `hold({ content, verdicts })` | `Promise<{ verdict }>` | Parks the run on a decision: `content` is the question, `verdicts` the accepted answers (at least two distinct strings, or the raise is refused). Resolves with the chosen verdict once an agent holding the `workflow_hold` tool answers; see *Decision holds*. |
 | `gate(options?)` | `Promise<Value>` | Wake-gate evaluation. Options: `criteria` (string), `model` (optional override). |
 | `deliverEvents(upToSeq)` | `Promise<Value>` | Stamps pending events as delivered up to a sequence number. |
 | `parallel(thunks)` | `Promise<Array>` | `Promise.all` with per-thunk worker-failure swallowing (a failed worker collapses its slot to `null`). A pre-spawn author error propagates and fails the run. |
@@ -461,10 +461,10 @@ relaunches them by replay.
 `postEvent(kind, payload)` appends to the run's durable pending-event
 queue and resolves to the stored event `{ seq, kind, payload, source }`.
 `kind` is any namespaced name: two or more non-empty segments joined by
-`.`, `:`, `/`, `_` or `-`, drawn from letters, digits and those
-separators — `worker.report`, `decision.needed`, `device.reply`. A bare
-word (`escalation`, `completion`) is refused with `RunEventError`, as is
-an empty or malformed name. Events are journalled (exactly-once under
+`.`, `:` or `/`, each segment made of ASCII letters, digits, `_` and `-` —
+`worker.report`, `decision.needed`, `device.reply`. A bare word
+(`escalation`, `completion`) is refused with `RunEventError`, as is
+`worker-report`, which is one segment, and an empty or malformed name. Events are journalled (exactly-once under
 replay) and assigned a monotonic `seq`. Each event record links to its
 journal entry via `journal_entry_id`. The same validation applies to an
 event posted from outside the run through the `run_event_post` tool.
@@ -485,9 +485,9 @@ run must wait on is a hold (below), which validates the answer.
 `hold({ content, verdicts })` parks the run on a decision. The script names
 the question and the verdicts it accepts — at least two distinct strings; a
 hold with fewer is refused at raise and never reaches a decider. The hold is
-registered on the run: the run page lists it, and an agent granted the
-`workflow_hold` tool lists the open holds in its topic (`action: "list"`)
-and answers one (`action: "answer"` with the `hold_id` and a `verdict` from
+registered on the run: the run page shows it and takes no answer, and an
+agent granted the `workflow_hold` tool lists the open holds in its topic
+(`action: "list"`) and answers one (`action: "answer"` with the `hold_id` and a `verdict` from
 the set), the answering session recorded; the script names no decider. An
 answer outside the set is refused with feedback and the hold keeps waiting.
 The run resumes with `{ verdict }`; cancelling the run releases its holds.
