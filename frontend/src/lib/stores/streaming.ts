@@ -478,16 +478,19 @@ export function createStreamingStore(
 
         case "error": {
           // Preserve the terminal reason beside whatever the user saw.
-          const approvalTimedOut = event.code === "approval_timeout";
+          // An expired approval and an interruption the gateway names
+          // (a shutdown stopping a delegated child) end the turn
+          // interrupted, not failed.
+          const interrupted = event.code === "approval_timeout" || event.code === "turn_interrupted";
           const refused = event.code === "provider_refused";
-          if (approvalTimedOut && !get(stream.streamedContentStore) && options?.conversationStore?.settleUnansweredRequest) {
+          if (interrupted && !get(stream.streamedContentStore) && options?.conversationStore?.settleUnansweredRequest) {
             options.conversationStore.settleUnansweredRequest(
               { turn_state: "interrupted", tool_calls: get(stream.activeToolCallsStore) }, ownerId,
             );
             stream.activeToolCallsStore.set([]);
           } else {
             settleResponse(
-              ownerId, stream, approvalTimedOut ? "interrupted" : refused ? "refused" : "failed", undefined,
+              ownerId, stream, interrupted ? "interrupted" : refused ? "refused" : "failed", undefined,
               refused ? get(stream.activeToolCallsStore) : undefined,
             );
           }

@@ -1442,20 +1442,25 @@ describe("output-limit completion", () => {
   });
 });
 
-describe("approval timeout interruption", () => {
-  it.each(["partial answer", ""])("keeps the interrupted state for partial content %j", (content) => {
+describe("interrupted turns", () => {
+  it.each([
+    ["approval_timeout", "approval timed out before tool execution; turn interrupted", "partial answer"],
+    ["approval_timeout", "approval timed out before tool execution; turn interrupted", ""],
+    ["turn_interrupted", "the gateway shut down while the turn ran", "partial answer"],
+    ["turn_interrupted", "the gateway shut down while the turn ran", ""],
+  ])("keeps the interrupted state for %s (%s) with partial content %j", (code, message, content) => {
     const conv = createMockConversationStore();
     const settleUnansweredRequest = vi.fn();
     const store = createStreamingStore({ conversationStore: { ...conv, settleUnansweredRequest } });
     store.startTurn("Use echo");
     if (content) store.handleServerEvent({ type: "token", content });
-    store.handleServerEvent({ type: "error", code: "approval_timeout", message: "approval timed out before tool execution; turn interrupted" });
+    store.handleServerEvent({ type: "error", code, message });
     if (content) {
       expect(conv.getMessages().find((m) => m.role === "assistant")?.turn_state).toBe("interrupted");
     } else {
       expect(settleUnansweredRequest).toHaveBeenCalledWith({ turn_state: "interrupted", tool_calls: [] }, "test-conversation");
     }
-    expect(store.turnError?.message).toContain("approval timed out");
+    expect(store.turnError?.message).toBe(message);
     expect(store.isStreaming).toBe(false);
   });
 });
