@@ -5357,7 +5357,7 @@
           ]
         },
         {
-          "description": "A session's list-visible state changed: a turn began or settled on\nit, so it is running, idle, or left interrupted. Clients showing\nsession lists refetch — the event is the signal, not the content.",
+          "description": "A session row may have changed or entered or left a list. Refetch\nsession lists to read the current rows from the gateway.",
           "type": "object",
           "properties": {
             "session_id": {
