@@ -794,7 +794,8 @@ combined:
 
 1. **Tracked-local-state check** — catches runtime state directories that were
    accidentally committed.
-2. **Tracker-tag check** — rejects bracketed tracker tags in source comments.
+2. **Tracker-tag check** — rejects bracketed tracker tags in tracked text files,
+   excluding paths covered by the repository’s ignore rules.
 3. **Format check** — Rust formatting and Justfile formatting.
 4. **Type check** — `cargo check` across the workspace plus the frontend's
    type checker.

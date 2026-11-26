@@ -1,142 +1,102 @@
-use std::{env, fs, process::Command};
+use std::{
+    env, fs,
+    path::PathBuf,
+    process::{Command, Output},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-struct TestRepository(std::path::PathBuf);
+struct TestRepository(PathBuf);
 
 impl TestRepository {
-    fn new(name: &str) -> Self {
-        let root = env::var_os("SWAGE_TEST_SCRATCH_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(env::temp_dir)
-            .join(format!(
-                "tracker-{name}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("test clock must be after the Unix epoch")
-                    .as_nanos()
-            ));
-        fs::create_dir(&root).expect("create tracker test repository");
-        Self(root)
+    fn new() -> Self {
+        let root = env::temp_dir().join(format!(
+            "swage-tracker-tags-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        fs::create_dir(&root).unwrap();
+        let repo = Self(root);
+        repo.git(&["init", "--quiet"]);
+        repo
+    }
+
+    fn git(&self, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(&self.0)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn write(&self, path: &str, contents: &str) {
+        fs::write(self.0.join(path), contents).unwrap();
+    }
+
+    fn scan(&self) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .current_dir(&self.0)
+            .arg("check-tracker-tags")
+            .output()
+            .unwrap()
     }
 }
 
 impl Drop for TestRepository {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).expect("remove tracker test repository");
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
 #[test]
-fn tracker_tags_ignore_deleted_tracked_files() {
-    let repository = TestRepository::new("deleted");
-    let root = &repository.0;
-    assert!(
-        Command::new("git")
-            .arg("init")
-            .arg(root)
-            .status()
-            .unwrap()
-            .success()
+fn catches_tags_in_comments_and_strings_across_tracked_file_types() {
+    let repo = TestRepository::new();
+    repo.write(
+        "source.rs",
+        &format!("let text = \"[{}]\"; // [{}] [{}]", "a1b2", "8uce", "utf8"),
     );
-    fs::write(root.join("tracked.rs"), "// useful explanation\n").unwrap();
-    assert!(
-        Command::new("git")
-            .current_dir(root)
-            .args(["add", "tracked.rs"])
-            .status()
-            .unwrap()
-            .success()
-    );
-    fs::remove_file(root.join("tracked.rs")).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
-        .current_dir(root)
-        .arg("check-tracker-tags")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
+    repo.write("notes.md", &format!("<!-- [{}] -->", "v7qg"));
+    repo.git(&["add", "--", "source.rs", "notes.md"]);
 
-#[test]
-fn tracker_tags_ignore_developer_local_files() {
-    let repository = TestRepository::new("tracker");
-    let root = &repository.0;
-    assert!(
-        Command::new("git")
-            .arg("init")
-            .arg(root)
-            .status()
-            .unwrap()
-            .success()
-    );
-    fs::write(root.join(".gitignore"), ".venv/\n.opencode/\n.motes/\n").unwrap();
-    fs::write(root.join("tracked.rs"), "// useful explanation\n").unwrap();
-    assert!(
-        Command::new("git")
-            .current_dir(root)
-            .args(["add", ".gitignore", "tracked.rs"])
-            .status()
-            .unwrap()
-            .success()
-    );
-    for directory in [".venv", ".opencode", ".motes"] {
-        fs::create_dir(root.join(directory)).unwrap();
-        fs::write(root.join(directory).join("local.ts"), "// [a1b2]\n").unwrap();
-        fs::write(root.join(directory).join("binary.rs"), [0xff]).unwrap();
-    }
-    let scan = || {
-        Command::new(env!("CARGO_BIN_EXE_xtask"))
-            .current_dir(root)
-            .arg("check-tracker-tags")
-            .output()
-            .unwrap()
-    };
-    let output = scan();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    fs::write(root.join("untracked.ts"), "// [a1b2]\n").unwrap();
-    let output = scan();
+    let output = repo.scan();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("untracked.ts:1:4"));
-    fs::remove_file(root.join("untracked.ts")).unwrap();
-    fs::write(root.join("tracked.rs"), "// [8uce]\n").unwrap();
-    let output = scan();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("tracked.rs:1:4"));
-}
-
-#[test]
-fn tracker_tags_report_javascript_comments() {
-    let repository = TestRepository::new("javascript");
-    let root = &repository.0;
-    assert!(
-        Command::new("git")
-            .arg("init")
-            .arg(root)
-            .status()
-            .unwrap()
-            .success()
-    );
-    for extension in ["js", "mjs", "cjs"] {
-        fs::write(root.join(format!("source.{extension}")), "// [a1b2]\n").unwrap();
-    }
-    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
-        .current_dir(root)
-        .arg("check-tracker-tags")
-        .output()
-        .unwrap();
-    assert!(!output.status.success(), "JavaScript comments were skipped");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    for extension in ["js", "mjs", "cjs"] {
-        assert!(
-            stderr.contains(&format!("source.{extension}:1:4")),
-            "{stderr}"
-        );
+    for expected in ["source.rs", "notes.md", "a1b2", "8uce", "v7qg"] {
+        assert!(stderr.contains(expected), "{stderr}");
     }
+    assert!(!stderr.contains("utf8"), "{stderr}");
+}
+
+#[test]
+fn skips_local_files_deleted_paths_and_known_non_tags() {
+    let repo = TestRepository::new();
+    repo.write(".gitignore", "/ignored.rs\n");
+    let tag = format!("// [{}]\n", "a1b2");
+    repo.write("ignored.rs", &tag);
+    repo.write("untracked.rs", &tag);
+    repo.write("deleted.rs", &tag);
+    repo.write(
+        "ordinary.txt",
+        &format!(
+            "[main] [1234] [A1b2] [a1b23] [{}] [{}] [{}]",
+            "0xff", "89ab", "utf8"
+        ),
+    );
+    repo.git(&["add", "--", ".gitignore", "deleted.rs", "ordinary.txt"]);
+    repo.git(&["add", "--force", "--", "ignored.rs"]);
+    fs::remove_file(repo.0.join("deleted.rs")).unwrap();
+
+    let output = repo.scan();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

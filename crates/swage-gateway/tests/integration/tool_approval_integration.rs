@@ -1020,7 +1020,7 @@ async fn agent_scoped_routing_isolates_approval_events() {
     let _guard = SwageHomeGuard::isolate();
 
     // Agent-scoped routing is tested at the unit level in the gateway's
-    // approval routing tests (task) and via the re-emission tests
+    // approval routing tests and via the re-emission tests
     // which verify that approvals for other agents are NOT re-emitted.
     // A full two-agent WebSocket test requires multi-agent session setup
     // which is not yet available in the inter-agent communication stack.
@@ -1028,7 +1028,7 @@ async fn agent_scoped_routing_isolates_approval_events() {
     // The routing infrastructure is in place and unit-tested. The cross-agent
     // isolation is verified by `approvals_for_other_agent_not_re_emitted_on_connect`.
     eprintln!(
-        "Agent-scoped routing is unit-tested via [byi8] and re-emission tests — \
+        "Agent-scoped routing is covered by unit and re-emission tests — \
                full multi-agent WebSocket integration deferred until inter-agent communication is available"
     );
 }
