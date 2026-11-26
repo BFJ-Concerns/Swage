@@ -24,6 +24,7 @@ pub(super) enum SandboxDegradationApproval {
     Approved,
     Rejected,
     Interrupted,
+    Cancelled,
 }
 
 pub(super) struct SandboxDegradationApprovalRequest<'a> {
@@ -165,11 +166,14 @@ pub(super) async fn request_sandbox_degradation_approval(
                 .storage
                 .update_approval_state(approval.id, ApprovalState::Expired, Some("turn cancelled"))
                 .await?;
-            SandboxDegradationApproval::Interrupted
+            SandboxDegradationApproval::Cancelled
         }
     };
 
-    if !matches!(outcome, SandboxDegradationApproval::Interrupted) {
+    if !matches!(
+        outcome,
+        SandboxDegradationApproval::Interrupted | SandboxDegradationApproval::Cancelled
+    ) {
         state
             .storage
             .update_turn_state(turn_id, TurnState::Processing)

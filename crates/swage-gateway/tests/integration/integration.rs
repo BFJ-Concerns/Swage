@@ -190,7 +190,7 @@ async fn start_test_server_with_dispatcher(
     dispatcher: swage_gateway::tool::ToolDispatcher,
 ) -> (Router, SocketAddr, Arc<SqliteStorage>) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
@@ -470,6 +470,7 @@ async fn an_interrupted_turn_keeps_its_tool_calls_after_restart() {
     for (position, call_id, tool) in [(0, "call-write", "file_write"), (1, "call-shell", "shell")] {
         let record = storage
             .create_tool_call(NewToolCall {
+                execution: None,
                 turn_id: turn.id,
                 agent_id: "gateway".into(),
                 call_id: call_id.into(),
@@ -499,13 +500,20 @@ async fn an_interrupted_turn_keeps_its_tool_calls_after_restart() {
                     3,
                     false,
                     None,
+                    None,
                 )
                 .await
                 .unwrap();
         }
     }
 
-    recover_orphaned_turns(&*storage, &*storage).await.unwrap();
+    recover_orphaned_turns(
+        &*storage,
+        &*storage,
+        &swage_agent::MessageRouter::new(storage.clone(), None),
+    )
+    .await
+    .unwrap();
 
     let (_, body) = http(&router, "GET", &format!("/api/conversations/{conv_id}")).await;
     let messages = body["messages"].as_array().unwrap();
@@ -534,7 +542,19 @@ async fn stream_cancellation_preserves_partial_response() {
     let (tx1, rx1) = tokio::sync::mpsc::channel(10);
     let (tx2, rx2) = tokio::sync::mpsc::channel(10);
     let provider = ChannelProvider::new(vec![rx1, rx2]);
-    let (router, addr, storage) = start_test_server(provider).await;
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let state = AppState::new_with_config_root(
+        storage.clone(),
+        storage.clone(),
+        Arc::new(provider),
+        swage_config::ResolvedConfig::default(),
+        swage_gateway::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    let router = build_router(state);
+    let (addr, _server) = start_live_server(router.clone()).await;
 
     // Create conversation + open WebSocket.
     let (_, body) = http(&router, "POST", "/api/conversations").await;
@@ -580,9 +600,9 @@ async fn stream_cancellation_preserves_partial_response() {
         "at least the user message should be stored"
     );
 
-    // The turn should be interrupted.
-    let has_interrupted = messages.iter().any(|m| m["turn_state"] == "interrupted");
-    assert!(has_interrupted, "turn should be marked interrupted");
+    // The turn should be cancelled.
+    let has_cancelled = messages.iter().any(|m| m["turn_state"] == "cancelled");
+    assert!(has_cancelled, "turn should be marked cancelled");
 
     let session_id = conv_id.parse().expect("conversation id");
     let thread = storage
@@ -592,15 +612,15 @@ async fn stream_cancellation_preserves_partial_response() {
         .into_iter()
         .next()
         .expect("conversation thread");
-    let interrupted_turn = storage
+    let cancelled_turn = storage
         .list_turns_by_thread(thread.id)
         .await
         .expect("conversation turns")
         .into_iter()
-        .find(|turn| turn.state == TurnState::Interrupted)
-        .expect("interrupted turn");
+        .find(|turn| turn.state == TurnState::Cancelled)
+        .expect("cancelled turn");
     let rounds = storage
-        .list_provider_rounds_by_turn(interrupted_turn.id)
+        .list_provider_rounds_by_turn(cancelled_turn.id)
         .await
         .expect("provider rounds");
     assert_eq!(rounds.len(), 1, "the cancelled request opened one round");
@@ -608,6 +628,8 @@ async fn stream_cancellation_preserves_partial_response() {
         rounds[0].completed_at.is_some(),
         "a cancelled provider request must no longer be outstanding"
     );
+    // The provider stream ended without a response; its round outcome is
+    // independent of the cancelled turn's terminal state.
     assert_eq!(rounds[0].outcome, json!({"outcome": "interrupted"}));
 
     // Partial content should be saved.
@@ -715,7 +737,13 @@ async fn startup_recovery_marks_orphaned_turns() {
         .unwrap();
 
     // Run recovery.
-    let count = recover_orphaned_turns(&*storage, &*storage).await.unwrap();
+    let count = recover_orphaned_turns(
+        &*storage,
+        &*storage,
+        &swage_agent::MessageRouter::new(storage.clone(), None),
+    )
+    .await
+    .unwrap();
     assert_eq!(count, 1, "only 1 orphaned turn should be recovered");
 
     // Verify the orphaned turn is now Interrupted.
@@ -727,7 +755,13 @@ async fn startup_recovery_marks_orphaned_turns() {
     assert_eq!(turn.state, TurnState::Completed);
 
     // Recovery is idempotent — running again should find nothing.
-    let count = recover_orphaned_turns(&*storage, &*storage).await.unwrap();
+    let count = recover_orphaned_turns(
+        &*storage,
+        &*storage,
+        &swage_agent::MessageRouter::new(storage.clone(), None),
+    )
+    .await
+    .unwrap();
     assert_eq!(count, 0, "no orphans should remain");
 }
 
@@ -1117,5 +1151,182 @@ async fn tool_execution_round_trip_with_persistence() {
     assert!(
         tool_calls.is_empty() || tool_calls.iter().all(|tc| tc.get("call_id").is_some()),
         "tool_calls entries must have call_id"
+    );
+}
+
+/// The real startup recovers a delegating parent before serving, and its
+/// startup queue drain carries the reconstructed Result into the parent thread.
+#[tokio::test(flavor = "multi_thread")]
+async fn gateway_boot_recovers_delegation_before_accepting_work() {
+    use swage_core::MessageKind;
+    use swage_storage::{
+        AgentMessageStore, MessageStore, NewAgentMessage, SessionStore, TopicStore,
+    };
+
+    let root = crate::support::scratch_tempdir();
+    let runtime = crate::support::scratch_tempdir();
+    let storage = Arc::new(SqliteStorage::open(&root.path().join("swage.db")).unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .unwrap();
+    let parent_thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "gateway".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let parent = storage
+        .create_turn(NewTurn {
+            thread_id: parent_thread.id,
+            agent_id: "gateway".into(),
+            state: TurnState::Delegating,
+            user_input: Some("survey".into()),
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+    let child_session = storage
+        .create_session(swage_storage::model::NewSession {
+            agent_id: "worker".into(),
+            ..swage_storage::fixtures::new_session(topic.id)
+        })
+        .await
+        .unwrap();
+    let child_thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: child_session.id,
+            agent_id: "worker".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let delegate = storage
+        .create_agent_message(NewAgentMessage {
+            sender_agent_id: "gateway".into(),
+            recipient_agent_id: "worker".into(),
+            kind: MessageKind::Delegate,
+            correlation_id: None,
+            payload: json!({"task": "survey", "_thread_id": child_thread.id}),
+        })
+        .await
+        .unwrap();
+    let child = storage
+        .create_turn(NewTurn {
+            thread_id: child_thread.id,
+            agent_id: "worker".into(),
+            state: TurnState::Completed,
+            user_input: Some("survey".into()),
+            parent_turn_id: Some(parent.id),
+        })
+        .await
+        .unwrap();
+    storage
+        .update_response(child.id, "The completed survey.")
+        .await
+        .unwrap();
+
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = reservation.local_addr().unwrap();
+    drop(reservation);
+    let log_path = root.path().join("gateway.log");
+    let log = std::fs::File::create(&log_path).unwrap();
+    let mut gateway = tokio::process::Command::new(env!("CARGO_BIN_EXE_swage"))
+        .env("SWAGE_HOME", root.path())
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .args([
+            "gateway",
+            "start",
+            "--foreground",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &addr.port().to_string(),
+        ])
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let ready = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Ok(response) = client.get(format!("http://{addr}/api/health")).send().await
+                && response.status().is_success()
+            {
+                break;
+            }
+            if let Some(status) = gateway.try_wait().unwrap() {
+                panic!(
+                    "gateway exited with {status}: {}",
+                    std::fs::read_to_string(&log_path).unwrap()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    assert!(
+        ready.is_ok(),
+        "gateway did not become ready: {}",
+        std::fs::read_to_string(&log_path).unwrap()
+    );
+    // Recovery is awaited before the health endpoint can answer.
+    assert_eq!(
+        storage.get_turn(parent.id).await.unwrap().unwrap().state,
+        TurnState::Interrupted
+    );
+    let results = storage.list_by_correlation(delegate.id).await.unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].payload["response"], "The completed survey.");
+    assert_eq!(
+        results[0].payload["parent_thread_id"],
+        parent_thread.id.to_string()
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let messages = storage
+                .list_messages_by_thread(parent_thread.id)
+                .await
+                .unwrap();
+            if messages
+                .iter()
+                .any(|message| message.content.contains("The completed survey."))
+            {
+                assert!(
+                    messages
+                        .iter()
+                        .any(|message| message.content.contains("The gateway restarted while"))
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("startup drain must resume the parent with its child's result");
+    client
+        .post(format!("http://{addr}/api/shutdown"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let status = tokio::time::timeout(Duration::from_secs(15), gateway.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        status.success(),
+        "gateway failed to stop: {}",
+        std::fs::read_to_string(&log_path).unwrap()
     );
 }

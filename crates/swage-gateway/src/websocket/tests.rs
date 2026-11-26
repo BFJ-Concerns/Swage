@@ -143,6 +143,7 @@ fn server_event_tool_start_includes_parent_call_id_when_some() {
 #[test]
 fn server_event_tool_end_serialises() {
     let event = ServerEvent::ToolEnd {
+        execution: None,
         call_id: "toolu_01abc".to_string(),
         tool: "shell".to_string(),
         result: serde_json::json!("file1\nfile2\nfile3"),
@@ -166,6 +167,7 @@ fn server_event_tool_end_serialises() {
 #[test]
 fn server_event_tool_end_omits_parent_call_id_when_none() {
     let event = ServerEvent::ToolEnd {
+        execution: None,
         call_id: "toolu_native".to_string(),
         tool: "shell".to_string(),
         result: serde_json::json!("ok"),
@@ -185,6 +187,7 @@ fn server_event_tool_end_omits_parent_call_id_when_none() {
 #[test]
 fn server_event_tool_end_includes_parent_call_id_when_some() {
     let event = ServerEvent::ToolEnd {
+        execution: None,
         call_id: "sub_01".to_string(),
         tool: "shell".to_string(),
         result: serde_json::json!("output"),
@@ -201,6 +204,7 @@ fn server_event_tool_end_includes_parent_call_id_when_some() {
 #[test]
 fn server_event_tool_end_serialises_without_total_bytes() {
     let event = ServerEvent::ToolEnd {
+        execution: None,
         call_id: "toolu_02".to_string(),
         tool: "file_read".to_string(),
         result: serde_json::json!({"content": "hello"}),
@@ -220,6 +224,7 @@ fn server_event_tool_end_serialises_without_total_bytes() {
 #[test]
 fn server_event_tool_end_truncated() {
     let event = ServerEvent::ToolEnd {
+        execution: None,
         call_id: "toolu_03".to_string(),
         tool: "shell".to_string(),
         result: serde_json::json!("partial output..."),
@@ -570,7 +575,7 @@ fn make_empty_state() -> AppState {
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
     let topic_store: Arc<dyn swage_storage::store::TopicStore> =
         storage as Arc<dyn swage_storage::store::TopicStore>;
-    AppState::new(
+    AppState::for_test(
         storage_arc,
         topic_store,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
@@ -606,7 +611,7 @@ async fn make_state_with_session_and_storage() -> (AppState, Uuid, Arc<MockStora
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>;
     let topic_store: Arc<dyn swage_storage::store::TopicStore> =
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>;
-    let state = AppState::new(
+    let state = AppState::for_test(
         storage_arc,
         topic_store,
         Arc::new(MockProvider::new(vec![])) as Arc<dyn LlmProvider>,
@@ -816,6 +821,7 @@ fn provider_retry_settled_serialises() {
 fn output_schema_failed_serialises() {
     let turn_id = Uuid::new_v4();
     let event = ServerEvent::OutputSchemaFailed {
+        failure_message: "required name".into(),
         turn_id,
         attempts: 3,
         errors: vec![SchemaValidationError {
@@ -1422,4 +1428,149 @@ async fn queued_websocket_send_preserves_its_client_id() {
         client_id.to_string(),
         "a queued acknowledgement must identify its client send"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_duplicate_socket_receives_the_reason_over_the_websocket() {
+    use axum::routing::get;
+    use futures::StreamExt;
+    use tokio::time::{Duration, timeout};
+
+    use swage_storage::store::{SessionStore, Storage, TopicStore};
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .unwrap();
+    let session_id = session.id;
+    let state = AppState::new_with_config_root(
+        storage.clone() as Arc<dyn Storage>,
+        storage as Arc<dyn TopicStore>,
+        Arc::new(MockProvider::new(vec![])),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    let router = axum::Router::new()
+        .route("/ws/{id}", get(super::ws_handler))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let url = format!("ws://{address}/ws/{session_id}");
+    let (mut first, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let duplicate = tokio_tungstenite::connect_async(&url).await;
+    assert!(
+        duplicate.is_ok(),
+        "the browser must receive the rejection reason on the socket: {duplicate:?}"
+    );
+    let (mut duplicate, _) = duplicate.unwrap();
+    let frame = timeout(Duration::from_secs(3), duplicate.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let event: ServerEvent = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+    assert!(matches!(event, ServerEvent::Error { code, .. } if code == "already_connected"));
+    assert!(first.close(None).await.is_ok());
+    let _ = duplicate.close(None).await;
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resuming_a_session_updates_open_recent_lists_over_the_socket() {
+    use axum::routing::get;
+    use futures::StreamExt;
+    use swage_protocol::client::conversation::{RecentSessionsResponse, RecentSessionsSource};
+    use swage_storage::store::{SessionStore, Storage, TopicStore};
+    use tokio::time::{Duration, timeout};
+
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session_id = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .unwrap()
+        .id;
+    storage
+        .archive_inactive_sessions(chrono::Utc::now() + chrono::Duration::days(1), &[])
+        .await
+        .unwrap();
+
+    let state = AppState::new_with_config_root(
+        storage.clone() as Arc<dyn Storage>,
+        storage as Arc<dyn TopicStore>,
+        Arc::new(MockProvider::new(vec![])),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    let router = axum::Router::new()
+        .route("/api/work-surface/ws", get(super::work_surface_ws_handler))
+        .route("/api/sessions", get(crate::handlers::list_recent_sessions))
+        .route("/api/conversations/{id}/ws", get(super::ws_handler))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let list_url = format!("http://{address}/api/sessions");
+    let client = reqwest::Client::new();
+    let read_list = || async {
+        client
+            .get(&list_url)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<RecentSessionsResponse>()
+            .await
+            .unwrap()
+    };
+    let (mut signals, _) =
+        tokio_tungstenite::connect_async(format!("ws://{address}/api/work-surface/ws"))
+            .await
+            .unwrap();
+    assert!(read_list().await.entries.is_empty());
+
+    let (mut conversation, _) = tokio_tungstenite::connect_async(format!(
+        "ws://{address}/api/conversations/{session_id}/ws"
+    ))
+    .await
+    .unwrap();
+    let frame = timeout(Duration::from_secs(3), signals.next())
+        .await
+        .expect("the list receives a signal without polling")
+        .unwrap()
+        .unwrap();
+    let event: ServerEvent = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+    assert!(matches!(event, ServerEvent::SessionUpdated { session_id: id } if id == session_id));
+    let list = read_list().await;
+    assert!(matches!(
+        list.entries.as_slice(),
+        [entry] if matches!(&entry.source, RecentSessionsSource::Conversation { session } if session.id == session_id)
+    ));
+    conversation.close(None).await.unwrap();
+    signals.close(None).await.unwrap();
+    server.abort();
+}
+
+/// A session's running-state change is a work-surface signal for session
+/// lists and belongs to no conversation socket: the list refetches, the
+/// conversation already has its own stream.
+#[test]
+fn session_updated_is_a_list_signal_and_not_a_conversation_event() {
+    let event = ServerEvent::SessionUpdated {
+        session_id: Uuid::new_v4(),
+    };
+    assert!(super::work_surface::is_work_surface_signal(&event));
+    assert!(!super::connection::broadcast_event_matches_session(
+        Uuid::new_v4(),
+        &event
+    ));
 }

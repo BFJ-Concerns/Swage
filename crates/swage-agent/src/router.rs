@@ -85,6 +85,24 @@ impl MessageRouter {
     /// Dispatches MessageDeliver and MessageReceive hooks. If either blocks,
     /// the message transitions to Failed. Otherwise, transitions to Delivered.
     pub async fn deliver_message(&self, msg: &AgentMessage) -> Result<(), AgentError> {
+        self.check_delivery(msg).await?;
+
+        // Transition to Delivered.
+        self.storage
+            .update_agent_message_status(msg.id, MessageStatus::Delivered, None)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Put a message to the delivery hooks without delivering it: the
+    /// MessageDeliver and MessageReceive hooks run as `deliver_message`
+    /// runs them, and a block fails the message the same way, but a
+    /// message they pass keeps its status — for a path that records the
+    /// message where it is going before it claims it (a Result carried
+    /// into a thread append-before-claim), so a crash between the check
+    /// and the claim re-delivers rather than loses it.
+    pub async fn check_delivery(&self, msg: &AgentMessage) -> Result<(), AgentError> {
         self.dispatch_blocking_hook(
             msg,
             HookEvent::MessageDeliver {
@@ -109,14 +127,7 @@ impl MessageRouter {
             },
             "MessageReceive",
         )
-        .await?;
-
-        // Transition to Delivered.
-        self.storage
-            .update_agent_message_status(msg.id, MessageStatus::Delivered, None)
-            .await?;
-
-        Ok(())
+        .await
     }
 
     /// Dispatch a hook that may block message delivery.
@@ -361,5 +372,42 @@ mod tests {
 
         let updated = storage.get_agent_message(msg.id).await.unwrap().unwrap();
         assert_eq!(updated.status, MessageStatus::Failed);
+    }
+
+    /// The hook check alone runs both delivery hooks and fails a blocked
+    /// message, but leaves a passed one pending for its caller to claim
+    /// once it is recorded where it is going.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn check_delivery_runs_the_hooks_without_claiming_the_message() {
+        let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::in_memory().unwrap());
+
+        fn is_receive(event: &HookEvent) -> bool {
+            matches!(event, HookEvent::MessageReceive { .. })
+        }
+
+        let passing = MessageRouter::new(storage.clone(), None);
+        let msg = passing.send_message(delegate_msg()).await.unwrap();
+        passing.check_delivery(&msg).await.unwrap();
+        let checked = storage.get_agent_message(msg.id).await.unwrap().unwrap();
+        assert_eq!(
+            checked.status,
+            MessageStatus::Pending,
+            "a passed message is not claimed"
+        );
+
+        let blocking = make_router_with_blocking_hook(storage.clone(), is_receive);
+        match blocking.check_delivery(&msg).await.unwrap_err() {
+            AgentError::HookBlocked { hook, reason } => {
+                assert_eq!(hook, "MessageReceive");
+                assert_eq!(reason, "policy: blocked by blocker");
+            }
+            other => panic!("expected HookBlocked, got {other:?}"),
+        }
+        let blocked = storage.get_agent_message(msg.id).await.unwrap().unwrap();
+        assert_eq!(blocked.status, MessageStatus::Failed);
+        assert_eq!(
+            blocked.failure_reason.as_deref(),
+            Some("policy: blocked by blocker")
+        );
     }
 }

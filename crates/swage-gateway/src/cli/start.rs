@@ -7,7 +7,7 @@
 use std::{path::PathBuf, time::Duration};
 
 use swage_client::{error::ClientError, http::GatewayClient, runtime::RuntimeMetadata};
-use tokio::time::{Instant, sleep};
+use tokio::time::Instant;
 
 use crate::cli::StartArgs;
 
@@ -41,10 +41,6 @@ pub(super) async fn run_with_environment(
         .host
         .clone()
         .or_else(|| installed.as_ref().and_then(|cfg| cfg.host.clone()));
-    let effective_config = args
-        .config
-        .clone()
-        .or_else(|| installed.as_ref().and_then(|cfg| cfg.config.clone()));
 
     // Step 1: Check runtime metadata to detect an existing gateway.
     let metadata_path = environment
@@ -92,30 +88,30 @@ pub(super) async fn run_with_environment(
     // Step 2: Foreground mode — run the gateway inline, blocking until shutdown.
     if args.foreground {
         if let Some(environment) = environment {
-            return run_foreground_gateway(
-                effective_port,
-                effective_host.as_deref(),
-                effective_config.as_deref(),
-                environment,
-            );
+            return run_foreground_gateway(effective_port, effective_host.as_deref(), environment);
         }
-        crate::startup::run_gateway(effective_port, effective_host, effective_config).await;
+        crate::startup::run_gateway(effective_port, effective_host).await;
         return Ok(());
     }
 
     // Step 3: Background mode — spawn a detached child process.
-    spawn_background_gateway(
+    let log_path = gateway_log_path(args.log_file.as_deref(), environment);
+    let log_offset = std::fs::metadata(&log_path).map_or(0, |metadata| metadata.len());
+    let mut child = spawn_background_gateway(
         effective_port,
         effective_host.as_deref(),
-        effective_config.as_deref(),
         args.log_file.as_deref(),
         environment,
     )?;
 
     // Step 4: Poll until the gateway writes its metadata and passes a health check.
-    let address = poll_until_ready_at(Duration::from_secs(5), &metadata_path)
-        .await
-        .map_err(|reason| ClientError::GatewayNotRunning { reason })?;
+    let address = poll_for_gateway(
+        Duration::from_secs(5),
+        &metadata_path,
+        Some((&mut child, &log_path, log_offset)),
+    )
+    .await
+    .map_err(|reason| ClientError::GatewayNotRunning { reason })?;
 
     // Step 5: Report success to the user.
     println!("Gateway started on {address}");
@@ -138,16 +134,15 @@ pub(super) async fn run_with_environment(
 fn spawn_background_gateway(
     port: Option<u16>,
     host: Option<&str>,
-    config: Option<&str>,
     log_file: Option<&str>,
     environment: Option<&super::recovery::GatewayLifecycleEnvironment>,
-) -> Result<(), ClientError> {
+) -> Result<std::process::Child, ClientError> {
     let binary = std::env::current_exe().map_err(|e| ClientError::MetadataIo { source: e })?;
 
     let log_path = gateway_log_path(log_file, environment);
     let (log_file, log_stderr) = open_detached_output(&log_path)?;
 
-    let args = build_spawn_args(port, host.map(str::to_owned), config.map(str::to_owned));
+    let args = build_spawn_args(port, host.map(str::to_owned));
 
     let mut cmd = std::process::Command::new(&binary);
     cmd.args(&args);
@@ -166,24 +161,17 @@ fn spawn_background_gateway(
     }
 
     cmd.spawn()
-        .map_err(|e| ClientError::MetadataIo { source: e })?;
-
-    Ok(())
+        .map_err(|e| ClientError::MetadataIo { source: e })
 }
 
 fn run_foreground_gateway(
     port: Option<u16>,
     host: Option<&str>,
-    config: Option<&str>,
     environment: &super::recovery::GatewayLifecycleEnvironment,
 ) -> Result<(), ClientError> {
     let binary = std::env::current_exe().map_err(|source| ClientError::MetadataIo { source })?;
     let mut command = std::process::Command::new(binary);
-    command.args(build_spawn_args(
-        port,
-        host.map(str::to_owned),
-        config.map(str::to_owned),
-    ));
+    command.args(build_spawn_args(port, host.map(str::to_owned)));
     environment.apply_to_command(&mut command);
     let status = command
         .status()
@@ -226,17 +214,34 @@ fn open_detached_output(
 /// timeout.
 #[cfg(test)]
 pub(crate) async fn poll_until_ready(timeout: Duration) -> Result<String, String> {
-    poll_until_ready_at(timeout, &RuntimeMetadata::metadata_path()).await
+    poll_for_gateway(timeout, &RuntimeMetadata::metadata_path(), None).await
 }
 
-async fn poll_until_ready_at(
+async fn poll_for_gateway(
     timeout: Duration,
     metadata_path: &std::path::Path,
+    mut child: Option<(&mut std::process::Child, &std::path::Path, u64)>,
 ) -> Result<String, String> {
     let deadline = Instant::now() + timeout;
     let mut delay = Duration::from_millis(100);
 
     loop {
+        if let Some((process, log_path, offset)) = child.as_mut()
+            && let Some(status) = process.try_wait().map_err(|error| error.to_string())?
+        {
+            use std::io::{Read, Seek};
+            let output = (|| -> std::io::Result<String> {
+                let mut file = std::fs::File::open(log_path)?;
+                let start = (*offset).max(file.metadata()?.len().saturating_sub(65_536));
+                file.seek(std::io::SeekFrom::Start(start))?;
+                let mut bytes = Vec::new();
+                file.take(65_536).read_to_end(&mut bytes)?;
+                Ok(String::from_utf8_lossy(&bytes).trim().to_owned())
+            })()
+            .unwrap_or_else(|error| format!("could not read startup output: {error}"));
+            return Err(format!("gateway exited with {status}: {output}"));
+        }
+
         if Instant::now() >= deadline {
             return Err(format!(
                 "gateway did not become ready within {}s",
@@ -247,12 +252,15 @@ async fn poll_until_ready_at(
         // Check for the metadata file — the gateway writes it after binding.
         if let Ok(meta) = RuntimeMetadata::load_from(metadata_path) {
             let client = GatewayClient::new(&meta.address);
-            if client.health().await.is_ok() {
+            if matches!(
+                tokio::time::timeout_at(deadline, client.health()).await,
+                Ok(Ok(()))
+            ) {
                 return Ok(meta.address);
             }
         }
 
-        sleep(delay).await;
+        tokio::time::sleep_until((Instant::now() + delay).min(deadline)).await;
         // Double the delay up to 800 ms to avoid hammering the process.
         delay = (delay * 2).min(Duration::from_millis(800));
     }
@@ -285,11 +293,7 @@ pub(crate) fn gateway_log_path(
 ///
 /// This is a pure function — extracted so tests can verify the args without
 /// actually spawning a process.
-pub(crate) fn build_spawn_args(
-    port: Option<u16>,
-    host: Option<String>,
-    config: Option<String>,
-) -> Vec<String> {
+pub(crate) fn build_spawn_args(port: Option<u16>, host: Option<String>) -> Vec<String> {
     let mut args = vec![
         "--server-mode".to_string(),
         "gateway".to_string(),
@@ -302,10 +306,6 @@ pub(crate) fn build_spawn_args(
     if let Some(h) = host {
         args.push("--host".to_string());
         args.push(h);
-    }
-    if let Some(c) = config {
-        args.push("--config".to_string());
-        args.push(c);
     }
     args
 }
@@ -321,6 +321,38 @@ mod tests {
     use crate::test_support::{SwageHomeGuard, XdgRuntimeDirGuard};
 
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_start_reports_only_this_childs_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("gateway.log");
+        std::fs::write(&log_path, "an earlier startup failed\n").unwrap();
+        let offset = std::fs::metadata(&log_path).unwrap().len();
+        let (stdout, stderr) = open_detached_output(&log_path).unwrap();
+        let mut child = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "printf 'invalid configuration: unknown provider broken\n' >&2; exit 1",
+            ])
+            .stdout(stdout)
+            .stderr(stderr)
+            .spawn()
+            .unwrap();
+        let error = poll_for_gateway(
+            Duration::from_millis(500),
+            &directory.path().join("metadata.json"),
+            Some((&mut child, &log_path, offset)),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.contains("invalid configuration: unknown provider broken"),
+            "{error}"
+        );
+        assert!(!error.contains("an earlier startup failed"), "{error}");
+        assert!(child.try_wait().unwrap().is_some());
+    }
 
     #[test]
     fn log_path_uses_swage_root() {
@@ -354,14 +386,14 @@ mod tests {
     // When no flags are given, only --server-mode should appear.
     #[test]
     fn spawn_args_with_no_overrides_contains_only_server_mode() {
-        let args = build_spawn_args(None, None, None);
+        let args = build_spawn_args(None, None);
         assert_eq!(args, vec!["--server-mode", "gateway", "start"]);
     }
 
     // Port flag is added when provided.
     #[test]
     fn spawn_args_includes_port_when_set() {
-        let args = build_spawn_args(Some(8080), None, None);
+        let args = build_spawn_args(Some(8080), None);
         assert!(args.contains(&"--server-mode".to_string()));
         assert!(args.contains(&"--port".to_string()));
         assert!(args.contains(&"8080".to_string()));
@@ -370,27 +402,15 @@ mod tests {
     // Host flag is added when provided.
     #[test]
     fn spawn_args_includes_host_when_set() {
-        let args = build_spawn_args(None, Some("0.0.0.0".to_string()), None);
+        let args = build_spawn_args(None, Some("0.0.0.0".to_string()));
         assert!(args.contains(&"--host".to_string()));
         assert!(args.contains(&"0.0.0.0".to_string()));
-    }
-
-    // Config flag is added when provided.
-    #[test]
-    fn spawn_args_includes_config_when_set() {
-        let args = build_spawn_args(None, None, Some("/etc/swage.toml".to_string()));
-        assert!(args.contains(&"--config".to_string()));
-        assert!(args.contains(&"/etc/swage.toml".to_string()));
     }
 
     // All flags together.
     #[test]
     fn spawn_args_with_all_overrides() {
-        let args = build_spawn_args(
-            Some(9090),
-            Some("127.0.0.1".to_string()),
-            Some("/tmp/cfg.toml".to_string()),
-        );
+        let args = build_spawn_args(Some(9090), Some("127.0.0.1".to_string()));
         let expected = vec![
             "--server-mode",
             "gateway",
@@ -399,8 +419,6 @@ mod tests {
             "9090",
             "--host",
             "127.0.0.1",
-            "--config",
-            "/tmp/cfg.toml",
         ];
         assert_eq!(args, expected);
     }
@@ -425,7 +443,6 @@ mod tests {
         let args = StartArgs {
             port: None,
             host: None,
-            config: None,
             foreground: false,
             log_file: None,
         };

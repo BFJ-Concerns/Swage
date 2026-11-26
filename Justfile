@@ -74,8 +74,8 @@ release-force:
 install prefix="${HOME}/.local/bin":
     cargo run -p xtask -- install --prefix {{ prefix }}
 
-install-lan prefix="${HOME}/.local/bin":
-    cargo run -p xtask -- install --prefix {{ prefix }} --lan
+install-lan prefix=(env("HOME") / ".local/bin") host="0.0.0.0" port="3000":
+    cargo run -p xtask -- install --prefix {{ quote(prefix) }} --lan --host {{ quote(host) }} --port {{ quote(port) }}
 
 install-hooks:
     git config core.hooksPath .githooks

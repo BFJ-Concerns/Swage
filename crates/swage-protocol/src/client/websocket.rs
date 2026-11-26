@@ -107,9 +107,12 @@ pub enum ServerEvent {
     },
     /// A tool call has finished. Contains the result and execution metadata.
     ToolEnd {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        execution: Option<super::conversation::ToolExecution>,
         call_id: String,
         tool: String,
-        #[ts(type = "string | Record<string, unknown>")]
+        #[ts(type = "string | Record<string, unknown> | null")]
         result: serde_json::Value,
         /// "success" or "error".
         status: String,
@@ -144,6 +147,9 @@ pub enum ServerEvent {
     /// Clients showing the catalogue refetch it — the event is the signal,
     /// not the content.
     LibraryUpdated { entry_id: Uuid },
+    /// A session row may have changed or entered or left a list. Refetch
+    /// session lists to read the current rows from the gateway.
+    SessionUpdated { session_id: Uuid },
     /// A message was recorded on a conversation by something other than the
     /// person at this client — a schedule's brief, a delegation's completion
     /// notice, a notice from the platform — so open views append it where it
@@ -169,6 +175,7 @@ pub enum ServerEvent {
     QueueDrained {
         session_id: Uuid,
         turn_id: Uuid,
+        thread_id: Uuid,
         queued_ids: Vec<Uuid>,
     },
     /// Context assembly completed for a turn.
@@ -244,6 +251,7 @@ pub enum ServerEvent {
     /// Always delivered regardless of subscription state — this is an error
     /// condition that the client must surface to the user.
     OutputSchemaFailed {
+        failure_message: String,
         turn_id: Uuid,
         /// Total number of attempts made (including the initial attempt).
         attempts: u32,

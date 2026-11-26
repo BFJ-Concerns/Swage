@@ -61,6 +61,20 @@ describe("settings api", () => {
     expect(apiError.message).toBe("validation error: unknown variant `OpenAi`");
   });
 
+  it.each([
+    ["delivery_failed", 502],
+    ["runtime_error", 500],
+  ])("recognises %s as a contract error", async (code, status) => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      mockResponse({ code, message: "operation failed" }, status),
+    );
+    const failure = await discoverModels("llama").catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).code).toBe(code);
+    expect((failure as ApiError).status).toBe(status);
+    expect((failure as ApiError).message).toBe("operation failed");
+  });
+
   it("treats a code outside the contract as out of contract", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
       mockResponse({ code: "teapot", message: "short and stout" }, 418),

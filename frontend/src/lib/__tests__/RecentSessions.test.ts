@@ -7,16 +7,61 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, tick, unmount } from "svelte";
 
+import { compile } from "svelte/compiler";
+import recentSessionsSource from "../components/RecentSessions.svelte?raw";
 import RecentSessions from "../components/RecentSessions.svelte";
 import * as sessionsApi from "../api/sessions";
 import type { RecentSession } from "../protocol/RecentSession";
 import type { RecentSessionsEntry } from "../protocol/RecentSessionsEntry";
+import type { ServerEvent } from "../types";
+
+// A stand-in for the server end of the work-surface channel: `emit` pushes
+// into whatever the list subscribed with, and nothing after `close`, as the
+// real channel delivers nothing once closed.
+function fakeChannel() {
+  const handlers: ((event: ServerEvent) => void)[] = [];
+  const reconnectHandlers: (() => void)[] = [];
+  const channel = {
+    closed: false,
+    onSignal(handler: (event: ServerEvent) => void) {
+      handlers.push(handler);
+    },
+    onReconnect(handler: () => void) {
+      reconnectHandlers.push(handler);
+    },
+    reconnect() {
+      for (const handler of reconnectHandlers) handler();
+    },
+    close() {
+      channel.closed = true;
+    },
+    emit(event: ServerEvent) {
+      if (channel.closed) return;
+      for (const handler of handlers) handler(event);
+    },
+  };
+  return channel;
+}
 
 vi.mock("../api/sessions", () => ({
   listRecentSessions: vi.fn(),
 }));
 
 type MountedComponent = ReturnType<typeof mount>;
+
+function installRecentSessionsStyles(): HTMLStyleElement {
+  // Match Vite's scope on the mounted DOM when installing the external CSS.
+  const scope = Array.from(document.querySelector(".recent-sessions")!.classList).find(name => name.startsWith("svelte-"))!;
+  const compiled = compile(recentSessionsSource, {
+    cssHash: () => scope,
+    filename: decodeURIComponent(new URL("../components/RecentSessions.svelte", import.meta.url).pathname),
+    generate: "client",
+  });
+  const style = document.createElement("style");
+  style.textContent = compiled.css?.code ?? "";
+  document.head.append(style);
+  return style;
+}
 
 function makeSession(overrides: Partial<RecentSession> = {}): RecentSession {
   return {
@@ -76,6 +121,109 @@ describe("RecentSessions", () => {
     document.body.replaceChildren();
   });
 
+  it("labels the latest failed and interrupted responses and clears markers after recovery", async () => {
+    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValue([
+      conversationEntry(makeSession({ id: "failed", message_preview: "Failed direct reply", latest_turn_state: "failed" })),
+      conversationEntry(makeSession({ id: "interrupted", message_preview: "Interrupted direct reply", latest_turn_state: "interrupted" })),
+      conversationEntry(makeSession({ id: "recovered", message_preview: "Recovered direct reply", has_interrupted_turn: true, latest_turn_state: "completed" })),
+      { source: { kind: "schedule", id: "schedule", message: "Nightly" }, last_activity: "2026-10-01T00:00:00Z",
+        automated: [makeSession({ id: "scheduled-failure", message_preview: "Failed scheduled reply", latest_turn_state: "failed", origin: { kind: "schedule_run", schedule_id: "schedule" } })] },
+    ]);
+    component = mount(RecentSessions, { target: document.body });
+    await settle();
+    const rows = Array.from(document.querySelectorAll<HTMLButtonElement>('.row.source'));
+    for (const [preview, label, opposite] of [
+      ["Failed direct reply", "Last response failed", "Interrupted"],
+      ["Interrupted direct reply", "Interrupted", "Last response failed"],
+    ]) {
+      const row = rows.find(row => row.querySelector('.preview')?.textContent?.trim() === preview);
+      expect(row).toBeDefined();
+      const marker = row!.querySelector<HTMLElement>(".interrupted");
+      expect(marker?.textContent?.replace("⚠", "").trim()).toBe(label);
+      expect(marker?.textContent).not.toContain(opposite);
+    }
+    const recovered = rows.find(row => row.querySelector('.preview')?.textContent?.trim() === "Recovered direct reply");
+    expect(recovered).toBeDefined();
+    expect(recovered!.querySelector(".interrupted")).toBeNull();
+    const schedule = rows.find(row => row.querySelector('.preview')?.textContent?.trim() === "Nightly");
+    expect(schedule).toBeDefined();
+    schedule!.click();
+    flushSync();
+    const scheduled = Array.from(document.querySelectorAll('.row.nested')).find(row => row.querySelector('.preview')?.textContent?.trim() === "Failed scheduled reply");
+    expect(scheduled).toBeDefined();
+    expect(scheduled!.querySelector(".interrupted")?.textContent?.replace("⚠", "").trim()).toBe("Last response failed");
+  });
+
+  it("updates the mounted list through failure, visibility restore and reconnect", async () => {
+    vi.useFakeTimers();
+    let hidden = false;
+    const visibility = vi.spyOn(document, "hidden", "get").mockImplementation(() => hidden);
+    const channel = fakeChannel();
+    try {
+      const load = vi.mocked(sessionsApi.listRecentSessions);
+      const preview = "Plan the release";
+      const session = makeSession({ id: "conv-1", message_preview: preview, has_running_turn: true });
+      const worker = makeSession({ id: "worker-1", origin: { kind: "delegation", parent_session_id: session.id } });
+      const entry = (changes: Partial<RecentSession>) => [conversationEntry({ ...session, ...changes }, [worker])];
+      load.mockResolvedValue(entry({ latest_turn_state: "pending" }));
+
+      component = mount(RecentSessions, {
+        target: document.body,
+        props: {
+          channelFactory: () => channel,
+          topics: [{ id: "research", name: "Research", description: "", slug: "research", created_at: "" }],
+        },
+      });
+      await vi.runOnlyPendingTimersAsync();
+      expect(document.querySelector(".row.source")?.textContent).toContain("running");
+      expect(document.querySelector(".row.source .interrupted")).toBeNull();
+      flushSync(() => buttonNamed("Research").click());
+      await vi.runOnlyPendingTimersAsync();
+      const disclosure = document.querySelector<HTMLButtonElement>(".group-summary")!;
+      flushSync(() => disclosure.click());
+      expect(disclosure.getAttribute("aria-expanded")).toBe("false");
+
+      const signal = { type: "session_updated", session_id: session.id } as const;
+      const before = load.mock.calls.length;
+      load.mockResolvedValue(entry({ latest_turn_state: "failed", has_running_turn: false }));
+      channel.emit(signal);
+      channel.emit(signal);
+      await vi.runOnlyPendingTimersAsync();
+      expect(load).toHaveBeenCalledTimes(before + 1);
+      expect(load).toHaveBeenLastCalledWith("research", false);
+      expect(document.querySelector(".row.source .interrupted")?.textContent).toContain("Last response failed");
+      expect(document.querySelector(".group-summary")).toBe(disclosure);
+      expect(disclosure.getAttribute("aria-expanded")).toBe("false");
+
+      hidden = true;
+      document.dispatchEvent(new Event("visibilitychange"));
+      load.mockResolvedValue(entry({ latest_turn_state: "completed", has_running_turn: false }));
+      channel.emit(signal);
+      await vi.runOnlyPendingTimersAsync();
+      expect(load).toHaveBeenCalledTimes(before + 1);
+      hidden = false;
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.runOnlyPendingTimersAsync();
+      expect(document.querySelector(".row.source .preview")?.textContent).toBe(preview);
+      expect(document.querySelector(".row.source .interrupted")).toBeNull();
+
+      load.mockResolvedValue(entry({ latest_turn_state: "interrupted", has_running_turn: false }));
+      channel.reconnect();
+      await vi.runOnlyPendingTimersAsync();
+      expect(document.querySelector(".row.source .interrupted")?.textContent).toContain("Interrupted");
+
+      channel.emit(signal);
+      unmount(component);
+      component = undefined;
+      expect(channel.closed).toBe(true);
+      await vi.runOnlyPendingTimersAsync();
+      expect(load).toHaveBeenCalledTimes(before + 3);
+    } finally {
+      visibility.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("lists every scope's sessions in the order the gateway gave, automated ones nested beneath their source", async () => {
     const worker = makeSession({
       id: "worker-1",
@@ -110,6 +258,25 @@ describe("RecentSessions", () => {
 
     flushSync(() => (nested?.querySelector("button") as HTMLButtonElement).click());
     expect(onSelectSession).toHaveBeenCalledWith("worker-1");
+  });
+
+  it("searches sixty filter topics and preserves All sessions", async () => {
+    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValue([]);
+    const topics = Array.from({ length: 60 }, (_, i) => ({ id: `t-${i}`, name: `Topic ${i}`, slug: `t-${i}`, description: "", created_at: "" }));
+    component = mount(RecentSessions, { target: document.body, props: { topics } });
+    await settle();
+    const search = document.querySelector<HTMLInputElement>('input[aria-label="Search topic filters"]');
+    expect(search).not.toBeNull();
+    flushSync(() => { search!.value = "59"; search!.dispatchEvent(new Event("input", { bubbles: true })); });
+    expect(document.querySelector('[aria-label="Topic filter"]')?.textContent).not.toContain("Topic 58");
+    flushSync(() => buttonNamed("Topic 59").click());
+    await settle();
+    expect(sessionsApi.listRecentSessions).toHaveBeenLastCalledWith("t-59", false);
+    flushSync(() => buttonNamed("All sessions").click());
+    await settle();
+    expect(sessionsApi.listRecentSessions).toHaveBeenLastCalledWith(null, false);
+    flushSync(() => { search!.value = ""; search!.dispatchEvent(new Event("input", { bubbles: true })); });
+    expect(document.querySelectorAll('.filter')).toHaveLength(61);
   });
 
   it("narrows to a topic with the filter and returns to all sessions", async () => {
@@ -263,7 +430,7 @@ describe("RecentSessions schedule groups", () => {
   });
 
   it("reports a run with neither flag as ended, not completed", async () => {
-    component = await render([scheduleEntry({ has_interrupted_turn: true })]);
+    component = await render([scheduleEntry({ has_interrupted_turn: true, latest_turn_state: "interrupted" })]);
     expect(summaryText()).toBe("▸ 11 runs · Interrupted");
     unmount(component);
     document.body.replaceChildren();
@@ -334,5 +501,60 @@ describe("RecentSessions message previews", () => {
     component = mount(RecentSessions, { target: document.body, props: { onSelectSession: vi.fn() } });
     await settle();
     expect(document.querySelector(".row.nested .preview")?.textContent).toBe("Open child");
+  });
+});
+
+describe("RecentSessions outcome history and empty schedules", () => {
+  let component: MountedComponent | undefined;
+  let stylesheet: HTMLStyleElement | undefined;
+
+  async function flushRender(): Promise<void> {
+    await tick();
+    await Promise.resolve();
+    flushSync();
+  }
+
+  beforeEach(() => {
+    vi.mocked(sessionsApi.listRecentSessions).mockReset();
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    if (component) unmount(component);
+    component = undefined;
+    stylesheet?.remove();
+    stylesheet = undefined;
+    document.body.replaceChildren();
+  });
+
+  it("labels earlier interruptions as history rather than the latest run state", async () => {
+    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValue([{
+      source: { kind: "schedule", id: "schedule", message: "Nightly" },
+      last_activity: "2026-10-01T00:00:00Z",
+      automated: [makeSession({ latest_turn_state: "completed", has_interrupted_turn: true })],
+    }]);
+    component = mount(RecentSessions, { target: document.body });
+    await flushRender();
+    expect(document.querySelector('.group-summary')?.textContent).toContain("Completed");
+    expect(document.querySelector('.group-summary')?.textContent).toContain("Previous response interrupted");
+  });
+
+  it("keeps an empty schedule disabled and collapsed even with a saved expansion", async () => {
+    localStorage.setItem("swage:recent-session-groups", JSON.stringify({ "schedule:empty": true }));
+    vi.mocked(sessionsApi.listRecentSessions).mockResolvedValue([{
+      source: { kind: "schedule", id: "empty", message: "No runs yet" },
+      last_activity: "2026-10-01T00:00:00Z", automated: [],
+    }]);
+    component = mount(RecentSessions, { target: document.body });
+    await flushRender();
+    stylesheet = installRecentSessionsStyles();
+    const heading = document.querySelector<HTMLButtonElement>('.row.source')!;
+    expect(heading.disabled).toBe(true);
+    expect(getComputedStyle(heading).opacity).toBe("0.6");
+    expect(heading.getAttribute("aria-expanded")).toBe("false");
+    heading.click();
+    flushSync();
+    expect(document.querySelector('.group-summary')).toBeNull();
+    expect(document.querySelector('.automated')).toBeNull();
   });
 });

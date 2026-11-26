@@ -29,7 +29,7 @@ import { createConnectionStore } from "../stores/connection";
 
 interface MockWsClient extends WebSocketClient {
   // Test helpers to drive callbacks registered by the store.
-  triggerStatus(s: ConnectionStatus): void;
+  triggerStatus(s: ConnectionStatus, message?: string): void;
   triggerEvent(e: ServerEvent): void;
   // Introspection on what the store sent.
   sentEvents(): string[];
@@ -37,7 +37,7 @@ interface MockWsClient extends WebSocketClient {
 }
 
 function createMockWsClient(): MockWsClient {
-  let statusHandler: ((s: ConnectionStatus) => void) | null = null;
+  let statusHandler: ((s: ConnectionStatus, message?: string) => void) | null = null;
   let eventHandler: ((e: ServerEvent) => void) | null = null;
   const connected: string[] = [];
   const sent: string[] = [];
@@ -57,7 +57,7 @@ function createMockWsClient(): MockWsClient {
       statusHandler = handler;
     }),
 
-    triggerStatus: (s) => statusHandler?.(s),
+    triggerStatus: (s, message) => statusHandler?.(s, message),
     triggerEvent: (e) => eventHandler?.(e),
     sentEvents: () => [...sent],
     lastConnectedId: () => connected[connected.length - 1],
@@ -416,5 +416,24 @@ describe("reconnect callback", () => {
 
     // Should not throw even without a callback.
     expect(() => mock.triggerStatus("connected")).not.toThrow();
+  });
+});
+
+
+describe("connection explanations", () => {
+  it("uses a gateway reason only when supplied and clears it on recovery or disconnect", () => {
+    const client = createMockWsClient();
+    const store = createConnectionStore({ wsClientFactory: () => client });
+    store.connectTo("conv-abc");
+    client.triggerStatus("error");
+    expect(store.errorMessage).not.toContain("another tab");
+    client.triggerStatus("error", "Conversation already has an active connection");
+    expect(store.errorMessage).toBe("Conversation already has an active connection");
+    client.triggerStatus("connected");
+    expect(store.errorMessage).toBeNull();
+    client.triggerStatus("error", "Conversation already has an active connection");
+    store.disconnect();
+    expect(store.status).toBe("disconnected");
+    expect(store.errorMessage).toBeNull();
   });
 });

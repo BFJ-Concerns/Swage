@@ -25,6 +25,7 @@ function run(
     final_output: null,
     handover: null,
     terminal_account: terminalAccount,
+    interruptions: [],
     error_message: null,
     created_at: "2026-09-02T10:00:00Z",
     completed_at: null,
@@ -66,6 +67,52 @@ function emptyAccount(ending: WorkflowRunEnding): WorkflowRunTerminalAccount {
 describe("WorkflowRunView", () => {
   let component: MountedComponent | undefined;
 
+  it("renders run, interruption and cancellation times locally with exact stamps", () => {
+    const start = "2026-10-01T19:28:49.393288230Z";
+    const end = "2026-10-01T19:30:49.393288230Z";
+    const account = emptyAccount({ ending: "cancelled" });
+    account.cancellation = { source: "API request", requested_at: end };
+    component = render({ ...run(account), created_at: start, completed_at: end,
+      interruptions: [{ detected_at: start, run_state: "running" }] });
+    for (const [selector, stamp] of [
+      [".run header time:nth-of-type(1)", start],
+      [".run header time:nth-of-type(2)", end],
+      [".interruptions time", start],
+      [".ending time", end],
+    ]) {
+      const time = document.querySelector<HTMLTimeElement>(selector)!;
+      expect(time, selector).not.toBeNull();
+      expect(time.getAttribute("datetime"), selector).toBe(stamp);
+      expect(time.title, selector).toBe(stamp);
+      expect(time.textContent).toBe(new Date(stamp).toLocaleString());
+      expect(time.textContent).not.toBe(stamp);
+    }
+  });
+
+  it("run accounts preserve the author defect and hide empty partial results", () => {
+    const account = emptyAccount({ ending: "author_error", error: "UnknownAgentOptionError: unknown option bogusOption" });
+    account.partial_results = { reason: "no result", results: [] };
+    component = render(run(account));
+    expect(document.querySelector(".ending-line")?.textContent).toBe("Author error — UnknownAgentOptionError: unknown option bogusOption");
+    expect(document.body.textContent).not.toContain("Partial results");
+  });
+
+  it("run accounts render cancellation provenance", () => {
+    const account = emptyAccount({ ending: "cancelled" });
+    account.cancellation = { source: "API request", actor: "operator", session_id: "session-1", requested_at: "2026-10-15T10:00:00Z" };
+    account.workers.cut_short.push({ journal_entry_id: "cut-short", seq: 1, label: "worker", agent_definition_id: null, placement: null, worktree: null,
+      redispatched_after_interruption: false,
+      termination: { termination: "cut_short", cause: "run_cancelled", detail: "WorkflowCancelledError: run cancelled" } });
+    component = render(run(account));
+    expect(getComputedStyle(document.querySelector(".detail")!).textTransform).toBe("none");
+    const text = document.querySelector(".ending")?.textContent;
+    expect(text).toContain("API request");
+    expect(text).toContain(new Date("2026-10-15T10:00:00Z").toLocaleString());
+    expect(document.querySelector(".ending time")?.getAttribute("datetime")).toBe("2026-10-15T10:00:00Z");
+    expect(text).toContain("operator");
+    expect(text).toContain("session-1");
+  });
+
   afterEach(() => {
     if (component) unmount(component);
     component = undefined;
@@ -85,6 +132,7 @@ describe("WorkflowRunView", () => {
             placement: "/worktrees/run-1/finishing",
             worktree: null,
             termination: null,
+            redispatched_after_interruption: false,
           },
         ],
         failed: [
@@ -99,6 +147,7 @@ describe("WorkflowRunView", () => {
               termination: "failed",
               message: "the worker exhausted its attempts",
             },
+            redispatched_after_interruption: false,
           },
         ],
         cut_short: [
@@ -114,6 +163,7 @@ describe("WorkflowRunView", () => {
               cause: "run_cancelled",
               detail: "the run was cancelled",
             },
+            redispatched_after_interruption: false,
           },
         ],
         unsettled: [
@@ -125,6 +175,7 @@ describe("WorkflowRunView", () => {
             placement: null,
             worktree: null,
             termination: { termination: "unsettled" },
+            redispatched_after_interruption: false,
           },
         ],
       },
@@ -165,6 +216,59 @@ describe("WorkflowRunView", () => {
     expect(text).toContain("the survey text");
   });
 
+  it("shows each interruption the run lived through and marks workers redispatched after one", async () => {
+    const account: WorkflowRunTerminalAccount = {
+      ...emptyAccount({ ending: "returned" }),
+      workers: {
+        done: [
+          {
+            journal_entry_id: "entry-1",
+            seq: 0,
+            label: "appender",
+            agent_definition_id: null,
+            placement: null,
+            worktree: null,
+            termination: null,
+            redispatched_after_interruption: true,
+          },
+          {
+            journal_entry_id: "entry-2",
+            seq: 1,
+            label: "clean",
+            agent_definition_id: null,
+            placement: null,
+            worktree: null,
+            termination: null,
+            redispatched_after_interruption: false,
+          },
+        ],
+        failed: [],
+        cut_short: [],
+        unsettled: [],
+      },
+    };
+    const interrupted = {
+      ...run(account),
+      interruptions: [
+        { detected_at: "2026-09-02T10:02:00Z", run_state: "parked" },
+        { detected_at: "2026-09-02T10:04:00Z", run_state: "running" },
+      ],
+    } as unknown as WorkflowRun;
+    component = render(interrupted);
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Interruptions");
+    expect(text).toContain("the gateway stopped while this run was parked");
+    expect(text).toContain("the gateway stopped while this run was executing; the calls it had in flight were cut off");
+    expect(text).not.toContain("dispatched again");
+    expect(text).toContain("Workers redispatched after an interruption may have repeated their effects.");
+    const done = Array.from(document.querySelectorAll(".standing li"));
+    const appender = done.find((item) => item.textContent?.includes("appender"))!;
+    expect(appender.textContent).toContain("redispatched after an interruption");
+    expect(appender.textContent).toContain("unknown outcomes and may have been applied twice");
+    const clean = done.find((item) => item.textContent?.includes("clean"))!;
+    expect(clean.textContent).not.toContain("redispatched");
+  });
+
   it("says a run that has not ended has no account yet", async () => {
     component = render(run(null));
 
@@ -201,4 +305,105 @@ describe("WorkflowRunView", () => {
 
     expect(document.querySelector('[role="alert"]')?.textContent).toContain("read failed");
   });
+});
+
+describe("run page completeness", () => {
+  let page: MountedComponent | undefined;
+  afterEach(() => { if (page) unmount(page); document.body.replaceChildren(); });
+
+  it("shows identity, timing and the launching conversation", () => {
+    page = render({ ...run(emptyAccount({ ending: "returned" }), "run-own", "three-whys"),
+      dispatching_session_id: "parent-session", completed_at: "2026-09-02T10:05:00Z" });
+    const header = document.querySelector(".run header")!;
+    expect(header.textContent).toContain("three-whys");
+    expect(header.textContent).toContain("run-own");
+    expect(header.textContent).toContain(new Date("2026-09-02T10:00:00Z").toLocaleString());
+    expect(header.textContent).toContain(new Date("2026-09-02T10:05:00Z").toLocaleString());
+    expect(header.querySelector("a")?.getAttribute("href")).toBe("/conversations/parent-session");
+  });
+
+  it("groups workers sharing a placement once and preserves its case", () => {
+    const account = emptyAccount({ ending: "returned" });
+    account.workers.done = [0, 1].map((seq) => ({ journal_entry_id: `worker-${seq}`, seq,
+      label: `worker ${seq}`, placement: "/Worktrees/MyRun", worktree: null, termination: null,
+      redispatched_after_interruption: false }));
+    const shared = detail(run(account));
+    shared.journal = account.workers.done.map((worker, index) => ({ id: worker.journal_entry_id, result: { kind: "agent_call", output: `Worker output ${index}` } } as unknown as WorkflowRunDetailResponse["journal"][number]));
+    page = mount(WorkflowRunView, { target: document.body, props: { detail: shared, loadState: "loaded", errorMessage: "" } });
+    expect(document.body.textContent?.split("/Worktrees/MyRun")).toHaveLength(2);
+    const placement = document.querySelector(".placement")!;
+    expect(getComputedStyle(placement).textTransform).toBe("none");
+    expect(placement.parentElement?.textContent).toContain("worker 0");
+    expect(placement.parentElement?.textContent).toContain("worker 1");
+    expect(placement.parentElement?.textContent).toContain("Worker output 0");
+    expect(placement.parentElement?.textContent).toContain("Worker output 1");
+  });
+
+  it.each(["timer", "hold", "event"])("names a parked %s wait read-only", (kind) => {
+    const started = "2026-09-02T10:00:00.393288230Z";
+    // workflow.rs parks event waits and holds at now + 36,500 days.
+    const sentinel = "2126-08-09T10:00:00.393288230Z";
+    const wake = kind === "timer" ? "2026-09-03T10:00:00.393288230Z" : sentinel;
+    const parked = detail({ ...run(null), state: "parked", wake_at: wake });
+    parked.journal = [{
+      id: "wait", seq: 0n, kind: kind === "event" ? "await_event" : kind === "hold" ? "hold" : "timer",
+      status: "started", started_at: started,
+      request: kind === "timer" ? { ms: 86400000 } : kind === "event"
+        ? { action: "await", kinds: ["review.finished"] }
+        : { action: "raise", content: "Ship the findings?", verdicts: ["approve", "postpone"] },
+    }];
+    if (kind === "hold") parked.holds = [{ id: "decision", run_id: "run-1", seq: 1, content: "Ship the findings?", verdicts: ["approve", "postpone"], state: "open", raised_at: started, rejections: [] }];
+    page = mount(WorkflowRunView, { target: document.body, props: { detail: parked, loadState: "loaded", errorMessage: "" } });
+    const awaited = document.querySelector(".awaited")!;
+    expect(awaited).not.toBeNull();
+    if (kind === "timer") {
+      expect(awaited.textContent).toContain("Timer wakes at");
+      expect(awaited.querySelector("time")?.textContent).toBe(new Date(wake).toLocaleString());
+      expect(awaited.querySelector("time")?.title).toBe(wake);
+    } else {
+      expect(awaited.textContent).not.toContain("Timer wakes at");
+      expect(awaited.querySelector("time")).toBeNull();
+      expect(awaited.textContent).not.toContain(sentinel);
+    }
+    if (kind === "hold") {
+      expect(awaited.textContent).toContain("Decision hold");
+      expect(awaited.textContent).toContain("Ship the findings?");
+      expect(awaited.textContent).toContain("approve, postpone");
+      expect(awaited.textContent).toContain("An agent answers");
+    }
+    if (kind === "event") expect(awaited.textContent).toContain("Awaiting review.finished");
+    expect(awaited.querySelector("button, input, select")).toBeNull();
+  });
+
+  it("keeps all thrown error lines under a neutral disclosure", () => {
+    const error = "Input rejected\nThe source is missing\nTry a different source";
+    page = render(run(emptyAccount({ ending: "threw", error })));
+    const disclosure = document.querySelector(".ending details")!;
+    expect(disclosure.querySelector("summary")?.textContent).toBe("Error details");
+    expect(disclosure.querySelector("pre")?.textContent).toBe(error);
+  });
+
+  it("shows recorded and failed sources from the returned result independently of workers", () => {
+    const completed = run(emptyAccount({ ending: "returned" }));
+    completed.final_output = { gathered: [{ url: "https://source.invalid/good", observation_id: "observation-1" }], failed_sources: [{ url: "https://source.invalid/bad", reason: "The source refused access" }], organised: { orientation_cards: 1, note: "Two subjects indexed" } };
+    page = render(completed);
+    const result = document.querySelector('[aria-label="Run result"]')!;
+    expect(result).not.toBeNull();
+    const items = result.querySelectorAll("li");
+    expect(items[0].textContent).toContain("https://source.invalid/good");
+    expect(items[0].textContent).toContain("observation-1");
+    expect(items[1].textContent).toContain("https://source.invalid/bad");
+    expect(items[1].textContent).toContain("The source refused access");
+    expect(result.textContent).toContain("organised");
+    expect(result.textContent).toContain("Two subjects indexed");
+  });
+  it("links a terminal worker to its recorded session", () => {
+    const account = emptyAccount({ ending: "returned" });
+    account.workers.done = [{ journal_entry_id: "entry-session", seq: 0, label: "Completed worker", redispatched_after_interruption: false }];
+    const recorded = detail(run(account));
+    recorded.journal = [{ id: "entry-session", agent_call: { session_id: "recorded-session" } } as unknown as WorkflowRunDetailResponse["journal"][number]];
+    page = mount(WorkflowRunView, { target: document.body, props: { detail: recorded, loadState: "loaded", errorMessage: "" } });
+    expect(document.querySelector(".workers .worker a")?.getAttribute("href")).toBe("/conversations/recorded-session");
+  });
+
 });

@@ -45,7 +45,7 @@ async fn workflow_metadata_and_explicit_updates_persist_through_live_gateway_req
     environment.set_swage_home(root.path());
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let topic = storage.general_scope().await.unwrap();
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn Storage>,
         Arc::clone(&storage) as Arc<dyn TopicStore>,
         Arc::new(StubProvider),

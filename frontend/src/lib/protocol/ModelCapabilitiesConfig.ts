@@ -6,4 +6,11 @@ export type ModelCapabilitiesConfig = { reasoning_replay?: boolean,
  * The model's effort control, when the catalogue declares one; absent,
  * the provider adapter's declaration for the models it serves applies.
  */
-effort?: EffortCapability | null, };
+effort?: EffortCapability | null,
+/**
+ * The most output tokens one response may carry, when the catalogue
+ * declares it; absent, the provider adapter's account for the models it
+ * serves applies, and a model neither declares takes the adapter's
+ * floor. A caller's own `max_tokens` is sent as it is either way.
+ */
+output_limit?: number | null, };

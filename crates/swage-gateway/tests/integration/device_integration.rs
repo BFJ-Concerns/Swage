@@ -113,7 +113,7 @@ async fn start_test_server(
 ) -> (SocketAddr, AppState) {
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
     let config = swage_config::ResolvedConfig::default();
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(provider),
@@ -722,7 +722,7 @@ async fn a_registered_device_reconnects_to_a_restarted_gateway_and_serves_it() {
 
     // First life of the gateway: register, dial in, connected.
     let storage = Arc::new(SqliteStorage::open(&db_path).unwrap());
-    let state = AppState::new(
+    let state = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(ChannelProvider::new(vec![])),
@@ -764,7 +764,7 @@ async fn a_registered_device_reconnects_to_a_restarted_gateway_and_serves_it() {
     // Second life on the same address, from the same store: the device's
     // redial finds it, advertises again, and serves it.
     let storage = Arc::new(SqliteStorage::open(&db_path).unwrap());
-    let restarted = AppState::new(
+    let restarted = AppState::for_test(
         Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
         Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
         Arc::new(ChannelProvider::new(vec![])),

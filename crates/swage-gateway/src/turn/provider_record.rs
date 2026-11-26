@@ -11,8 +11,6 @@
 //! `record_reconstruction_gap` and escalated only when the gap itself cannot
 //! be recorded.
 
-use std::mem;
-
 use super::{
     AgentEvent, AppState, GatewayError, Uuid, WorkflowProviderRoundOutcome, record_durability,
 };
@@ -78,10 +76,66 @@ pub(crate) async fn apply_provider_snapshot_event(
     let turn_id = match &event {
         AgentEvent::ProviderRequestPrepared { turn_id, .. }
         | AgentEvent::ProviderResponseCaptured { turn_id, .. }
-        | AgentEvent::ProviderReasoningCaptured { turn_id, .. } => *turn_id,
+        | AgentEvent::ProviderReasoningCaptured { turn_id, .. }
+        | AgentEvent::ProviderAttempt { turn_id, .. } => *turn_id,
         _ => return,
     };
     match event {
+        AgentEvent::ProviderAttempt { mut record, .. } => {
+            if let Some(request) = record.request.take() {
+                record.request = match redact_provider_visible_request(state, request).await {
+                    Ok(request) => Some(request),
+                    Err(_) => {
+                        append_provider_visible_capture_error(report_json, record.round);
+                        None
+                    }
+                };
+                let requests = provider_visible_array(report_json, "requests");
+                // Replace the provisional pre-stream snapshot with concrete
+                // attempts. Settlements update the same entry, preserving the
+                // order in which attempts ran, even if capture failed.
+                requests.retain(|entry| {
+                    entry["round"] != record.round || !entry["attempt_id"].is_null()
+                });
+                let value = serde_json::json!({
+                    "round": record.round,
+                    "attempt_id": record.id,
+                    "request": record.request,
+                });
+                if let Some(previous) = requests
+                    .iter_mut()
+                    .find(|entry| entry["attempt_id"] == record.id)
+                {
+                    *previous = value;
+                } else {
+                    requests.push(value);
+                }
+            }
+            if let Some(error) = &mut record.error {
+                match known_secret_values(state).await {
+                    Ok(secrets) => {
+                        redact_text(error, &secrets);
+                    }
+                    Err(_) => {
+                        *error =
+                            "Error detail omitted because secret redaction was unavailable".into();
+                    }
+                }
+            }
+            let value = serde_json::to_value(&record).expect("attempt serialises");
+            let attempts = report_json
+                .as_object_mut()
+                .expect("context report is an object")
+                .entry("provider_attempts")
+                .or_insert_with(|| serde_json::json!([]))
+                .as_array_mut()
+                .expect("provider attempts is an array");
+            if let Some(previous) = attempts.iter_mut().find(|a| a["id"] == record.id) {
+                *previous = value;
+            } else {
+                attempts.push(value);
+            }
+        }
         AgentEvent::ProviderRequestPrepared { round, request, .. } => {
             match redact_provider_visible_request(state, request).await {
                 Ok(request) => append_provider_visible_request(report_json, round, request),
@@ -119,8 +173,10 @@ pub(crate) async fn apply_provider_snapshot_event(
     }
 }
 
-async fn known_secret_values(state: &AppState) -> Result<Vec<String>, swage_core::StorageError> {
-    state
+pub(super) async fn known_secret_values(
+    state: &AppState,
+) -> Result<Vec<String>, swage_core::StorageError> {
+    let mut values = state
         .secret_manager
         .known_values()
         .await
@@ -129,30 +185,45 @@ async fn known_secret_values(state: &AppState) -> Result<Vec<String>, swage_core
             other => swage_core::StorageError::Corruption {
                 message: format!("secret redaction set could not be read: {other}"),
             },
-        })
+        })?;
+    values.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+    Ok(values)
 }
 
-fn redact_secret_values(value: &mut serde_json::Value, secret_values: &[String]) {
-    match value {
-        serde_json::Value::String(text) => {
-            let mut redacted = mem::take(text);
-            for secret in secret_values {
-                redacted = redacted.replace(secret, "[REDACTED_SECRET]");
-            }
-            *text = redacted;
+pub(super) const REDACTED_SECRET: &str = "[REDACTED_SECRET]";
+
+pub(super) fn redact_text(text: &mut String, secret_values: &[impl AsRef<str>]) -> bool {
+    let mut replaced = false;
+    for secret in secret_values {
+        let secret = secret.as_ref();
+        if text.contains(secret) {
+            *text = text.replace(secret, REDACTED_SECRET);
+            replaced = true;
         }
+    }
+    replaced
+}
+
+pub(super) fn redact_secret_values(
+    value: &mut serde_json::Value,
+    secret_values: &[String],
+) -> bool {
+    let mut replaced = false;
+    match value {
+        serde_json::Value::String(text) => return redact_text(text, secret_values),
         serde_json::Value::Array(values) => {
             for value in values {
-                redact_secret_values(value, secret_values);
+                replaced |= redact_secret_values(value, secret_values);
             }
         }
         serde_json::Value::Object(values) => {
             for value in values.values_mut() {
-                redact_secret_values(value, secret_values);
+                replaced |= redact_secret_values(value, secret_values);
             }
         }
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
     }
+    replaced
 }
 
 pub(crate) fn append_provider_visible_reasoning(
@@ -307,6 +378,22 @@ pub(super) fn record_effort_snapshot(
         serde_json::to_value(resolved).expect("resolved effort serialises");
 }
 
+/// Record the output limit the turn's request carries beside the effort:
+/// the tokens sent and which source named them. Absent from the snapshot
+/// when no source declared one — the adapter's protocol floor then applies,
+/// and the per-round request record shows what went on the wire.
+pub(super) fn record_output_limit_snapshot(
+    report_json: &mut serde_json::Value,
+    resolved: swage_core::ResolvedOutputLimit,
+) {
+    normalise_report_object(report_json);
+    if !report_json["provider_visible"].is_object() {
+        report_json["provider_visible"] = serde_json::json!({});
+    }
+    report_json["provider_visible"]["output_limit"] =
+        serde_json::to_value(resolved).expect("resolved output limit serialises");
+}
+
 pub(super) fn record_effective_model_snapshot(
     report_json: &mut serde_json::Value,
     catalogue_entry: &str,
@@ -324,4 +411,36 @@ pub(super) fn record_effective_model_snapshot(
         "provider_id": model.provider_id,
         "source": source,
     });
+}
+
+pub(crate) async fn redact_element_texts(
+    state: &AppState,
+    report: &mut swage_protocol::client::context::AssemblyReport,
+) {
+    fn visit(
+        elements: &mut [swage_protocol::client::context::ElementReport],
+        secrets: Option<&[String]>,
+    ) {
+        for element in elements {
+            if let Some(secrets) = secrets {
+                if let Some(text) = &mut element.full_text {
+                    redact_text(text, secrets);
+                }
+            } else {
+                element.full_text = None;
+            }
+            if let Some(nested) = &mut element.named_assembly {
+                visit(&mut nested.child_elements, secrets);
+            }
+        }
+    }
+    match known_secret_values(state).await {
+        Ok(secrets) => visit(&mut report.elements, Some(&secrets)),
+        Err(_) => {
+            visit(&mut report.elements, None);
+            report.warnings.push(
+                "Element text capture omitted because secret redaction was unavailable".into(),
+            );
+        }
+    }
 }

@@ -65,7 +65,7 @@ async function stop(code = 0) {
   if (stopping) return;
   stopping = true;
   for (const child of children) child.kill("SIGTERM");
-  await Promise.all(children.map((child) => child.exitCode !== null
+  await Promise.all(children.map((child) => (child.exitCode !== null || child.signalCode !== null)
     ? Promise.resolve()
     : new Promise((done) => child.once("exit", done))));
   await rm(swageRoot, { recursive: true, force: true });
@@ -88,13 +88,15 @@ start(process.execPath, [join(frontendDir, "e2e/mock-provider.mjs")], {
     SWAGE_E2E_PROVIDER_REQUESTS: join(invocationDir, "provider-requests.jsonl"),
   },
 });
-start(join(repoDir, "target/debug/swage"), [
+const targetDir = resolve(repoDir, process.env.CARGO_TARGET_DIR ?? "target");
+start(join(targetDir, "debug/swage"), [
   "--server-mode", "gateway", "start", "--host", "127.0.0.1", "--port", String(gatewayPort),
 ], {
   cwd: repoDir,
   env: {
     ...process.env,
     SWAGE_HOME: swageRoot,
+    XDG_RUNTIME_DIR: join(swageRoot, "run"),
     SWAGE_E2E_PROVIDER_KEY: "test-only",
     SWAGE_MANAGED_SECRET_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
   },

@@ -4,4 +4,4 @@
  * How a run ended. Every ending path names itself here, so no reader has to
  * infer a run's end from silence or from the absence of a result.
  */
-export type WorkflowRunEnding = { "ending": "returned" } | { "ending": "threw", error: string, } | { "ending": "cancelled" } | { "ending": "wound_down", error: string, } | { "ending": "interrupted_without_resume", reason: string, };
+export type WorkflowRunEnding = { "ending": "returned" } | { "ending": "threw", error: string, } | { "ending": "author_error", error: string, } | { "ending": "cancelled" } | { "ending": "wound_down", error: string, } | { "ending": "interrupted_without_resume", reason: string, };

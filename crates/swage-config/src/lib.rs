@@ -25,7 +25,7 @@ pub const RESERVED_WORKFLOW_AGENT_ID: &str = "__workflow_ephemeral__";
 // Resolved config types
 pub use masked_string::MaskedString;
 pub use model::{
-    AccessGateMode, BrowserScreenshotPolicy, BrowserToolConfig, ChannelsConfig,
+    AccessGateMode, AttachmentsConfig, BrowserScreenshotPolicy, BrowserToolConfig, ChannelsConfig,
     CommunicationConfig, ContextConfig, ContextTransferConfig, ContextTransferField,
     ContextTransferMode, ContextTransferTargetConfig, GenerationConfig, GenerationPresetConfig,
     HierarchyLevel, HitlConfig, LogLevel, LoggingConfig, MemoryConfig, ModelCapabilitiesConfig,
@@ -48,5 +48,5 @@ pub use merge::PartialConfig;
 // Resolution pipeline — primary public API
 pub use resolve::{
     apply_overlay, configuration_hierarchy, load_resolved_config, load_resolved_config_from,
-    validate_files,
+    load_running_config, load_running_config_from, overlay_scope_layers, validate_files,
 };

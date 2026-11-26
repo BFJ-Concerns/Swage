@@ -13,7 +13,9 @@ use crate::model::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use swage_core::ApprovalTimeoutPolicy;
-pub use swage_protocol::client::settings::{PartialMemoryConfig, PartialSessionsConfig};
+pub use swage_protocol::client::settings::{
+    PartialAttachmentsConfig, PartialMemoryConfig, PartialSessionsConfig,
+};
 
 // ---------------------------------------------------------------------------
 // Partial section types — mirror of model types, all fields Option<T>
@@ -138,6 +140,7 @@ pub struct PartialExperimentLocationConfig {
 /// partial overrides that would silently inherit unexpected approval gates.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PartialToolConfig {
+    pub max_identical_failures: Option<u32>,
     pub shell_timeout_secs: Option<u64>,
     pub python_execute: Option<PartialPythonExecuteToolConfig>,
     pub max_output_bytes: Option<usize>,
@@ -262,6 +265,7 @@ pub struct PartialConfig {
     pub scheduling: Option<PartialSchedulingConfig>,
     pub sessions: Option<PartialSessionsConfig>,
     pub memory: Option<PartialMemoryConfig>,
+    pub attachments: Option<PartialAttachmentsConfig>,
     pub voice: Option<PartialVoiceConfig>,
     pub generation: Option<PartialGenerationConfig>,
     pub channels: Option<PartialChannelsConfig>,
@@ -276,67 +280,99 @@ pub struct PartialConfig {
 // ---------------------------------------------------------------------------
 
 impl From<ResolvedConfig> for PartialConfig {
+    /// Every configuration field goes back into its partial: the overlay of a
+    /// session's scope layers starts from this conversion of the running
+    /// configuration, so a field left behind here would reset to its default
+    /// on every turn. The exhaustive destructuring makes a new field a
+    /// compile error until it is carried. Instructions and declared skills
+    /// are not configuration fields and are carried by the resolver.
     fn from(r: ResolvedConfig) -> Self {
+        let ResolvedConfig {
+            server,
+            hitl,
+            providers,
+            models,
+            sandbox,
+            logging,
+            tools,
+            context,
+            pricing,
+            observability,
+            experimentation,
+            output,
+            declared_skills: _,
+            communication,
+            scheduling,
+            sessions,
+            memory,
+            attachments,
+            voice,
+            generation,
+            channels,
+            instructions: _,
+            instruction_sources: _,
+            dangerously_skip_permissions,
+        } = r;
         PartialConfig {
             server: Some(PartialServerConfig {
-                host: Some(r.server.host),
-                port: Some(r.server.port),
-                access: Some(r.server.access),
+                host: Some(server.host),
+                port: Some(server.port),
+                access: Some(server.access),
             }),
             providers: Some(PartialProviderCatalogConfig {
-                default: Some(r.providers.default),
-                entries: if r.providers.entries.is_empty() {
+                default: Some(providers.default),
+                entries: if providers.entries.is_empty() {
                     None
                 } else {
-                    Some(r.providers.entries)
+                    Some(providers.entries)
                 },
             }),
             models: Some(PartialModelCatalogConfig {
-                default: Some(r.models.default),
+                default: Some(models.default),
                 default_model_id: None,
-                entries: if r.models.entries.is_empty() {
+                entries: if models.entries.is_empty() {
                     None
                 } else {
-                    Some(r.models.entries)
+                    Some(models.entries)
                 },
             }),
             sandbox: Some(PartialSandboxConfig {
-                enabled: Some(r.sandbox.enabled),
-                allow_degraded_execution: Some(r.sandbox.allow_degraded_execution),
+                enabled: Some(sandbox.enabled),
+                allow_degraded_execution: Some(sandbox.allow_degraded_execution),
             }),
             logging: Some(PartialLoggingConfig {
-                level: Some(r.logging.level),
+                level: Some(logging.level),
             }),
             context: Some(PartialContextConfig {
-                assembly: Some(r.context.assembly),
-                alternatives: if r.context.alternatives.is_empty() {
+                assembly: Some(context.assembly),
+                alternatives: if context.alternatives.is_empty() {
                     None
                 } else {
-                    Some(r.context.alternatives)
+                    Some(context.alternatives)
                 },
-                timeout: Some(r.context.timeout),
-                budget: Some(r.context.budget),
-                compaction_threshold: Some(r.context.compaction_threshold),
-                diagnosis_reader_model: Some(r.context.diagnosis_reader_model),
-                diagnosis_synthesis_model: Some(r.context.diagnosis_synthesis_model),
+                timeout: Some(context.timeout),
+                budget: Some(context.budget),
+                compaction_threshold: Some(context.compaction_threshold),
+                diagnosis_reader_model: Some(context.diagnosis_reader_model),
+                diagnosis_synthesis_model: Some(context.diagnosis_synthesis_model),
             }),
             pricing: Some(PartialPricingConfig {
-                models: if r.pricing.models.is_empty() {
+                models: if pricing.models.is_empty() {
                     None
                 } else {
-                    Some(r.pricing.models)
+                    Some(pricing.models)
                 },
             }),
             observability: Some(PartialObservabilityConfig {
-                force_on: Some(r.observability.force_on),
+                force_on: Some(observability.force_on),
             }),
             experimentation: Some(PartialExperimentationConfig {
-                enabled: Some(r.experimentation.enabled),
-                locations: if r.experimentation.locations.is_empty() {
+                enabled: Some(experimentation.enabled),
+                locations: if experimentation.locations.is_empty() {
                     None
                 } else {
                     Some(
-                        r.experimentation
+                        experimentation
                             .locations
                             .into_iter()
                             .map(|(key, location)| {
@@ -353,52 +389,53 @@ impl From<ResolvedConfig> for PartialConfig {
                 },
             }),
             tools: Some(PartialToolConfig {
-                shell_timeout_secs: Some(r.tools.shell_timeout_secs),
+                max_identical_failures: Some(tools.max_identical_failures),
+                shell_timeout_secs: Some(tools.shell_timeout_secs),
                 python_execute: Some(PartialPythonExecuteToolConfig {
-                    enabled: Some(r.tools.python_execute.enabled),
-                    timeout_secs: Some(r.tools.python_execute.timeout_secs),
-                    startup_timeout_secs: Some(r.tools.python_execute.startup_timeout_secs),
-                    idle_ttl_secs: Some(r.tools.python_execute.idle_ttl_secs),
-                    warm_target: Some(r.tools.python_execute.warm_target),
-                    max_workers: Some(r.tools.python_execute.max_workers),
-                    runtime_policy: Some(r.tools.python_execute.runtime_policy),
-                    runtime_path: Some(r.tools.python_execute.runtime_path),
-                    require_sandbox: Some(r.tools.python_execute.require_sandbox),
+                    enabled: Some(tools.python_execute.enabled),
+                    timeout_secs: Some(tools.python_execute.timeout_secs),
+                    startup_timeout_secs: Some(tools.python_execute.startup_timeout_secs),
+                    idle_ttl_secs: Some(tools.python_execute.idle_ttl_secs),
+                    warm_target: Some(tools.python_execute.warm_target),
+                    max_workers: Some(tools.python_execute.max_workers),
+                    runtime_policy: Some(tools.python_execute.runtime_policy),
+                    runtime_path: Some(tools.python_execute.runtime_path),
+                    require_sandbox: Some(tools.python_execute.require_sandbox),
                 }),
-                max_output_bytes: Some(r.tools.max_output_bytes),
-                plugin_directory: Some(r.tools.plugin_directory),
-                search: Some(r.tools.search),
+                max_output_bytes: Some(tools.max_output_bytes),
+                plugin_directory: Some(tools.plugin_directory),
+                search: Some(tools.search),
                 browser: Some(PartialBrowserToolConfig {
-                    binary_path: Some(r.tools.browser.binary_path),
-                    page_idle_secs: Some(r.tools.browser.page_idle_secs),
-                    process_idle_secs: Some(r.tools.browser.process_idle_secs),
-                    max_snapshot_bytes: Some(r.tools.browser.max_snapshot_bytes),
-                    screenshots: Some(r.tools.browser.screenshots),
-                    allow_hosts: Some(r.tools.browser.allow_hosts),
+                    binary_path: Some(tools.browser.binary_path),
+                    page_idle_secs: Some(tools.browser.page_idle_secs),
+                    process_idle_secs: Some(tools.browser.process_idle_secs),
+                    max_snapshot_bytes: Some(tools.browser.max_snapshot_bytes),
+                    screenshots: Some(tools.browser.screenshots),
+                    allow_hosts: Some(tools.browser.allow_hosts),
                 }),
-                allow: Some(r.tools.permissions.allow),
-                deny: Some(r.tools.permissions.deny),
-                bundles: Some(r.tools.permissions.bundles),
-                require_approval: Some(r.tools.permissions.require_approval),
+                allow: Some(tools.permissions.allow),
+                deny: Some(tools.permissions.deny),
+                bundles: Some(tools.permissions.bundles),
+                require_approval: Some(tools.permissions.require_approval),
             }),
             output: Some(PartialOutputConfig {
-                schema: Some(r.output.schema),
-                max_retries: Some(r.output.max_retries),
+                schema: Some(output.schema),
+                max_retries: Some(output.max_retries),
             }),
             hitl: Some(PartialHitlConfig {
-                timeout: Some(r.hitl.timeout),
-                timeout_policy: Some(r.hitl.timeout_policy),
+                timeout: Some(hitl.timeout),
+                timeout_policy: Some(hitl.timeout_policy),
             }),
             communication: Some(PartialCommunicationConfig {
                 context_transfer: Some(PartialContextTransferConfig {
-                    mode: Some(r.communication.context_transfer.mode),
-                    allowed_fields: Some(r.communication.context_transfer.allowed_fields),
-                    summary_budget: r.communication.context_transfer.summary_budget,
-                    targets: if r.communication.context_transfer.targets.is_empty() {
+                    mode: Some(communication.context_transfer.mode),
+                    allowed_fields: Some(communication.context_transfer.allowed_fields),
+                    summary_budget: communication.context_transfer.summary_budget,
+                    targets: if communication.context_transfer.targets.is_empty() {
                         None
                     } else {
                         Some(
-                            r.communication
+                            communication
                                 .context_transfer
                                 .targets
                                 .into_iter()
@@ -416,29 +453,29 @@ impl From<ResolvedConfig> for PartialConfig {
                         )
                     },
                 }),
-                message_ttl_secs: Some(r.communication.message_ttl_secs),
-                expiry_interval_secs: Some(r.communication.expiry_interval_secs),
+                message_ttl_secs: Some(communication.message_ttl_secs),
+                expiry_interval_secs: Some(communication.expiry_interval_secs),
             }),
             scheduling: Some(PartialSchedulingConfig {
-                run_history_max_age_days: Some(r.scheduling.run_history_max_age_days),
-                run_history_max_per_schedule: Some(r.scheduling.run_history_max_per_schedule),
+                run_history_max_age_days: Some(scheduling.run_history_max_age_days),
+                run_history_max_per_schedule: Some(scheduling.run_history_max_per_schedule),
             }),
-            sessions: Some(r.sessions.clone().into()),
-            memory: Some(r.memory.clone().into()),
+            sessions: Some(sessions.into()),
+            memory: Some(memory.into()),
+            attachments: Some(attachments.into()),
             voice: Some(PartialVoiceConfig {
-                transcription_model: r.voice.transcription_model.clone(),
-                speech_model: r.voice.speech_model.clone(),
+                transcription_model: voice.transcription_model,
+                speech_model: voice.speech_model,
             }),
             generation: Some(PartialGenerationConfig {
-                presets: if r.generation.presets.is_empty() {
+                presets: if generation.presets.is_empty() {
                     None
                 } else {
-                    Some(r.generation.presets)
+                    Some(generation.presets)
                 },
             }),
             channels: Some(PartialChannelsConfig {
-                telegram: r
-                    .channels
+                telegram: channels
                     .telegram
                     .map(|telegram| PartialTelegramChannelConfig {
                         bot_token_secret_ref: Some(telegram.bot_token_secret_ref),
@@ -447,7 +484,7 @@ impl From<ResolvedConfig> for PartialConfig {
                         poll_timeout_secs: Some(telegram.poll_timeout_secs),
                     }),
             }),
-            dangerously_skip_permissions: Some(r.dangerously_skip_permissions),
+            dangerously_skip_permissions: Some(dangerously_skip_permissions),
         }
     }
 }
@@ -656,6 +693,7 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
                 (base_b, overlay_b) => overlay_b.or(base_b),
             };
             PartialToolConfig {
+                max_identical_failures: o.max_identical_failures.or(b.max_identical_failures),
                 shell_timeout_secs: o.shell_timeout_secs.or(b.shell_timeout_secs),
                 python_execute: merge_overlay_section(b.python_execute, o.python_execute),
                 max_output_bytes: o.max_output_bytes.or(b.max_output_bytes),
@@ -703,6 +741,11 @@ pub fn merge_partial(base: PartialConfig, overlay: PartialConfig) -> PartialConf
             PartialSessionsConfig::overlay,
         ),
         memory: merge_section(base.memory, overlay.memory, PartialMemoryConfig::overlay),
+        attachments: merge_section(
+            base.attachments,
+            overlay.attachments,
+            PartialAttachmentsConfig::overlay,
+        ),
         voice: merge_overlay_section(base.voice, overlay.voice),
         generation: merge_section(base.generation, overlay.generation, |b, o| {
             let mut presets = b.presets.unwrap_or_default();
@@ -813,6 +856,9 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
             let py = t.python_execute.unwrap_or_default();
             let browser = t.browser.unwrap_or_default();
             ToolConfig {
+                max_identical_failures: t
+                    .max_identical_failures
+                    .unwrap_or(dt.max_identical_failures),
                 shell_timeout_secs: t.shell_timeout_secs.unwrap_or(dt.shell_timeout_secs),
                 python_execute: PythonExecuteToolConfig {
                     enabled: py.enabled.unwrap_or(dpy.enabled),
@@ -989,6 +1035,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
         },
         sessions: partial.sessions.unwrap_or_default().resolve(),
         memory: partial.memory.unwrap_or_default().resolve(),
+        attachments: partial.attachments.unwrap_or_default().resolve(),
         voice: {
             let v = partial.voice.unwrap_or_default();
             VoiceConfig {
@@ -998,6 +1045,7 @@ pub fn resolve(partial: PartialConfig) -> ResolvedConfig {
         },
         // Instructions are assembled separately by the instructions module
         instructions: String::new(),
+        instruction_sources: Vec::new(),
         dangerously_skip_permissions: partial.dangerously_skip_permissions.unwrap_or(false),
     }
 }
@@ -1182,6 +1230,7 @@ mod tests {
                 entries: Some(HashMap::from([(
                     "openai".to_string(),
                     ProviderEndpointConfig {
+                        display_name: None,
                         protocol: Protocol::OpenAi,
                         api_key_secret_ref: None,
                         api_key_env: Some("OPENAI_API_KEY".to_string()),
@@ -2008,6 +2057,33 @@ mod tests {
     }
 
     #[test]
+    fn delegation_depth_cascades_through_partial_config() {
+        assert_eq!(
+            serde_json::to_value(resolve(PartialConfig::default()).sessions).unwrap()["max_delegation_depth"],
+            4,
+            "the runtime cascade supplies the declared depth default"
+        );
+        let base: PartialConfig = toml::from_str("[sessions]\nmax_delegation_depth = 2\n").unwrap();
+        let overlay: PartialConfig =
+            toml::from_str("[sessions]\nmax_delegation_depth = 6\n").unwrap();
+        let resolved = resolve(merge_partial(base, overlay));
+        assert_eq!(
+            serde_json::to_value(&resolved.sessions).unwrap()["max_delegation_depth"],
+            6,
+            "the child layer controls delegation depth"
+        );
+        let reloaded = resolve(PartialConfig::from(resolved.clone()));
+        assert_eq!(
+            serde_json::to_value(&reloaded.sessions).unwrap()["max_delegation_depth"],
+            6
+        );
+        assert_eq!(
+            serde_json::to_value(resolve(PartialConfig::default()).sessions).unwrap()["max_delegation_depth"],
+            4
+        );
+    }
+
+    #[test]
     fn sessions_archive_delay_defaults_and_overlays() {
         assert_eq!(
             resolve(PartialConfig::default())
@@ -2019,12 +2095,14 @@ mod tests {
         let base = PartialConfig {
             sessions: Some(PartialSessionsConfig {
                 archive_after_days: Some(30),
+                ..Default::default()
             }),
             ..Default::default()
         };
         let overlay = PartialConfig {
             sessions: Some(PartialSessionsConfig {
                 archive_after_days: Some(3),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -2325,5 +2403,23 @@ mod tests {
         let telegram = merged.channels.unwrap().telegram.unwrap();
         assert_eq!(telegram.bot_token_secret_ref, Some(None));
         assert_eq!(telegram.bot_token_env, Some(None));
+    }
+    #[test]
+    fn image_scheme_settings_default_replace_and_round_trip() {
+        assert_eq!(
+            resolve(PartialConfig::default())
+                .attachments
+                .accepted_schemes,
+            ["https", "data"]
+        );
+        let base: PartialConfig =
+            toml::from_str("[attachments]\naccepted_schemes = ['https', 'data']").unwrap();
+        let overlay: PartialConfig =
+            toml::from_str("[attachments]\naccepted_schemes = ['http']").unwrap();
+        let resolved = resolve(merge_partial(base, overlay));
+        assert_eq!(resolved.attachments.accepted_schemes, ["http"]);
+        let encoded = toml::to_string(&PartialConfig::from(resolved.clone())).unwrap();
+        let again = resolve(toml::from_str(&encoded).unwrap());
+        assert_eq!(again.attachments, resolved.attachments);
     }
 }

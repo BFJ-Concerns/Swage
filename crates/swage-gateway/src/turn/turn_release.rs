@@ -11,7 +11,7 @@
 //! (record_durability.rs): each propagates its storage error.
 
 use super::{
-    AppState, GatewayError, SandboxGuard, TurnState, Uuid, WorkflowAgentCallResolution,
+    AppState, GatewayError, SandboxGuard, TurnState, Uuid, WorkflowAttemptResolution,
     shutdown_sandbox_guard,
 };
 
@@ -37,9 +37,11 @@ pub(super) async fn release_active_turn(
         let result = relay.finish().await;
         state.active_turns.lock().await.remove(&session_id);
         state.turn_event_deliveries.lock().await.remove(&turn_id);
+        crate::service::announce_session_updated(&state.broadcast, session_id);
         result
     } else {
         state.active_turns.lock().await.remove(&session_id);
+        crate::service::announce_session_updated(&state.broadcast, session_id);
         Ok(())
     }
 }
@@ -73,14 +75,14 @@ pub(super) async fn record_agent_call_attempt_before_execution(
     session_id: Uuid,
     prepared_turn_id: Uuid,
     agent_call_scope: Option<Uuid>,
-    resolution: &WorkflowAgentCallResolution,
+    resolution: &WorkflowAttemptResolution,
     sandbox_guard: &Option<SandboxGuard>,
 ) -> Result<(), GatewayError> {
     let Some(agent_call_scope) = agent_call_scope else {
         return Ok(());
     };
     let result = match serde_json::to_value(resolution) {
-        Ok(resolution) => crate::workflow::record_agent_call_attempt(
+        Ok(resolution) => crate::workflow::resolve_agent_call_attempt(
             state.storage.as_ref(),
             agent_call_scope,
             resolution,

@@ -3,12 +3,17 @@
 // change the manifest and regenerate.
 
 import type { AccessStatusResponse } from "./AccessStatusResponse";
+import type { ChannelLinkCodeListResponse } from "./ChannelLinkCodeListResponse";
+import type { ChannelLinkCodeResponse } from "./ChannelLinkCodeResponse";
+import type { ChannelLinkListResponse } from "./ChannelLinkListResponse";
+import type { ChannelStatusListResponse } from "./ChannelStatusListResponse";
 import type { ConversationBranchListResponse } from "./ConversationBranchListResponse";
 import type { ConversationBranchResponse } from "./ConversationBranchResponse";
 import type { ConversationDetail } from "./ConversationDetail";
 import type { ConversationListResponse } from "./ConversationListResponse";
 import type { ConversationResponse } from "./ConversationResponse";
 import type { ConversationThreadDetail } from "./ConversationThreadDetail";
+import type { CreateChannelLinkCodeRequest } from "./CreateChannelLinkCodeRequest";
 import type { CreateConversationBranchRequest } from "./CreateConversationBranchRequest";
 import type { CreateConversationRequest } from "./CreateConversationRequest";
 import type { CreateSurfaceAnnotationRequest } from "./CreateSurfaceAnnotationRequest";
@@ -32,11 +37,13 @@ import type { PairingCodeResponse } from "./PairingCodeResponse";
 import type { ProviderSignInState } from "./ProviderSignInState";
 import type { RecentSessionsResponse } from "./RecentSessionsResponse";
 import type { RelinkWorkspaceAttachmentRequest } from "./RelinkWorkspaceAttachmentRequest";
+import type { RenameSurfaceRequest } from "./RenameSurfaceRequest";
 import type { RestartStatusResponse } from "./RestartStatusResponse";
 import type { SaveProviderSettings } from "./SaveProviderSettings";
 import type { SaveSecuritySettingsRequest } from "./SaveSecuritySettingsRequest";
 import type { SaveSettingsRequest } from "./SaveSettingsRequest";
 import type { SaveSurfaceToLibraryRequest } from "./SaveSurfaceToLibraryRequest";
+import type { SecretListResponse } from "./SecretListResponse";
 import type { SecuritySettingsResponse } from "./SecuritySettingsResponse";
 import type { SettingsResponse } from "./SettingsResponse";
 import type { StartProviderSignInRequest } from "./StartProviderSignInRequest";
@@ -80,6 +87,26 @@ async function request<T>(
     return undefined as T;
   }
   return (await response.json()) as T;
+}
+
+/** List channel statuses. */
+export async function listChannelStatuses(): Promise<ChannelStatusListResponse> {
+  return request<ChannelStatusListResponse>("GET", `/api/channels`);
+}
+
+/** List linked channel conversations. */
+export async function listChannelLinks(): Promise<ChannelLinkListResponse> {
+  return request<ChannelLinkListResponse>("GET", `/api/onboarding/channels`);
+}
+
+/** Issue a single-use channel link code. */
+export async function createChannelLinkCode(body: CreateChannelLinkCodeRequest): Promise<ChannelLinkCodeResponse> {
+  return request<ChannelLinkCodeResponse>("POST", `/api/onboarding/channels/link-codes`, body);
+}
+
+/** Read unredeemed channel link codes. */
+export async function listChannelLinkCodes(): Promise<ChannelLinkCodeListResponse> {
+  return request<ChannelLinkCodeListResponse>("GET", `/api/onboarding/channels/link-codes`);
 }
 
 /** List every topic. */
@@ -251,6 +278,16 @@ export async function getSurface(surfaceId: string): Promise<SurfaceResponse> {
   return request<SurfaceResponse>("GET", `/api/surfaces/${encodeURIComponent(surfaceId)}`);
 }
 
+/** Rename this session's surface. */
+export async function renameSurface(surfaceId: string, body: RenameSurfaceRequest): Promise<SurfaceResponse> {
+  return request<SurfaceResponse>("POST", `/api/surfaces/${encodeURIComponent(surfaceId)}`, body);
+}
+
+/** Resolve a note while keeping it in the record. */
+export async function resolveSurfaceAnnotation(surfaceId: string, annotationId: string): Promise<SurfaceAnnotationView> {
+  return request<SurfaceAnnotationView>("POST", `/api/surfaces/${encodeURIComponent(surfaceId)}/annotations/${encodeURIComponent(annotationId)}/resolve`);
+}
+
 /** Write a surface module: append one, or replace one's source against the revision read — a moved-on revision is refused with the module as it now stands. */
 export async function writeSurfaceModule(surfaceId: string, body: WriteSurfaceModuleRequest): Promise<WriteSurfaceModuleResponse> {
   return request<WriteSurfaceModuleResponse>("POST", `/api/surfaces/${encodeURIComponent(surfaceId)}/modules`, body);
@@ -279,6 +316,11 @@ export async function updateSurfaceAnnotation(annotationId: string, body: Update
 /** Delete a surface annotation. */
 export async function deleteSurfaceAnnotation(annotationId: string): Promise<DeleteSurfaceAnnotationResponse> {
   return request<DeleteSurfaceAnnotationResponse>("DELETE", `/api/surface-annotations/${encodeURIComponent(annotationId)}`);
+}
+
+/** List governed secrets without revealing values. */
+export async function listSecrets(): Promise<SecretListResponse> {
+  return request<SecretListResponse>("GET", `/api/secrets`);
 }
 
 /** Read gateway settings. */

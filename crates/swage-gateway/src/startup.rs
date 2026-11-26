@@ -28,18 +28,15 @@ const CODEX_COMPLETION_UNSUPPORTED_REASON: &str = "Codex turns run through the A
 /// Optional overrides take precedence over configured values:
 /// - `port` — TCP port to listen on
 /// - `host` — host address to bind
-/// - `config_path` — path to a TOML configuration file (name used for lookup)
 ///
 /// Errors during startup are printed to stderr and the process exits.
-pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: Option<String>) {
-    // Step 1: Load configuration. Errors go to stderr — no logging yet.
-    // The gateway's own configuration is the global layer with a default
-    // agent overlay; a configured name selects the topic whose layer applies.
-    let scope = match config_path.as_deref() {
-        Some(name) => swage_core::ScopeLocation::topic(name),
-        None => swage_core::ScopeLocation::General,
-    };
-    let mut config = match swage_config::load_resolved_config(&scope, "default") {
+pub async fn run_gateway(port: Option<u16>, host: Option<String>) {
+    // Step 1: Load the running configuration. Errors go to stderr — no
+    // logging yet. This is the global layer, read from disk here and at no
+    // later point: settings saves replace it in place, and each turn overlays
+    // its session's topic and agent layers on it (swage-config's resolver
+    // states the reload policy).
+    let mut config = match swage_config::load_running_config() {
         Ok(c) => c,
         Err(e) => {
             for problem in &e.problems {
@@ -92,7 +89,53 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
     // Step 4: Open persistent storage.
     let raw_storage = open_storage(&db_path);
 
-    // Step 5: Requeue channel messages claimed by a crashed gateway before
+    // Step 5: Create provider clients from governed credential resolution.
+    let startup_secret_manager = crate::secret::SecretManager::new(
+        Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>
+    );
+    let provider = create_provider(&config, &startup_secret_manager).await;
+    let voice_provider = create_voice_provider(&config, &startup_secret_manager).await;
+    let telegram = create_telegram_client(&config, &startup_secret_manager).await;
+
+    // Step 6: Build the tool dispatch pipeline from the root selected above.
+    let browser_host_slot = Arc::new(std::sync::OnceLock::new());
+    let tool_dispatcher = build_tool_dispatcher(
+        &config,
+        Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>,
+        &root,
+        &browser_host_slot,
+    );
+    let browser_host = browser_host_slot.get().cloned();
+
+    // Step 7: Assemble application state, including the message router
+    // and hooks that startup recovery and live turns share. No work starts yet.
+    let storage: Arc<dyn swage_storage::store::Storage> =
+        Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>;
+    let topic_store: Arc<dyn swage_storage::store::TopicStore> = raw_storage.clone();
+    let mut state = crate::state::AppState::new_with_config_root(
+        storage,
+        topic_store,
+        provider,
+        config.clone(),
+        tool_dispatcher,
+        None,
+        root,
+    );
+    state.browser_host = browser_host_slot;
+    state.replace_voice_provider(voice_provider);
+    state.telegram = telegram;
+    // The token gate for this binding: a loopback binding is never gated; a
+    // private-network binding asks every request from beyond loopback for the
+    // token in the data root, generated now if absent.
+    state.access_gate = Arc::new(
+        crate::access_gate::AccessGate::for_binding(&state.config_root, &config.server.host)
+            .unwrap_or_else(|error| {
+                eprintln!("Failed to read or create the gateway token: {error}");
+                std::process::exit(1);
+            }),
+    );
+
+    // Step 8: Requeue channel messages claimed by a crashed gateway before
     // interrupting the orphaned turns they were attached to. A running process
     // cannot survive startup, so any in-flight turn here is a crash orphan.
     match raw_storage.requeue_presented_for_inflight_turns().await {
@@ -104,8 +147,14 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         }
     }
 
-    // Step 5b: Recover orphaned turns from a previous unclean shutdown.
-    match crate::shutdown::recover_orphaned_turns(&*raw_storage, &*raw_storage).await {
+    // Step 8b: Recover orphaned turns from a previous unclean shutdown.
+    match crate::shutdown::recover_orphaned_turns(
+        &*state.storage,
+        &*state.topic_store,
+        &state.message_router(),
+    )
+    .await
+    {
         Ok(0) => {}
         Ok(n) => info!("Recovered {n} orphaned turn(s) from a previous shutdown"),
         Err(e) => {
@@ -135,18 +184,26 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         }
     }
 
-    match raw_storage.interrupt_running_workflow_runs().await {
-        Ok(0) => {}
+    match raw_storage
+        .record_gateway_interruption(chrono::Utc::now())
+        .await
+    {
         // Marking is half the recovery; the workflow wake loop spawned at
         // server start relaunches these (and due parked runs) by replay.
-        Ok(n) => info!("Marked {n} workflow run(s) interrupted by a previous shutdown; resuming"),
+        // Every run the gateway's absence touched — running or parked —
+        // carries the interruption on its record.
+        Ok(counts) if counts.running_interrupted > 0 || counts.parked > 0 => info!(
+            "Marked {} workflow run(s) interrupted by a previous shutdown and {} parked run(s) as having outlived it; resuming",
+            counts.running_interrupted, counts.parked
+        ),
+        Ok(_) => {}
         Err(e) => {
             eprintln!("Workflow startup recovery failed: {e}");
             std::process::exit(1);
         }
     }
 
-    // Step 5c: Apply timeout policy to any approval requests that expired
+    // Step 8c: Apply timeout policy to any approval requests that expired
     // while the gateway was offline. Approvals still within their window are
     // left as-is and will be re-emitted to clients on WebSocket connect.
     let message_ttl = std::time::Duration::from_secs(config.communication.message_ttl_secs);
@@ -178,50 +235,6 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: O
         }
     }
 
-    // Step 6: Create provider clients from governed credential resolution.
-    let startup_secret_manager = crate::secret::SecretManager::new(
-        Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>
-    );
-    let provider = create_provider(&config, &startup_secret_manager).await;
-    let voice_provider = create_voice_provider(&config, &startup_secret_manager).await;
-    let telegram = create_telegram_client(&config, &startup_secret_manager).await;
-
-    // Step 7: Build the tool dispatch pipeline from the root selected above.
-    let browser_host = Some(crate::browser::BrowserHost::new(
-        crate::browser::BrowserConfig::from_tool_config(&config.tools.browser, &root),
-    ));
-    let tool_dispatcher = build_tool_dispatcher_with_browser(
-        &config,
-        Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>,
-        browser_host.clone(),
-        &root,
-    );
-
-    // Step 8: Assemble application state and build the router.
-    let storage: Arc<dyn swage_storage::store::Storage> =
-        Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>;
-    let topic_store: Arc<dyn swage_storage::store::TopicStore> = raw_storage;
-    let mut state = crate::state::AppState::new_with_config_root(
-        storage,
-        topic_store,
-        provider,
-        config.clone(),
-        tool_dispatcher,
-        None,
-        root,
-    );
-    state.replace_voice_provider(voice_provider);
-    state.telegram = telegram;
-    // The token gate for this binding: a loopback binding is never gated; a
-    // private-network binding asks every request from beyond loopback for the
-    // token in the data root, generated now if absent.
-    state.access_gate = Arc::new(
-        crate::access_gate::AccessGate::for_binding(&state.config_root, &config.server.host)
-            .unwrap_or_else(|error| {
-                eprintln!("Failed to read or create the gateway token: {error}");
-                std::process::exit(1);
-            }),
-    );
     // The Codex CLI's auth store lives under a Swage-owned state directory;
     // registering it as file-backed secrets brings the harness's own tokens
     // under governance — audited resolution and redaction — without moving
@@ -736,11 +749,15 @@ pub(crate) fn build_tool_dispatcher(
     config: &swage_config::ResolvedConfig,
     storage: Arc<dyn swage_storage::store::Storage>,
     config_root: &std::path::Path,
+    browser_host: &std::sync::OnceLock<Arc<crate::browser::BrowserHost>>,
 ) -> crate::tool::ToolDispatcher {
-    let browser_host = Some(crate::browser::BrowserHost::new(
-        crate::browser::BrowserConfig::from_tool_config(&config.tools.browser, config_root),
-    ));
-    build_tool_dispatcher_with_browser(config, storage, browser_host, config_root)
+    let browser_host = browser_host.get_or_init(|| {
+        crate::browser::BrowserHost::new(crate::browser::BrowserConfig::from_tool_config(
+            &config.tools.browser,
+            config_root,
+        ))
+    });
+    build_tool_dispatcher_with_browser(config, storage, Some(Arc::clone(browser_host)), config_root)
 }
 
 pub(crate) fn build_tool_dispatcher_with_browser(
@@ -750,11 +767,12 @@ pub(crate) fn build_tool_dispatcher_with_browser(
     config_root: &std::path::Path,
 ) -> crate::tool::ToolDispatcher {
     use crate::tool::{
-        Tool, browser::browser_tools, docs_read::DocsReadTool, hold::WorkflowHoldTool,
-        knowledge::KnowledgeCiteTool, knowledge::KnowledgeCurateOrientationTool,
-        knowledge::KnowledgeCurateTool, knowledge::KnowledgeOrientTool,
-        knowledge::KnowledgeRecordTool, knowledge::KnowledgeSearchTool, memory::MemoryReadTool,
-        memory::MemoryWriteTool, plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
+        Tool, agent_definition::AgentDefinitionTool, browser::browser_tools,
+        docs_read::DocsReadTool, hold::WorkflowHoldTool, knowledge::KnowledgeCiteTool,
+        knowledge::KnowledgeCurateOrientationTool, knowledge::KnowledgeCurateTool,
+        knowledge::KnowledgeOrientTool, knowledge::KnowledgeRecordTool,
+        knowledge::KnowledgeSearchTool, memory::MemoryReadTool, memory::MemoryWriteTool,
+        plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
         run_event::RunEventPostTool, schedule::ScheduleTool, schedule::WakeMeLaterTool,
         session_variable::SessionVariableTool, surface::SurfaceLibraryTool,
         surface::SurfaceReadTool, surface::SurfaceWriteTool, task_definition::TaskDefinitionTool,
@@ -795,6 +813,10 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         // Schedule tools reach the gateway's schedule service through the host
         // tool context; both are host-only (requires_device_execution).
         Arc::new(ScheduleTool),
+        // The two definition kinds a conversation can author: the agents a
+        // person picks for a session, and the contracts a delegated child
+        // runs under. Both host-only, both audited through their service.
+        Arc::new(AgentDefinitionTool),
         Arc::new(TaskDefinitionTool),
         Arc::new(WakeMeLaterTool),
         Arc::new(RunEventPostTool),
@@ -1037,6 +1059,7 @@ fn same_connection(
 ) -> bool {
     let resolved =
         |endpoint: &swage_config::ProviderEndpointConfig| swage_config::ProviderEndpointConfig {
+            display_name: None,
             base_url: Some(provider_base_url(endpoint).to_owned()),
             ..endpoint.clone()
         };
@@ -1357,7 +1380,7 @@ mod tests {
             )
             .await
             .expect("complete run with worker result");
-        let state = crate::state::AppState::new(
+        let state = crate::state::AppState::for_test(
             Arc::clone(&storage) as Arc<dyn Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -1741,6 +1764,7 @@ mod tests {
                     (
                         "primary".to_string(),
                         ProviderEndpointConfig {
+                            display_name: None,
                             worker_staleness_threshold_ms: None,
                             protocol: Protocol::OpenAi,
                             api_key_secret_ref: None,
@@ -1753,6 +1777,7 @@ mod tests {
                     (
                         "secondary".to_string(),
                         ProviderEndpointConfig {
+                            display_name: None,
                             worker_staleness_threshold_ms: None,
                             protocol: Protocol::OpenAi,
                             api_key_secret_ref: None,
@@ -1823,6 +1848,7 @@ mod tests {
                 entries: [(
                     "codex".to_string(),
                     ProviderEndpointConfig {
+                        display_name: None,
                         worker_staleness_threshold_ms: None,
                         protocol: Protocol::Codex,
                         api_key_secret_ref: None,
@@ -1931,6 +1957,7 @@ mod tests {
         let events = MessageRecorder::default();
         let captured = Arc::clone(&events.0);
         let provider = ProviderEndpointConfig {
+            display_name: None,
             worker_staleness_threshold_ms: None,
             protocol: Protocol::OpenAi,
             api_key_secret_ref: None,
@@ -2002,6 +2029,7 @@ mod tests {
                     (
                         "openai".to_string(),
                         ProviderEndpointConfig {
+                            display_name: None,
                             worker_staleness_threshold_ms: None,
                             protocol: Protocol::OpenAi,
                             api_key_secret_ref: None,
@@ -2014,6 +2042,7 @@ mod tests {
                     (
                         "anthropic".to_string(),
                         ProviderEndpointConfig {
+                            display_name: None,
                             worker_staleness_threshold_ms: None,
                             protocol: Protocol::Anthropic,
                             api_key_secret_ref: None,
@@ -2058,6 +2087,7 @@ mod tests {
 
     fn endpoint(protocol: Protocol, base_url: String) -> ProviderEndpointConfig {
         ProviderEndpointConfig {
+            display_name: None,
             worker_staleness_threshold_ms: None,
             protocol,
             api_key_secret_ref: None,
@@ -2256,6 +2286,7 @@ mod tests {
     #[test]
     fn a_scoped_credential_override_does_not_reuse_the_runtime_provider() {
         let endpoint_with = |secret: Option<&str>, env: Option<&str>| ProviderEndpointConfig {
+            display_name: None,
             api_key_secret_ref: secret.map(str::to_owned),
             api_key_env: env.map(str::to_owned),
             ..endpoint(Protocol::OpenAi, "https://proxy.example/v1".to_owned())
@@ -2356,6 +2387,7 @@ mod tests {
             &swage_config::ResolvedConfig::default(),
             storage as Arc<dyn swage_storage::store::Storage>,
             std::path::Path::new(".swage"),
+            &std::sync::OnceLock::new(),
         );
 
         assert!(
@@ -2367,6 +2399,107 @@ mod tests {
         );
     }
 
+    /// Every tool the orientation's preferences name is a tool of this
+    /// gateway — registered by the built-in dispatcher, or a built-in name a
+    /// host registers when its runtime is present — so a renamed tool fails
+    /// here rather than silently losing its sentence.
+    #[tokio::test]
+    async fn orientation_preferences_name_only_the_gateways_tools() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let dispatcher = build_tool_dispatcher(
+            &swage_config::ResolvedConfig::default(),
+            storage as Arc<dyn swage_storage::store::Storage>,
+            std::path::Path::new(".swage"),
+            &std::sync::OnceLock::new(),
+        );
+        let registry = dispatcher.registry();
+
+        for tool in swage_context::orientation::tools_named_in_preferences() {
+            assert!(
+                registry.get(tool).is_some() || registry.is_protected(tool),
+                "the orientation names `{tool}`, which is no tool of this gateway",
+            );
+        }
+    }
+
+    /// The registered-secrets section names, from the tools' own
+    /// declarations, each gateway tool whose parameters resolve a
+    /// `secret://` reference — so the text never names a tool or parameter
+    /// the executor does not resolve, nor omits one it does.
+    #[tokio::test]
+    async fn orientation_names_the_tools_that_resolve_secret_references() {
+        use swage_context::element::ContextElement;
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let dispatcher = build_tool_dispatcher(
+            &swage_config::ResolvedConfig::default(),
+            storage as Arc<dyn swage_storage::store::Storage>,
+            std::path::Path::new(".swage"),
+            &std::sync::OnceLock::new(),
+        );
+        let registry = dispatcher.registry();
+        let offered = registry.offered(registry.list().into_iter().map(str::to_string).collect());
+        assert!(
+            !offered.secret_reference_parameters.is_empty(),
+            "the gateway ships at least one tool that resolves a secret reference"
+        );
+        for (tool, parameters) in &offered.secret_reference_parameters {
+            let declared = registry
+                .get(tool)
+                .expect("a declared resolver is a registered tool");
+            assert_eq!(
+                parameters,
+                &declared
+                    .device_secret_keys()
+                    .iter()
+                    .map(|key| (*key).to_owned())
+                    .collect::<Vec<_>>()
+            );
+            for parameter in parameters {
+                assert!(
+                    declared.parameters()["properties"].get(parameter).is_some(),
+                    "`{tool}` resolves `{parameter}`, which its schema does not offer"
+                );
+            }
+        }
+
+        let text = swage_context::orientation::OrientationElement::new(
+            swage_context::orientation::SessionEnvironment {
+                workspaces: vec![],
+                topic_name: String::new(),
+                topic_description: String::new(),
+                tool_root: swage_context::orientation::ToolRoot::ManagedScratch(
+                    "/scratch/session".into(),
+                ),
+                started_at: chrono::Utc::now(),
+                channel: None,
+            },
+            vec![],
+            offered.names.clone(),
+            offered.secret_reference_parameters.clone(),
+        )
+        .content()[0]
+            .text_content();
+        for (tool, parameters) in &offered.secret_reference_parameters {
+            let parameters = parameters
+                .iter()
+                .map(|parameter| format!("`{parameter}`"))
+                .collect::<Vec<_>>()
+                .join(" and ");
+            assert!(
+                text.contains(&format!("`{tool}` resolves one in {parameters}")),
+                "{text}"
+            );
+        }
+        assert!(
+            text.contains(
+                "Every other tool, `shell` included, receives a reference as literal text"
+            ),
+            "{text}"
+        );
+    }
+
     #[tokio::test]
     async fn build_tool_dispatcher_registers_workflow_list_tool() {
         let storage =
@@ -2375,6 +2508,7 @@ mod tests {
             &swage_config::ResolvedConfig::default(),
             storage as Arc<dyn swage_storage::store::Storage>,
             std::path::Path::new(".swage"),
+            &std::sync::OnceLock::new(),
         );
 
         assert!(
@@ -2397,6 +2531,7 @@ mod tests {
             &config,
             storage as Arc<dyn swage_storage::store::Storage>,
             std::path::Path::new(".swage"),
+            &std::sync::OnceLock::new(),
         );
 
         assert!(dispatcher.registry().get("python_execute").is_none());
@@ -2410,6 +2545,7 @@ mod tests {
             &swage_config::ResolvedConfig::default(),
             storage as Arc<dyn swage_storage::store::Storage>,
             std::path::Path::new(".swage"),
+            &std::sync::OnceLock::new(),
         );
 
         assert!(
@@ -2426,6 +2562,7 @@ mod tests {
             &swage_config::ResolvedConfig::default(),
             storage as Arc<dyn swage_storage::store::Storage>,
             std::path::Path::new(".swage"),
+            &std::sync::OnceLock::new(),
         );
 
         assert!(
@@ -2484,6 +2621,7 @@ mod tests {
             &config,
             storage as Arc<dyn swage_storage::store::Storage>,
             temp_dir.path(),
+            &std::sync::OnceLock::new(),
         );
 
         assert!(dispatcher.registry().get("echo_plugin").is_some());
@@ -2561,6 +2699,7 @@ mod tests {
             .expect("secret should be created");
 
         let provider = swage_config::ProviderEndpointConfig {
+            display_name: None,
             worker_staleness_threshold_ms: None,
             protocol: swage_config::Protocol::Anthropic,
             api_key_secret_ref: Some(secret.reference),

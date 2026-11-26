@@ -9,6 +9,12 @@ first session needs nothing else. A topic, an attached workspace and trust
 in it are optional — they give agents their own memory, file access and
 project guidance, but a conversation can start without any of them.
 
+Configure a provider and choose its default model through
+[Provider setup](interfaces-and-tooling.md#provider-setup) before sending a
+message. Provider setup comes before any sandbox or tool approval. A small
+first tool request, such as asking the shell to print its working directory,
+checks that the configured route can answer and run a tool.
+
 ## The front door
 
 The web UI opens to the **New session** control at the top of the page; it

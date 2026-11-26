@@ -40,6 +40,16 @@
             "$ref": "#/$defs/DeliveryTarget"
           }
         },
+        "queued": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QueuedMessageView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "response": {
           "type": "string"
         },
@@ -301,6 +311,108 @@
         "dev_dm",
         "dev_thread",
         "telegram"
+      ]
+    },
+    "MessageAttachment": {
+      "description": "Something submitted beside a message's text and carried to the model as\nits own content part. The tag names what the attachment is; a client\nsends only kinds the gateway's configured provider can consume, and the\ngateway refuses the turn otherwise rather than dropping the part.",
+      "oneOf": [
+        {
+          "description": "An image the model reads, addressed by URL — `https://` or a\n`data:` URL carrying the bytes inline.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "image_url"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "url"
+          ]
+        }
+      ]
+    },
+    "MessageOrigin": {
+      "description": "Who put a message into the conversation. `role` is what the model is\nshown; the origin is the authorship fact a person reads — only a `User`\nmessage was typed by them, whatever role carries it to the provider.",
+      "oneOf": [
+        {
+          "description": "A person typed it, at any client (the web UI, a channel, the API).",
+          "type": "string",
+          "const": "user"
+        },
+        {
+          "description": "The model's reply.",
+          "type": "string",
+          "const": "assistant"
+        },
+        {
+          "description": "A tool's result, recorded as its own row.",
+          "type": "string",
+          "const": "tool"
+        },
+        {
+          "description": "The delegation machinery: a brief handed to a child, or a child's\ncompletion notice delivered to its parent.",
+          "type": "string",
+          "const": "delegation"
+        },
+        {
+          "description": "A schedule's run: a fresh run's opening or a continuation's brief.",
+          "type": "string",
+          "const": "schedule"
+        },
+        {
+          "description": "A workflow script's prompt to a worker.",
+          "type": "string",
+          "const": "workflow"
+        },
+        {
+          "description": "A notice the platform itself attached to the conversation.",
+          "type": "string",
+          "const": "platform"
+        }
+      ]
+    },
+    "QueuedMessageView": {
+      "description": "A message held behind a running turn: not yet a message of the\nconversation, but shown to every open view until the next turn takes it.",
+      "type": "object",
+      "properties": {
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MessageAttachment"
+          }
+        },
+        "client_id": {
+          "description": "Identifies the client's optimistic send, when supplied.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "content": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "origin": {
+          "$ref": "#/$defs/MessageOrigin"
+        },
+        "queued_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "origin",
+        "content",
+        "queued_at"
       ]
     },
     "RecordedDelivery": {

@@ -9,12 +9,14 @@
   this component just reads the tab and shows the matching field set.
 -->
 <script lang="ts">
-  import { onMount } from "svelte";
+  import "./settings/controls.css";
+  import { onDestroy, onMount, untrack } from "svelte";
   import { fetchSettings, restartGateway, saveSettings } from "../api/settings";
   import SecuritySettingsPanel from "./settings/SecuritySettingsPanel.svelte";
   import ScheduleAutomationPanel from "./ScheduleAutomationPanel.svelte";
   import AutomationSettingsPanel from "./settings/AutomationSettingsPanel.svelte";
   import AgentDefinitionsPanel from "./AgentDefinitionsPanel.svelte";
+  import ChannelsPanel from "./ChannelsPanel.svelte";
   import CommandsPanel from "./CommandsPanel.svelte";
   import DisplayPreferencesSettingsPanel from "./settings/DisplayPreferencesSettingsPanel.svelte";
   import GenerationSettingsPanel from "./settings/GenerationSettingsPanel.svelte";
@@ -25,7 +27,7 @@
   import type { MemoryPageAddress } from "../router";
   import SkillsPanel from "./SkillsPanel.svelte";
   import VoiceSettingsPanel from "./settings/VoiceSettingsPanel.svelte";
-  import type { GenerationPresetConfig, SettingsResponse, Topic } from "../types";
+  import type { GenerationPresetConfig, SettingsPayload, SettingsResponse, Topic } from "../types";
 
   // Agents, providers, generation, automation, and recovery have working
   // backends. The remaining partial pages are identified below.
@@ -69,8 +71,36 @@
   let settings = $state<SettingsResponse | null>(null);
   let savedProviderIds = $state<Set<string>>(new Set());
   let isPersisting = $state(false);
+  let saveFailed = $state(false);
+  let providerSaveInFlight = $state(false);
+  let lastPersistedProviderFingerprint = $state("");
+  let lastRejectedSettingsFingerprint = $state<string | null>(null);
   let hasLoadedSettings = $state(false);
-  let lastPersistedSettingsFingerprint = "";
+  let leaving = false;
+  let previousTab: SettingsTabId | null = null;
+  $effect(() => {
+    const current = tab;
+    const leavingProviders = previousTab === "providers" && current !== "providers";
+    previousTab = current;
+    if (leavingProviders) untrack(() => {
+      leaving = true;
+      if (hasLoadedSettings && settingsFingerprint() !== lastPersistedSettingsFingerprint && settingsFingerprint() !== lastRejectedSettingsFingerprint && !isPersisting) void persist();
+    });
+  });
+
+  function warnBeforeUnload(event: BeforeUnloadEvent): void {
+    if (!providerEditsPending && !providerSaveInFlight) return;
+    event.preventDefault();
+    event.returnValue = "";
+  }
+
+  onDestroy(() => {
+    leaving = true;
+    if (providerEditsPending && !isPersisting && settingsFingerprint() !== lastRejectedSettingsFingerprint) void persist();
+  });
+  let lastPersistedSettingsFingerprint = $state("");
+  const providerEditsPending = $derived(hasLoadedSettings && providerFingerprint() !== lastPersistedProviderFingerprint);
+
   let lastSavedSearch: SettingsResponse["tool_runtime"]["search"] = null;
   let hasInvalidBundlesJson = $state(false);
   let hasInvalidApprovalJson = $state(false);
@@ -80,8 +110,52 @@
       ? "Archive delay must be at least 1 day."
       : null,
   );
+  const delegationDepthError = $derived(
+    settings && (nullableNumber(settings.sessions.max_delegation_depth) == null
+      || !Number.isInteger(settings.sessions.max_delegation_depth)
+      || settings.sessions.max_delegation_depth < 1)
+      ? "Delegation depth must be a whole number of at least 1."
+      : null,
+  );
+  const curatorIdleError = $derived(
+    settings && (nullableNumber(settings.memory.curator_idle_minutes) == null
+      || !Number.isInteger(settings.memory.curator_idle_minutes)
+      || settings.memory.curator_idle_minutes < 1)
+      ? "Memory curation idle minutes must be a whole number of at least 1."
+      : null,
+  );
   let status = $state("");
+  let saveSucceeded = $state(false);
+  $effect(() => {
+    if (!saveSucceeded || !status) return;
+    const timer = window.setTimeout(() => {
+      status = "";
+      saveSucceeded = false;
+    }, 4000);
+    return () => window.clearTimeout(timer);
+  });
+  const AUTOMATION_JSON_SAVE_ERROR = "Fix the invalid automation JSON before saving.";
+  const ARCHIVE_SAVE_ERROR = "Fix the archive delay in Automation before saving. It must be at least 1 day.";
   let error = $state<string | null>(null);
+  $effect(() => {
+    const currentTab = tab;
+    const invalidArchive = archiveDelayError;
+    untrack(() => {
+      if (currentTab !== "automation" && invalidArchive && settings) {
+        settings.sessions.archive_after_days = lastSavedArchiveDelay;
+      }
+      if (error === ARCHIVE_SAVE_ERROR && (!invalidArchive || currentTab !== "automation")) error = null;
+    });
+  });
+  $effect(() => {
+    if (tab !== "automation") {
+      // The panel discards invalid editor text when it unmounts. Its guard
+      // must describe the valid settings that remain, not the lost draft.
+      if (hasInvalidApprovalJson || error === AUTOMATION_JSON_SAVE_ERROR) error = null;
+      hasInvalidBundlesJson = false;
+      hasInvalidApprovalJson = false;
+    }
+  });
   const HOT_AUTOSAVE_TABS: ReadonlySet<SettingsTabId> = new Set([
     "providers",
     "generation",
@@ -96,6 +170,7 @@
       lastSavedSearch = settings.tool_runtime.search ? { ...settings.tool_runtime.search } : null;
       savedProviderIds = new Set(Object.keys(settings.providers));
       lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
+      lastPersistedProviderFingerprint = providerFingerprint() ?? "";
       hasLoadedSettings = true;
     } catch (err) {
       error = err instanceof Error ? err.message : "Failed to load settings.";
@@ -119,7 +194,7 @@
       settings.default_provider = settings.models[settings.default_model].provider_id;
       return;
     }
-    const replacement = Object.keys(settings.models)[0] ?? "";
+    const replacement = Object.keys(settings.models).sort()[0] ?? "";
     settings.default_model = replacement;
     settings.default_provider = replacement ? settings.models[replacement].provider_id : "";
   }
@@ -130,6 +205,11 @@
 
   function toolRuntimeForSave(runtime: SettingsResponse["tool_runtime"]): SettingsResponse["tool_runtime"] {
     return { ...runtime, search: searchIsIncomplete(runtime.search) ? lastSavedSearch : runtime.search };
+  }
+
+  function providerFingerprint(): string | null {
+    if (!settings) return null;
+    return JSON.stringify({ providers: settings.providers, models: settings.models, default_provider: settings.default_provider, default_model: settings.default_model });
   }
 
   function settingsFingerprint(): string | null {
@@ -150,22 +230,35 @@
       communication: settings.communication,
       sessions: settings.sessions,
       memory: settings.memory,
+      attachments: settings.attachments,
       voice: settings.voice,
     });
   }
 
   async function persist(options: { message?: string } = {}): Promise<boolean> {
-    if (!settings) return false;
+    if (!settings || isPersisting) return false;
+    saveFailed = false;
     error = null;
     status = "";
+    saveSucceeded = false;
     if (archiveDelayError) {
-      error = "Fix the archive delay in Automation before saving. It must be at least 1 day.";
+      error = ARCHIVE_SAVE_ERROR;
+      lastRejectedSettingsFingerprint = settingsFingerprint();
+      return false;
+    }
+    if (delegationDepthError) {
+      error = delegationDepthError;
+      return false;
+    }
+    if (curatorIdleError) {
+      error = curatorIdleError;
       return false;
     }
     const archiveDelayChanged = settings.sessions.archive_after_days !== lastSavedArchiveDelay;
     const holdSearchDraft = searchIsIncomplete(settings.tool_runtime.search);
+    const submittedSearchDraft = JSON.stringify(settings.tool_runtime.search);
     if (hasInvalidBundlesJson || hasInvalidApprovalJson) {
-      error = "Fix the invalid automation JSON before saving.";
+      error = AUTOMATION_JSON_SAVE_ERROR;
       return false;
     }
     for (const [id, preset] of Object.entries(settings.generation_presets)) {
@@ -178,16 +271,22 @@
       preset.temperature = nullableNumber(preset.temperature);
     }
     settings.hitl.timeout = nullableNumber(settings.hitl.timeout) ?? 0;
-    settings.sessions.archive_after_days = Math.min(3650, settings.sessions.archive_after_days);
-    settings.memory.curator_idle_minutes = Math.min(10080, Math.max(1, nullableNumber(settings.memory.curator_idle_minutes) ?? 10));
     settings.context.timeout = nullableNumber(settings.context.timeout) ?? 0;
     settings.context.budget = nullableNumber(settings.context.budget);
+    let submittedFingerprint: string | null = null;
     try {
       isPersisting = true;
       normaliseDefaultModel();
+      submittedFingerprint = settingsFingerprint();
+      providerSaveInFlight = providerEditsPending;
+      // The sandbox and approval-gated tools are saved from the Security tab.
       const { sandbox: _sandbox, tool_permissions, ...general } = settings;
       const { require_approval: _approvals, ...grants } = tool_permissions;
-      const saved = await saveSettings({ ...general, tool_permissions: grants, tool_runtime: toolRuntimeForSave(settings.tool_runtime) });
+      const submitted = JSON.parse(JSON.stringify({ ...general, tool_permissions: grants, tool_runtime: toolRuntimeForSave(settings.tool_runtime) })) as SettingsPayload;
+      const saved = await saveSettings(submitted);
+      const editedDuringSave = settingsFingerprint() !== submittedFingerprint
+        || JSON.stringify(settings.tool_runtime.search) !== submittedSearchDraft;
+      const pendingSettings = settings;
       const searchDraft = settings.tool_runtime.search;
       settings = saved;
       lastSavedArchiveDelay = saved.sessions.archive_after_days;
@@ -197,25 +296,46 @@
       // password field returns to the "Stored credential" placeholder.
       for (const provider of Object.values(settings.providers)) provider.api_key = "";
       lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
+      lastPersistedProviderFingerprint = providerFingerprint() ?? "";
+      if (editedDuringSave) {
+        for (const [id, provider] of Object.entries(pendingSettings.providers)) {
+          const savedProvider = saved.providers[id];
+          if (!savedProvider) continue;
+          if (provider.api_key === submitted.providers[id]?.api_key) provider.api_key = "";
+          if (provider.api_key_secret_ref === submitted.providers[id]?.api_key_secret_ref) {
+            provider.api_key_secret_ref = savedProvider.api_key_secret_ref;
+            provider.has_credential = savedProvider.has_credential;
+          }
+        }
+        pendingSettings.restart_required = saved.restart_required;
+        pendingSettings.can_restart = saved.can_restart;
+        settings = pendingSettings;
+      }
       if (holdSearchDraft) settings.tool_runtime.search = searchDraft;
       await onSettingsSaved?.();
       status = hasInvalidBundlesJson
         ? ""
         : archiveDelayChanged
-          ? `Archive delay saved as ${saved.sessions.archive_after_days} ${saved.sessions.archive_after_days === 1 ? "day" : "days"}.`
-          : options.message ?? "Saved. New turns will use the updated runtime.";
+          ? `Archive delay saved as ${saved.sessions.archive_after_days} ${saved.sessions.archive_after_days === 1 ? "day" : "days"}. Changes apply to new turns.`
+          : options.message ?? "Saved. Changes apply to new turns.";
+      saveSucceeded = Boolean(status);
       return true;
     } catch (err) {
+      lastRejectedSettingsFingerprint = submittedFingerprint;
+      saveFailed = true;
       error = err instanceof Error ? err.message : "Failed to save settings.";
       return false;
     } finally {
+      providerSaveInFlight = false;
       isPersisting = false;
+      if (leaving && !error && settingsFingerprint() !== lastPersistedSettingsFingerprint) void persist();
     }
   }
 
   async function restart(): Promise<void> {
     try {
       const response = await restartGateway();
+      saveSucceeded = false;
       status = response.guidance;
     } catch (err) {
       error = err instanceof Error ? err.message : "Failed to restart gateway.";
@@ -225,7 +345,7 @@
   const TAB_TITLES: Record<SettingsTabId, { title: string; sub: string }> = {
     providers: {
       title: "Providers",
-      sub: "Connection settings for the LLM gateways Swage talks to. Credentials are stored on the server and never returned over the wire.",
+      sub: "Configure providers, credentials and models. Stored credentials stay on the server; environment credentials come from the gateway’s environment.",
     },
     agents: {
       title: "Agent definitions",
@@ -300,7 +420,6 @@
   ]);
   const NON_FUNCTIONAL_TABS: ReadonlySet<SettingsTabId> = new Set([
     "plugins",
-    "channels",
     "devices",
     "account",
   ]);
@@ -310,17 +429,25 @@
   const shouldAutosaveSettings = $derived(HOT_AUTOSAVE_TABS.has(tab));
 
   $effect(() => {
-    if (!hasLoadedSettings || !shouldAutosaveSettings) return;
+    if (!hasLoadedSettings || !shouldAutosaveSettings || isPersisting) return;
     const fingerprint = settingsFingerprint();
-    if (!fingerprint || fingerprint === lastPersistedSettingsFingerprint) return;
+    if (!fingerprint || fingerprint === lastPersistedSettingsFingerprint || fingerprint === lastRejectedSettingsFingerprint) return;
 
     const timer = window.setTimeout(() => {
-      void persist({ message: "Saved automatically. New turns will use the updated runtime." });
+      void persist({ message: "Saved automatically. Changes apply to new turns." });
     }, 650);
 
     return () => window.clearTimeout(timer);
   });
 </script>
+
+<svelte:window onbeforeunload={warnBeforeUnload} />
+
+{#snippet saveStatus()}
+<span class="autosave-state" class:saving={isPersisting}>
+            {tab === "providers" ? isPersisting ? "Saving…" : providerEditsPending ? saveFailed ? "Save failed" : "Changes not saved" : "Saved" : isPersisting ? "Autosaving" : "Autosave"}
+          </span>
+{/snippet}
 
 <div class="settings-pane" aria-label="Settings">
   {#if isShellTab}
@@ -338,6 +465,9 @@
         <h1 class="title">{heading.title}</h1>
         <p class="sub">{heading.sub}</p>
       </div>
+      {#if shouldAutosaveSettings}
+        <div class="head-actions">{@render saveStatus()}</div>
+      {/if}
     </div>
 
     {#if isNonFunctionalTab}
@@ -358,57 +488,55 @@
     {/if}
 
     {#if status && !archiveDelayError}
-      <div class="notice">
+      <div class="notice" class:success={saveSucceeded} role={saveSucceeded ? "status" : undefined}>
         <span>{status}</span>
       </div>
     {/if}
 
-    {#if tab === "security"}
-      <SecuritySettingsPanel onSaved={async () => {
-        settings = await fetchSettings();
-        lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
-        await onSettingsSaved?.();
-      }} />
-    {:else if tab === "agents"}
-      <AgentDefinitionsPanel {topicId} />
-    {:else if tab === "commands"}
-      <CommandsPanel {topicId} />
-    {:else if tab === "skills"}
-      <SkillsPanel {topicId} />
-    {:else if tab === "memory"}
-      <MemoryPanel {topics} page={memoryPage} />
-    {:else if tab === "plugins"}
-      <!--
-        Swage has no plugin registry yet, so this page only describes the capability.
-      -->
-      <InformationalSettingsPanel {tab} />
-    {:else if tab === "channels"}
-      <!--
-        The operator overview lists channels read-only; there is no channel
-        management API for this page to edit yet.
-      -->
-      <InformationalSettingsPanel {tab} />
-    {:else if tab === "devices"}
-      <!--
-        Devices register and pair through the API; this page has no view of them
-        yet.
-      -->
-      <InformationalSettingsPanel {tab} />
-    {:else if tab === "voice"}
-      {#if settings}
-        <VoiceSettingsPanel bind:settings />
+    <div class="settings-content">
+      {#if tab === "security"}
+        <SecuritySettingsPanel onSaved={async () => {
+          settings = await fetchSettings();
+          lastPersistedSettingsFingerprint = settingsFingerprint() ?? "";
+          await onSettingsSaved?.();
+        }} />
+      {:else if tab === "agents"}
+        <AgentDefinitionsPanel {topicId} />
+      {:else if tab === "commands"}
+        <CommandsPanel {topicId} />
+      {:else if tab === "skills"}
+        <SkillsPanel {topicId} />
+      {:else if tab === "memory"}
+        <MemoryPanel {topics} page={memoryPage} />
+      {:else if tab === "plugins"}
+        <!--
+          Swage has no plugin registry yet, so this page only describes the capability.
+        -->
+        <InformationalSettingsPanel {tab} />
+      {:else if tab === "channels"}
+        <ChannelsPanel {topicId} {topics} />
+      {:else if tab === "devices"}
+        <!--
+          Devices register and pair through the API; this page has no view of them
+          yet.
+        -->
+        <InformationalSettingsPanel {tab} />
+      {:else if tab === "voice"}
+        {#if settings}
+          <VoiceSettingsPanel bind:settings onsave={() => persist()} saving={isPersisting} />
+        {/if}
+      {:else if tab === "recovery"}
+        <RecoverySettingsPanel />
+      {:else if tab === "display"}
+        <DisplayPreferencesSettingsPanel />
+      {:else if tab === "account"}
+        <!--
+          Swage is single-operator and has no identity model, so there is no
+          account to manage; the page keeps the settings route resolving.
+        -->
+        <InformationalSettingsPanel {tab} />
       {/if}
-    {:else if tab === "recovery"}
-      <RecoverySettingsPanel />
-    {:else if tab === "display"}
-      <DisplayPreferencesSettingsPanel />
-    {:else if tab === "account"}
-      <!--
-        Swage is single-operator and has no identity model, so there is no
-        account to manage; the page keeps the settings route resolving.
-      -->
-      <InformationalSettingsPanel {tab} />
-    {/if}
+    </div>
   {:else if !settings}
     <p class="loading">Loading settings…</p>
   {:else}
@@ -421,9 +549,7 @@
       </div>
       <div class="head-actions">
         {#if shouldAutosaveSettings && tab !== "automation"}
-          <span class="autosave-state" class:saving={isPersisting}>
-            {isPersisting ? "Autosaving" : "Autosave"}
-          </span>
+          {@render saveStatus()}
         {:else if !shouldAutosaveSettings}
           <button type="button" class="btn primary" onclick={() => persist()} disabled={isPersisting}>
             {isPersisting ? "Saving..." : "Save"}
@@ -440,9 +566,9 @@
     {/if}
 
     {#if status && !archiveDelayError}
-      <div class="notice">
+      <div class="notice" class:success={saveSucceeded} role={saveSucceeded ? "status" : undefined}>
         <span>{status}</span>
-        {#if settings.can_restart}
+        {#if settings.can_restart && !saveSucceeded}
           <button type="button" class="notice-action" onclick={restart}>Restart</button>
         {/if}
       </div>
@@ -455,36 +581,36 @@
       </div>
     {/if}
 
-    {#if tab === "providers"}
-      <ProviderSettingsPanel
-        bind:settings
-        {savedProviderIds}
-        {isPersisting}
-        bind:error
-      />
-    {:else if tab === "generation"}
-      <GenerationSettingsPanel bind:settings />
-    {:else if tab === "automation"}
-      <ScheduleAutomationPanel {topicId} {topics} sessionId={null} />
-      <section aria-label="Automation settings">
-        <div class="head">
-          <h3>Automation settings</h3>
-          <span class="autosave-state" class:saving={isPersisting}>
-            {isPersisting ? "Autosaving" : "Autosave"}
-          </span>
-        </div>
-        <AutomationSettingsPanel
+    <div class="settings-content">
+      {#if tab === "providers"}
+        <ProviderSettingsPanel
           bind:settings
-          {archiveDelayError}
-          onValidation={(bundlesInvalid, approvalsInvalid, message) => {
-            hasInvalidBundlesJson = bundlesInvalid;
-            if (bundlesInvalid) status = "";
-            hasInvalidApprovalJson = approvalsInvalid;
-            error = message;
-          }}
+          {savedProviderIds}
+          {isPersisting}
+          bind:error
         />
-      </section>
-    {/if}
+      {:else if tab === "generation"}
+        <GenerationSettingsPanel bind:settings />
+      {:else if tab === "automation"}
+        <ScheduleAutomationPanel {topicId} {topics} sessionId={null} />
+        <section aria-label="Automation settings">
+          <div class="head">
+            <h3>Automation settings</h3>
+            {@render saveStatus()}
+          </div>
+          <AutomationSettingsPanel
+            bind:settings
+            {archiveDelayError}
+            onValidation={(bundlesInvalid, approvalsInvalid, message) => {
+              hasInvalidBundlesJson = bundlesInvalid;
+              if (bundlesInvalid) status = "";
+              hasInvalidApprovalJson = approvalsInvalid;
+              error = message;
+            }}
+          />
+        </section>
+      {/if}
+    </div>
   {/if}
 </div>
 
@@ -494,7 +620,8 @@
      --------------------------------------------------------------------------- */
 
   .settings-pane {
-    height: 100%;
+    flex: 1;
+    min-height: 0;
     padding: 28px 36px;
     display: flex;
     flex-direction: column;
@@ -502,8 +629,19 @@
     background: var(--paper);
     color: var(--ink);
     font-family: var(--font-body);
-    overflow: auto;
+    overflow: hidden;
     isolation: isolate;
+  }
+
+  .settings-content {
+    min-height: 0;
+    overflow: auto;
+  }
+
+  .settings-pane > .head,
+  .settings-pane > .notice,
+  .settings-pane > .shell-banner {
+    flex-shrink: 0;
   }
 
   /* ---------------------------------------------------------------------------
@@ -637,6 +775,17 @@
     line-height: 1.4;
     letter-spacing: 0.12em;
     text-transform: uppercase;
+  }
+
+  .notice.success {
+    background: var(--paper);
+    color: var(--ink-soft);
+    border: 1px solid var(--rule-soft);
+    font-family: var(--font-body);
+    font-weight: 400;
+    font-size: 13px;
+    letter-spacing: normal;
+    text-transform: none;
   }
 
   .notice.error {

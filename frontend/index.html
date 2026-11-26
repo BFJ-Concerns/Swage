@@ -4,16 +4,37 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Swage</title>
-    <!--
-      Type ramp for the riso/cyanotype shell:
-        - Bebas Neue: display headings and topic name
-        - Hanken Grotesk: body copy
-        - DM Mono: eyebrows, timestamps, codes
-      Loaded via Google Fonts. preconnect cuts the DNS round-trip on cold load.
-    -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Hanken+Grotesk:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <style>
+      @font-face {
+        font-family: "Bebas Neue";
+        src: url("/fonts/BebasNeue-Regular.ttf") format("truetype");
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+      }
+      @font-face {
+        font-family: "Hanken Grotesk";
+        src: url("/fonts/HankenGrotesk[wght].ttf") format("truetype");
+        font-style: normal;
+        font-weight: 400 700;
+        font-display: swap;
+      }
+      @font-face {
+        font-family: "DM Mono";
+        src: url("/fonts/DMMono-Regular.ttf") format("truetype");
+        font-style: normal;
+        font-weight: 400;
+        font-display: swap;
+      }
+      @font-face {
+        font-family: "DM Mono";
+        src: url("/fonts/DMMono-Medium.ttf") format("truetype");
+        font-style: normal;
+        font-weight: 500;
+        font-display: swap;
+      }
+    </style>
   </head>
   <body>
     <div id="app"></div>
