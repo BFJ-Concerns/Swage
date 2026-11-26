@@ -1018,4 +1018,6 @@ workspace. Paired-device execution still stores artefacts relative to its
 working directory at `.swage/tool-output/` and reports relative paths.
 
 Operators can register additional tools through plugins; plugin tool names come
-from the plugin manifest rather than the gateway's built-in set.
+from the plugin manifest rather than the gateway's built-in set. A plugin
+whose tool takes a built-in tool's name, or a name another tool already has,
+is left out at startup with a warning in the gateway's log.
