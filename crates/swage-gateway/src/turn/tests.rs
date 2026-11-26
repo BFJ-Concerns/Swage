@@ -17576,6 +17576,7 @@ fn sandbox_config_carries_the_session_shell_timeout_and_waits_for_its_reply() {
         let roots = PolicyRoots {
             home: std::env::temp_dir().join("swage-no-home"),
             data_root: std::env::temp_dir().join("swage-no-data-root"),
+            cargo_home: None,
         };
         let config = build_sandbox_config(&agent, None, &roots, &config).unwrap();
         assert_eq!(
@@ -17634,6 +17635,7 @@ fn sandbox_config_skips_missing_trusted_workspace_paths() {
     let roots = PolicyRoots {
         home: temp_dir.path().join("home"),
         data_root: temp_dir.path().join("data-root"),
+        cargo_home: None,
     };
     let sandbox_config = build_sandbox_config(
         &agent_config,
@@ -17712,6 +17714,7 @@ fn a_linked_worktree_writes_its_gitdir_and_the_repository_it_belongs_to() {
     let roots = PolicyRoots {
         home: temp_dir.path().join("home"),
         data_root: temp_dir.path().join("data-root"),
+        cargo_home: None,
     };
     let sandbox_config = build_sandbox_config(
         &agent_config,
@@ -17739,6 +17742,7 @@ fn git_metadata_under_a_masked_path_is_left_masked() {
     let roots = PolicyRoots {
         home: home.clone(),
         data_root: data_root.clone(),
+        cargo_home: None,
     };
 
     for pointed_at in [ssh.clone(), data_root.join("store")] {
@@ -17793,6 +17797,7 @@ fn a_grant_equal_to_a_masked_path_is_carried_beside_its_mask() {
     let roots = PolicyRoots {
         home: home.clone(),
         data_root: data_root.clone(),
+        cargo_home: None,
     };
 
     let at_ssh = AgentConfig::new("worker").with_workspace(&ssh, vec![ssh.clone()]);
@@ -17884,6 +17889,7 @@ fn a_git_pointer_at_a_directory_that_is_not_git_metadata_grants_nothing() {
     let roots = PolicyRoots {
         home: home.clone(),
         data_root: data_root.clone(),
+        cargo_home: None,
     };
     let workspace = temp_dir.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -17948,6 +17954,7 @@ fn a_placement_within_a_masked_private_path_is_named_for_refusal() {
     let roots = PolicyRoots {
         home: home.clone(),
         data_root: data_root.clone(),
+        cargo_home: None,
     };
     assert_eq!(
         private_path_covering(&ssh, &roots).as_deref(),
@@ -17994,6 +18001,7 @@ fn the_policy_masks_private_home_paths_and_the_data_root_and_opens_the_shared_ca
     let roots = PolicyRoots {
         home: home.clone(),
         data_root: data_root.clone(),
+        cargo_home: None,
     };
     let sandbox_config = build_sandbox_config(
         &agent_config,
@@ -18056,7 +18064,12 @@ fn absent_shared_caches_are_created_for_installed_tools_only() {
     let home = temp_dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
 
-    let caches = crate::turn::dispatcher::shared_caches(&home, |tool| tool == "npm");
+    let roots = PolicyRoots {
+        home: home.clone(),
+        data_root: home.join(".swage"),
+        cargo_home: None,
+    };
+    let caches = crate::turn::dispatcher::shared_caches(&roots, |tool| tool == "npm");
 
     assert!(home.join(".npm").is_dir());
     assert!(
@@ -18074,6 +18087,50 @@ fn absent_shared_caches_are_created_for_installed_tools_only() {
     );
 }
 
+/// Where the operator keeps Cargo's home elsewhere (`CARGO_HOME`), that is
+/// the cache the sandbox writes and the place its tokens are masked.
+#[test]
+fn cargo_home_elsewhere_is_the_cache_granted_and_its_tokens_are_masked() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path().join("home");
+    let cargo_home = temp_dir.path().join("tools").join("cargo");
+    std::fs::create_dir_all(&cargo_home).unwrap();
+    std::fs::write(cargo_home.join("credentials.toml"), "token").unwrap();
+    let workspace = home.join("project");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let roots = PolicyRoots {
+        home: home.clone(),
+        data_root: home.join(".swage"),
+        cargo_home: Some(cargo_home.clone()),
+    };
+    let agent_config =
+        AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
+    let policy = build_sandbox_config(
+        &agent_config,
+        None,
+        &roots,
+        &swage_config::ResolvedConfig::default(),
+    )
+    .unwrap();
+
+    assert!(
+        policy.write_paths.contains(&sandbox_path(&cargo_home)),
+        "{:?}",
+        policy.write_paths
+    );
+    assert!(
+        policy
+            .masked_paths
+            .contains(&sandbox_path(&cargo_home.join("credentials.toml"))),
+        "{:?}",
+        policy.masked_paths
+    );
+    assert!(
+        !home.join(".cargo").exists(),
+        "~/.cargo is not Cargo's home here"
+    );
+}
+
 /// Registry tokens are masked, the one inside the writable cargo cache
 /// included.
 #[test]
@@ -18088,6 +18145,7 @@ fn registry_credentials_are_masked_even_inside_a_writable_cache() {
     let roots = PolicyRoots {
         home: home.clone(),
         data_root: home.join(".swage"),
+        cargo_home: None,
     };
     let agent_config =
         AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
@@ -18126,6 +18184,7 @@ fn the_ssh_files_that_hold_no_key_reopen_read_only_and_the_keys_stay_masked() {
     let roots = PolicyRoots {
         home: home.clone(),
         data_root: home.join(".swage"),
+        cargo_home: None,
     };
     let agent_config =
         AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
@@ -18169,6 +18228,7 @@ fn the_shipped_skills_are_readable_beneath_the_masked_data_root() {
     let roots = PolicyRoots {
         home,
         data_root: sandbox_path(&data_root),
+        cargo_home: None,
     };
     let agent_config =
         AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
@@ -18200,6 +18260,7 @@ fn the_sandbox_shares_the_host_network_unless_the_setting_confines_it() {
     let roots = PolicyRoots {
         home: workspace.path().join("home"),
         data_root: workspace.path().join("data-root"),
+        cargo_home: None,
     };
     let agent_config = AgentConfig::new("worker")
         .with_workspace(workspace.path(), vec![workspace.path().to_path_buf()]);
@@ -18255,6 +18316,7 @@ fn worker_placement_replaces_other_filesystem_authority() {
     let roots = PolicyRoots {
         home: temp_dir.path().join("home"),
         data_root: temp_dir.path().join("data-root"),
+        cargo_home: None,
     };
     let sandbox_config = build_sandbox_config(
         &agent_config,

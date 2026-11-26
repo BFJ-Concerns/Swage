@@ -155,6 +155,9 @@ pub(super) fn sandbox_path(path: &Path) -> PathBuf {
 pub(crate) struct PolicyRoots {
     pub(crate) home: PathBuf,
     pub(crate) data_root: PathBuf,
+    /// The operator's `CARGO_HOME`, where they set one; `~/.cargo`
+    /// otherwise.
+    pub(crate) cargo_home: Option<PathBuf>,
 }
 
 impl PolicyRoots {
@@ -170,10 +173,21 @@ impl PolicyRoots {
                           and shared caches; start the gateway with HOME set"
                     .into(),
             })?;
+        let cargo_home = std::env::var_os("CARGO_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute());
         Ok(Self {
             home,
             data_root: sandbox_path(data_root),
+            cargo_home,
         })
+    }
+
+    /// Cargo's home: its registry cache, and its registry tokens.
+    pub(crate) fn cargo_home(&self) -> PathBuf {
+        self.cargo_home
+            .clone()
+            .unwrap_or_else(|| self.home.join(".cargo"))
     }
 }
 
@@ -195,10 +209,8 @@ const MASKED_HOME_PATHS: &[&str] = &[
     ".config/git/credentials",
     ".config/gh/hosts.yml",
     ".config/forgejo",
-    // Registry tokens, some inside a cache the sandbox writes: a mask is
-    // deeper than the cache's grant, so it still hides.
-    ".cargo/credentials",
-    ".cargo/credentials.toml",
+    // Registry tokens. Cargo's live in its home, wherever that is
+    // (`CARGO_TOKEN_FILES`).
     ".npmrc",
     ".pypirc",
     ".gem/credentials",
@@ -207,12 +219,15 @@ const MASKED_HOME_PATHS: &[&str] = &[
     ".password-store",
 ];
 
+/// Cargo's registry tokens in its home. Its home is a cache the sandbox
+/// writes; a mask is deeper than the cache's grant, so it still hides them.
+const CARGO_TOKEN_FILES: &[&str] = &["credentials", "credentials.toml"];
+
 /// Under the home, the shared build and package caches a sandboxed command
 /// may write, so a dependency fetched once is fetched once, each with the
-/// tool that fills it; `.cache` is every tool's.
+/// tool that fills it; `.cache` is every tool's. Cargo's is its home.
 const SHARED_CACHE_PATHS: &[(&str, Option<&str>)] = &[
     (".cache", None),
-    (".cargo", Some("cargo")),
     (".npm", Some("npm")),
     (".local/share/pnpm", Some("pnpm")),
     ("go/pkg", Some("go")),
@@ -222,11 +237,12 @@ const SHARED_CACHE_PATHS: &[(&str, Option<&str>)] = &[
 /// exist yet is created first where its tool is installed, since the
 /// sandbox can write inside a cache but cannot create one in the home; a
 /// cache with no tool to fill it is left uncreated.
-pub(crate) fn shared_caches(home: &Path, installed: impl Fn(&str) -> bool) -> Vec<PathBuf> {
+pub(crate) fn shared_caches(roots: &PolicyRoots, installed: impl Fn(&str) -> bool) -> Vec<PathBuf> {
     SHARED_CACHE_PATHS
         .iter()
-        .filter_map(|(cache, tool)| {
-            let path = home.join(cache);
+        .map(|(cache, tool)| (roots.home.join(cache), *tool))
+        .chain([(roots.cargo_home(), Some("cargo"))])
+        .filter_map(|(path, tool)| {
             if !path.is_dir()
                 && tool.is_none_or(&installed)
                 && let Err(error) = std::fs::create_dir_all(&path)
@@ -405,7 +421,7 @@ pub(crate) fn build_sandbox_config(
         }
     }
 
-    for cache in shared_caches(&roots.home, on_path) {
+    for cache in shared_caches(roots, on_path) {
         builder = builder.write_path(cache);
     }
     for private in &masked {
@@ -542,9 +558,11 @@ pub(crate) fn ssh_files_without_keys(home: &Path) -> Vec<PathBuf> {
 /// to the root, or to any masked private path, binds after the mask and
 /// reopens what it names.
 fn masked_paths(roots: &PolicyRoots) -> Vec<PathBuf> {
+    let cargo_home = roots.cargo_home();
     let mut masked: Vec<PathBuf> = MASKED_HOME_PATHS
         .iter()
         .map(|private| roots.home.join(private))
+        .chain(CARGO_TOKEN_FILES.iter().map(|file| cargo_home.join(file)))
         .filter(|path| path.exists())
         .map(|path| sandbox_path(&path))
         .collect();
@@ -892,11 +910,8 @@ pub(crate) async fn build_gateway_dispatcher(
             &agent_config.agent_id,
         )
     });
-    let credentials = crate::git_credential::CredentialServer::start(
-        state.storage.clone(),
-        session_id,
-        turn_id,
-    )?;
+    let credentials =
+        crate::git_credential::CredentialServer::start(state.storage.clone(), session_id, turn_id)?;
     // The operator's commit signing, forwarded to the host: present when
     // the operator signs, as the workspace's git configuration says; a
     // configuration that signs nothing leaves sandboxed git signing nothing.

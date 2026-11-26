@@ -431,7 +431,7 @@ is readable except the private paths it masks: SSH and GnuPG key material,
 cloud and cluster credentials (`~/.aws`, `~/.azure`, `~/.config/gcloud`,
 `~/.kube`), plaintext token files (`~/.netrc`, `~/.git-credentials`, the
 `gh` and Forgejo token files), package-registry tokens (Cargo's
-`credentials.toml`, `~/.npmrc`, `~/.pypirc`, `~/.gem/credentials`, Docker's
+`credentials.toml` in its home, `~/.npmrc`, `~/.pypirc`, `~/.gem/credentials`, Docker's
 `config.json`), the desktop keyrings and `pass` store, and the gateway's own
 data root. A masked
 directory reads as empty and a masked file as `/dev/null`. Of `~/.ssh`, the
@@ -443,7 +443,8 @@ root reopens it.
 Writes go only to the workspace (when its grant allows), the workspace's
 git metadata where a linked worktree keeps it outside the tree, temporary
 space, the shared build and package caches under the home (`~/.cache`,
-`~/.cargo`, `~/.npm`, `~/.local/share/pnpm`, `~/go/pkg`) and any attachment
+Cargo's home — `CARGO_HOME`, else `~/.cargo` — `~/.npm`,
+`~/.local/share/pnpm`, `~/go/pkg`) and any attachment
 granted write. A cache that does not exist yet is created before the turn
 where its tool is installed, so a first fetch can fill it; a token kept
 inside a cache stays masked.
