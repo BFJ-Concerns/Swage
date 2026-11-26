@@ -109,6 +109,8 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- The workflow-authoring and project-docs skills are rewritten for any installation. The workflow-authoring skill names no model in its examples (a worker with no `model` runs on the configured default), gives each function's error names, and no longer assumes two model families or the development-process skills are in reach.
+- The shipped default agent's description says what it gives a session: no instructions of its own, with the model and tools the installation's settings provide.
 - The supplied and hosted guides explain creating and editing agent definitions in conversation, including the required tool grant, limits and configuration history, alongside the operator API.
 - Anthropic turns without an explicit output limit use the model's documented limit instead of a fixed 4,096 tokens. A limit the request sets is kept, and a model Anthropic does not document falls back to the catalogue's limit.
 - Session orientation lists every readable attached workspace with its path, access and trust. A worker placed inside one sees its placement root, the trust it inherits and its own write access.
@@ -165,6 +167,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- The project-docs skill no longer hands agent-guidance changes to a skill Swage does not ship: it reports proposed changes to `AGENTS.md`, and edits that file only when the request covers it.
 - Failed settings saves leave configuration, managed credentials and the active runtime unchanged. History distinguishes absent values from strings and identifies its audit-event and saved-context sources.
 - `file_edit` refuses an ambiguous passage whose occurrences overlap, rather than replacing one of them.
 - Shortened tool results tell later turns that the earlier result was delivered whole and identify a retrieval route when one is available.
