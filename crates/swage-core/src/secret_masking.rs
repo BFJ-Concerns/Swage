@@ -42,11 +42,17 @@ impl RegisteredSecretValues {
         )
     }
 
-    /// Mask every registered value in `text`, in its plain form and in the
-    /// escaped form it takes inside serialised JSON. Returns whether anything
-    /// was replaced.
+    /// Mask every registered value in `text` ([`mask_record_text`]).
+    /// Returns whether anything was replaced.
     pub fn mask(&self, text: &mut String) -> bool {
-        mask_serialised_text(text, &self.current())
+        mask_record_text(text, &self.current())
+    }
+
+    /// Whether `text` holds any registered value, by the same reading as
+    /// [`Self::mask`].
+    pub fn holds_any(&self, text: &str) -> bool {
+        let mut copy = text.to_owned();
+        self.mask(&mut copy)
     }
 
     /// [`Self::mask`] over an optional text.
@@ -68,11 +74,28 @@ pub fn mask_text(text: &mut String, values: &[impl AsRef<str>]) -> bool {
     replaced
 }
 
-/// Mask every value in text that may hold them inside serialised JSON, where a
-/// value with quotes, backslashes or control characters appears escaped: both
-/// the escaped and the plain form are replaced. The marker has no character
-/// JSON escapes, so a masked document stays the document it was.
-pub fn mask_serialised_text(text: &mut String, values: &[String]) -> bool {
+/// Mask every value in `text`, reading it as the record it is.
+///
+/// A JSON object or array is masked in its decoded strings and keys and
+/// written out again only when something was replaced, so a value that
+/// happens to match a number or the document's own syntax never turns the
+/// record into text that no longer parses. Numbers are left as they are.
+/// Any other text is masked as text, in the value's plain form and in the
+/// escaped form it takes when JSON is quoted inside it.
+pub fn mask_record_text(text: &mut String, values: &[String]) -> bool {
+    if values.is_empty() {
+        return false;
+    }
+    let trimmed = text.trim_start();
+    if (trimmed.starts_with('{') || trimmed.starts_with('['))
+        && let Ok(mut document) = serde_json::from_str::<serde_json::Value>(text)
+    {
+        if mask_json_strings(&mut document, values) {
+            *text = document.to_string();
+            return true;
+        }
+        return false;
+    }
     let mut changed = false;
     for value in values {
         let encoded = serde_json::to_string(value).expect("secret text serialises");
@@ -85,33 +108,71 @@ pub fn mask_serialised_text(text: &mut String, values: &[String]) -> bool {
     changed
 }
 
-/// Mask every value in the strings of a JSON document, keys included.
+/// Mask every value in the strings of a JSON document, keys included. A
+/// string that is itself a serialised document is masked as one.
 pub fn mask_json_strings(value: &mut serde_json::Value, values: &[String]) -> bool {
     let mut replaced = false;
     match value {
-        serde_json::Value::String(text) => return mask_text(text, values),
+        serde_json::Value::String(text) => return mask_record_text(text, values),
         serde_json::Value::Array(items) => {
             for item in items {
                 replaced |= mask_json_strings(item, values);
             }
         }
         serde_json::Value::Object(map) => {
-            let keys: Vec<String> = map.keys().cloned().collect();
-            for key in keys {
-                let mut masked_key = key.clone();
-                if mask_text(&mut masked_key, values) {
-                    let item = map.remove(&key).expect("key was listed");
-                    map.insert(masked_key, item);
-                    replaced = true;
-                }
-            }
-            for item in map.values_mut() {
-                replaced |= mask_json_strings(item, values);
+            let entries = std::mem::take(map);
+            for (mut key, mut item) in entries {
+                replaced |= mask_record_text(&mut key, values);
+                replaced |= mask_json_strings(&mut item, values);
+                map.insert(key, item);
             }
         }
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
     }
     replaced
+}
+
+/// Holds back the end of a stream of text that could be the start of a
+/// registered value, so a value split across two pieces is masked whole.
+/// Each piece pushed returns the text that is safe to pass on now; `finish`
+/// returns what is left when the stream ends or pauses.
+#[derive(Debug, Default)]
+pub struct StreamMasking {
+    pending: String,
+}
+
+impl StreamMasking {
+    /// Take the next piece of the stream and return what can be passed on.
+    pub fn push(&mut self, piece: &str, values: &[String]) -> String {
+        self.pending.push_str(piece);
+        mask_text(&mut self.pending, values);
+        let held = self.held_back_from(values);
+        let rest = self.pending.split_off(held);
+        std::mem::replace(&mut self.pending, rest)
+    }
+
+    /// Everything still held back, masked.
+    pub fn finish(&mut self, values: &[String]) -> String {
+        let mut rest = std::mem::take(&mut self.pending);
+        mask_text(&mut rest, values);
+        rest
+    }
+
+    /// The byte index from which `pending` could still begin a value: the
+    /// start of the longest ending that is a proper prefix of one.
+    fn held_back_from(&self, values: &[String]) -> usize {
+        let text = self.pending.as_str();
+        for (start, _) in text.char_indices() {
+            let ending = &text[start..];
+            if values
+                .iter()
+                .any(|value| value.len() > ending.len() && value.starts_with(ending))
+            {
+                return start;
+            }
+        }
+        text.len()
+    }
 }
 
 #[cfg(test)]
@@ -136,6 +197,32 @@ mod tests {
         assert!(set.mask(&mut text));
         let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed["output"], "key [REDACTED_SECRET] end");
+    }
+
+    #[test]
+    fn a_value_matching_a_number_or_syntax_leaves_the_document_parsable() {
+        let set = RegisteredSecretValues::default();
+        set.replace(vec!["123456".into()]);
+        let mut text = r#"{"output":"PIN 123456","total_bytes":123456}"#.to_string();
+        assert!(set.mask(&mut text));
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["output"], "PIN [REDACTED_SECRET]");
+        assert_eq!(parsed["total_bytes"], 123_456);
+
+        set.replace(vec![r#"","#.into()]);
+        let mut text = r#"{"a":"x","b":"y"}"#.to_string();
+        assert!(!set.mask(&mut text));
+        assert_eq!(text, r#"{"a":"x","b":"y"}"#);
+    }
+
+    #[test]
+    fn a_value_split_across_stream_pieces_is_masked_whole() {
+        let values = vec!["verifier-canary-7F29".to_string()];
+        let mut stream = StreamMasking::default();
+        let mut passed = stream.push("key: verifier-canary-", &values);
+        passed.push_str(&stream.push("7F29 done, verif", &values));
+        passed.push_str(&stream.finish(&values));
+        assert_eq!(passed, "key: [REDACTED_SECRET] done, verif");
     }
 
     #[test]

@@ -107,7 +107,7 @@ impl Tool for ToolResultReadTool {
                  checked: {error}"
             ),
         })?;
-        swage_core::secret_masking::mask_serialised_text(&mut result, &secret_values);
+        swage_core::secret_masking::mask_record_text(&mut result, &secret_values);
         let result = result.as_str();
 
         let mut follow_up_arguments = serde_json::Map::new();

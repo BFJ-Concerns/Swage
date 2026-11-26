@@ -234,6 +234,7 @@ async fn forward_events<S>(
 ) where
     S: futures::Sink<Message> + Unpin,
 {
+    let mut streamed = swage_core::secret_masking::StreamMasking::default();
     loop {
         tokio::select! {
             // Per-turn events (Token, ToolStart, ToolEnd, TurnComplete, etc.)
@@ -242,20 +243,24 @@ async fn forward_events<S>(
                     None => break, // All senders dropped — turn and connection done.
                     Some(event) => {
                         let is_shutdown = matches!(event, ServerEvent::Shutdown { .. });
-                        match serde_json::to_string(&event) {
-                            Ok(mut json) => {
-                                secret_values.mask(&mut json);
-                                if ws_sink.send(Message::Text(json.into())).await.is_err() {
-                                    // Client disconnected — stop forwarding.
-                                    break;
+                        let mut disconnected = false;
+                        for event in held_back_stream(&mut streamed, event, &secret_values) {
+                            match serde_json::to_string(&event) {
+                                Ok(mut json) => {
+                                    secret_values.mask(&mut json);
+                                    if ws_sink.send(Message::Text(json.into())).await.is_err() {
+                                        disconnected = true;
+                                        break;
+                                    }
                                 }
-                                if is_shutdown {
-                                    break;
+                                Err(e) => {
+                                    tracing::error!(error = %e, "failed to serialise server event");
                                 }
                             }
-                            Err(e) => {
-                                tracing::error!(error = %e, "failed to serialise server event");
-                            }
+                        }
+                        // A client that disconnected stops the forwarding.
+                        if disconnected || is_shutdown {
+                            break;
                         }
                     }
                 }
@@ -300,6 +305,37 @@ async fn forward_events<S>(
 
     // Send a close frame when the forwarding loop exits for any reason.
     let _ = ws_sink.send(Message::Close(None)).await;
+}
+
+/// The events to send for one event of the session's stream. Streamed text
+/// is held back while its end could be the start of a registered value, so a
+/// value split across two tokens is masked whole; any other event first
+/// releases what is held, so the text it follows reaches the client ahead
+/// of it.
+fn held_back_stream(
+    streamed: &mut swage_core::secret_masking::StreamMasking,
+    event: ServerEvent,
+    secret_values: &swage_core::RegisteredSecretValues,
+) -> Vec<ServerEvent> {
+    let values = secret_values.current();
+    match event {
+        ServerEvent::Token { content } => {
+            let content = streamed.push(&content, &values);
+            if content.is_empty() {
+                Vec::new()
+            } else {
+                vec![ServerEvent::Token { content }]
+            }
+        }
+        event => {
+            let content = streamed.finish(&values);
+            if content.is_empty() {
+                vec![event]
+            } else {
+                vec![ServerEvent::Token { content }, event]
+            }
+        }
+    }
 }
 
 pub(super) fn broadcast_event_matches_session(session_id: Uuid, event: &ServerEvent) -> bool {
@@ -373,6 +409,58 @@ mod tests {
         };
         let event: serde_json::Value = serde_json::from_str(&frame).unwrap();
         assert_eq!(event["result"]["output"], "key [REDACTED_SECRET] end");
+    }
+
+    /// A registered value a provider streams in two pieces reaches the
+    /// client masked whole, and the text after it is not lost.
+    #[tokio::test]
+    async fn a_value_split_across_tokens_never_reaches_the_socket() {
+        let values = swage_core::RegisteredSecretValues::default();
+        values.replace(vec!["verifier-canary-7F29".to_string()]);
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let (_broadcast_sender, broadcast) = broadcast::channel(4);
+        let (sink, output) = futures::channel::mpsc::unbounded::<Message>();
+        let forwarding = tokio::spawn(forward_events(
+            sink,
+            Uuid::new_v4(),
+            receiver,
+            broadcast,
+            values,
+        ));
+        for content in ["the key is verifier-canary-", "7F29 and verif"] {
+            sender
+                .send(ServerEvent::Token {
+                    content: content.into(),
+                })
+                .unwrap();
+        }
+        sender
+            .send(ServerEvent::Shutdown {
+                reason: "test finished".into(),
+            })
+            .unwrap();
+        forwarding.await.unwrap();
+
+        let frames: Vec<serde_json::Value> = output
+            .filter_map(|message| async move {
+                match message {
+                    Message::Text(text) => Some(serde_json::from_str(&text).unwrap()),
+                    _ => None,
+                }
+            })
+            .collect()
+            .await;
+        let streamed: String = frames
+            .iter()
+            .filter(|event| event["type"] == "token")
+            .map(|event| event["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(streamed, "the key is [REDACTED_SECRET] and verif");
+        assert!(
+            frames
+                .iter()
+                .all(|event| !event.to_string().contains("7F29"))
+        );
     }
 
     #[tokio::test]

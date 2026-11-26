@@ -16,6 +16,7 @@ pub mod migrations;
 pub mod observation;
 pub mod orientation_card;
 pub mod provider_round;
+mod record_masking;
 pub mod schedule;
 pub mod secret;
 pub mod session;
@@ -78,10 +79,13 @@ impl SqliteStorage {
             .map_err(|e| StorageError::ConnectionFailed(e.to_string()))?;
 
         run_migrations(&conn)?;
+        let secret_values = swage_core::RegisteredSecretValues::default();
+        record_masking::install(&conn, &secret_values)
+            .map_err(|e| StorageError::ConnectionFailed(e.to_string()))?;
 
         Ok(Self {
             conn: Mutex::new(conn),
-            secret_values: swage_core::RegisteredSecretValues::default(),
+            secret_values,
         })
     }
 
@@ -297,6 +301,36 @@ mod tests {
             .await
             .unwrap();
 
+        // Writers that mask nothing themselves: the audit trail, a topic's
+        // description, and a raw write as any later writer might make.
+        storage
+            .create_audit_event(NewAuditEvent {
+                id: uuid::Uuid::new_v4().to_string(),
+                session_id: Some(session.id),
+                entity_kind: "settings".into(),
+                entity_id: "providers".into(),
+                event_kind: "updated".into(),
+                summary: text.clone(),
+                metadata: serde_json::json!({ "display_name": secret, "count": 123_456 }),
+            })
+            .await
+            .unwrap();
+        let raw = text.clone();
+        storage
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE topics SET description = ?1 WHERE is_general = 1",
+                    [&raw],
+                )?;
+                conn.execute(
+                    "INSERT INTO topics (id, name, description, slug, created_at, updated_at)
+                     VALUES ('t2', ?1, ?1, 't2', 'now', 'now')",
+                    [&raw],
+                )
+            })
+            .await
+            .unwrap();
+
         let escaped = serde_json::to_string(secret).unwrap();
         let escaped = &escaped[1..escaped.len() - 1];
         assert_eq!(rows_holding(&storage, secret).await, Vec::<String>::new());
@@ -305,6 +339,22 @@ mod tests {
             !rows_holding(&storage, swage_core::REDACTED_SECRET)
                 .await
                 .is_empty()
+        );
+        let metadata: String = storage
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT metadata_json FROM audit_events WHERE entity_id = 'providers'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .unwrap();
+        let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(metadata["display_name"], "[REDACTED_SECRET]");
+        assert_eq!(
+            metadata["count"], 123_456,
+            "the record stays the document it was"
         );
     }
 
