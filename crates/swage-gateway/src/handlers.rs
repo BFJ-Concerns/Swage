@@ -1400,7 +1400,7 @@ fn shutdown_peer_is_local(
 }
 
 #[cfg(unix)]
-fn local_interface_addresses() -> std::io::Result<Vec<IpAddr>> {
+pub(crate) fn local_interface_addresses() -> std::io::Result<Vec<IpAddr>> {
     struct Interfaces(*mut libc::ifaddrs);
     impl Drop for Interfaces {
         fn drop(&mut self) {
@@ -1445,7 +1445,7 @@ fn local_interface_addresses() -> std::io::Result<Vec<IpAddr>> {
 }
 
 #[cfg(not(unix))]
-fn local_interface_addresses() -> std::io::Result<Vec<IpAddr>> {
+pub(crate) fn local_interface_addresses() -> std::io::Result<Vec<IpAddr>> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "local interface enumeration is unavailable",
@@ -2468,6 +2468,7 @@ mod tests {
                 api_key: None,
                 command: None,
                 state_dir: None,
+                plaintext_credentials: None,
             })
             .send()
             .await

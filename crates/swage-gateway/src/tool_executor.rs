@@ -496,10 +496,6 @@ mod tests {
             })
         }
 
-        fn sensitive_keys(&self) -> &[&str] {
-            &["secret"]
-        }
-
         fn device_secret_keys(&self) -> &[&str] {
             &["secret"]
         }
