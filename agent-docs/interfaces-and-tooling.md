@@ -1067,7 +1067,7 @@ two sandbox-eligible tools.
 | Tool | Purpose |
 |---|---|
 | `agent_definition` | Create, update, list or delete named agents selectable for future sessions; see [Creating and editing definitions](agents-and-permissions.md#creating-and-editing-definitions) for the grant, fields and limits |
-| `task_definition` | Create or update (`upsert`), list or delete reusable delegated work contracts. They have no entry in the new-session picker. Upsert keeps omitted fields when updating and clears optional fields set to null. |
+| `task_definition` | Create or replace (`upsert`), list or delete reusable delegated work contracts; these do not appear in the new-session picker. An upsert replaces the whole definition, so omitted fields are cleared. |
 
 ### Session and memory
 

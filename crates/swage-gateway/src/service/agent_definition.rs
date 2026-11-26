@@ -356,10 +356,7 @@ pub fn validate_definition(definition: &NewAgentDefinition) -> Result<(), Gatewa
 /// with only a log line to say so, which is how an agent asked for on one
 /// model quietly runs on another; refusing here, with the ids that would
 /// be accepted, keeps the preference honest at every authoring surface.
-pub(crate) fn require_configured_model(
-    state: &AppState,
-    model_id: Option<&str>,
-) -> Result<(), GatewayError> {
+fn require_configured_model(state: &AppState, model_id: Option<&str>) -> Result<(), GatewayError> {
     let Some(model_id) = model_id else {
         return Ok(());
     };

@@ -33,18 +33,6 @@ fn map(error: GatewayError) -> ToolError {
     }
 }
 
-fn field<T: serde::de::DeserializeOwned>(
-    params: &Value,
-    key: &str,
-    current: Option<T>,
-) -> Result<Option<T>, ToolError> {
-    match params.get(key) {
-        None => Ok(current),
-        Some(value) => serde_json::from_value(value.clone())
-            .map_err(|error| invalid(format!("'{key}': {error}"))),
-    }
-}
-
 #[async_trait]
 impl Tool for TaskDefinitionTool {
     fn name(&self) -> &str {
@@ -54,22 +42,18 @@ impl Tool for TaskDefinitionTool {
         "Create, list, update, or delete durable task definitions: a named work contract — \
          instructions, a preferred model, narrowed tool grants and an output contract — that a \
          delegated child turn runs under when a delegation names it. Set `action` to `upsert` \
-         (store the definition `id` names: with nothing stored under that id the call creates \
-         it, and `instructions` is required; with one stored it changes only the fields the call \
-         gives — a field you leave out keeps its stored value, a field you give replaces it, and \
-         setting `model_id`, `tool_permissions`, `output_schema` or `output_max_retries` to null \
-         clears that field), `list` (every stored definition, with all its fields), or `delete`.\n\n\
+         (create a definition, or replace one whole: an upsert stores exactly the fields given, \
+         so a field left out is cleared — restate every field that should remain), `list` (every \
+         stored definition), or `delete`.\n\n\
          Reach for this when the person wants a repeatable contract for work handed to a child \
          turn, or wants one changed. A task definition has no entry in the new-session picker and \
          no name people choose; for an agent a person can pick when starting a session — with a \
          display name, a description and standing instructions of its own — use \
          `agent_definition` instead.\n\n\
-         An upsert's reply says whether it created the definition or updated it. Every upsert and \
-         delete is written to the audit trail with the definition's whole state before and \
-         after. Deleting is permanent (the definition can be recreated); a delegation that names \
-         a deleted definition is refused. `tool_permissions` can only narrow what the delegating \
-         context grants, never widen it. A `model_id` must be one the gateway's model catalogue \
-         configures; a refusal names the configured ids."
+         Every upsert and delete is written to the audit trail with the definition's whole state \
+         before and after. Deleting is permanent (the definition can be recreated); a delegation \
+         that names a deleted definition is refused. `tool_permissions` can only narrow what the \
+         delegating context grants, never widen it."
     }
     fn parameters(&self) -> Value {
         let string_array = || json!({"type":"array","items":{"type":"string"}});
@@ -79,23 +63,23 @@ impl Tool for TaskDefinitionTool {
                 "action":{
                     "type":"string",
                     "enum":["upsert","list","delete"],
-                    "description":"What to do: `upsert` creates the definition `id` names or, when one is already stored, changes the fields given and leaves the rest as stored (to change part of a text, `list` first and give the whole revised text, since a text given replaces all of the stored one); `list` returns every stored definition; `delete` removes one."
+                    "description":"What to do: `upsert` stores the definition exactly as given, creating or replacing it whole; `list` returns every stored definition; `delete` removes one."
                 },
                 "id":{
                     "type":"string",
-                    "description":"The definition's stable identifier — lowercase ASCII letters, digits and hyphens — that a delegation names to run under it. Required for upsert and delete. An upsert under an id with nothing stored creates a new definition, so to change an existing one give its id exactly as `list` shows it."
+                    "description":"The definition's stable identifier — lowercase ASCII letters, digits and hyphens — that a delegation names to run under it. Required for upsert and delete."
                 },
                 "instructions":{
                     "type":"string",
-                    "description":"The complete contract the child turn works to, as it will read it. Required when the upsert creates the definition. On a change, omit it to keep the stored text; a text given replaces the whole stored text, so include everything that should remain. It cannot be cleared: a definition always has instructions, and null or an empty text is refused."
+                    "description":"The complete contract the child turn works to, as it will read it. Required on upsert; it replaces any stored text."
                 },
                 "model_id":{
                     "type":["string","null"],
-                    "description":"The id of a model in the gateway's configured catalogue the child turn uses in place of the delegating context's model. Omit on create to keep the delegating context's model; on a change, null clears the preference and omitting keeps it. An id the catalogue does not configure is refused."
+                    "description":"The id of a model in the gateway's configured catalogue the child turn uses. Omit or null to keep the delegating context's model."
                 },
                 "tool_permissions":{
                     "type":["object","null"],
-                    "description":"Narrows the tools the child turn may call; the result intersects with what the delegating context grants and can only remove tools. Omit on create to leave the grants unchanged; on a change, null removes the narrowing, omitting keeps it, and an object given replaces the stored one whole, so give every member.",
+                    "description":"Narrows the tools the child turn may call; the result intersects with what the delegating context grants and can only remove tools. Omit or null to leave the grants unchanged.",
                     "properties":{
                         "allow":string_array(),
                         "deny":string_array(),
@@ -127,13 +111,13 @@ impl Tool for TaskDefinitionTool {
                 },
                 "output_schema":{
                     "type":["object","null"],
-                    "description":"A JSON Schema the child's final reply must satisfy; a reply that does not is retried. Omit on create for a free-form reply; on a change, null removes the contract and omitting keeps it."
+                    "description":"A JSON Schema the child's final reply must satisfy; a reply that does not is retried. Omit or null for a free-form reply."
                 },
                 "output_max_retries":{
                     "type":["integer","null"],
                     "minimum":0,
                     "maximum":u32::MAX,
-                    "description":"How many times a reply failing `output_schema` is retried before the delegation fails. Omit on create for the configured default; on a change, null restores that default and omitting keeps the stored value."
+                    "description":"How many times a reply failing `output_schema` is retried before the delegation fails. Omit or null for the configured default."
                 }
             },
             "required":["action"],
@@ -165,32 +149,42 @@ impl Tool for TaskDefinitionTool {
                     .and_then(Value::as_str)
                     .ok_or_else(|| invalid("'id' is required"))?
                     .to_owned();
-                let _write = gateway.definition_writes.lock().await;
-                let current = gateway
-                    .storage
-                    .get_task_definition(&id)
-                    .await
-                    .map_err(GatewayError::from)
-                    .map_err(map)?;
-                let (instructions, model_id, tool_permissions, output_schema, output_max_retries) =
-                    current.map_or(Default::default(), |current| {
-                        (
-                            Some(current.instructions),
-                            current.model_id,
-                            current.tool_permissions,
-                            current.output_schema,
-                            current.output_max_retries,
-                        )
-                    });
+                let instructions = params
+                    .get("instructions")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| invalid("'instructions' is required"))?
+                    .to_owned();
+                let output_max_retries = params
+                    .get("output_max_retries")
+                    .filter(|value| !value.is_null())
+                    .map(|value| {
+                        value
+                            .as_u64()
+                            .and_then(|value| u32::try_from(value).ok())
+                            .ok_or_else(|| {
+                                invalid(format!(
+                                    "'output_max_retries' must be an integer between 0 and {}",
+                                    u32::MAX
+                                ))
+                            })
+                    })
+                    .transpose()?;
                 let definition = swage_storage::NewTaskDefinition {
                     id,
-                    instructions: field(&params, "instructions", instructions)?.ok_or_else(
-                        || invalid("'instructions' is required and cannot be cleared"),
-                    )?,
-                    model_id: field(&params, "model_id", model_id)?,
-                    tool_permissions: field(&params, "tool_permissions", tool_permissions)?,
-                    output_schema: field(&params, "output_schema", output_schema)?,
-                    output_max_retries: field(&params, "output_max_retries", output_max_retries)?,
+                    instructions,
+                    model_id: params
+                        .get("model_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    tool_permissions: params
+                        .get("tool_permissions")
+                        .filter(|v| !v.is_null())
+                        .cloned(),
+                    output_schema: params
+                        .get("output_schema")
+                        .filter(|v| !v.is_null())
+                        .cloned(),
+                    output_max_retries,
                 };
                 crate::service::upsert_task_definition(
                     gateway,
@@ -203,7 +197,6 @@ impl Tool for TaskDefinitionTool {
                 .map_err(map)
             }
             "delete" => {
-                let _write = gateway.definition_writes.lock().await;
                 let id = params
                     .get("id")
                     .and_then(Value::as_str)
@@ -238,24 +231,11 @@ mod tests {
     fn context() -> (GatewayToolContext, Arc<SqliteStorage>) {
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
         let provider = Arc::new(MockProvider::new(vec![]));
-        let mut config = swage_config::ResolvedConfig::default();
-        config.models.entries.insert(
-            "gpt-5.6".into(),
-            swage_config::model::ModelEndpointConfig {
-                provider_id: "test".into(),
-                model_id: "gpt-5.6".into(),
-                aliases: vec![],
-                context_window: None,
-                generation_preset: None,
-                default_effort: None,
-                capabilities: Default::default(),
-            },
-        );
         let state = AppState::for_test(
             Arc::clone(&storage) as Arc<dyn swage_storage::Storage>,
             Arc::clone(&storage) as Arc<dyn TopicStore>,
             provider as Arc<dyn LlmProvider>,
-            config,
+            swage_config::ResolvedConfig::default(),
             crate::tool::ToolDispatcher::allow_all(vec![]),
             None,
         );
@@ -271,7 +251,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn tool_validates_and_audits_partial_definition_mutations() {
+    async fn tool_validates_and_audits_whole_definition_mutations() {
         let (context, storage) = context();
         let tool = TaskDefinitionTool;
 
@@ -367,62 +347,16 @@ mod tests {
             json!({"type":"object"})
         );
         assert_eq!(edited.metadata["prior_state"]["output_max_retries"], 2);
-        assert_eq!(edited.metadata["new_state"]["model_id"], "gpt-5.6");
+        assert_eq!(edited.metadata["new_state"]["model_id"], Value::Null);
         assert_eq!(
             edited.metadata["new_state"]["tool_permissions"],
-            edited.metadata["prior_state"]["tool_permissions"]
+            Value::Null
         );
-        assert_eq!(
-            edited.metadata["new_state"]["output_schema"],
-            edited.metadata["prior_state"]["output_schema"]
-        );
+        assert_eq!(edited.metadata["new_state"]["output_schema"], Value::Null);
         assert_eq!(
             edited.metadata["new_state"]["output_max_retries"],
-            edited.metadata["prior_state"]["output_max_retries"]
+            Value::Null
         );
-
-        let invalid_model = tool
-            .execute(
-                json!({"action":"upsert","id":"review","model_id":"not-configured"}),
-                &context,
-            )
-            .await
-            .expect_err("an unknown model is refused");
-        assert!(
-            matches!(&invalid_model, ToolError::InvalidParameters { message, .. }
-                if message.contains("not-configured") && message.contains("gpt-5.6"))
-        );
-
-        let invalid_instructions = tool
-            .execute(
-                json!({"action":"upsert","id":"review","instructions":null}),
-                &context,
-            )
-            .await
-            .expect_err("instructions cannot be cleared");
-        assert!(matches!(
-            invalid_instructions,
-            ToolError::InvalidParameters { .. }
-        ));
-        assert_eq!(
-            storage
-                .get_task_definition("review")
-                .await
-                .unwrap()
-                .unwrap()
-                .instructions,
-            "Edited contract."
-        );
-
-        tool.execute(
-            json!({
-                "action":"upsert", "id":"review", "model_id":null,
-                "tool_permissions":null, "output_schema":null, "output_max_retries":null
-            }),
-            &context,
-        )
-        .await
-        .expect("clear optional fields without restating instructions");
 
         tool.execute(json!({"action":"delete","id":"review"}), &context)
             .await

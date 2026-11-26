@@ -942,8 +942,8 @@ session topic: a run in another topic reads as absent rather than forbidden.
 **Definition authoring** — `agent_definition` creates, edits, lists and deletes
 named agents you can choose for future sessions. `task_definition` manages
 reusable work contracts for delegated children, which do not appear in the
-new-session picker. Saving an existing definition changes the supplied fields.
-Omitted fields keep their values, and null clears an optional field. See [Creating and editing
+new-session picker; saving one replaces its whole definition, so omitted fields
+are cleared. See [Creating and editing
 definitions](agents-and-permissions.md#creating-and-editing-definitions) for
 the conversational route and its grant.
 

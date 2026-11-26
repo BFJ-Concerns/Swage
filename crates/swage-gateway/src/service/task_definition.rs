@@ -62,7 +62,6 @@ pub async fn upsert_task_definition(
     session_id: Option<uuid::Uuid>,
 ) -> Result<TaskDefinitionChange, GatewayError> {
     validate_task_definition(&definition)?;
-    super::require_configured_model(state, definition.model_id.as_deref())?;
     let id = definition.id.clone();
     let prior = snapshot(state.storage.as_ref(), &id).await?;
     state
