@@ -6,3 +6,12 @@
 # because Clippy reports them separately.
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
+
+# `large_futures` bound. The gateway's turn and workflow-run handler futures
+# carry whole records — several `serde_json::Value`s each — and measure
+# 15–18 KiB; clippy's default bound (16 KiB) sat just above them until
+# deno_core enabled serde_json's `preserve_order` feature workspace-wide,
+# which grows every `Value` by the IndexMap it now holds. The bound below
+# keeps the lint for what it exists to catch (a future that is tens of
+# kilobytes) without boxing every handler for a layout change.
+future-size-threshold = 24576

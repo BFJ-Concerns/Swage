@@ -6,8 +6,8 @@ description: How Swage runs workflow scripts — lifecycle, journalling, budget 
 
 Swage's workflow engine runs front-loaded JavaScript scripts that orchestrate
 agent work. A script defines a run's entire plan — which agents to call, in
-what order, with what structure — and the engine executes it inside a sandboxed
-QuickJS runtime on a dedicated OS thread. Every non-deterministic host call is journalled, so a crashed or
+what order, with what structure — and the engine executes it inside a caged V8
+isolate of its own on a dedicated OS thread. Every non-deterministic host call is journalled, so a crashed or
 restarted run replays from its journal and picks up where it left off.
 The one deliberate exception is the synchronous budget accessors
 `budget.spent()` and `budget.remaining()` — these are live reads against
@@ -40,16 +40,26 @@ and concurrent `start_run` calls race the async mutex without serialisation.
 The launch path (`launch_existing_run`) is shared between new and resumed runs.
 It loads the journal replay, computes initial token and call counts from
 completed entries, spawns the host-command loop, and starts a dedicated OS
-thread running the QuickJS engine. When the engine finishes, the spawned
+thread running the V8 isolate. When the engine finishes, the spawned
 completion task resolves the terminal state — recording the output, the error,
 or the handover depending on the outcome.
 
 ## Scripts
 
-Scripts run in a stripped-down QuickJS sandbox. The runtime provides JSON, promises,
-Map/Set, and regular expressions, but no `Date`, `setTimeout`, `fetch`, or
-`process`. `Math.random` throws to prevent non-deterministic branching, since
-replay depends on the script producing the same host-call sequence.
+Each workflow runs in its own V8 isolate. Scripts use the workflow API to
+wait on timers and obtain external values. `Math.random`
+and host-locale methods such as `toLocaleString()` throw
+`NondeterministicCallError`. Replay uses the journal to repeat the same
+sequence of host calls.
+
+The isolate limits its heap, its fixed-length buffers and its uninterrupted
+execution time. The heap and the combined backing stores of all live buffers
+each have a 64 MiB ceiling. Typed arrays and data views use those same backing
+stores. Resizable buffers are unavailable. To grow a buffer within the
+ceiling, allocate a new fixed-length buffer and copy the data into it.
+
+Reaching a limit stops the script and fails the run. The audit trail records
+the reason in an `engine_terminated` event.
 
 A script may open with a `export const meta = { ... };` header declaring
 portable metadata: `name`, `description`, `task` (an opaque identity for
@@ -401,9 +411,8 @@ hash would change and replay would fail with a non-deterministic-call error.
 
 ## Cancellation
 
-Cancellation propagates through a `CancellationToken` installed as the QuickJS
-interrupt handler (checked between JS opcodes) and raced against the execution
-future. The engine returns `Cancelled` and the run transitions to `cancelled`.
+Cancelling a workflow stops the script while it runs or waits for a host
+call. The workflow record moves to `cancelled`.
 
 For parked runs, which have no engine to signal, `cancel_run` directly sets
 the state to `cancelled` in storage.

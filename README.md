@@ -63,7 +63,7 @@ things those tend to leave out:
 | **Providers** | Anthropic, OpenAI Chat Completions and Responses, Google, OpenRouter, and the built-in Codex app server (temporarily disabled); retries; interactive turns honour the selected model's provider; per-model reasoning effort |
 | **Tools** | File read/write/edit/search, shell, URL fetch, web search¹, a Chromium browser¹, Python execution¹, memory, a knowledge base with citations, schedules, workflows, and agent-built *surfaces* |
 | **Safety** | Per-tool permissions with interactive approvals, grants that narrow as work is delegated, per-turn bubblewrap + Landlock sandboxing, and credential leak detection with redaction |
-| **Workflows** | A JavaScript workflow engine (QuickJS) whose runs are journalled: a run interrupted by a crash or restart replays and carries on. Token budgets per provider route, durable parking on long timers, and runs that pause for a human decision |
+| **Workflows** | A JavaScript workflow engine (V8, one isolate per run) whose runs are journalled: a run interrupted by a crash or restart replays and carries on. Token budgets per provider route, durable parking on long timers, and runs that pause for a human decision |
 | **Automation** | Schedules that start or continue sessions, external channels (Telegram¹), delivery targets, and remote *devices* that dial in and execute tools on other machines |
 | **Context** | Scriptable context assembly, compaction, and recovery for sessions that keep failing: separate readers diagnose what went wrong and the session continues from their notes |
 | **Interfaces** | Web UI, desktop shell and CLI; a wire contract defined once in Rust and projected to TypeScript, JSON Schema and OpenAPI |
@@ -80,11 +80,11 @@ support Node 22 from **22.13.0**, or **24 and later**; Node 24 is recommended.
 Building needs a C toolchain, `pkg-config`, and OpenSSL development headers.
 The per-turn sandbox needs
 [bubblewrap](https://github.com/containers/bubblewrap). On Debian/Ubuntu,
-install these packages, plus Git for cloning the repository:
+install these packages, plus Git for cloning the repository and curl for fetching V8:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y build-essential pkg-config libssl-dev bubblewrap git ca-certificates
+sudo apt-get install -y build-essential pkg-config libssl-dev bubblewrap git curl ca-certificates
 ```
 
 Clone the repository, build the binary, and add its directory to this
@@ -92,9 +92,14 @@ terminal's `PATH`:
 
 ```bash
 git clone https://github.com/BFJ-Concerns/Swage.git && cd Swage
+cargo run --locked -p fetch-v8
 cargo build --bin swage
 export PATH="$PWD/target/debug:$PATH"
 ```
+
+The fetch command downloads the V8 static library and verifies its checksum
+against `v8-archive.toml`. The repository's `just` build and verification
+recipes run this step automatically.
 
 The `PATH` change applies to this terminal only. In each new terminal,
 repeat the `export PATH` command from the repository root. Examples using

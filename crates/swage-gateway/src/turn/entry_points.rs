@@ -36,7 +36,8 @@ pub async fn process_turn(
     subscription: Arc<Mutex<SubscriptionState>>,
     output_schema_override: Option<serde_json::Value>,
 ) -> Result<(), GatewayError> {
-    process_turn_with_existing_turn(
+    // Keep the turn coordinator's state off the caller's async stack.
+    Box::pin(process_turn_with_existing_turn(
         state,
         session_id,
         target_thread_id,
@@ -49,7 +50,7 @@ pub async fn process_turn(
         None,
         None,
         TurnAttendance::Attended,
-    )
+    ))
     .await
 }
 
