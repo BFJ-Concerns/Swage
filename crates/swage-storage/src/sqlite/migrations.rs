@@ -96,9 +96,8 @@ fn migrations() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// The execution boundary a turn ran inside, recorded when its dispatcher
-/// settled: the isolated, degraded, declared and its detail (the
-/// degradation reason or the declared boundary).
+/// A turn's execution isolation, recorded when its dispatcher settles:
+/// isolated or degraded, with the degradation reason stored as its detail.
 const ADD_TURN_EXECUTION_ISOLATION: &str = "
     ALTER TABLE turns ADD COLUMN isolation_kind TEXT;
     ALTER TABLE turns ADD COLUMN isolation_detail TEXT;
@@ -2758,10 +2757,9 @@ mod tests {
             )
             .expect("select recorded replay columns");
 
-        let arguments: swage_core::CompactToolReplay =
-            serde_json::from_str(&model_arguments).expect("arguments compact replay");
-        assert_eq!(arguments.kind, "tool_arguments");
-        assert_eq!(arguments.preview, r#"{"cmd":"missing-command"}"#);
+        let arguments: serde_json::Value =
+            serde_json::from_str(&model_arguments).expect("native model arguments");
+        assert_eq!(arguments, serde_json::json!({"cmd": "missing-command"}));
 
         let result: swage_core::CompactToolReplay =
             serde_json::from_str(&model_result).expect("result compact replay");

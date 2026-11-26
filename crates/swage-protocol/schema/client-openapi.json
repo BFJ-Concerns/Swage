@@ -2089,6 +2089,16 @@
             "type": "string"
           },
           {
+            "const": "delivery_failed",
+            "description": "The gateway could not deliver output to its destination.",
+            "type": "string"
+          },
+          {
+            "const": "runtime_error",
+            "description": "Automated execution did not produce its required result.",
+            "type": "string"
+          },
+          {
             "const": "internal_error",
             "description": "An unexpected failure inside the gateway.",
             "type": "string"
@@ -6543,6 +6553,13 @@
               }
             ]
           },
+          "model_replay_truncated": {
+            "description": "Whether later turns receive only a preview of this result. Absent when\nthere is no completed, recognised model replay to account for.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "parent_call_id": {
             "type": [
               "string",
@@ -6844,12 +6861,24 @@
         "type": "object"
       },
       "TurnIsolationView": {
-        "description": "The execution boundary a turn ran inside: sandboxed on the host, degraded\nfor a stated reason, or the boundary the install declares for every turn\n(a container image, for one) — which is neither of the other two.",
+        "description": "A turn's execution isolation: sandboxed on the host, unsandboxed because\nthe configuration switched the sandbox off, or degraded for a stated\nreason.",
         "oneOf": [
           {
             "properties": {
               "kind": {
                 "const": "isolated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "sandbox_disabled",
                 "type": "string"
               }
             },
@@ -6871,22 +6900,6 @@
             "required": [
               "kind",
               "reason"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "boundary": {
-                "type": "string"
-              },
-              "kind": {
-                "const": "declared",
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "boundary"
             ],
             "type": "object"
           }
@@ -10240,7 +10253,7 @@
   },
   "info": {
     "title": "Swage client surface",
-    "version": "0.2.0"
+    "version": "0.0.1"
   },
   "openapi": "3.1.0",
   "paths": {

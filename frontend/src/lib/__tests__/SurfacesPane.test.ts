@@ -6,11 +6,16 @@
  * editor opened at, and a save refused as stale shows the newer version and
  * leaves replacing it as a deliberate second act.
  */
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect, afterEach, onTestFinished, vi } from "vitest";
 import { mount, unmount, flushSync } from "svelte";
 import { fromStore, writable } from "svelte/store";
 import { compile } from "svelte/compiler";
 import SurfaceLibrary from "../components/SurfaceLibrary.svelte";
+import MessageDisplay from "../components/MessageDisplay.svelte";
+import messageDisplaySource from "../components/MessageDisplay.svelte?raw";
+import { renderedStyles } from "./rendered-styles";
+import { createConversationStore } from "../stores/conversations";
+import * as conversationApi from "../api/conversations";
 import SurfacesPane from "../components/SurfacesPane.svelte";
 import surfacesPaneSource from "../components/SurfacesPane.svelte?raw";
 import type { SurfacesStore } from "../stores/surfaces";
@@ -303,6 +308,56 @@ describe("SurfacesPane module controls", () => {
     expect(document.querySelector("article.module textarea")).toBeNull();
   });
 
+  it("updates conversation and surface cells through one shared table rule", async () => {
+    const source = "| Name | Shift |\n| --- | --- |\n| Priya | Morning |";
+    const conversations = createConversationStore();
+    vi.spyOn(conversationApi, "getConversation").mockResolvedValue({
+      id: SESSION_ID, agent_id: "gateway", agent_display_name: "Swage default",
+      topic_id: null, created_at: "2026-10-20T12:00:00Z", last_activity: "2026-10-20T12:00:00Z",
+      messages: [{ role: "assistant", content: source, timestamp: "2026-10-20T12:00:00Z", turn_state: "completed" }],
+    });
+    vi.spyOn(conversationApi, "listBranches").mockResolvedValue([]);
+    onTestFinished(() => { vi.restoreAllMocks(); });
+    await conversations.selectConversation(SESSION_ID);
+    const conversation = mount(MessageDisplay, { target: document.body, props: { store: conversations } });
+    onTestFinished(() => unmount(conversation));
+    component = mount(SurfacesPane, {
+      target: document.body,
+      props: { store: fakeStore(surface([module("m-1", source, 0)])), sessionId: SESSION_ID },
+    });
+    flushSync();
+    const styles: HTMLStyleElement[] = [];
+    onTestFinished(() => styles.forEach((style) => style.remove()));
+    for (const [source, root, filename] of [
+      [messageDisplaySource, ".message-display", "MessageDisplay.svelte"],
+      [surfacesPaneSource, ".module-content", "SurfacesPane.svelte"],
+    ]) {
+      const scope = [...document.querySelector(root)!.classList].find((name) => name.startsWith("svelte-")) ?? "svelte-unstyled";
+      const { css } = compile(source, { filename, css: "external", cssHash: () => scope });
+      const style = renderedStyles(css!.code);
+      styles.push(style);
+    }
+    const shared = renderedStyles();
+    styles.push(shared);
+    const cells = [".assistant-content", ".module-content"].flatMap((root) =>
+      [...document.querySelectorAll(`${root} th, ${root} td`)],
+    );
+    expect(cells).toHaveLength(8);
+    for (const cell of cells) {
+      expect(getComputedStyle(cell).borderLeftStyle).toBe("solid");
+      expect(getComputedStyle(cell).borderLeftWidth).toBe("1px");
+    }
+    // Change the production stylesheet's shared cell rule, never a rule
+    // supplied by this test. Independently owned rules will not follow it.
+    for (const rule of shared.sheet!.cssRules) {
+      if (rule instanceof CSSStyleRule && rule.selectorText.includes(".riso-tables td")) {
+        rule.style.setProperty("padding", "17px");
+      }
+    }
+    shared.textContent = [...shared.sheet!.cssRules].map((rule) => rule.cssText).join("\n");
+    for (const cell of cells) expect(getComputedStyle(cell).paddingLeft).toBe("17px");
+  });
+
   it("renders document tables as padded, separated cells", () => {
     const rota = "| Name | Shift | Cost | Status |\n| --- | --- | --- | --- |\n| Priya | Morning | 280 | Confirmed |";
     const store = fakeStore(surface([module("m-1", rota, 0)]));
@@ -325,12 +380,14 @@ describe("SurfacesPane module controls", () => {
     const scope = Array.from(content!.classList).find((name) => name.startsWith("svelte-")) ??
       "svelte-unstyled";
     const { css } = compile(surfacesPaneSource, { filename: "SurfacesPane.svelte", css: "external", cssHash: () => scope });
-    const style = document.createElement("style");
-    style.textContent = css?.code ?? "";
-    document.head.append(style);
+    const style = renderedStyles(css?.code ?? "");
     try {
       for (const cell of table!.querySelectorAll("th, td")) {
         const computed = getComputedStyle(cell);
+        expect(computed.borderLeftStyle).toBe("solid");
+        expect(computed.borderLeftWidth).toBe("1px");
+        expect(computed.borderTopStyle).toBe("solid");
+        expect(computed.borderTopWidth).toBe("1px");
         // Beyond the browser default's 1px, which lets cell texts touch.
         expect(parseFloat(computed.paddingLeft)).toBeGreaterThanOrEqual(4);
         expect(parseFloat(computed.paddingRight)).toBeGreaterThanOrEqual(4);

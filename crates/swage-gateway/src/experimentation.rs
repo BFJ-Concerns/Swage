@@ -44,6 +44,13 @@ pub const LOCATION_MEMORY_CURATOR_PROMPT: &str = "prompts.memory_curator";
 /// first variant; a candidate decision model's instruction registers here.
 pub const LOCATION_REQUEST_JUDGE_PROMPT: &str = "prompts.request_judge";
 
+/// The succession summariser's instruction: the text the hand-over notes
+/// are written under when a session's history outgrows its room or keeps
+/// hitting walls. Drawn when a summary is first asked for, never before, so
+/// a session that never summarises holds no selection. The authored default
+/// is the first variant.
+pub const LOCATION_SUCCESSION_SUMMARY_PROMPT: &str = "prompts.succession_summary";
+
 /// Why the selected variant was selected. Recorded verbatim; the reasons are
 /// the audit trail's vocabulary, so they name situations, not code paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -25,6 +25,7 @@ vi.mock("../api/turns", () => ({
 
 import { fetchTurnContext } from "../api/turns";
 import MessageDisplay from "../components/MessageDisplay.svelte";
+import { renderedStyles } from "./rendered-styles";
 import messageDisplaySource from "../components/MessageDisplay.svelte?raw";
 import type { ConversationStore } from "../stores/conversations";
 import {
@@ -171,6 +172,38 @@ afterEach(() => {
   }
   _msgSeq = 0;
   vi.resetAllMocks();
+});
+
+describe("fenced code rendering", () => {
+  it("keeps highlighted source exact across conversation remounts", async () => {
+    const yaml = "- first\n- second\n";
+    const xml = '<root name="example">&amp;<child /></root>\n';
+    const content = `\`\`\`yaml\n${yaml}\`\`\`\n\n\`\`\`xml\n${xml}\`\`\``;
+    const store = makeConversationStore([makeAssistantMessage(content)]);
+    let firstMarkup: string[] | undefined;
+
+    for (let view = 0; view < 5; view++) {
+      component = mount(MessageDisplay, {
+        target: document.body,
+        props: { store, streamingStore: makeStreamingStore() },
+      });
+      flushSync();
+
+      const blocks = [...document.querySelectorAll(".assistant-content pre code")];
+      expect(blocks.map((block) => block.textContent)).toEqual([yaml, xml]);
+      for (const block of blocks) {
+        expect(block.textContent).not.toContain("hljs-");
+        expect(block.textContent).not.toContain("&lt;");
+        expect(block.querySelector('span[class^="hljs-"]')).not.toBeNull();
+      }
+      const markup = blocks.map((block) => block.innerHTML);
+      if (firstMarkup) expect(markup).toEqual(firstMarkup);
+      else firstMarkup = markup;
+
+      await unmount(component);
+      component = undefined;
+    }
+  });
 });
 
 describe("provider failure notice", () => {
@@ -1207,11 +1240,29 @@ describe("assistant message width", () => {
       css: "external",
       cssHash: () => scope,
     });
-    const style = document.createElement("style");
-    style.textContent = css!.code;
-    document.head.append(style);
+    const style = renderedStyles(css!.code);
     onTestFinished(() => style.remove());
   }
+
+  it.each([false, true])("caps plain reply prose while streaming=%s", (live) => {
+    const text = "A long plain reply. ".repeat(100);
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: {
+        store: makeConversationStore(live ? [] : [makeAssistantMessage(text)]),
+        streamingStore: { ...makeStreamingStore([], live), streamedContent: live ? text : "" },
+        displayPreferences: {
+          theme: "system", density: "compact", message_model_display: "off",
+          conversation_rendering: "plain", print_marks: "full",
+        },
+      },
+    });
+    applyComponentStyles();
+    const body = document.querySelector<HTMLElement>(".plain-body")!;
+    expect(body.textContent).toBe(text);
+    expect(getComputedStyle(body).maxWidth).toBe("80ch");
+    expect(getComputedStyle(body).whiteSpace).toBe("pre-wrap");
+  });
 
   const wideReply = [
     "Here is the comparison.",
@@ -1335,6 +1386,80 @@ describe("authorship of platform-written messages", () => {
 describe("message link navigation", () => {
   afterEach(() => { document.body.replaceChildren(); });
 
+  const childId = "18315217-1234-4567-89ab-0123456789ab";
+
+  it.each([
+    `/sessions/${childId}`,
+    `swage://session/${childId}`,
+    `/sessions/${childId}?view=reply`,
+    `swage://session/${childId}?view=reply`,
+    `${window.location.origin}/sessions/${childId}?view=reply`,
+  ])(
+    "opens a child conversation from a reply: %s", (href) => {
+      const onNavigate = vi.fn();
+      const component = mount(MessageDisplay, {
+        target: document.body,
+        props: { store: makeConversationStore([makeAssistantMessage(`[Open child session](${href})`)]), onNavigate },
+      });
+      onTestFinished(() => unmount(component));
+      flushSync();
+      const link = document.querySelector<HTMLAnchorElement>(".markdown-body a")!;
+      const expectedPath = `/conversations/${childId}${new URL(href, window.location.origin).search}`;
+      expect(link.getAttribute("href")).toBe(expectedPath);
+      const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+      let intercepted: boolean | undefined;
+      // Observe the handler before suppressing jsdom's unsupported navigation.
+      document.addEventListener("click", (event) => {
+        intercepted = event.defaultPrevented;
+        event.preventDefault();
+      }, { once: true });
+      link.dispatchEvent(click);
+      expect(onNavigate).toHaveBeenCalledExactlyOnceWith(expectedPath);
+      expect(intercepted).toBe(true);
+    },
+  );
+
+  it.each([
+    "swage://settings/providers",
+    "swage://session/not-a-conversation-id",
+    `swage://session/${childId}/extra`,
+    `swage://session/${childId}#extra`,
+    ` swage://session/${childId}`,
+    `swage://session/${childId} `,
+    `swage://session/${childId}\n`,
+  ])("strips an unsupported swage href: %s", (href) => {
+    const component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store: makeConversationStore([makeAssistantMessage(`<a href="${href}">link</a>`)]) },
+    });
+    onTestFinished(() => unmount(component));
+    flushSync();
+    expect(document.querySelector(".markdown-body a")!.hasAttribute("href")).toBe(false);
+  });
+
+  it("keeps external and javascript links out of app navigation", () => {
+    const onNavigate = vi.fn();
+    const component = mount(MessageDisplay, {
+      target: document.body,
+      props: {
+        store: makeConversationStore([makeAssistantMessage(
+          '<a href="https://elsewhere.example/page">external</a> <a href="javascript:alert(1)">unsafe</a>',
+        )]),
+        onNavigate,
+      },
+    });
+    onTestFinished(() => unmount(component));
+    flushSync();
+    const links = document.querySelectorAll<HTMLAnchorElement>(".markdown-body a");
+    expect(links[0].getAttribute("href")).toBe("https://elsewhere.example/page");
+    expect(links[1].hasAttribute("href")).toBe(false);
+    for (const link of links) {
+      document.addEventListener("click", (event) => event.preventDefault(), { once: true });
+      link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+    }
+    expect(onNavigate).not.toHaveBeenCalled();
+  });
+
   it.each(["/settings/memory?scope=general&reference=general%2Fprofile", `${window.location.origin}/settings/memory?scope=general&reference=general%2Fprofile`])("routes a memory notice inside the app: %s", (href) => {
     const onNavigate = vi.fn();
     const component = mount(MessageDisplay, {
@@ -1357,6 +1482,10 @@ describe("message link navigation", () => {
 
   it.each([
     { href: "https://elsewhere.example/page", ctrlKey: false },
+    { href: `https://elsewhere.example/sessions/${childId}`, ctrlKey: false },
+    { href: `/sessions/${childId}#details`, ctrlKey: false },
+    { href: `/sessions/${childId}?view=reply`, ctrlKey: true },
+    { href: `swage://session/${childId}`, ctrlKey: true },
     { href: "/settings/memory", ctrlKey: true },
     { href: "/api/memory/pages", ctrlKey: false },
   ])("leaves ordinary browser navigation intact: $href ($ctrlKey)", ({ href, ctrlKey }) => {
@@ -1368,6 +1497,9 @@ describe("message link navigation", () => {
     onTestFinished(() => unmount(component));
     flushSync();
     const link = document.querySelector<HTMLAnchorElement>(".markdown-body a")!;
+    if (href.includes("#") || href.startsWith("https://elsewhere.example")) {
+      expect(link.getAttribute("href")).toBe(href);
+    }
     const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, ctrlKey });
     let intercepted: boolean | undefined;
     // Observe the component's decision, then suppress jsdom's unsupported document navigation.

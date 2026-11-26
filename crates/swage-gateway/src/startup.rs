@@ -28,18 +28,15 @@ const CODEX_COMPLETION_UNSUPPORTED_REASON: &str = "Codex turns run through the A
 /// Optional overrides take precedence over configured values:
 /// - `port` — TCP port to listen on
 /// - `host` — host address to bind
-/// - `config_path` — path to a TOML configuration file (name used for lookup)
 ///
 /// Errors during startup are printed to stderr and the process exits.
-pub async fn run_gateway(port: Option<u16>, host: Option<String>, config_path: Option<String>) {
-    // Step 1: Load configuration. Errors go to stderr — no logging yet.
-    // The gateway's own configuration is the global layer with a default
-    // agent overlay; a configured name selects the topic whose layer applies.
-    let scope = match config_path.as_deref() {
-        Some(name) => swage_core::ScopeLocation::topic(name),
-        None => swage_core::ScopeLocation::General,
-    };
-    let mut config = match swage_config::load_resolved_config(&scope, "default") {
+pub async fn run_gateway(port: Option<u16>, host: Option<String>) {
+    // Step 1: Load the running configuration. Errors go to stderr — no
+    // logging yet. This is the global layer, read from disk here and at no
+    // later point: settings saves replace it in place, and each turn overlays
+    // its session's topic and agent layers on it (swage-config's resolver
+    // states the reload policy).
+    let mut config = match swage_config::load_running_config() {
         Ok(c) => c,
         Err(e) => {
             for problem in &e.problems {
@@ -760,11 +757,12 @@ pub(crate) fn build_tool_dispatcher_with_browser(
     config_root: &std::path::Path,
 ) -> crate::tool::ToolDispatcher {
     use crate::tool::{
-        Tool, browser::browser_tools, docs_read::DocsReadTool, hold::WorkflowHoldTool,
-        knowledge::KnowledgeCiteTool, knowledge::KnowledgeCurateOrientationTool,
-        knowledge::KnowledgeCurateTool, knowledge::KnowledgeOrientTool,
-        knowledge::KnowledgeRecordTool, knowledge::KnowledgeSearchTool, memory::MemoryReadTool,
-        memory::MemoryWriteTool, plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
+        Tool, agent_definition::AgentDefinitionTool, browser::browser_tools,
+        docs_read::DocsReadTool, hold::WorkflowHoldTool, knowledge::KnowledgeCiteTool,
+        knowledge::KnowledgeCurateOrientationTool, knowledge::KnowledgeCurateTool,
+        knowledge::KnowledgeOrientTool, knowledge::KnowledgeRecordTool,
+        knowledge::KnowledgeSearchTool, memory::MemoryReadTool, memory::MemoryWriteTool,
+        plugin::discover_plugin_tools, python_execute::PythonExecuteTool,
         run_event::RunEventPostTool, schedule::ScheduleTool, schedule::WakeMeLaterTool,
         session_variable::SessionVariableTool, surface::SurfaceLibraryTool,
         surface::SurfaceReadTool, surface::SurfaceWriteTool, task_definition::TaskDefinitionTool,
@@ -805,6 +803,10 @@ pub(crate) fn build_tool_dispatcher_with_browser(
         // Schedule tools reach the gateway's schedule service through the host
         // tool context; both are host-only (requires_device_execution).
         Arc::new(ScheduleTool),
+        // The two definition kinds a conversation can author: the agents a
+        // person picks for a session, and the contracts a delegated child
+        // runs under. Both host-only, both audited through their service.
+        Arc::new(AgentDefinitionTool),
         Arc::new(TaskDefinitionTool),
         Arc::new(WakeMeLaterTool),
         Arc::new(RunEventPostTool),
@@ -2398,6 +2400,83 @@ mod tests {
                 "the orientation names `{tool}`, which is no tool of this gateway",
             );
         }
+    }
+
+    /// The registered-secrets section names, from the tools' own
+    /// declarations, each gateway tool whose parameters resolve a
+    /// `secret://` reference — so the text never names a tool or parameter
+    /// the executor does not resolve, nor omits one it does.
+    #[tokio::test]
+    async fn orientation_names_the_tools_that_resolve_secret_references() {
+        use swage_context::element::ContextElement;
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let dispatcher = build_tool_dispatcher(
+            &swage_config::ResolvedConfig::default(),
+            storage as Arc<dyn swage_storage::store::Storage>,
+            std::path::Path::new(".swage"),
+            &std::sync::OnceLock::new(),
+        );
+        let registry = dispatcher.registry();
+        let offered = registry.offered(registry.list().into_iter().map(str::to_string).collect());
+        assert!(
+            !offered.secret_reference_parameters.is_empty(),
+            "the gateway ships at least one tool that resolves a secret reference"
+        );
+        for (tool, parameters) in &offered.secret_reference_parameters {
+            let declared = registry
+                .get(tool)
+                .expect("a declared resolver is a registered tool");
+            assert_eq!(
+                parameters,
+                &declared
+                    .device_secret_keys()
+                    .iter()
+                    .map(|key| (*key).to_owned())
+                    .collect::<Vec<_>>()
+            );
+            for parameter in parameters {
+                assert!(
+                    declared.parameters()["properties"].get(parameter).is_some(),
+                    "`{tool}` resolves `{parameter}`, which its schema does not offer"
+                );
+            }
+        }
+
+        let text = swage_context::orientation::OrientationElement::new(
+            swage_context::orientation::SessionEnvironment {
+                workspaces: vec![],
+                topic_name: String::new(),
+                topic_description: String::new(),
+                tool_root: swage_context::orientation::ToolRoot::ManagedScratch(
+                    "/scratch/session".into(),
+                ),
+                started_at: chrono::Utc::now(),
+                channel: None,
+            },
+            vec![],
+            offered.names.clone(),
+            offered.secret_reference_parameters.clone(),
+        )
+        .content()[0]
+            .text_content();
+        for (tool, parameters) in &offered.secret_reference_parameters {
+            let parameters = parameters
+                .iter()
+                .map(|parameter| format!("`{parameter}`"))
+                .collect::<Vec<_>>()
+                .join(" and ");
+            assert!(
+                text.contains(&format!("`{tool}` resolves one in {parameters}")),
+                "{text}"
+            );
+        }
+        assert!(
+            text.contains(
+                "Every other tool, `shell` included, receives a reference as literal text"
+            ),
+            "{text}"
+        );
     }
 
     #[tokio::test]

@@ -11,8 +11,6 @@
 //! `record_reconstruction_gap` and escalated only when the gap itself cannot
 //! be recorded.
 
-use std::mem;
-
 use super::{
     AgentEvent, AppState, GatewayError, Uuid, WorkflowProviderRoundOutcome, record_durability,
 };
@@ -115,7 +113,9 @@ pub(crate) async fn apply_provider_snapshot_event(
             }
             if let Some(error) = &mut record.error {
                 match known_secret_values(state).await {
-                    Ok(secrets) => redact_text(error, &secrets),
+                    Ok(secrets) => {
+                        redact_text(error, &secrets);
+                    }
                     Err(_) => {
                         *error =
                             "Error detail omitted because secret redaction was unavailable".into();
@@ -173,8 +173,10 @@ pub(crate) async fn apply_provider_snapshot_event(
     }
 }
 
-async fn known_secret_values(state: &AppState) -> Result<Vec<String>, swage_core::StorageError> {
-    state
+pub(super) async fn known_secret_values(
+    state: &AppState,
+) -> Result<Vec<String>, swage_core::StorageError> {
+    let mut values = state
         .secret_manager
         .known_values()
         .await
@@ -183,32 +185,45 @@ async fn known_secret_values(state: &AppState) -> Result<Vec<String>, swage_core
             other => swage_core::StorageError::Corruption {
                 message: format!("secret redaction set could not be read: {other}"),
             },
-        })
+        })?;
+    values.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+    Ok(values)
 }
 
-fn redact_text(text: &mut String, secret_values: &[String]) {
-    let mut redacted = mem::take(text);
+pub(super) const REDACTED_SECRET: &str = "[REDACTED_SECRET]";
+
+pub(super) fn redact_text(text: &mut String, secret_values: &[impl AsRef<str>]) -> bool {
+    let mut replaced = false;
     for secret in secret_values {
-        redacted = redacted.replace(secret, "[REDACTED_SECRET]");
+        let secret = secret.as_ref();
+        if text.contains(secret) {
+            *text = text.replace(secret, REDACTED_SECRET);
+            replaced = true;
+        }
     }
-    *text = redacted;
+    replaced
 }
 
-fn redact_secret_values(value: &mut serde_json::Value, secret_values: &[String]) {
+pub(super) fn redact_secret_values(
+    value: &mut serde_json::Value,
+    secret_values: &[String],
+) -> bool {
+    let mut replaced = false;
     match value {
-        serde_json::Value::String(text) => redact_text(text, secret_values),
+        serde_json::Value::String(text) => return redact_text(text, secret_values),
         serde_json::Value::Array(values) => {
             for value in values {
-                redact_secret_values(value, secret_values);
+                replaced |= redact_secret_values(value, secret_values);
             }
         }
         serde_json::Value::Object(values) => {
             for value in values.values_mut() {
-                redact_secret_values(value, secret_values);
+                replaced |= redact_secret_values(value, secret_values);
             }
         }
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
     }
+    replaced
 }
 
 pub(crate) fn append_provider_visible_reasoning(

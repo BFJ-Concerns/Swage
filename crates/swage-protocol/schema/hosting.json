@@ -1380,6 +1380,68 @@
         "devices"
       ]
     },
+    "PythonExecuteToolConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "idle_ttl_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_workers": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "require_sandbox": {
+          "type": "boolean"
+        },
+        "runtime_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtime_policy": {
+          "$ref": "#/$defs/PythonRuntimePolicy"
+        },
+        "startup_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "warm_target": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "timeout_secs",
+        "startup_timeout_secs",
+        "idle_ttl_secs",
+        "warm_target",
+        "max_workers",
+        "runtime_policy",
+        "require_sandbox"
+      ]
+    },
+    "PythonRuntimePolicy": {
+      "type": "string",
+      "enum": [
+        "bundled_then_system"
+      ]
+    },
     "SandboxPolicy": {
       "description": "Per-turn sandbox policy and timeouts.\n\nSerialised to the sandboxed child, which applies the write set and the\nbroad read through Landlock; the host applies the same policy through\nbubblewrap's mounts, where the masks and the read-only paths are enforced.",
       "type": "object",
@@ -1422,6 +1484,17 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "tool_runtime": {
+          "description": "Session tool settings carried to the child, which builds its tools\nfrom them.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolRuntimeSettings"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "working_directory": {
@@ -1645,6 +1718,22 @@
         }
       ]
     },
+    "SearchProviderConfig": {
+      "type": "object",
+      "properties": {
+        "base_url": {
+          "type": "string"
+        },
+        "provider_type": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "provider_type",
+        "base_url"
+      ]
+    },
     "SecretListResponse": {
       "type": "object",
       "properties": {
@@ -1777,6 +1866,45 @@
             "session_id"
           ]
         }
+      ]
+    },
+    "ToolRuntimeSettings": {
+      "type": "object",
+      "properties": {
+        "max_output_bytes": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "plugin_directory": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "python_execute": {
+          "$ref": "#/$defs/PythonExecuteToolConfig"
+        },
+        "search": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SearchProviderConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "shell_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "shell_timeout_secs",
+        "python_execute",
+        "max_output_bytes"
       ]
     },
     "UpdateAgentDefinitionRequest": {

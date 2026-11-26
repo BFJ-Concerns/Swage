@@ -74,25 +74,23 @@ pub(crate) struct GatewayDispatcherBuild {
     pub(crate) isolation: ExecutionIsolation,
 }
 
-/// Where a turn's tools run. `Declared` is the boundary the install states
-/// for every turn (`AppState::declared_execution_boundary`): the turn is
-/// neither sandboxed per turn nor degraded, and its record says so.
+/// Whether a turn's tools run sandboxed, unsandboxed because the
+/// configuration switched the sandbox off, or without the isolation a sandbox
+/// meant to run would have given, for a stated reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExecutionIsolation {
     Isolated,
+    SandboxDisabled,
     Degraded { reason: String },
-    Declared { boundary: String },
 }
 
 /// The turn-row record of an isolation.
 pub(crate) fn turn_isolation(isolation: &ExecutionIsolation) -> swage_storage::TurnIsolation {
     match isolation {
         ExecutionIsolation::Isolated => swage_storage::TurnIsolation::Isolated,
+        ExecutionIsolation::SandboxDisabled => swage_storage::TurnIsolation::SandboxDisabled,
         ExecutionIsolation::Degraded { reason } => swage_storage::TurnIsolation::Degraded {
             reason: reason.clone(),
-        },
-        ExecutionIsolation::Declared { boundary } => swage_storage::TurnIsolation::Declared {
-            boundary: boundary.clone(),
         },
     }
 }
@@ -276,9 +274,17 @@ pub(crate) fn build_sandbox_config(
     agent_config: &AgentConfig,
     workspace_policy: Option<&TrustedWorkspacePolicy>,
     roots: &PolicyRoots,
-) -> Result<swage_sandbox::SandboxConfig, swage_sandbox::SandboxConfigError> {
+    tools: &swage_config::ToolConfig,
+) -> Result<swage_sandbox::SandboxConfig, swage_core::SandboxError> {
     let working_directory = sandbox_path(&agent_config.working_directory);
-    let mut builder = swage_sandbox::SandboxConfig::builder().working_directory(&working_directory);
+    let runtime = crate::settings::tool_runtime_from_config(tools).map_err(|error| {
+        swage_core::SandboxError::SpawnFailed {
+            message: format!("failed to configure sandbox tools: {error}"),
+        }
+    })?;
+    let mut builder = swage_sandbox::SandboxConfig::builder()
+        .working_directory(&working_directory)
+        .tool_runtime(runtime);
     let mut granted: Vec<PathBuf> = Vec::new();
     let masked = masked_paths(roots);
 
@@ -363,7 +369,11 @@ pub(crate) fn build_sandbox_config(
             .write_path(&directory)
             .tool_output_directory(directory);
     }
-    builder.build()
+    builder
+        .build()
+        .map_err(|error| swage_core::SandboxError::SpawnFailed {
+            message: format!("failed to build sandbox config: {error}"),
+        })
 }
 
 /// The private paths a turn's sandbox masks, each only where it exists: the
@@ -428,37 +438,17 @@ pub(super) async fn build_turn_sandbox(
             })?;
     }
 
-    // An install that declares its boundary (a container image, for one)
-    // runs every turn inside it: no per-turn sandbox is built, the host
-    // sandbox settings are not consulted, and the turn's record names the
-    // boundary rather than "isolated" or "degraded".
-    if let Some(boundary) = state.declared_execution_boundary.as_ref() {
-        return Ok(TurnSandboxBuild {
-            sandbox: None,
-            isolation: ExecutionIsolation::Declared {
-                boundary: boundary.clone(),
-            },
-            backend: SandboxBackend::None,
-        });
-    }
     if !config.sandbox.enabled {
         return Ok(TurnSandboxBuild {
             sandbox: None,
-            isolation: ExecutionIsolation::Degraded {
-                reason: "sandbox_disabled_by_configuration".into(),
-            },
+            isolation: ExecutionIsolation::SandboxDisabled,
             backend: SandboxBackend::None,
         });
     }
     #[cfg(test)]
     if state.test_sandbox_enabled() {
         let roots = PolicyRoots::from_environment(&state.config_root)?;
-        let config =
-            build_sandbox_config(agent_config, workspace_policy, &roots).map_err(|error| {
-                swage_core::SandboxError::SpawnFailed {
-                    message: format!("failed to build test sandbox config: {error}"),
-                }
-            })?;
+        let config = build_sandbox_config(agent_config, workspace_policy, &roots, &config.tools)?;
         return Ok(TurnSandboxBuild {
             sandbox: Some(Arc::new(PolicyEnforcingTestSandbox { config })),
             isolation: ExecutionIsolation::Isolated,
@@ -572,11 +562,7 @@ async fn build_turn_sandbox_for_backend_selection(
 ) -> Result<TurnSandboxBuild, swage_core::SandboxError> {
     let roots = PolicyRoots::from_environment(&state.config_root)?;
     let mut sandbox_config =
-        build_sandbox_config(agent_config, workspace_policy, &roots).map_err(|error| {
-            swage_core::SandboxError::SpawnFailed {
-                message: format!("failed to build sandbox config: {error}"),
-            }
-        })?;
+        build_sandbox_config(agent_config, workspace_policy, &roots, &config.tools)?;
 
     if let Some(credentials) = credentials {
         credentials.configure(&mut sandbox_config)?;
@@ -781,10 +767,12 @@ pub(crate) async fn build_gateway_dispatcher(
             || sandbox_build.backend == SandboxBackend::Bubblewrap)
     {
         let roots = PolicyRoots::from_environment(&state.config_root)?;
-        let mut policy = build_sandbox_config(agent_config, workspace_policy.as_ref(), &roots)
-            .map_err(|error| swage_core::SandboxError::SpawnFailed {
-                message: error.to_string(),
-            })?;
+        let mut policy = build_sandbox_config(
+            agent_config,
+            workspace_policy.as_ref(),
+            &roots,
+            &config.tools,
+        )?;
         credentials.configure(&mut policy)?;
         if let Some(signer) = &signer {
             signer.configure(&mut policy)?;
@@ -864,15 +852,34 @@ pub(crate) async fn build_gateway_dispatcher(
     })
 }
 
-pub(crate) async fn record_degraded_execution(
+/// Record in the audit trail that a build's tools run without a sandbox:
+/// `execution_sandbox_disabled` where the configuration switched it off,
+/// `execution_isolation_degraded` with its reason where a sandbox meant to
+/// run could not. A sandboxed build records nothing here.
+pub(crate) async fn record_unsandboxed_execution(
     state: &AppState,
     isolation: &ExecutionIsolation,
     execution_context: &'static str,
     session_id: Option<Uuid>,
     turn_id: Option<Uuid>,
 ) -> Result<(), swage_core::GatewayError> {
-    let ExecutionIsolation::Degraded { reason } = isolation else {
-        return Ok(());
+    let (id_prefix, event_kind, summary, metadata) = match isolation {
+        ExecutionIsolation::Isolated => return Ok(()),
+        ExecutionIsolation::SandboxDisabled => (
+            "sandbox-disabled",
+            "execution_sandbox_disabled",
+            "Execution ran with the sandbox switched off by configuration",
+            serde_json::json!({ "execution_context": execution_context }),
+        ),
+        ExecutionIsolation::Degraded { reason } => (
+            "sandbox-degradation",
+            "execution_isolation_degraded",
+            "Execution isolation was degraded",
+            serde_json::json!({
+                "execution_context": execution_context,
+                "reason": reason,
+            }),
+        ),
     };
     let (entity_kind, entity_id) = turn_id.map_or_else(
         || {
@@ -886,16 +893,13 @@ pub(crate) async fn record_degraded_execution(
     state
         .storage
         .create_audit_event(swage_storage::NewAuditEvent {
-            id: format!("sandbox-degradation-{}", Uuid::new_v4()),
+            id: format!("{id_prefix}-{}", Uuid::new_v4()),
             session_id,
             entity_kind: entity_kind.into(),
             entity_id,
-            event_kind: "execution_isolation_degraded".into(),
-            summary: "Execution isolation was degraded".into(),
-            metadata: serde_json::json!({
-                "execution_context": execution_context,
-                "reason": reason,
-            }),
+            event_kind: event_kind.into(),
+            summary: summary.into(),
+            metadata,
         })
         .await?;
     Ok(())
@@ -923,7 +927,7 @@ pub(crate) async fn turn_offered_tools(
     topic_id: Option<Uuid>,
     session_id: Option<Uuid>,
     session_approval_grants: &std::collections::HashSet<crate::state::ApprovalGrantKey>,
-) -> std::collections::BTreeSet<String> {
+) -> swage_tool::registry::OfferedTools {
     use swage_tool::permission::{PermissionCheckResult, check_permission};
 
     let registry = state
@@ -940,7 +944,7 @@ pub(crate) async fn turn_offered_tools(
     let approval_offers = config.default_provider_protocol() != swage_config::Protocol::Codex;
     let device = crate::device::resolve_device(state, session_metadata).await;
     let filter = build_gateway_advertisement_filter(device.as_ref(), agent_config);
-    registry
+    let names = registry
         .list()
         .into_iter()
         .filter(|name| match check_permission(&permissions, name) {
@@ -954,7 +958,8 @@ pub(crate) async fn turn_offered_tools(
                 .is_some_and(|tool| filter.as_ref().is_none_or(|filter| filter(tool.as_ref())))
         })
         .map(str::to_string)
-        .collect()
+        .collect();
+    registry.offered(names)
 }
 
 pub(crate) async fn build_gateway_dispatcher_for_unattended_execution(
@@ -971,7 +976,7 @@ pub(crate) async fn build_gateway_dispatcher_for_unattended_execution(
     // delegated child, the sender's — so no turn row is stamped here: a turn's
     // own boundary is written where its dispatcher settles for it
     // (dispatcher_settlement.rs), never from a build made on its behalf.
-    record_degraded_execution(
+    record_unsandboxed_execution(
         state,
         &build.isolation,
         execution_context,
@@ -997,9 +1002,7 @@ mod tests {
             .args(["--exact", name, "--nocapture"])
             .env("SWAGE_DISPATCHER_REGRESSION_CHILD", "1");
         if no_home {
-            command
-                .env_remove("HOME")
-                .env_remove("SWAGE_EXECUTION_BOUNDARY");
+            command.env_remove("HOME");
         } else {
             let runtime = swage_python::runtime_resolver::ResolvedPythonRuntime::resolve(
                 &swage_config::model::PythonExecuteToolConfig::default(),
@@ -1007,8 +1010,7 @@ mod tests {
             .unwrap();
             command
                 .env("SWAGE_TEST_PYTHON", runtime.executable_path)
-                .env("PATH", "")
-                .env("SWAGE_EXECUTION_BOUNDARY", "container");
+                .env("PATH", "");
         }
         let output = command.output().unwrap();
         assert!(
@@ -1112,27 +1114,6 @@ mod tests {
     }
 
     #[test]
-    fn declared_boundary_python_runs_without_bubblewrap() {
-        if !run_dispatcher_environment_case(
-            "turn::dispatcher::tests::declared_boundary_python_runs_without_bubblewrap",
-            false,
-        ) {
-            return;
-        }
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let mut config = swage_config::ResolvedConfig::default();
-            config.tools.python_execute.require_sandbox = false;
-            config.tools.python_execute.enabled = true;
-            config.tools.python_execute.warm_target = 0;
-            config.tools.python_execute.runtime_path =
-                Some(std::env::var("SWAGE_TEST_PYTHON").unwrap());
-            config.dangerously_skip_permissions = true;
-            assert!(config.sandbox.enabled);
-            environment_case_dispatcher(config, true).await;
-        });
-    }
-
-    #[test]
     fn degraded_python_records_http_without_bubblewrap() {
         degraded_python_case(
             "turn::dispatcher::tests::degraded_python_records_http_without_bubblewrap",
@@ -1183,7 +1164,6 @@ mod tests {
                 .env("SWAGE_ENABLE_TEST_SANDBOX", "1")
                 .env("SWAGE_TEST_PYTHON", runtime.executable_path)
                 .env("PATH", "")
-                .env_remove("SWAGE_EXECUTION_BOUNDARY")
                 .output()
                 .unwrap();
             assert!(
@@ -1382,7 +1362,7 @@ mod tests {
     async fn degraded_execution_is_recorded_in_the_unified_audit_trail() {
         let (state, session_id) = make_state_with_session(Vec::new()).await;
         let turn_id = Uuid::new_v4();
-        record_degraded_execution(
+        record_unsandboxed_execution(
             &state,
             &ExecutionIsolation::Degraded {
                 reason: "fallback_sandbox_without_namespace_isolation".into(),
@@ -1403,15 +1383,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_declared_boundary_runs_every_turn_inside_it_and_records_no_degradation() {
-        let (mut state, session_id) = make_state_with_session(Vec::new()).await;
-        state.declared_execution_boundary = Some("container".into());
+    async fn disabled_sandbox_persists_its_degraded_reason() {
+        let (state, session_id) = make_state_with_session(Vec::new()).await;
         let workspace = tempfile::tempdir().unwrap();
         let agent_config = AgentConfig::new("gateway")
             .with_workspace(workspace.path(), vec![workspace.path().to_path_buf()]);
-        // Even with the host sandbox switched off: the declaration decides.
         let mut config = swage_config::ResolvedConfig::default();
         config.sandbox.enabled = false;
+        let turn_id =
+            crate::automated_turn::create_placeholder_turn(&state, session_id, "gateway", "Hello")
+                .await
+                .unwrap();
 
         let build = build_turn_sandbox(
             &state,
@@ -1423,45 +1405,29 @@ mod tests {
             None,
         )
         .await
-        .expect("a declared boundary needs no sandbox of its own");
+        .unwrap();
+        record_turn_isolation(&state, &build.isolation, turn_id)
+            .await
+            .unwrap();
+
+        let turn = state.storage.get_turn(turn_id).await.unwrap().unwrap();
         assert_eq!(
-            build.isolation,
-            ExecutionIsolation::Declared {
-                boundary: "container".into()
-            }
+            turn.execution_isolation,
+            Some(swage_storage::TurnIsolation::SandboxDisabled),
+            "a sandbox switched off by configuration is recorded as that, not as degraded"
         );
         assert_eq!(build.backend, SandboxBackend::None);
-
-        record_degraded_execution(
-            &state,
-            &build.isolation,
-            "interactive turn",
-            Some(session_id),
-            Some(Uuid::new_v4()),
-        )
-        .await
-        .unwrap();
-        assert!(
-            state.storage.list_audit_events().await.unwrap().is_empty(),
-            "a declared boundary is neither isolated nor degraded: nothing to audit"
-        );
-        assert_eq!(
-            turn_isolation(&build.isolation),
-            swage_storage::TurnIsolation::Declared {
-                boundary: "container".into()
-            }
-        );
     }
 
     #[tokio::test]
-    async fn disabled_gateway_sandbox_remains_degraded() {
+    async fn disabled_gateway_sandbox_needs_no_degraded_execution_opt_in() {
         let (state, _session_id) = make_state_with_session(Vec::new()).await;
         let workspace = tempfile::tempdir().unwrap();
         let agent_config = AgentConfig::new("gateway")
             .with_workspace(workspace.path(), vec![workspace.path().to_path_buf()]);
         let mut config = swage_config::ResolvedConfig::default();
         config.sandbox.enabled = false;
-        config.sandbox.allow_degraded_execution = true;
+        assert!(!config.sandbox.allow_degraded_execution);
 
         let build = build_turn_sandbox(
             &state,
@@ -1473,14 +1439,9 @@ mod tests {
             None,
         )
         .await
-        .expect("explicitly opted-in non-Codex execution should remain available");
+        .expect("switching the sandbox off is the choice itself; no opt-in is needed");
 
-        assert_eq!(
-            build.isolation,
-            ExecutionIsolation::Degraded {
-                reason: "sandbox_disabled_by_configuration".into(),
-            }
-        );
+        assert_eq!(build.isolation, ExecutionIsolation::SandboxDisabled);
     }
 
     #[tokio::test]
@@ -1520,7 +1481,7 @@ mod tests {
         assert!(reason.contains("; unmasked: "), "{reason}");
 
         let turn_id = Uuid::new_v4();
-        record_degraded_execution(
+        record_unsandboxed_execution(
             &state,
             &build.isolation,
             "scheduled turn",
@@ -1602,12 +1563,15 @@ mod tests {
         .await;
 
         let build = result.expect("explicit sandbox disablement should construct a dispatcher");
+        assert_eq!(build.isolation, ExecutionIsolation::SandboxDisabled);
+        let events = state.storage.list_audit_events().await.unwrap();
         assert_eq!(
-            build.isolation,
-            ExecutionIsolation::Degraded {
-                reason: "sandbox_disabled_by_configuration".into(),
-            }
+            events
+                .iter()
+                .map(|event| event.event_kind.as_str())
+                .collect::<Vec<_>>(),
+            ["execution_sandbox_disabled"],
+            "a sandbox switched off on purpose is recorded as that and never as degraded"
         );
-        assert_eq!(state.storage.list_audit_events().await.unwrap().len(), 1);
     }
 }

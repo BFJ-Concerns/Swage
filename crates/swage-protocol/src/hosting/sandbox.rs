@@ -68,6 +68,9 @@ pub struct SandboxPolicy {
     /// Per-tool-call IPC timeout.
     #[ts(type = "{ secs: number, nanos: number }")]
     pub tool_call_timeout: Duration,
+    /// Session tool settings carried to the child, which builds its tools
+    /// from them.
+    pub tool_runtime: Option<crate::client::settings::ToolRuntimeSettings>,
     /// Per-LLM-request IPC timeout.
     #[ts(type = "{ secs: number, nanos: number }")]
     pub llm_request_timeout: Duration,
@@ -107,6 +110,7 @@ pub struct SandboxPolicyBuilder {
     shutdown_grace_period: Duration,
     // 30 second default — tools that run external commands need headroom.
     tool_call_timeout: Duration,
+    tool_runtime: Option<crate::client::settings::ToolRuntimeSettings>,
     // 60 second default — LLM requests can take a while for large completions.
     llm_request_timeout: Duration,
 }
@@ -122,6 +126,7 @@ impl SandboxPolicyBuilder {
             tool_output_directory: None,
             shutdown_grace_period: Duration::from_secs(5),
             tool_call_timeout: Duration::from_secs(30),
+            tool_runtime: None,
             llm_request_timeout: Duration::from_secs(60),
         }
     }
@@ -159,7 +164,6 @@ impl SandboxPolicyBuilder {
         self
     }
 
-    /// Overrides the graceful shutdown timeout (default: 5s).
     /// Sets the runtime-owned directory for tool-output artefacts. Add it as
     /// a write path too: the policy carries the location, not the grant.
     pub fn tool_output_directory(mut self, path: impl Into<PathBuf>) -> Self {
@@ -167,6 +171,7 @@ impl SandboxPolicyBuilder {
         self
     }
 
+    /// Overrides the graceful shutdown timeout (default: 5s).
     pub fn shutdown_grace_period(mut self, duration: Duration) -> Self {
         self.shutdown_grace_period = duration;
         self
@@ -175,6 +180,12 @@ impl SandboxPolicyBuilder {
     /// Overrides the per-tool-call IPC timeout (default: 30s).
     pub fn tool_call_timeout(mut self, duration: Duration) -> Self {
         self.tool_call_timeout = duration;
+        self
+    }
+
+    /// Passes the session's tool settings to the child process.
+    pub fn tool_runtime(mut self, settings: crate::client::settings::ToolRuntimeSettings) -> Self {
+        self.tool_runtime = Some(settings);
         self
     }
 
@@ -202,7 +213,18 @@ impl SandboxPolicyBuilder {
             tool_output_directory: self.tool_output_directory,
             environment: std::collections::BTreeMap::new(),
             shutdown_grace_period: self.shutdown_grace_period,
-            tool_call_timeout: self.tool_call_timeout,
+            // The shell owns its deadline. Allow its process cleanup and reply
+            // to finish before treating silence as a broken IPC connection.
+            tool_call_timeout: self.tool_runtime.as_ref().map_or(
+                self.tool_call_timeout,
+                |settings| {
+                    self.tool_call_timeout.max(
+                        Duration::from_secs(settings.shell_timeout_secs)
+                            .saturating_add(self.shutdown_grace_period),
+                    )
+                },
+            ),
+            tool_runtime: self.tool_runtime,
             llm_request_timeout: self.llm_request_timeout,
         })
     }

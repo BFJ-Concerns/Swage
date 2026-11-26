@@ -2508,6 +2508,16 @@
           "const": "provider_runtime_unavailable"
         },
         {
+          "description": "The gateway could not deliver output to its destination.",
+          "type": "string",
+          "const": "delivery_failed"
+        },
+        {
+          "description": "Automated execution did not produce its required result.",
+          "type": "string",
+          "const": "runtime_error"
+        },
+        {
           "description": "An unexpected failure inside the gateway.",
           "type": "string",
           "const": "internal_error"
@@ -6963,6 +6973,13 @@
             }
           ]
         },
+        "model_replay_truncated": {
+          "description": "Whether later turns receive only a preview of this result. Absent when\nthere is no completed, recognised model replay to account for.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "parent_call_id": {
           "type": [
             "string",
@@ -7263,7 +7280,7 @@
       ]
     },
     "TurnIsolationView": {
-      "description": "The execution boundary a turn ran inside: sandboxed on the host, degraded\nfor a stated reason, or the boundary the install declares for every turn\n(a container image, for one) — which is neither of the other two.",
+      "description": "A turn's execution isolation: sandboxed on the host, unsandboxed because\nthe configuration switched the sandbox off, or degraded for a stated\nreason.",
       "oneOf": [
         {
           "type": "object",
@@ -7271,6 +7288,18 @@
             "kind": {
               "type": "string",
               "const": "isolated"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "sandbox_disabled"
             }
           },
           "required": [
@@ -7291,22 +7320,6 @@
           "required": [
             "kind",
             "reason"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "boundary": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "const": "declared"
-            }
-          },
-          "required": [
-            "kind",
-            "boundary"
           ]
         }
       ]

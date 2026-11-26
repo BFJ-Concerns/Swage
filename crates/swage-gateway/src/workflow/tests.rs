@@ -20206,3 +20206,155 @@ async fn review_fix_3_overview_omits_worker_bodies() {
         "private worker result"
     );
 }
+
+mod dispatch_attempt_reader_tests {
+    use super::*;
+
+    async fn entry_with_attempts(
+        attempts: Option<Value>,
+    ) -> (SqliteStorage, WorkflowJournalRecord) {
+        let storage = SqliteStorage::in_memory().expect("storage");
+        let topic = storage.general_scope().await.expect("scope");
+        let (run_id, entry_id) = journalled_agent_call(&storage, topic.id).await;
+        let dispatch = serde_json::json!({
+            "prompt": "answer", "agent_definition_id": null,
+            "requested_model": null, "requested_effort": null,
+            "placement": null, "grants": null, "attempts": []
+        });
+        storage.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE workflow_journal SET dispatch_json = ?1, dispatch_attempts_json = ?2 WHERE id = ?3",
+                rusqlite::params![dispatch.to_string(), attempts.map(|v| v.to_string()), entry_id.to_string()],
+            )?;
+            Ok(())
+        }).await.expect("record inputs");
+        let entry = storage
+            .list_workflow_journal(run_id)
+            .await
+            .expect("journal")
+            .into_iter()
+            .find(|entry| entry.id == entry_id)
+            .expect("entry");
+        (storage, entry)
+    }
+
+    fn valid_attempts(turn_id: Uuid) -> Value {
+        serde_json::json!([{
+            "cause": {"cause": "after_interruption"}, "opened_at": "2026-10-18T12:00:00Z",
+            "model": "chosen", "effort": null, "session_id": null,
+            "thread_id": null, "turn_id": turn_id
+        }])
+    }
+
+    fn cases(turn_id: Uuid) -> Vec<(Option<Value>, bool, bool)> {
+        vec![
+            (None, false, false),
+            (Some(serde_json::json!([])), false, false),
+            (Some(valid_attempts(turn_id)), true, false),
+            (Some(Value::Null), false, true),
+            (Some(serde_json::json!({"not": "an array"})), false, true),
+            (Some(serde_json::json!([{}])), false, true),
+        ]
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attempt_turns_read_absent_valid_and_malformed_records() {
+        let turn = Uuid::new_v4();
+        for (value, has_attempt, malformed) in cases(turn) {
+            let (_, entry) = entry_with_attempts(value).await;
+            let actual = agent_call_attempt_turns(&entry);
+            if malformed {
+                assert!(actual.is_err(), "malformed attempts must fail: {actual:?}");
+                assert!(actual.unwrap_err().contains(&entry.id.to_string()));
+            } else {
+                assert_eq!(
+                    actual,
+                    Ok(if has_attempt {
+                        vec![Some(turn)]
+                    } else {
+                        vec![]
+                    })
+                );
+            }
+        }
+        let (_, mut entry) = entry_with_attempts(None).await;
+        entry.result = Some(serde_json::json!({"turn_id": turn}));
+        assert_eq!(agent_call_attempt_turns(&entry), Ok(vec![Some(turn)]));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn journal_projection_reads_absent_valid_and_malformed_records() {
+        let turn = Uuid::new_v4();
+        for (value, has_attempt, malformed) in cases(turn) {
+            let (_, entry) = entry_with_attempts(value).await;
+            let id = entry.id;
+            let actual = journal_wire(entry, None);
+            if malformed {
+                assert!(actual.is_err(), "malformed attempts must fail: {actual:?}");
+                assert!(actual.unwrap_err().contains(&id.to_string()));
+            } else {
+                assert!(actual.is_ok(), "valid journal must project: {actual:?}");
+                let dispatch = actual.unwrap().agent_call.unwrap().dispatch.unwrap();
+                assert_eq!(dispatch.attempts.len(), usize::from(has_attempt));
+                if has_attempt {
+                    assert_eq!(dispatch.attempts[0].turn_id, Some(turn));
+                    assert_eq!(dispatch.attempts[0].model.as_deref(), Some("chosen"));
+                }
+            }
+        }
+        let (_, mut entry) = entry_with_attempts(None).await;
+        entry.dispatch.as_mut().unwrap()["attempts"] = valid_attempts(turn);
+        let projected = journal_wire(entry, None).unwrap();
+        assert_eq!(
+            projected.agent_call.unwrap().dispatch.unwrap().attempts[0].turn_id,
+            Some(turn)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_account_reads_absent_valid_and_malformed_records() {
+        let turn = Uuid::new_v4();
+        for (value, has_attempt, malformed) in cases(turn) {
+            let (_, entry) = entry_with_attempts(value).await;
+            let actual = worker_account(&entry, &HashMap::new(), None);
+            if malformed {
+                assert!(actual.is_err(), "malformed attempts must fail: {actual:?}");
+                assert!(actual.unwrap_err().contains(&entry.id.to_string()));
+            } else {
+                assert!(actual.is_ok(), "valid worker must be accounted: {actual:?}");
+                assert_eq!(actual.unwrap().redispatched_after_interruption, has_attempt);
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attempt_cause_reads_absent_valid_and_malformed_records() {
+        let turn = Uuid::new_v4();
+        for (value, has_attempt, malformed) in cases(turn) {
+            let (storage, entry) = entry_with_attempts(value).await;
+            let actual = attempt_cause_for(&storage, entry.run_id, entry.id).await;
+            if malformed {
+                assert!(actual.is_err(), "malformed attempts must fail: {actual:?}");
+                assert!(
+                    actual
+                        .unwrap_err()
+                        .to_string()
+                        .contains(&entry.id.to_string())
+                );
+            } else {
+                assert!(
+                    actual.is_ok(),
+                    "valid attempt cause must resolve: {actual:?}"
+                );
+                assert_eq!(
+                    actual.unwrap(),
+                    if has_attempt {
+                        WorkflowAttemptCause::AfterInterruption
+                    } else {
+                        WorkflowAttemptCause::First
+                    }
+                );
+            }
+        }
+    }
+}

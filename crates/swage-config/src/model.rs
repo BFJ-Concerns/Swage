@@ -263,6 +263,16 @@ impl Default for ToolPermissionConfig {
             "session-authoring".to_string(),
             vec!["session_values".to_string()],
         );
+        // Authoring the durable definitions — the agents a person can pick
+        // and the task contracts a child runs under — as one grantable
+        // power, so an agent can be kept from reshaping who runs with what.
+        bundles.insert(
+            "definition-authoring".to_string(),
+            vec![
+                "agent_definition".to_string(),
+                "task_definition".to_string(),
+            ],
+        );
         // Knowledge-base access at registry grain: reading the topic's
         // gathered evidence and writing captures into it are separate powers,
         // so gathering workers can hold write without every reader gaining it.
@@ -471,8 +481,12 @@ pub use swage_protocol::client::settings::ObservabilityConfig;
 pub struct ExperimentationConfig {
     /// Master switch for every experimental variant decision.
     ///
-    /// When false, variant selection helpers must return the default
-    /// implementation and record, at most, that experimentation was disabled.
+    /// Binds the selections made after it is read: when false, a location
+    /// reaching its selection point serves its default implementation and
+    /// records only that experimentation was disabled. A session or task
+    /// that has already recorded a variant keeps serving it for its whole
+    /// life — one draw serves that session or task — so turning the switch
+    /// off changes nothing already drawn.
     #[serde(default = "default_experimentation_enabled")]
     pub enabled: bool,
     /// Per-location controls keyed by stable runtime location id.

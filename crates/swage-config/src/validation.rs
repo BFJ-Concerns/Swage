@@ -12,6 +12,10 @@ use toml::{Table, Value};
 
 pub use swage_protocol::client::settings::MAX_ARCHIVE_AFTER_DAYS;
 
+/// The most identical failing calls `tools.max_identical_failures` may
+/// permit within one unattended turn.
+pub const MAX_IDENTICAL_FAILURES: i64 = 100;
+
 // ---------------------------------------------------------------------------
 // Declared sections
 // ---------------------------------------------------------------------------
@@ -442,13 +446,13 @@ fn check_field_semantics(
         }
         ("context", "timeout") => {
             if let Value::Integer(t) = value
-                && (*t < 1 || *t > 60)
+                && *t < 1
             {
                 problems.push(make_problem(
                     file_path,
                     Some(field_path.to_string()),
                     ConfigProblemKind::SemanticError {
-                        message: format!("context.timeout must be between 1 and 60, got {t}"),
+                        message: format!("context.timeout must be a positive integer, got {t}"),
                     },
                 ));
             }
@@ -512,6 +516,21 @@ fn check_field_semantics(
                         },
                     ));
                 }
+            }
+        }
+        ("tools", "max_identical_failures") => {
+            if let Value::Integer(n) = value
+                && !(1..=MAX_IDENTICAL_FAILURES).contains(n)
+            {
+                problems.push(make_problem(
+                    file_path,
+                    Some(field_path.to_string()),
+                    ConfigProblemKind::SemanticError {
+                        message: format!(
+                            "tools.max_identical_failures must be between 1 and {MAX_IDENTICAL_FAILURES}, got {n}"
+                        ),
+                    },
+                ));
             }
         }
         ("output", "max_retries") => {
@@ -2019,6 +2038,30 @@ allowed_fields = ["user"]
     }
 
     #[test]
+    fn tools_failure_bound_refuses_values_outside_its_range() {
+        for raw in ["0", "101", "-1"] {
+            let problems = validate_toml_string(
+                &format!("[tools]\nmax_identical_failures = {raw}"),
+                &path("config.toml"),
+            );
+            assert!(
+                problems.iter().any(|problem| {
+                    problem.field_path.as_deref() == Some("tools.max_identical_failures")
+                        && matches!(&problem.kind, ConfigProblemKind::SemanticError { .. })
+                }),
+                "{raw} is refused: {problems:?}"
+            );
+        }
+        for raw in ["1", "100"] {
+            let problems = validate_toml_string(
+                &format!("[tools]\nmax_identical_failures = {raw}"),
+                &path("config.toml"),
+            );
+            assert!(problems.is_empty(), "{raw} is accepted: {problems:?}");
+        }
+    }
+
+    #[test]
     fn context_assembly_wrong_type_produces_error() {
         let toml = "[context]\nassembly = 42";
         let problems = validate_toml_string(toml, &path("config.toml"));
@@ -2032,7 +2075,6 @@ allowed_fields = ["user"]
 
     #[test]
     fn context_timeout_zero_produces_semantic_error() {
-        // timeout range is 1-60; 0 is out of range
         let toml = "[context]\ntimeout = 0";
         let problems = validate_toml_string(toml, &path("config.toml"));
         assert!(
@@ -2044,21 +2086,10 @@ allowed_fields = ["user"]
     }
 
     #[test]
-    fn context_timeout_above_max_produces_semantic_error() {
-        let toml = "[context]\ntimeout = 61";
-        let problems = validate_toml_string(toml, &path("config.toml"));
-        assert!(
-            problems
-                .iter()
-                .any(|p| matches!(&p.kind, ConfigProblemKind::SemanticError { .. })),
-            "timeout=61 should produce SemanticError"
-        );
-    }
-
-    #[test]
-    fn context_timeout_boundary_valid() {
-        // 1 and 60 are the inclusive bounds — should produce no errors
-        for timeout in [1_i64, 60] {
+    fn context_timeout_takes_any_positive_number_of_seconds() {
+        // The timeout only stops a hung assembly script; any positive
+        // value does that, so none is too long to choose.
+        for timeout in [1_i64, 60, 61, 3_600] {
             let toml = format!("[context]\ntimeout = {timeout}");
             let problems = validate_toml_string(&toml, &path("config.toml"));
             assert!(

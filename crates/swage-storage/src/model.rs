@@ -1227,15 +1227,14 @@ pub struct InboundAudit {
     pub modified_by_hooks: Vec<String>,
 }
 
-/// The execution boundary a turn ran inside, recorded on the turn when its
-/// dispatcher settles. Three kinds: sandboxed on the host, degraded for a
-/// stated reason, or the boundary the install declares for every turn (a
-/// container image, for one), which is neither of the other two.
+/// A turn's execution isolation, recorded when its dispatcher settles:
+/// sandboxed on the host, unsandboxed because the configuration switched the
+/// sandbox off, or degraded for a stated reason.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TurnIsolation {
     Isolated,
+    SandboxDisabled,
     Degraded { reason: String },
-    Declared { boundary: String },
 }
 
 impl TurnIsolation {
@@ -1243,17 +1242,16 @@ impl TurnIsolation {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Isolated => "isolated",
+            Self::SandboxDisabled => "sandbox_disabled",
             Self::Degraded { .. } => "degraded",
-            Self::Declared { .. } => "declared",
         }
     }
 
-    /// The stored detail column: the reason or the boundary, when there is one.
+    /// The stored detail column: the reason for degraded isolation.
     pub fn detail(&self) -> Option<&str> {
         match self {
-            Self::Isolated => None,
+            Self::Isolated | Self::SandboxDisabled => None,
             Self::Degraded { reason } => Some(reason),
-            Self::Declared { boundary } => Some(boundary),
         }
     }
 
@@ -1261,11 +1259,9 @@ impl TurnIsolation {
     pub fn from_columns(kind: &str, detail: Option<String>) -> Result<Self, String> {
         match (kind, detail) {
             ("isolated", _) => Ok(Self::Isolated),
+            ("sandbox_disabled", _) => Ok(Self::SandboxDisabled),
             ("degraded", Some(reason)) => Ok(Self::Degraded { reason }),
-            ("declared", Some(boundary)) => Ok(Self::Declared { boundary }),
-            ("degraded" | "declared", None) => {
-                Err(format!("turn isolation '{kind}' stored without its detail"))
-            }
+            ("degraded", None) => Err(format!("turn isolation '{kind}' stored without its detail")),
             (other, _) => Err(format!("unknown turn isolation kind '{other}'")),
         }
     }

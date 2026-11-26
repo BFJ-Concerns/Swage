@@ -41,7 +41,7 @@ pub fn resolve_agent_binary() -> Result<PathBuf, SandboxError> {
     })
 }
 
-pub use agent_loop::run_agent_loop;
+pub use agent_loop::{child_sandbox_config_from_env, run_agent_loop};
 pub use bubblewrap::BubblewrapSandbox;
 pub use bubblewrap::{find_bwrap, policy_command};
 pub use config::{SandboxConfig, SandboxConfigError};

@@ -33,6 +33,7 @@ use swage_tool::validation::validate_tool_schema;
 use crate::state::AppState;
 use crate::surface;
 use crate::tool::Tool;
+use crate::tool::exact_text_replacement::replace_exact_text;
 
 const READ_TOOL: &str = "surface_read";
 const WRITE_TOOL: &str = "surface_write";
@@ -610,20 +611,12 @@ impl SurfaceWriteTool {
                 // The guarded write below returns the newer source without a mutation.
                 existing.source.clone()
             } else {
-                if existing
-                    .source
-                    .as_bytes()
-                    .windows(old.len())
-                    .filter(|part| *part == old.as_bytes())
-                    .count()
-                    != 1
-                {
-                    return Err(invalid(
+                replace_exact_text(&existing.source, old, new).map_err(|_| {
+                    invalid(
                         WRITE_TOOL,
                         "replace.old must match exactly once; read the module again",
-                    ));
-                }
-                existing.source.replacen(old, new, 1)
+                    )
+                })?
             }
         } else {
             params

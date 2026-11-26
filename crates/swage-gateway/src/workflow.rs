@@ -596,6 +596,27 @@ async fn interrupt_outstanding_rounds(
     Ok(())
 }
 
+/// Read the attempt column without confusing absent history with corrupt history.
+/// Absence leaves a caller's existing fallback available; a present column must
+/// contain complete attempt records, including when the caller needs only a flag.
+fn recorded_dispatch_attempts(
+    entry: &WorkflowJournalRecord,
+) -> Result<Option<Vec<WorkflowAgentCallResolution>>, String> {
+    entry
+        .dispatch_attempts
+        .as_ref()
+        .map(|attempts| {
+            serde_json::from_value(attempts.clone()).map_err(|error| {
+                format!(
+                    "workflow journal entry {} carries an attempt record outside \
+                 WorkflowAgentCallResolution: {error}",
+                    entry.id
+                )
+            })
+        })
+        .transpose()
+}
+
 /// Every turn an agent-call entry dispatched, oldest attempt first.
 ///
 /// A call the run's end interrupted and replay re-dispatched ran more than
@@ -608,15 +629,7 @@ fn agent_call_attempt_turns(entry: &WorkflowJournalRecord) -> Result<Vec<Option<
     // never resolved keeps its position with no turn, so the attempts after
     // it number as the record numbers them.
     let mut turns: Vec<Option<Uuid>> = Vec::new();
-    if let Some(attempts) = entry.dispatch_attempts.as_ref() {
-        let attempts: Vec<WorkflowAgentCallResolution> = serde_json::from_value(attempts.clone())
-            .map_err(|error| {
-            format!(
-                "workflow journal entry {} carries an attempt record outside \
-                     WorkflowAgentCallResolution: {error}",
-                entry.id
-            )
-        })?;
+    if let Some(attempts) = recorded_dispatch_attempts(entry)? {
         turns.extend(attempts.into_iter().map(|attempt| attempt.turn_id));
     }
     let settled = entry
@@ -720,6 +733,11 @@ fn journal_wire(
         (_, "failed") => WorkflowJournalEntryStatus::Failed,
         (_, other) => return Err(format!("unknown workflow entry status: {other}")),
     };
+    let attempts = if kind == WorkflowJournalEntryKind::AgentCall {
+        recorded_dispatch_attempts(&entry)?
+    } else {
+        None
+    };
     let effect = entry
         .idempotency_key
         .map(|idempotency_key| WorkflowEffectDetail {
@@ -791,16 +809,8 @@ fn journal_wire(
                 )
             })
             .transpose()?;
-        if let (Some(dispatch), Some(attempts)) =
-            (dispatch.as_mut(), entry.dispatch_attempts.as_ref())
-        {
-            dispatch.attempts = serde_json::from_value(attempts.clone()).map_err(|error| {
-                format!(
-                    "workflow journal entry {} carries an attempt record outside \
-                     WorkflowAgentCallResolution: {error}",
-                    entry.id
-                )
-            })?;
+        if let (Some(dispatch), Some(attempts)) = (dispatch.as_mut(), attempts) {
+            dispatch.attempts = attempts;
         }
         // The last attempt is the one that ran to the entry's own ending;
         // the earlier ones are the interrupted attempts it followed.
@@ -2654,7 +2664,6 @@ async fn persist_workflow_worker_liveness(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Why the run dispatches an attempt of `journal_entry_id` now: the call's
 /// first, or one following attempts an interruption cut off — the entry
 /// already carries attempts only when replay re-dispatches it, since a call
@@ -2668,11 +2677,13 @@ async fn attempt_cause_for(
         .list_workflow_journal(run_id)
         .await
         .map_err(|error| error.to_string())?;
-    let earlier = journal
+    let attempts = journal
         .iter()
         .find(|entry| entry.id == journal_entry_id)
-        .and_then(|entry| entry.dispatch_attempts.as_ref())
-        .and_then(Value::as_array)
+        .map(recorded_dispatch_attempts)
+        .transpose()?;
+    let earlier = attempts
+        .flatten()
         .is_some_and(|attempts| !attempts.is_empty());
     Ok(if earlier {
         WorkflowAttemptCause::AfterInterruption
@@ -3614,16 +3625,7 @@ fn worker_account(
     placements: &HashMap<u64, String>,
     termination: Option<WorkflowWorkerTermination>,
 ) -> Result<WorkflowWorkerAccount, String> {
-    let attempts: Vec<WorkflowAgentCallResolution> = match entry.dispatch_attempts.as_ref() {
-        Some(attempts) => serde_json::from_value(attempts.clone()).map_err(|error| {
-            format!(
-                "workflow journal entry {} carries an attempt record outside \
-                 WorkflowAgentCallResolution: {error}",
-                entry.id
-            )
-        })?,
-        None => Vec::new(),
-    };
+    let attempts = recorded_dispatch_attempts(entry)?.unwrap_or_default();
     Ok(WorkflowWorkerAccount {
         journal_entry_id: entry.id,
         seq: entry.seq,

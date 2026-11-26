@@ -57,9 +57,17 @@ pub struct ToolResultMetadata {
 }
 
 const MODEL_REPLAY_PREVIEW_CHARS: usize = 2000;
+const MODEL_ARGUMENT_STRING_CHARS: usize = 2000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactToolReplay {
+    /// The model's account of an elided replay, read before the fields it
+    /// explains: which field holds what, that the result was handed back
+    /// whole when the call returned, and how this turn reads the rest.
+    /// Written for the turn that reads the replay (`with_elision_note`),
+    /// never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     pub kind: String,
     pub bytes: usize,
     pub sha256: String,
@@ -75,7 +83,71 @@ impl CompactToolReplay {
     pub fn to_stable_json(&self) -> String {
         serde_json::to_string(self).expect("compact replay envelope serialises")
     }
+
+    /// The replay as the model of a later turn reads it. An elided result
+    /// carries the note that the result was handed back whole and the route
+    /// this turn has to the rest; a result replayed whole carries none.
+    pub fn with_elision_note(mut self, retrieval: ReplayRetrieval) -> Self {
+        self.note = self.truncated.then(|| self.elision_note(retrieval));
+        self
+    }
+
+    /// The note speaks of the call and the result, never of "you" having
+    /// read it: the turn that made the call may have ended before any reply
+    /// was written, and the model reading the note may not be the one that
+    /// made the call. "As the tool returned it" is the stored result, which
+    /// for a tool that bounds its own output is that bounded output.
+    fn elision_note(&self, retrieval: ReplayRetrieval) -> String {
+        let shown = self.preview.chars().count();
+        let bytes = self.bytes;
+        let route = match retrieval {
+            ReplayRetrieval::ByReference if self.full_result_ref.is_some() => {
+                ELIDED_READ_AGAIN_BY_REFERENCE
+            }
+            ReplayRetrieval::ByReference | ReplayRetrieval::None => ELIDED_NO_READ_AGAIN,
+        };
+        format!(
+            "This is a shortened copy of a tool result. `preview` holds the first {shown} \
+             characters of the result as the tool returned it; `bytes` ({bytes}) and `sha256` \
+             describe that whole result. The whole result was handed back when the call \
+             returned, and whatever was written next was written with all of it available: \
+             the shortening was made afterwards, for this conversation's history, and says \
+             nothing about how much was read at the time. {route}"
+        )
+    }
 }
+
+/// How a turn reaches the whole of a tool result an earlier turn received,
+/// when its replay keeps only the opening characters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayRetrieval {
+    /// `tool_result_read` is among the turn's tools: the whole result is
+    /// read again by the replay's `full_result_ref`.
+    ByReference,
+    /// No tool of the turn reads a stored result again: the replay's head
+    /// is all of it the turn can read.
+    None,
+}
+
+impl ReplayRetrieval {
+    /// The retrieval a turn has when `tool_result_read` is, or is not,
+    /// among the tools it offers.
+    pub fn with_read_tool(offered: bool) -> Self {
+        if offered {
+            Self::ByReference
+        } else {
+            Self::None
+        }
+    }
+}
+
+const ELIDED_READ_AGAIN_BY_REFERENCE: &str = "\
+To read beyond the preview, call `tool_result_read` with this `full_result_ref`, \
+copied exactly, as its `reference`.";
+
+const ELIDED_NO_READ_AGAIN: &str = "\
+The rest of this result cannot be read back in this session, so a detail beyond \
+`preview` is no longer available here; say that where it matters.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolResultReference {
@@ -83,9 +155,11 @@ pub struct ToolResultReference {
     pub call_id: String,
 }
 
+/// Keep tool parameters in their native JSON shape, bounding each string value.
 pub fn compact_tool_arguments_for_model(arguments: &serde_json::Value) -> String {
-    let raw = stable_json(arguments);
-    compact_tool_replay("tool_arguments", &raw, None, None).to_stable_json()
+    let mut arguments = arguments.clone();
+    compact_argument_values(&mut arguments);
+    serde_json::to_string(&arguments).expect("tool arguments serialise")
 }
 
 pub fn compact_tool_result_for_model(content: &str, is_error: bool) -> String {
@@ -188,13 +262,31 @@ fn compact_tool_replay(
         sha256: sha256_hex(raw.as_bytes()),
         truncated: preview.len() < raw.len(),
         preview,
+        note: None,
         full_result_ref,
         is_error,
     }
 }
 
-fn stable_json(value: &serde_json::Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
+fn compact_argument_values(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => {
+            if let Some((end, _)) = text.char_indices().nth(MODEL_ARGUMENT_STRING_CHARS) {
+                text.truncate(end);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                compact_argument_values(value);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                compact_argument_values(value);
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
 }
 
 fn preview_chars(raw: &str, max_chars: usize) -> String {
@@ -328,20 +420,17 @@ mod tests {
 
     #[test]
     fn compact_tool_arguments_for_model_is_deterministic() {
-        let arguments = serde_json::json!({"command": "pwd", "limit": 3});
+        let arguments = serde_json::json!({
+            "command": "pwd", "limit": 3,
+            "options": [true, null, {"ratio": 1.5, "label": "short"}]
+        });
 
         let first = compact_tool_arguments_for_model(&arguments);
         let second = compact_tool_arguments_for_model(&arguments);
 
         assert_eq!(first, second);
-        let envelope: CompactToolReplay = serde_json::from_str(&first).unwrap();
-        assert_eq!(envelope.kind, "tool_arguments");
-        assert_eq!(envelope.preview, r#"{"command":"pwd","limit":3}"#);
-        assert!(!envelope.truncated);
-        assert_eq!(envelope.bytes, envelope.preview.len());
-        assert_eq!(envelope.sha256.len(), 64);
-        assert_eq!(envelope.full_result_ref, None);
-        assert_eq!(envelope.is_error, None);
+        let replayed: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(replayed, arguments);
     }
 
     #[test]
@@ -373,6 +462,81 @@ mod tests {
             Some(reference.as_str())
         );
         assert_eq!(envelope.is_error, Some(false));
+    }
+
+    /// The stored envelope carries no note: the note is written for the
+    /// turn that reads the replay, by the route that turn has.
+    #[test]
+    fn an_elided_replay_notes_the_whole_delivery_and_the_read_route() {
+        let content = format!(
+            "{}MARKER-7f3a",
+            "x".repeat(MODEL_REPLAY_PREVIEW_CHARS + 500)
+        );
+        let reference = tool_result_reference("00000000-0000-0000-0000-000000000123", "call_1");
+        let stored = compact_tool_result_for_model_with_reference(&content, false, &reference);
+        assert!(!stored.contains("\"note\""));
+
+        let replay: CompactToolReplay = serde_json::from_str(&stored).unwrap();
+        let replay = replay.with_elision_note(ReplayRetrieval::ByReference);
+
+        let note = replay
+            .note
+            .as_deref()
+            .expect("an elided replay carries the note");
+        // The note carries the record's own figures, and the route by
+        // reference when the turn has one.
+        assert!(note.contains(&format!("first {MODEL_REPLAY_PREVIEW_CHARS} characters")));
+        assert!(note.contains(&format!("({})", content.len())));
+        assert!(note.ends_with(ELIDED_READ_AGAIN_BY_REFERENCE));
+        assert!(!note.contains(ELIDED_NO_READ_AGAIN));
+        let parsed = parse_tool_result_reference(replay.full_result_ref.as_deref().unwrap());
+        assert!(
+            parsed.is_some(),
+            "the reference the note points at resolves"
+        );
+        assert!(
+            replay.to_stable_json().starts_with("{\"note\":\""),
+            "the note is read before the fields it explains"
+        );
+    }
+
+    #[test]
+    fn an_elided_replay_without_a_read_tool_says_no_tool_reads_the_rest() {
+        let content = "y".repeat(MODEL_REPLAY_PREVIEW_CHARS + 1);
+        let reference = tool_result_reference("turn_1", "call_1");
+        let stored = compact_tool_result_for_model_with_reference(&content, true, &reference);
+
+        let replay: CompactToolReplay = serde_json::from_str(&stored).unwrap();
+        let replay = replay.with_elision_note(ReplayRetrieval::with_read_tool(false));
+
+        let note = replay.note.as_deref().unwrap();
+        assert!(note.ends_with(ELIDED_NO_READ_AGAIN));
+        assert!(!note.contains("tool_result_read"));
+    }
+
+    #[test]
+    fn an_elided_replay_without_a_reference_offers_no_read_route() {
+        let content = "z".repeat(MODEL_REPLAY_PREVIEW_CHARS + 1);
+        let stored = compact_tool_result_for_model(&content, false);
+
+        let replay: CompactToolReplay = serde_json::from_str(&stored).unwrap();
+        let replay = replay.with_elision_note(ReplayRetrieval::ByReference);
+
+        let note = replay.note.as_deref().unwrap();
+        assert!(note.ends_with(ELIDED_NO_READ_AGAIN));
+        assert!(!note.contains("tool_result_read"));
+    }
+
+    #[test]
+    fn a_replay_carried_whole_takes_no_note() {
+        let reference = tool_result_reference("turn_1", "call_1");
+        let stored = compact_tool_result_for_model_with_reference("short", false, &reference);
+
+        let replay: CompactToolReplay = serde_json::from_str(&stored).unwrap();
+        let replay = replay.with_elision_note(ReplayRetrieval::ByReference);
+
+        assert_eq!(replay.note, None);
+        assert!(!replay.to_stable_json().contains("note"));
     }
 
     #[test]

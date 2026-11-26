@@ -552,7 +552,7 @@ async fn an_over_threshold_context_runs_on_a_successor_assembled_from_its_elemen
     let storage = Arc::new(MockStorage::new());
     let (state, session_id) =
         make_state_with_storage(provider_witness_chunks(), Arc::clone(&storage)).await;
-    seed_history_over_threshold(&storage, session_id).await;
+    let thread_id = seed_history_over_threshold(&storage, session_id).await;
 
     let (tx, _rx) = mpsc::unbounded_channel();
     process_turn(
@@ -603,6 +603,65 @@ async fn an_over_threshold_context_runs_on_a_successor_assembled_from_its_elemen
     assert!(
         succession_position < history_position,
         "the summary opens the conversation: {names:?}"
+    );
+    drop(db);
+
+    // The summary's instruction is the session's recorded variant, drawn by
+    // the turn whose pass asked for the summary.
+    let turn_id = storage
+        .list_turns_by_thread(thread_id)
+        .await
+        .expect("list turns")
+        .last()
+        .expect("the turn")
+        .id;
+    let draws = summary_instruction_draws(&storage, session_id).await;
+    assert_eq!(draws.len(), 1, "one selection for the session: {draws:?}");
+    assert_eq!(draws[0].event_kind, "variant_selected");
+    assert_eq!(draws[0].metadata["variant"], "default");
+    assert_eq!(draws[0].metadata["turn_id"], turn_id.to_string());
+}
+
+async fn summary_instruction_draws(
+    storage: &MockStorage,
+    session_id: Uuid,
+) -> Vec<swage_storage::AuditEvent> {
+    storage
+        .list_audit_events_by_session(session_id)
+        .await
+        .expect("list audit events")
+        .into_iter()
+        .filter(|event| {
+            event.entity_id == crate::experimentation::LOCATION_SUCCESSION_SUMMARY_PROMPT
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_turn_within_its_room_records_no_summary_instruction_selection() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) =
+        make_state_with_storage(provider_witness_chunks(), Arc::clone(&storage)).await;
+    seed_history(&storage, session_id, 4).await;
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("continue"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("the turn runs");
+
+    assert!(
+        summary_instruction_draws(&storage, session_id)
+            .await
+            .is_empty(),
+        "a session that has asked for no summary holds no selection"
     );
 }
 
@@ -1204,9 +1263,12 @@ impl LlmProvider for TranscriptSummarisingProvider {
             .map(ChatMessage::text_content)
             .collect::<Vec<_>>()
             .join("\n");
+        // A summary request carries the history in its own tags; echoing it
+        // back stands in for notes that keep what the conversation settled.
         let summary = material
-            .split_once("## Conversation to summarise\n\n")
-            .map(|(_, history)| history.to_owned())
+            .split_once("<conversation_to_summarise>\n")
+            .and_then(|(_, rest)| rest.split_once("\n</conversation_to_summarise>"))
+            .map(|(history, _)| history.to_owned())
             .unwrap_or_else(|| "The missing-file reads failed repeatedly.".into());
         Ok(CompletionResponse {
             content: summary,
@@ -2253,8 +2315,8 @@ impl LlmProvider for PendingProvider {
 }
 
 /// A mock provider whose stream reports its first poll, then remains open without emitting.
-struct EmptyPendingProvider {
-    stream_polled: Arc<Notify>,
+pub(crate) struct EmptyPendingProvider {
+    pub(crate) stream_polled: Arc<Notify>,
 }
 
 #[async_trait]
@@ -2370,6 +2432,7 @@ impl Hook for ApprovePreToolHook {
 /// In-memory storage for testing.
 pub(crate) struct MockStorage {
     pub(crate) db: Mutex<InMemoryDb>,
+    remove_completed_turn_on_read: AtomicBool,
     fail_turn_state_writes: AtomicBool,
     fail_turn_state_write_at: AtomicUsize,
     turn_state_write_calls: AtomicUsize,
@@ -2905,6 +2968,7 @@ impl MockStorage {
     pub(crate) fn new() -> Self {
         Self {
             db: Mutex::new(InMemoryDb::default()),
+            remove_completed_turn_on_read: AtomicBool::new(false),
             fail_turn_state_writes: AtomicBool::new(false),
             fail_turn_state_write_at: AtomicUsize::new(0),
             turn_state_write_calls: AtomicUsize::new(0),
@@ -2936,6 +3000,12 @@ impl MockStorage {
             require_result_working_directory: AtomicBool::new(false),
             result_created_without_working_directory: AtomicBool::new(false),
         }
+    }
+
+    /// Lose a real completed row when its state is reconstructed.
+    pub(crate) fn remove_completed_turn_on_read(&self) {
+        self.remove_completed_turn_on_read
+            .store(true, Ordering::SeqCst);
     }
 
     pub(crate) fn fail_skill_activations(&self) {
@@ -4887,7 +4957,18 @@ impl TurnStore for MockStorage {
     }
 
     async fn get_turn(&self, id: Uuid) -> Result<Option<Turn>, StorageError> {
-        Ok(self.db.lock().await.turns.get(&id).cloned())
+        let mut db = self.db.lock().await;
+        if db
+            .turns
+            .get(&id)
+            .is_some_and(|turn| turn.state == TurnState::Completed)
+            && self
+                .remove_completed_turn_on_read
+                .swap(false, Ordering::SeqCst)
+        {
+            db.turns.remove(&id);
+        }
+        Ok(db.turns.get(&id).cloned())
     }
 
     async fn get_turn_observation(
@@ -5634,16 +5715,6 @@ impl swage_storage::store::ChannelQueueStore for MockStorage {
             .collect())
     }
 
-    async fn begin_channel_turn(
-        &self,
-        _thread_id: Uuid,
-        _agent_id: &str,
-        _composed_input: &str,
-        _message_ids: Vec<Uuid>,
-    ) -> Result<Turn, StorageError> {
-        unimplemented!("MockStorage does not support channel queue turn claims")
-    }
-
     async fn discard_channel_messages(
         &self,
         _message_ids: Vec<Uuid>,
@@ -6194,30 +6265,85 @@ impl swage_storage::store::OrientationCardStore for MockStorage {
     }
 }
 
+fn mock_secret_record(
+    secret: swage_storage::NewSecretRecord,
+) -> (swage_storage::SecretRecord, Option<String>) {
+    let record = swage_storage::SecretRecord {
+        id: secret.id,
+        name: secret.name,
+        material_kind: secret.material_kind,
+        owner_kind: secret.owner_kind,
+        backend_kind: secret.backend_kind.clone(),
+        scope_kind: secret.scope_kind,
+        scope_id: secret.scope_id,
+        reference: format!("secret://{}/{}", secret.backend_kind, secret.id),
+        external_reference: secret.external_reference,
+        metadata: secret.metadata,
+        status: "active".into(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        revoked_at: None,
+    };
+    (record, secret.value)
+}
+
 #[async_trait]
 impl swage_storage::store::SecretStore for MockStorage {
+    async fn write_credentials_with_audit(
+        &self,
+        creations: Vec<swage_storage::NewSecretRecord>,
+        rotations: Vec<(Uuid, String)>,
+        events: Vec<swage_storage::NewAuditEvent>,
+    ) -> Result<(), StorageError> {
+        let mut db = self.db.lock().await;
+        if self.fail_audit_writes.load(Ordering::SeqCst) {
+            return Err(StorageError::QueryFailed(
+                "injected audit write failure".into(),
+            ));
+        }
+        for (id, _) in &rotations {
+            if !db.secrets.contains_key(id) && !creations.iter().any(|secret| secret.id == *id) {
+                return Err(StorageError::NotFound {
+                    entity: "secret".into(),
+                    id: id.to_string(),
+                });
+            }
+        }
+        for secret in creations {
+            let (record, value) = mock_secret_record(secret);
+            if let Some(value) = value {
+                db.managed_secret_values.insert(record.id, value);
+            }
+            db.secrets.insert(record.id, record);
+        }
+        for (id, value) in rotations {
+            db.secrets
+                .get_mut(&id)
+                .expect("rotation was validated")
+                .updated_at = chrono::Utc::now();
+            db.managed_secret_values.insert(id, value);
+        }
+        db.audit_events
+            .extend(events.into_iter().map(|event| swage_storage::AuditEvent {
+                id: event.id,
+                session_id: event.session_id,
+                entity_kind: event.entity_kind,
+                entity_id: event.entity_id,
+                event_kind: event.event_kind,
+                summary: event.summary,
+                metadata: event.metadata,
+                created_at: chrono::Utc::now(),
+            }));
+        Ok(())
+    }
+
     async fn create_secret(
         &self,
         secret: swage_storage::NewSecretRecord,
     ) -> Result<swage_storage::SecretRecord, StorageError> {
-        let record = swage_storage::SecretRecord {
-            id: secret.id,
-            name: secret.name,
-            material_kind: secret.material_kind,
-            owner_kind: secret.owner_kind,
-            backend_kind: secret.backend_kind.clone(),
-            scope_kind: secret.scope_kind,
-            scope_id: secret.scope_id,
-            reference: format!("secret://{}/{}", secret.backend_kind, secret.id),
-            external_reference: secret.external_reference,
-            metadata: secret.metadata,
-            status: "active".into(),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            revoked_at: None,
-        };
+        let (record, value) = mock_secret_record(secret);
         let mut db = self.db.lock().await;
-        if let Some(value) = secret.value {
+        if let Some(value) = value {
             db.managed_secret_values.insert(record.id, value);
         }
         db.secrets.insert(record.id, record.clone());
@@ -6770,7 +6896,7 @@ pub(crate) async fn make_state_with_storage_and_root(
     .await
 }
 
-async fn make_state_with_provider_and_root(
+pub(crate) async fn make_state_with_provider_and_root(
     provider: Arc<dyn LlmProvider>,
     storage: Arc<MockStorage>,
     config_root: Option<std::path::PathBuf>,
@@ -6960,7 +7086,7 @@ async fn fresh_codex_turn_completes_without_degraded_execution_opt_in_or_audit()
     assert!(
         audit_events
             .iter()
-            .all(|event| { event.metadata["reason"] != "sandbox_disabled_by_configuration" }),
+            .all(|event| event.event_kind != "execution_isolation_degraded"),
         "App Server policy must not be recorded as degraded execution: {audit_events:?}"
     );
     server.abort();
@@ -8977,7 +9103,7 @@ async fn memory_scheduled_file_only_receives_summaries_as_all_readable_memory() 
         "no system message may direct an unavailable memory read: {system}"
     );
     assert!(
-        system.contains("the summaries are all of memory you can read"),
+        system.contains(swage_context::memory::INDEX_ONLY),
         "summary-only guidance: {system}"
     );
 }
@@ -8987,7 +9113,7 @@ async fn memory_scheduled_with_read_tool_receives_entry_read_guidance() {
     let (system, offered) = scheduled_memory_request(true).await;
     assert!(offered);
     assert!(
-        system.contains("read the entry with `memory_read`"),
+        system.contains(swage_context::memory::READ_ROUTE),
         "entry-read guidance: {system}"
     );
 }
@@ -9108,7 +9234,7 @@ async fn an_approval_gated_tool_is_offered_only_where_the_runtime_offers_it() {
     assert!(
         turn_offered_tools(&state, &gated, &agent_config, None, None, None, &no_grants,)
             .await
-            .contains(MEMORY_READ_TOOL),
+            .is_offered(MEMORY_READ_TOOL),
         "the agent runtime offers a gated tool and pauses for the approval"
     );
 
@@ -9117,7 +9243,7 @@ async fn an_approval_gated_tool_is_offered_only_where_the_runtime_offers_it() {
     assert!(
         !turn_offered_tools(&state, &codex, &agent_config, None, None, None, &no_grants,)
             .await
-            .contains(MEMORY_READ_TOOL),
+            .is_offered(MEMORY_READ_TOOL),
         "the Codex runtime withholds a gated tool"
     );
 
@@ -9140,7 +9266,7 @@ async fn an_approval_gated_tool_is_offered_only_where_the_runtime_offers_it() {
             &granted,
         )
         .await
-        .contains(MEMORY_READ_TOOL),
+        .is_offered(MEMORY_READ_TOOL),
         "a session's grant lifts the gate and the Codex runtime offers the tool"
     );
 }
@@ -10000,68 +10126,7 @@ async fn second_tool_round_request_replays_reasoning_when_model_capability_opts_
 
 #[tokio::test(flavor = "multi_thread")]
 async fn later_turn_rebuilds_tool_replay_from_persisted_compact_rows() {
-    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
-    let topic = storage.general_scope().await.expect("create default topic");
-    let session = storage
-        .create_session(new_session(topic.id))
-        .await
-        .expect("create session");
-    let session_id = session.id;
-
-    ThreadStore::create(
-        &*storage,
-        NewThread {
-            session_id,
-            agent_id: "gateway".to_string(),
-        },
-    )
-    .await
-    .expect("create default thread");
-
-    let first_provider = Arc::new(MultiRoundMockProvider::new(vec![
-        vec![
-            StreamChunk::ToolUse {
-                call_id: "c1".into(),
-                name: "echo".into(),
-                arguments: serde_json::json!({ "text": "first" }),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ],
-        vec![
-            StreamChunk::Delta {
-                content: "first complete".into(),
-            },
-            StreamChunk::Done {
-                finish_reason: None,
-            },
-        ],
-    ]));
-
-    let state = AppState::for_test(
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
-        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
-        first_provider as Arc<dyn LlmProvider>,
-        swage_config::ResolvedConfig::default(),
-        crate::tool::ToolDispatcher::allow_all(vec![
-            Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>
-        ]),
-        None,
-    );
-
-    let (tx, _rx) = mpsc::unbounded_channel();
-    process_turn(
-        &state,
-        session_id,
-        None,
-        "Use echo".to_string(),
-        tx,
-        Arc::new(Mutex::new(SubscriptionState::new(true))),
-        None,
-    )
-    .await
-    .expect("first turn should complete");
+    let (state, session_id) = start_result_turn("first".into(), Arc::new(EchoMockTool)).await;
 
     let (second_provider, captured) = CapturingProvider::new(vec![
         StreamChunk::Delta {
@@ -10124,8 +10189,7 @@ async fn later_turn_rebuilds_tool_replay_from_persisted_compact_rows() {
         .expect("tool-use replay");
     assert_eq!(tool_use.0, "c1");
     assert_eq!(tool_use.1, "echo");
-    assert_eq!(tool_use.2["kind"], "tool_arguments");
-    assert_eq!(tool_use.2["preview"], r#"{"text":"first"}"#);
+    assert_eq!(tool_use.2, &serde_json::json!({"text": "first"}));
 
     let tool_result_message = captured
         .messages
@@ -10163,6 +10227,156 @@ async fn later_turn_rebuilds_tool_replay_from_persisted_compact_rows() {
         "persisted replay should include a durable full-result reference"
     );
     assert_eq!(envelope.is_error, Some(false));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn later_snapshot_masks_registered_secret_before_tool_replay_compaction() {
+    let _guard = crate::secret::tests::with_secret_env();
+    let secret = "unique-long-fixture-material-\n".repeat(110);
+    let text = format!("prefix {secret}");
+    let (state, session_id) = start_result_turn(text, Arc::new(EchoMockTool)).await;
+    state
+        .secret_manager
+        .create_secret(crate::secret::CreateSecretRequest {
+            name: "Long provider key".into(),
+            material_kind: "provider_key".into(),
+            owner_kind: "service".into(),
+            backend_kind: "managed".into(),
+            scope_kind: "gateway".into(),
+            scope_id: None,
+            metadata: None,
+            value: Some(secret),
+            external_reference: None,
+        })
+        .await
+        .unwrap();
+    let thread = state.storage.list_by_session(session_id).await.unwrap()[0].id;
+    let first_turn = state.storage.list_turns_by_thread(thread).await.unwrap()[0].id;
+    let calls = state
+        .storage
+        .list_tool_calls_by_turn(first_turn)
+        .await
+        .unwrap();
+    let stored_arguments: serde_json::Value =
+        serde_json::from_str(&calls[0].model_arguments).unwrap();
+    let stored_prefix = stored_arguments["text"].as_str().unwrap();
+    assert_eq!(stored_prefix.len(), 2000);
+    assert!(stored_prefix.contains("unique-long-fixture-material-"));
+    let stored_result: swage_core::CompactToolReplay =
+        serde_json::from_str(calls[0].model_result.as_ref().unwrap()).unwrap();
+    assert!(stored_result.truncated);
+    assert!(
+        stored_result
+            .preview
+            .contains("unique-long-fixture-material-")
+    );
+    let malformed_call = NewToolCall {
+        execution: None,
+        turn_id: first_turn,
+        agent_id: calls[0].agent_id.clone(),
+        call_id: "malformed-call".into(),
+        tool: calls[0].tool.clone(),
+        arguments: "{".into(),
+        model_arguments: calls[0].model_arguments.clone(),
+        result: Some("Result of the call with malformed arguments".into()),
+        model_result: Some(swage_core::compact_tool_result_for_model(
+            "Result of the call with malformed arguments",
+            false,
+        )),
+        status: Some("success".into()),
+        duration_ms: None,
+        truncated: false,
+        total_bytes: None,
+        provider_round: calls[0].provider_round,
+        position: calls[0].position + 1,
+        parent_call_id: None,
+        display_summary: None,
+    };
+    state
+        .storage
+        .create_tool_call(malformed_call.clone())
+        .await
+        .unwrap();
+    state
+        .storage
+        .create_tool_call(NewToolCall {
+            call_id: "unverifiable-result".into(),
+            arguments: "{}".into(),
+            model_arguments: "{}".into(),
+            result: None,
+            model_result: calls[0].model_result.clone(),
+            position: malformed_call.position + 1,
+            ..malformed_call
+        })
+        .await
+        .unwrap();
+
+    let (provider, captured) = CapturingProvider::new(vec![
+        StreamChunk::Delta {
+            content: "done".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]);
+    state.replace_runtime(
+        state.active_config(),
+        Arc::new(provider),
+        crate::tool::ToolDispatcher::allow_all(vec![Arc::new(EchoMockTool) as Arc<dyn Tool>]),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Continue",
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let turns = state.storage.list_turns_by_thread(thread).await.unwrap();
+    let later = turns.iter().find(|turn| turn.id != first_turn).unwrap();
+    let snapshot = state.storage.get_snapshot(later.id).await.unwrap().unwrap();
+    let request = captured.lock().unwrap();
+    let request = request.as_ref().unwrap();
+    let wire = serde_json::to_string(request).unwrap();
+    let replay: Vec<_> = request
+        .messages
+        .iter()
+        .filter_map(ChatMessage::tool_replay)
+        .flatten()
+        .collect();
+    assert!(replay.iter().any(|part| matches!(
+        part,
+        ToolReplayPart::ToolCall { call_id, arguments, .. }
+            if call_id == "malformed-call" && arguments == &serde_json::json!({})
+    )));
+    assert!(replay.iter().any(|part| matches!(
+        part,
+        ToolReplayPart::ToolResult { call_id, content, .. }
+            if call_id == "unverifiable-result" && content == "[REDACTED_SECRET]"
+    )));
+    let result = replay
+        .iter()
+        .find_map(|part| match part {
+            ToolReplayPart::ToolResult {
+                call_id, content, ..
+            } if call_id == &calls[0].call_id => Some(content),
+            _ => None,
+        })
+        .unwrap();
+    let result: swage_core::CompactToolReplay = serde_json::from_str(result).unwrap();
+    assert_eq!(result.preview, r#"{"output":"prefix [REDACTED_SECRET]"}"#);
+    assert_eq!(result.full_result_ref, stored_result.full_result_ref);
+    assert!(!result.truncated);
+    for content in [&wire, &snapshot] {
+        assert!(content.contains("prefix [REDACTED_SECRET]"));
+        assert!(!content.contains("unique-long-fixture-material-"));
+        assert!(content.contains("Result of the call with malformed arguments"));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -10468,8 +10682,7 @@ async fn branch_turn_rebuilds_tool_replay_from_copied_history() {
         swage_core::ToolReplayPart::ToolCall { call_id, name, arguments }
             if call_id == "call_1"
                 && name == "echo"
-                && arguments["kind"] == "tool_arguments"
-                && arguments["preview"] == r#"{"text":"first"}"#
+                && arguments == &serde_json::json!({"text": "first"})
     )));
 
     let tool_result_replay = captured
@@ -10781,6 +10994,213 @@ fn complete_replay_record(call_id: &str) -> ToolCallRecord {
         parent_call_id: None,
         display_summary: None,
     }
+}
+
+#[test]
+fn replayed_file_read_arguments_validate_against_the_tool_schema() {
+    use crate::tool::Tool;
+
+    let record = complete_replay_record("native-read");
+    let replay = compact_tool_replay_messages(&[record]).unwrap();
+    let ToolReplayPart::ToolCall { arguments, .. } = &replay[0].tool_replay().unwrap()[0] else {
+        panic!("expected replayed tool call");
+    };
+    let schema = crate::tool::file_read::FileReadTool {
+        max_output_bytes: 4096,
+    }
+    .parameters();
+    assert!(
+        jsonschema::is_valid(&schema, arguments),
+        "replayed file_read arguments must validate against its parameter schema: {arguments}"
+    );
+    assert_eq!(arguments["path"], "Cargo.toml");
+    assert!(arguments.get("kind").is_none());
+    assert!(arguments.get("preview").is_none());
+}
+
+#[test]
+fn replayed_long_argument_values_are_bounded_inside_the_native_shape() {
+    let long = "界".repeat(2001);
+    let boundary = "é".repeat(2000);
+    let long_key = "k".repeat(2001);
+    let raw = serde_json::json!({
+        "path": "notes.txt",
+        "content": long,
+        "nested": [{"text": long, "boundary": boundary}, [long, 42, true, null]],
+        long_key.clone(): "value"
+    });
+    let mut record = complete_replay_record("long-write");
+    record.tool = "file_write".into();
+    record.arguments = raw.to_string();
+    record.model_arguments = swage_core::compact_tool_arguments_for_model(&raw);
+
+    let replay = compact_tool_replay_messages(&[record]).unwrap();
+    let ToolReplayPart::ToolCall { arguments, .. } = &replay[0].tool_replay().unwrap()[0] else {
+        panic!("expected replayed tool call");
+    };
+    assert_eq!(
+        arguments,
+        &serde_json::json!({
+            "path": "notes.txt",
+            "content": "界".repeat(2000),
+            "nested": [{"text": "界".repeat(2000), "boundary": boundary},
+                       ["界".repeat(2000), 42, true, null]],
+            long_key: "value"
+        }),
+        "only string values exceeding 2,000 characters may be shortened"
+    );
+}
+
+#[test]
+fn replayed_old_argument_envelopes_recover_bounded_raw_arguments_and_keep_results() {
+    let raw = serde_json::json!({"path": "Cargo.toml", "note": "x".repeat(2001)});
+    let mut old = complete_replay_record("old-read");
+    old.arguments = raw.to_string();
+    old.model_arguments = serde_json::json!({
+        "kind": "tool_arguments", "bytes": old.arguments.len(),
+        "sha256": "a".repeat(64), "truncated": true,
+        "preview": "not the original arguments"
+    })
+    .to_string();
+    let mut native = complete_replay_record("native-kind");
+    native.model_arguments = serde_json::json!({
+        "path": "kind.txt", "kind": "tool_arguments", "preview": "ordinary parameter"
+    })
+    .to_string();
+    let result = old.model_result.clone().unwrap();
+    let replay = compact_tool_replay_messages(&[old.clone(), native]).unwrap();
+    let calls = replay[0].tool_replay().unwrap();
+    assert!(
+        matches!(&calls[0], ToolReplayPart::ToolCall { call_id, arguments, .. }
+        if call_id == "old-read" && arguments == &serde_json::json!({
+            "path": "Cargo.toml", "note": "x".repeat(2000)
+        })),
+        "an old envelope must recover bounded arguments from the raw row"
+    );
+    assert!(
+        matches!(&calls[1], ToolReplayPart::ToolCall { arguments, .. }
+        if arguments == &serde_json::json!({
+            "path": "kind.txt", "kind": "tool_arguments", "preview": "ordinary parameter"
+        })),
+        "native parameters resembling part of an envelope must remain intact"
+    );
+    assert!(
+        matches!(&replay[1].tool_replay().unwrap()[0],
+        ToolReplayPart::ToolResult { call_id, content, .. }
+        if call_id == "old-read" && content == &result),
+        "recovering old arguments must retain the original result"
+    );
+
+    old.arguments = "{invalid".into();
+    assert!(
+        matches!(
+            compact_tool_replay_messages(&[old]),
+            Err(StorageError::Corruption { .. })
+        ),
+        "a preview is no substitute for corrupt raw arguments"
+    );
+}
+
+#[tokio::test]
+async fn replayed_native_arguments_are_redacted_in_recorded_provider_requests() {
+    let secret = "registered-replayed-argument-secret";
+    let provider = InspectorProtocolProvider {
+        adapter: Box::new(swage_provider::openai::OpenAiProvider::from_config(
+            swage_provider::ProviderConfig::keyless("replay-test", "http://unused.invalid/v1"),
+        )),
+        stream: MultiRoundMockProvider::new(vec![
+            vec![
+                StreamChunk::ToolUse {
+                    call_id: "secret-argument".into(),
+                    name: "echo".into(),
+                    arguments: serde_json::json!({"text": secret}),
+                },
+                StreamChunk::Done {
+                    finish_reason: Some(FinishReason::ToolUse),
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "done".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+            vec![
+                StreamChunk::Delta {
+                    content: "next turn".into(),
+                },
+                StreamChunk::Done {
+                    finish_reason: None,
+                },
+            ],
+        ]),
+    };
+    let (state, session_id, storage) =
+        make_state_with_tool_provider_and_storage(Arc::new(provider)).await;
+    state
+        .secret_manager
+        .create_secret(crate::secret::CreateSecretRequest {
+            name: "Replay capture secret".into(),
+            material_kind: "plugin_secret".into(),
+            owner_kind: "service".into(),
+            backend_kind: "managed".into(),
+            scope_kind: "plugin".into(),
+            scope_id: Some("replay-test".into()),
+            metadata: None,
+            value: Some(secret.into()),
+            external_reference: None,
+        })
+        .await
+        .unwrap();
+
+    for input in ["Echo once", "Continue from history"] {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        process_turn(
+            &state,
+            session_id,
+            None,
+            input.to_owned(),
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    let thread = storage.list_by_session(session_id).await.unwrap().remove(0);
+    let turns = storage.list_turns_by_thread(thread.id).await.unwrap();
+    assert_eq!(turns.len(), 2);
+    let stored_calls = storage.list_tool_calls_by_turn(turns[0].id).await.unwrap();
+    assert_eq!(stored_calls.len(), 1);
+    assert!(
+        stored_calls[0].model_arguments.contains(secret),
+        "the replay input must actually contain the registered secret"
+    );
+    let snapshot = storage.get_snapshot(turns[1].id).await.unwrap().unwrap();
+    let report: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+    let requests = report["provider_visible"]["requests"].as_array().unwrap();
+    assert!(
+        !requests.is_empty(),
+        "the next turn must record its provider request"
+    );
+    let request = &requests[0]["request"];
+    assert!(
+        !request.to_string().contains(secret),
+        "registered secret values must be absent from the recorded provider request"
+    );
+    let call = request["body"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message["tool_calls"].as_array())
+        .flatten()
+        .find(|call| call["id"] == "secret-argument")
+        .expect("the earlier call must reach the next turn's recorded request");
+    let arguments: serde_json::Value =
+        serde_json::from_str(call["function"]["arguments"].as_str().unwrap()).unwrap();
+    assert_eq!(arguments, serde_json::json!({"text": "[REDACTED_SECRET]"}));
 }
 
 #[test]
@@ -12650,6 +13070,179 @@ async fn delegated_read_only_location_approval_allows_read_and_refuses_write() {
         !attachment.join("blocked.txt").exists(),
         "delegated read-only placement must reject the sandboxed write"
     );
+}
+
+async fn assert_named_child_replay_accounts_for_reads(offered: bool) {
+    let _swage_home = SwageHomeGuard::isolate();
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session = storage.create_session(new_session(topic.id)).await.unwrap();
+    let thread = ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id: session.id,
+            agent_id: "gateway".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let parent_turn = storage
+        .create_turn(NewTurn {
+            thread_id: thread.id,
+            agent_id: "gateway".into(),
+            state: TurnState::Processing,
+            user_input: Some("delegate twice".into()),
+            parent_turn_id: None,
+        })
+        .await
+        .unwrap();
+    storage
+        .upsert_agent_definition(swage_storage::NewAgentDefinition {
+            id: "reader".into(),
+            topic_id: Some(topic.id),
+            display_name: "Reader".into(),
+            description: String::new(),
+            instructions: String::new(),
+            model_id: None,
+            tool_permissions: Some(serde_json::json!({
+                "allow": if offered { vec!["echo", "tool_result_read"] } else { vec!["echo"] },
+                "deny": [], "bundles": {}, "require_approval": []
+            })),
+            skills: vec![],
+            output_schema: None,
+            output_max_retries: None,
+        })
+        .await
+        .unwrap();
+    let done = || StreamChunk::Done {
+        finish_reason: None,
+    };
+    let (provider, captured) = CapturingMultiRoundProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "long-read".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({"text": "x".repeat(6500) + "READ-MARKER"}),
+            },
+            done(),
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "first complete".into(),
+            },
+            done(),
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "continued".into(),
+            },
+            done(),
+        ],
+    ]);
+    let state = AppState::for_test(
+        storage.clone() as Arc<dyn swage_storage::store::Storage>,
+        storage.clone() as Arc<dyn swage_storage::store::TopicStore>,
+        Arc::new(provider),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(EchoMockTool) as Arc<dyn Tool>,
+            Arc::new(crate::tool::tool_result_read::ToolResultReadTool {
+                max_output_bytes: 65536,
+            }),
+        ]),
+        None,
+    );
+    let handler = GatewayDelegationHandler::new(state.clone());
+    for call_id in ["first", "continue"] {
+        let outcome = handler
+            .handle_delegation(
+                "reader",
+                "report what you read",
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("reader"),
+                DispatchContextComposition::default(),
+                call_id,
+                "gateway",
+                parent_turn.id,
+                topic.id,
+                CancellationToken::new(),
+                DelegateCompletionMode::Wait,
+            )
+            .await
+            .expect("named child completes");
+        assert!(matches!(outcome, DelegationOutcome::Completed(_)));
+    }
+    let captured = captured.lock().unwrap();
+    assert_eq!(
+        captured.len(),
+        3,
+        "initial call, full result, and continuation"
+    );
+    let request = &captured[2];
+    assert_eq!(
+        request
+            .tool_definitions
+            .iter()
+            .any(|tool| tool["name"] == "tool_result_read"),
+        offered
+    );
+    let replay = request
+        .messages
+        .iter()
+        .filter_map(ChatMessage::tool_replay)
+        .flatten()
+        .find_map(|part| match part {
+            swage_core::ToolReplayPart::ToolResult {
+                call_id, content, ..
+            } if call_id == "long-read" => Some(content),
+            _ => None,
+        })
+        .expect("continued child receives earlier tool result");
+    let envelope: serde_json::Value = serde_json::from_str(replay).unwrap();
+    assert_eq!(envelope["truncated"], true);
+    assert!(
+        !envelope["preview"]
+            .as_str()
+            .unwrap()
+            .contains("READ-MARKER")
+    );
+    assert!(captured[1].messages.iter().filter_map(ChatMessage::tool_replay).flatten().any(|part| matches!(
+        part, swage_core::ToolReplayPart::ToolResult { content, .. } if content.contains("READ-MARKER")
+    )), "the earlier turn received the whole result");
+    assert!(
+        envelope["note"].is_string(),
+        "continued named child must receive an elision note matching its offering: {envelope}"
+    );
+    let expected: swage_core::CompactToolReplay = serde_json::from_str(replay).unwrap();
+    assert_eq!(
+        envelope["note"],
+        serde_json::to_value(
+            expected.with_elision_note(swage_core::ReplayRetrieval::with_read_tool(offered))
+        )
+        .unwrap()["note"]
+    );
+    assert_eq!(
+        envelope["note"]
+            .as_str()
+            .unwrap()
+            .contains("`tool_result_read`"),
+        offered,
+        "the note names the read tool only where the child is offered it"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn named_child_replay_accounts_for_reads_with_retrieval() {
+    assert_named_child_replay_accounts_for_reads(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn named_child_replay_accounts_for_reads_without_retrieval() {
+    assert_named_child_replay_accounts_for_reads(false).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -16975,6 +17568,34 @@ async fn delegation_rejects_missing_sender_turn_lineage() {
 }
 
 #[test]
+fn sandbox_config_carries_the_session_shell_timeout_and_waits_for_its_reply() {
+    let agent = AgentConfig::new("agent").with_workspace(std::env::current_dir().unwrap(), vec![]);
+    for seconds in [1, 75] {
+        let tools = swage_config::ToolConfig {
+            shell_timeout_secs: seconds,
+            ..Default::default()
+        };
+        let roots = PolicyRoots {
+            home: std::env::temp_dir().join("swage-no-home"),
+            data_root: std::env::temp_dir().join("swage-no-data-root"),
+        };
+        let config = build_sandbox_config(&agent, None, &roots, &tools).unwrap();
+        assert_eq!(
+            config
+                .tool_runtime
+                .as_ref()
+                .map(|settings| settings.shell_timeout_secs),
+            Some(seconds),
+            "the sandbox child must receive the session's configured timeout"
+        );
+        assert!(
+            config.tool_call_timeout > std::time::Duration::from_secs(seconds),
+            "the IPC wait must let the shell report its own timeout"
+        );
+    }
+}
+
+#[test]
 fn sandbox_config_skips_missing_trusted_workspace_paths() {
     let temp_dir = tempfile::tempdir().unwrap();
     let working_directory = temp_dir.path().join("work");
@@ -17016,7 +17637,13 @@ fn sandbox_config_skips_missing_trusted_workspace_paths() {
         home: temp_dir.path().join("home"),
         data_root: temp_dir.path().join("data-root"),
     };
-    let sandbox_config = build_sandbox_config(&agent_config, Some(&policy), &roots).unwrap();
+    let sandbox_config = build_sandbox_config(
+        &agent_config,
+        Some(&policy),
+        &roots,
+        &swage_config::ToolConfig::default(),
+    )
+    .unwrap();
     let existing_workspace = sandbox_path(&existing_workspace);
 
     assert!(sandbox_config.read_only_paths.contains(&existing_workspace));
@@ -17088,7 +17715,13 @@ fn a_linked_worktree_writes_its_gitdir_and_the_repository_it_belongs_to() {
         home: temp_dir.path().join("home"),
         data_root: temp_dir.path().join("data-root"),
     };
-    let sandbox_config = build_sandbox_config(&agent_config, None, &roots).unwrap();
+    let sandbox_config = build_sandbox_config(
+        &agent_config,
+        None,
+        &roots,
+        &swage_config::ToolConfig::default(),
+    )
+    .unwrap();
     assert!(sandbox_config.working_directory_is_writable());
     assert!(sandbox_config.write_paths.contains(&repo_git));
 }
@@ -17120,7 +17753,13 @@ fn git_metadata_under_a_masked_path_is_left_masked() {
         .unwrap();
         let agent_config =
             AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
-        let policy = build_sandbox_config(&agent_config, None, &roots).unwrap();
+        let policy = build_sandbox_config(
+            &agent_config,
+            None,
+            &roots,
+            &swage_config::ToolConfig::default(),
+        )
+        .unwrap();
         assert!(policy.working_directory_is_writable());
         assert!(
             !policy.write_paths.contains(&sandbox_path(&pointed_at)),
@@ -17159,7 +17798,8 @@ fn a_grant_equal_to_a_masked_path_is_carried_beside_its_mask() {
     };
 
     let at_ssh = AgentConfig::new("worker").with_workspace(&ssh, vec![ssh.clone()]);
-    let policy = build_sandbox_config(&at_ssh, None, &roots).unwrap();
+    let policy =
+        build_sandbox_config(&at_ssh, None, &roots, &swage_config::ToolConfig::default()).unwrap();
     assert!(
         policy.masked_paths.contains(&sandbox_path(&ssh)),
         "{:?}",
@@ -17172,12 +17812,14 @@ fn a_grant_equal_to_a_masked_path_is_carried_beside_its_mask() {
     );
 
     let at_root = AgentConfig::new("worker").with_workspace(&data_root, vec![data_root.clone()]);
-    let policy = build_sandbox_config(&at_root, None, &roots).unwrap();
+    let policy =
+        build_sandbox_config(&at_root, None, &roots, &swage_config::ToolConfig::default()).unwrap();
     assert!(policy.masked_paths.contains(&sandbox_path(&data_root)));
     assert!(policy.write_paths.contains(&sandbox_path(&data_root)));
 
     let above = AgentConfig::new("worker").with_workspace(&home, vec![home.clone()]);
-    let policy = build_sandbox_config(&above, None, &roots).unwrap();
+    let policy =
+        build_sandbox_config(&above, None, &roots, &swage_config::ToolConfig::default()).unwrap();
     assert!(policy.masked_paths.contains(&sandbox_path(&ssh)));
     assert!(
         !policy.write_paths.contains(&sandbox_path(&ssh)),
@@ -17199,7 +17841,13 @@ fn a_grant_equal_to_a_masked_path_is_carried_beside_its_mask() {
         }),
         attachments: Vec::new(),
     };
-    let policy = build_sandbox_config(&at_ssh, Some(&read_only_policy), &roots).unwrap();
+    let policy = build_sandbox_config(
+        &at_ssh,
+        Some(&read_only_policy),
+        &roots,
+        &swage_config::ToolConfig::default(),
+    )
+    .unwrap();
     assert!(policy.masked_paths.contains(&sandbox_path(&ssh)));
     assert!(
         policy.read_only_paths.contains(&sandbox_path(&ssh)),
@@ -17236,7 +17884,13 @@ fn a_git_pointer_at_a_directory_that_is_not_git_metadata_grants_nothing() {
     assert!(git_metadata_outside(&sandbox_path(&workspace)).is_empty());
     let agent_config =
         AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
-    let policy = build_sandbox_config(&agent_config, None, &roots).unwrap();
+    let policy = build_sandbox_config(
+        &agent_config,
+        None,
+        &roots,
+        &swage_config::ToolConfig::default(),
+    )
+    .unwrap();
     assert!(
         !policy.write_paths.contains(&sandbox_path(&home)),
         "{:?}",
@@ -17246,7 +17900,13 @@ fn a_git_pointer_at_a_directory_that_is_not_git_metadata_grants_nothing() {
     // A HEAD file dressing the home as metadata still leaves it above the
     // masks, so the policy grants nothing over them.
     std::fs::write(home.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-    let policy = build_sandbox_config(&agent_config, None, &roots).unwrap();
+    let policy = build_sandbox_config(
+        &agent_config,
+        None,
+        &roots,
+        &swage_config::ToolConfig::default(),
+    )
+    .unwrap();
     assert!(
         !policy.write_paths.contains(&sandbox_path(&home)),
         "{:?}",
@@ -17322,7 +17982,13 @@ fn the_policy_masks_private_home_paths_and_the_data_root_and_opens_the_shared_ca
         home: home.clone(),
         data_root: data_root.clone(),
     };
-    let sandbox_config = build_sandbox_config(&agent_config, None, &roots).unwrap();
+    let sandbox_config = build_sandbox_config(
+        &agent_config,
+        None,
+        &roots,
+        &swage_config::ToolConfig::default(),
+    )
+    .unwrap();
 
     let masked = &sandbox_config.masked_paths;
     assert!(
@@ -17358,7 +18024,8 @@ fn the_policy_masks_private_home_paths_and_the_data_root_and_opens_the_shared_ca
     let inside = data_root.join("scratch").join("session-1");
     std::fs::create_dir_all(&inside).unwrap();
     let granted = AgentConfig::new("worker").with_workspace(&inside, vec![inside.clone()]);
-    let sandbox_config = build_sandbox_config(&granted, None, &roots).unwrap();
+    let sandbox_config =
+        build_sandbox_config(&granted, None, &roots, &swage_config::ToolConfig::default()).unwrap();
     assert!(
         sandbox_config
             .masked_paths
@@ -17404,7 +18071,13 @@ fn worker_placement_replaces_other_filesystem_authority() {
         home: temp_dir.path().join("home"),
         data_root: temp_dir.path().join("data-root"),
     };
-    let sandbox_config = build_sandbox_config(&agent_config, Some(&policy), &roots).unwrap();
+    let sandbox_config = build_sandbox_config(
+        &agent_config,
+        Some(&policy),
+        &roots,
+        &swage_config::ToolConfig::default(),
+    )
+    .unwrap();
     let placement = sandbox_path(&placement);
     let sibling_workspace = sandbox_path(&sibling_workspace);
     assert!(sandbox_config.read_only_paths.contains(&placement));
@@ -17521,6 +18194,7 @@ async fn placed_worker_orientation_keeps_its_working_directory() {
         environment,
         vec![],
         std::collections::BTreeSet::new(),
+        std::collections::BTreeMap::new(),
     )
     .content()[0]
         .text_content();
@@ -17757,7 +18431,7 @@ fn named_assembly_elements_include_prompts_skills_memory_and_history() {
         )),
         test_environment(),
         vec![],
-        std::collections::BTreeSet::new(),
+        swage_tool::registry::OfferedTools::default(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
@@ -17794,7 +18468,7 @@ fn elements_built_without_memory_omit_the_memory_element() {
         None,
         test_environment(),
         vec![],
-        std::collections::BTreeSet::new(),
+        swage_tool::registry::OfferedTools::default(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
@@ -17854,7 +18528,7 @@ async fn named_assembly_composes_the_memory_element_like_any_other() {
         Some(memory),
         test_environment(),
         vec![],
-        std::collections::BTreeSet::new(),
+        swage_tool::registry::OfferedTools::default(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
@@ -17991,7 +18665,7 @@ async fn delegated_assembly_applies_call_scoped_composition_over_live_state() {
             assembly: Some("briefing".into()),
             skills: None,
         },
-        session_value_dispatcher.offered_tools(),
+        session_value_dispatcher.offered(),
     );
 
     let output = assembler
@@ -18074,7 +18748,7 @@ fn build_assembly_elements_memory_element_contains_provided_content() {
         )),
         test_environment(),
         vec![],
-        std::collections::BTreeSet::new(),
+        swage_tool::registry::OfferedTools::default(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
@@ -18378,7 +19052,7 @@ fn instruction_provenance_counts_configured_files_at_their_own_levels() {
             None,
             test_environment(),
             vec![],
-            std::collections::BTreeSet::new(),
+            swage_tool::registry::OfferedTools::default(),
             "gpt-test-model",
             swage_context::working_norms::WorkingNormsScaffold::Native,
             &[],
@@ -18431,7 +19105,7 @@ fn assembly_elements_layer_operator_guidance_after_instructions() {
         None,
         test_environment(),
         vec![],
-        std::collections::BTreeSet::new(),
+        swage_tool::registry::OfferedTools::default(),
         "claude-test-model",
         swage_context::working_norms::WorkingNormsScaffold::Native,
         &[],
@@ -20885,7 +21559,7 @@ async fn operation_outcome_turn(
 
 async fn operation_outcome_turn_with_config(
     calls: Vec<(&str, &str, serde_json::Value)>,
-    config: swage_config::ResolvedConfig,
+    mut config: swage_config::ResolvedConfig,
     attendance: TurnAttendance,
 ) -> (
     Arc<swage_storage::SqliteStorage>,
@@ -20893,6 +21567,8 @@ async fn operation_outcome_turn_with_config(
     Vec<ServerEvent>,
     Vec<CompletionRequest>,
 ) {
+    // Exercise host tools without depending on an installed sandbox backend.
+    config.sandbox.enabled = false;
     let root = SwageHomeGuard::new();
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
     let topic = storage.general_scope().await.unwrap();
@@ -20928,7 +21604,7 @@ async fn operation_outcome_turn_with_config(
             },
         ],
     ]);
-    let mut state = AppState::new_with_config_root(
+    let state = AppState::new_with_config_root(
         storage.clone(),
         storage.clone(),
         Arc::new(provider),
@@ -20946,8 +21622,6 @@ async fn operation_outcome_turn_with_config(
         None,
         root.path().to_path_buf(),
     );
-    // Exercise host tools without depending on an installed sandbox backend.
-    state.declared_execution_boundary = Some("container".into());
     let (tx, mut rx) = mpsc::unbounded_channel();
     process_turn_with_composition(
         &state,
@@ -24901,4 +25575,417 @@ async fn a_readdressed_result_is_delivered_only_in_the_parents_session() {
             .status,
         MessageStatus::Delivered
     );
+}
+
+async fn start_result_turn(text: String, tool: Arc<dyn crate::tool::Tool>) -> (AppState, Uuid) {
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+    let topic = storage.general_scope().await.expect("create default topic");
+    let session = storage
+        .create_session(new_session(topic.id))
+        .await
+        .expect("create session");
+    let session_id = session.id;
+
+    ThreadStore::create(
+        &*storage,
+        NewThread {
+            session_id,
+            agent_id: "gateway".to_string(),
+        },
+    )
+    .await
+    .expect("create default thread");
+
+    let first_provider = Arc::new(MultiRoundMockProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "c1".into(),
+                name: tool.name().into(),
+                arguments: serde_json::json!({ "text": text }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "first complete".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]));
+
+    let state = AppState::for_test(
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>,
+        Arc::clone(&storage) as Arc<dyn swage_storage::store::TopicStore>,
+        first_provider as Arc<dyn LlmProvider>,
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![tool]),
+        None,
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Use echo".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("first turn should complete");
+
+    (state, session_id)
+}
+
+async fn start_long_result_turn(tool: Arc<dyn crate::tool::Tool>) -> (AppState, Uuid) {
+    start_result_turn("x".repeat(6500) + "READ-MARKER", tool).await
+}
+
+async fn assert_later_replay_accounts_for_reads(offered: bool) {
+    let (state, session_id) = start_long_result_turn(Arc::new(EchoMockTool)).await;
+    let (second_provider, captured) = CapturingProvider::new(vec![
+        StreamChunk::Delta {
+            content: "second complete".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]);
+    let mut config = state.active_config();
+    config.tools.permissions.allow = if offered {
+        vec!["*".into()]
+    } else {
+        vec!["echo".into()]
+    };
+    state.replace_runtime(
+        config,
+        Arc::new(second_provider) as Arc<dyn LlmProvider>,
+        crate::tool::ToolDispatcher::allow_all(vec![
+            Arc::new(EchoMockTool) as Arc<dyn crate::tool::Tool>,
+            Arc::new(crate::tool::tool_result_read::ToolResultReadTool {
+                max_output_bytes: 65536,
+            }),
+        ]),
+    );
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Continue".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("second turn should complete");
+
+    let captured = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("second provider request should be captured");
+    let assistant_tool_message = captured
+        .messages
+        .iter()
+        .find(|message| {
+            message.role() == Role::Assistant
+                && message.tool_replay().is_some_and(|replay| {
+                    replay
+                        .iter()
+                        .any(|part| matches!(part, swage_core::ToolReplayPart::ToolCall { .. }))
+                })
+        })
+        .expect("later turn should include assistant tool-use replay");
+    let tool_use = assistant_tool_message
+        .tool_replay()
+        .unwrap()
+        .iter()
+        .find_map(|part| match part {
+            swage_core::ToolReplayPart::ToolCall {
+                call_id,
+                name,
+                arguments,
+            } => Some((call_id, name, arguments)),
+            _ => None,
+        })
+        .expect("tool-use replay");
+    assert_eq!(tool_use.0, "c1");
+    assert_eq!(tool_use.1, "echo");
+
+    let tool_result_message = captured
+        .messages
+        .iter()
+        .find(|message| {
+            message.role() == Role::User
+                && message.tool_replay().is_some_and(|replay| {
+                    replay
+                        .iter()
+                        .any(|part| matches!(part, swage_core::ToolReplayPart::ToolResult { .. }))
+                })
+        })
+        .expect("later turn should include user tool-result replay");
+    let tool_result = tool_result_message
+        .tool_replay()
+        .unwrap()
+        .iter()
+        .find_map(|part| match part {
+            swage_core::ToolReplayPart::ToolResult {
+                call_id, content, ..
+            } => Some((call_id, content)),
+            _ => None,
+        })
+        .expect("tool-result replay");
+    assert_eq!(tool_result.0, "c1");
+    let envelope: serde_json::Value = serde_json::from_str(tool_result.1).unwrap();
+    let note = envelope["note"]
+        .as_str()
+        .expect("later replay must account for the full earlier read");
+    let recorded: swage_core::CompactToolReplay =
+        serde_json::from_value(envelope.clone()).expect("the replay envelope");
+    assert_eq!(
+        Some(note),
+        swage_core::CompactToolReplay {
+            note: None,
+            ..recorded
+        }
+        .with_elision_note(swage_core::ReplayRetrieval::with_read_tool(offered))
+        .note
+        .as_deref(),
+        "the note is the one written for this turn's own tools"
+    );
+    assert_eq!(note.contains("`tool_result_read`"), offered);
+    let offered_in_request = captured
+        .tool_definitions
+        .iter()
+        .any(|tool| tool["name"] == "tool_result_read");
+    assert_eq!(offered_in_request, offered);
+    let reference = envelope["full_result_ref"].as_str().unwrap();
+    let parsed = swage_core::parse_tool_result_reference(reference).unwrap();
+    let row = state
+        .storage
+        .get_tool_call_by_turn_and_call_id(parsed.turn_id, &parsed.call_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(row.result.as_ref().unwrap().contains("READ-MARKER"));
+    let stored: serde_json::Value =
+        serde_json::from_str(row.model_result.as_ref().unwrap()).unwrap();
+    assert!(
+        stored.get("note").is_none(),
+        "the reading-time note must not be stored"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn later_replay_accounts_for_reads_with_retrieval() {
+    assert_later_replay_accounts_for_reads(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn later_replay_accounts_for_reads_without_retrieval() {
+    assert_later_replay_accounts_for_reads(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn later_replay_keeps_recovered_content() {
+    let (state, session_id) = start_long_result_turn(Arc::new(EchoMockTool)).await;
+    let thread_id = state.storage.list_by_session(session_id).await.unwrap()[0].id;
+    let turn_id = state.storage.list_turns_by_thread(thread_id).await.unwrap()[0].id;
+    let reference = swage_core::tool_result_reference(&turn_id.to_string(), "c1");
+    let read_provider = MultiRoundMockProvider::new(vec![
+        vec![
+            StreamChunk::ToolUse {
+                call_id: "recovered".into(),
+                name: "tool_result_read".into(),
+                arguments: serde_json::json!({ "reference": reference }),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "read again".into(),
+            },
+            StreamChunk::Done {
+                finish_reason: None,
+            },
+        ],
+    ]);
+    state.replace_runtime(
+        state.active_config(),
+        Arc::new(read_provider),
+        crate::tool::ToolDispatcher::allow_all(vec![Arc::new(
+            crate::tool::tool_result_read::ToolResultReadTool {
+                max_output_bytes: 65536,
+            },
+        ) as Arc<dyn crate::tool::Tool>]),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Read the recorded result".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .unwrap();
+    let read_turn = state
+        .storage
+        .list_turns_by_thread(thread_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|turn| turn.id != turn_id)
+        .unwrap();
+    let rows = state
+        .storage
+        .list_tool_calls_by_turn(read_turn.id)
+        .await
+        .unwrap();
+    assert_eq!(rows[0].status.as_deref(), Some("success"));
+    assert!(rows[0].result.as_ref().unwrap().contains("READ-MARKER"));
+
+    let (second_provider, captured) = CapturingProvider::new(vec![
+        StreamChunk::Delta {
+            content: "second complete".into(),
+        },
+        StreamChunk::Done {
+            finish_reason: None,
+        },
+    ]);
+    state.replace_runtime(
+        state.active_config(),
+        Arc::new(second_provider),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Where did you read the marker?".to_string(),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .unwrap();
+    let request = captured.lock().unwrap().take().unwrap();
+    let recovered = request
+        .messages
+        .iter()
+        .filter_map(|message| message.tool_replay())
+        .flatten()
+        .find_map(|part| match part {
+            ToolReplayPart::ToolResult {
+                call_id, content, ..
+            } if call_id == "recovered" => Some(content),
+            _ => None,
+        })
+        .expect("the recovered read is replayed");
+    assert_eq!(
+        recovered,
+        rows[0]
+            .result
+            .as_ref()
+            .expect("the settled recovered delivery"),
+        "later provider requests must keep the complete recovered delivery"
+    );
+    let service =
+        crate::service::ConversationService::new(state.storage.clone(), state.topic_store.clone());
+    let detail = serde_json::to_value(service.get_conversation(session_id).await.unwrap()).unwrap();
+    let read = detail["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|message| message["tool_calls"].as_array().unwrap())
+        .find(|call| call["call_id"] == "recovered")
+        .unwrap();
+    assert_eq!(
+        read["model_replay_truncated"], false,
+        "the recovered read is shown as a full replay"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn conversation_evidence_marks_a_replayed_preview() {
+    let (state, session_id) = start_long_result_turn(Arc::new(EchoMockTool)).await;
+    let service =
+        crate::service::ConversationService::new(state.storage.clone(), state.topic_store.clone());
+    let detail = serde_json::to_value(service.get_conversation(session_id).await.unwrap()).unwrap();
+    let call = detail["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|message| message["tool_calls"].as_array().unwrap())
+        .find(|call| call["call_id"] == "c1")
+        .unwrap();
+    assert_eq!(
+        call["model_replay_truncated"], true,
+        "the conversation must disclose the replay's preview-only delivery"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dispatcher_preserves_arguments_beyond_the_replay_bound() {
+    struct WholeArgumentsTool {
+        expected: String,
+        validated: Arc<AtomicBool>,
+        executed: Arc<AtomicBool>,
+    }
+    #[async_trait]
+    impl crate::tool::Tool for WholeArgumentsTool {
+        fn name(&self) -> &str {
+            "echo"
+        }
+        fn description(&self) -> &str {
+            "Return the submitted text."
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object", "properties":{"text":{"type":"string"}},"required":["text"]})
+        }
+        fn validate_call(&self, params: &serde_json::Value) -> Result<(), ToolError> {
+            assert_eq!(
+                params["text"].as_str(),
+                Some(self.expected.as_str()),
+                "validation must receive the complete argument"
+            );
+            self.validated.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn execute(
+            &self,
+            params: serde_json::Value,
+            _ctx: &dyn swage_tool::context::ToolContext,
+        ) -> Result<serde_json::Value, ToolError> {
+            assert_eq!(
+                params["text"].as_str(),
+                Some(self.expected.as_str()),
+                "execution must receive the complete argument"
+            );
+            self.executed.store(true, Ordering::SeqCst);
+            Ok(params)
+        }
+    }
+    let validated = Arc::new(AtomicBool::new(false));
+    let executed = Arc::new(AtomicBool::new(false));
+    start_long_result_turn(Arc::new(WholeArgumentsTool {
+        expected: "x".repeat(6500) + "READ-MARKER",
+        validated: validated.clone(),
+        executed: executed.clone(),
+    }))
+    .await;
+    assert!(validated.load(Ordering::SeqCst), "validation must run");
+    assert!(executed.load(Ordering::SeqCst), "execution must run");
 }

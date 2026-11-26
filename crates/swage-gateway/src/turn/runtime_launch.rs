@@ -42,8 +42,8 @@ pub(crate) fn effort_capability_for_model(
 /// The output limit a turn's request carries: the caller's own value (a
 /// generation preset's `max_tokens`), else the catalogue entry's declaration,
 /// else the provider adapter's account of the documented limit for the
-/// effective model; `None` where no source declares one, and the adapter's
-/// protocol floor then applies on the wire.
+/// effective model; `None` where no source declares one, and the adapter
+/// chooses what to send on the wire.
 pub(crate) fn output_limit_for_model(
     caller: Option<u32>,
     config: &swage_config::ResolvedConfig,

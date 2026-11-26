@@ -155,6 +155,191 @@ async fn create_conversation(router: &Router) -> Uuid {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn conversational_agent_definition_create_and_update_record_audited_rows() {
+    use crate::support::{
+        CapturingProvider, LiveTestGateway, journey, live_http_json, scratch_tempdir,
+    };
+    use reqwest::Method;
+    use swage_gateway::tool::ToolDispatcher;
+
+    let root = scratch_tempdir();
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let mut config = swage_config::ResolvedConfig::default();
+    config.sandbox.enabled = false;
+    config.tools.permissions.allow = vec!["*".into()];
+    let state = AppState::new_with_config_root(
+        storage.clone(),
+        storage.clone(),
+        Arc::new(MockProvider),
+        config,
+        ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    let gateway = LiveTestGateway::start(build_router(state.clone()), root).await;
+    // Saving settings builds the shipped registry, so missing registration is
+    // exercised too. Only the model is replaced with a scripted turn provider.
+    let settings = json!({
+        "default_provider": "local",
+        "providers": {"local": {"protocol": "openai", "base_url": "http://127.0.0.1:65535/v1"}},
+        "default_model": "sonnet",
+        "models": {"sonnet": {"provider_id": "local", "model_id": "claude-sonnet-5-5",
+            "aliases": [], "capabilities": {"reasoning_replay": false, "effort": null}}},
+        "sandbox": {"enabled": false, "allow_degraded_execution": false},
+        "tool_permissions": {"allow": ["*"], "deny": [], "bundles": {}, "require_approval": []}
+    });
+    let (status, saved) = live_http_json(
+        gateway.address,
+        Method::PUT,
+        "/api/settings",
+        Some(settings),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let registry = state.active_tool_dispatcher().registry().clone();
+    let tools = registry
+        .list()
+        .into_iter()
+        .map(|name| registry.get(name).unwrap());
+    let original = "Always open every reply with 'Heron here:'";
+    let revised = "Always open every reply with 'Heron revised:'";
+    let mutations = [
+        json!({"action": "create", "id": "heron", "display_name": "Heron",
+            "description": "Replies with a recognisable opening", "instructions": original, "model_id": "sonnet"}),
+        json!({"action": "update", "id": "heron", "instructions": revised}),
+    ];
+    let rounds = mutations
+        .iter()
+        .enumerate()
+        .flat_map(|(index, arguments)| {
+            [
+                vec![
+                    StreamChunk::ToolUse {
+                        call_id: format!("author-heron-{index}"),
+                        name: "agent_definition".into(),
+                        arguments: arguments.clone(),
+                    },
+                    StreamChunk::Done {
+                        finish_reason: Some(swage_core::FinishReason::ToolUse),
+                    },
+                ],
+                vec![
+                    StreamChunk::Delta {
+                        content: "Definition request handled.".into(),
+                    },
+                    StreamChunk::Done {
+                        finish_reason: Some(swage_core::FinishReason::Stop),
+                    },
+                ],
+            ]
+        })
+        .collect();
+    let (provider, requests) = CapturingProvider::new("definition-author", rounds);
+    state.replace_runtime(
+        state.active_config(),
+        Arc::new(provider),
+        ToolDispatcher::allow_all(tools),
+    );
+    let (status, conversation) = live_http_json(
+        gateway.address,
+        Method::POST,
+        "/api/conversations",
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{conversation}");
+    for (index, instructions) in [original, revised].iter().enumerate() {
+        let (status, submitted) = live_http_json(gateway.address, Method::POST, "/api/turns", Some(json!({
+            "conversation_id": conversation["id"],
+            "message": if index == 0 { "Create heron." } else { "Revise heron's instructions." },
+        }))).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{submitted}");
+        let turn_id = submitted["turn_id"].as_str().unwrap();
+        let settled = journey(async {
+            loop {
+                let (status, turn) = live_http_json(
+                    gateway.address,
+                    Method::GET,
+                    &format!("/api/turns/{turn_id}"),
+                    None,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{turn}");
+                if !["pending", "processing"].contains(&turn["state"].as_str().unwrap()) {
+                    break turn;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert_eq!(settled["state"], "completed", "{settled}");
+        let calls = state
+            .storage
+            .list_tool_calls_by_turn(turn_id.parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(calls.len(), 1, "one authoring call per turn: {calls:?}");
+        assert_eq!(calls[0].tool, "agent_definition");
+        assert_eq!(
+            calls[0].status.as_deref(),
+            Some("success"),
+            "the authoring tool must succeed: {:?}",
+            calls[0].result
+        );
+        let result: Value = serde_json::from_str(calls[0].result.as_deref().unwrap()).unwrap();
+        assert_eq!(result["definition"]["instructions"], *instructions);
+        let rows = state.storage.list_agent_definitions(None).await.unwrap();
+        let heron = rows
+            .iter()
+            .find(|row| row.id == "heron")
+            .expect("the conversational create must store heron");
+        assert_eq!(&heron.instructions, instructions);
+        assert_eq!(heron.display_name, "Heron");
+        assert_eq!(heron.model_id.as_deref(), Some("sonnet"));
+        let events = state.storage.list_audit_events().await.unwrap();
+        let changes: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.event_kind == "configuration_change"
+                    && event.entity_id == "heron@global"
+                    && event.metadata["action"] == "upsert_agent_definition"
+            })
+            .collect();
+        assert_eq!(
+            changes.len(),
+            index + 1,
+            "each conversational mutation must leave exactly one configuration_change"
+        );
+        let event = changes
+            .iter()
+            .find(|event| event.metadata["new_state"]["instructions"] == *instructions)
+            .expect("the mutation's audit record contains its new instructions");
+        assert_eq!(event.metadata["source"], "agent_tool");
+        assert_eq!(
+            event.metadata["new_state"],
+            serde_json::to_value(heron).unwrap()
+        );
+        if index == 0 {
+            assert!(event.metadata["prior_state"].is_null());
+        } else {
+            let creation = changes
+                .iter()
+                .find(|event| event.metadata["prior_state"].is_null())
+                .unwrap();
+            assert_eq!(
+                event.metadata["prior_state"],
+                creation.metadata["new_state"]
+            );
+        }
+    }
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        4,
+        "each turn consumes the tool result before finishing"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn agent_definition_http_crud_records_every_mutation() {
     let state = test_state();
     let router = build_router(state.clone());
