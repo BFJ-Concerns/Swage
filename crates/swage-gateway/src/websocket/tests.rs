@@ -1480,20 +1480,36 @@ async fn a_duplicate_socket_receives_the_reason_over_the_websocket() {
     server.abort();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn resuming_a_session_updates_open_recent_lists_over_the_socket() {
     use axum::routing::get;
     use futures::StreamExt;
     use swage_protocol::client::conversation::{RecentSessionsResponse, RecentSessionsSource};
-    use swage_storage::SessionStore;
+    use swage_storage::store::{SessionStore, Storage, TopicStore};
     use tokio::time::{Duration, timeout};
 
-    let (state, session_id, storage) = make_state_with_session_and_storage().await;
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session_id = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .unwrap()
+        .id;
     storage
         .archive_inactive_sessions(chrono::Utc::now() + chrono::Duration::days(1), &[])
         .await
         .unwrap();
 
+    let state = AppState::new_with_config_root(
+        storage.clone() as Arc<dyn Storage>,
+        storage as Arc<dyn TopicStore>,
+        Arc::new(MockProvider::new(vec![])),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
     let router = axum::Router::new()
         .route("/api/work-surface/ws", get(super::work_surface_ws_handler))
         .route("/api/sessions", get(crate::handlers::list_recent_sessions))
@@ -1522,7 +1538,7 @@ async fn resuming_a_session_updates_open_recent_lists_over_the_socket() {
             .unwrap();
     assert!(read_list().await.entries.is_empty());
 
-    let (_conversation, _) = tokio_tungstenite::connect_async(format!(
+    let (mut conversation, _) = tokio_tungstenite::connect_async(format!(
         "ws://{address}/api/conversations/{session_id}/ws"
     ))
     .await
@@ -1539,6 +1555,8 @@ async fn resuming_a_session_updates_open_recent_lists_over_the_socket() {
         list.entries.as_slice(),
         [entry] if matches!(&entry.source, RecentSessionsSource::Conversation { session } if session.id == session_id)
     ));
+    conversation.close(None).await.unwrap();
+    signals.close(None).await.unwrap();
     server.abort();
 }
 
