@@ -18,7 +18,6 @@ pub async fn voice_capabilities(state: &AppState) -> VoiceCapabilitiesResponse {
     VoiceCapabilitiesResponse {
         transcription: capabilities.transcription,
         synthesis: capabilities.synthesis,
-        synthesis_unverified: capabilities.synthesis_unverified,
         default_voice: capabilities.default_voice,
         supported_voices: capabilities.supported_voices,
         unavailable_reason: capabilities.unavailable_reason,

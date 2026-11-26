@@ -7574,16 +7574,11 @@
         "synthesis": {
           "type": "boolean"
         },
-        "synthesis_unverified": {
-          "description": "Whether the configured speech model's availability is still unverified.",
-          "type": "boolean",
-          "default": false
-        },
         "transcription": {
           "type": "boolean"
         },
         "unavailable_reason": {
-          "description": "Why transcription or synthesis is unavailable, naming what to\nconfigure; absent when both are available.",
+          "description": "Why transcription or synthesis is unavailable. Absent when both are available.",
           "type": [
             "string",
             "null"
