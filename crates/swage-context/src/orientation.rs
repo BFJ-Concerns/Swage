@@ -43,12 +43,13 @@ pub struct SessionEnvironment {
     pub channel: Option<ChannelOrientation>,
 }
 
-/// A readable workspace and the access granted to this session.
+/// A readable workspace and the access granted to this session. Every one
+/// listed is a folder the operator trusted: an attachment that is not trusted
+/// grants the session nothing and is never listed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadableWorkspace {
     pub path: String,
     pub can_write: bool,
-    pub is_trusted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -294,15 +295,7 @@ impl OrientationElement {
             } else {
                 "read-only"
             };
-            let trust = if workspace.is_trusted {
-                "trusted"
-            } else {
-                "untrusted"
-            };
-            place.push_str(&format!(
-                "Workspace: {} — {access}, {trust}\n",
-                workspace.path
-            ));
+            place.push_str(&format!("Workspace: {} — {access}\n", workspace.path));
         }
         place.push_str(&format!(
             "Session started: {}\n",
@@ -460,21 +453,17 @@ mod tests {
         );
         let text = with_browser.content()[0].text_content();
         assert!(text.contains("## Registered secrets"), "{text}");
-        assert!(
-            text.contains("`secret://<id>` in place of its value"),
-            "{text}"
-        );
+        assert!(text.contains(SECRETS_OPENING), "{text}");
         assert!(
             text.contains("This turn, `browser` resolves one in `text`."),
             "{text}"
         );
         assert!(
-            text.contains(
-                "Every other tool, `shell` included, receives a reference as literal text"
-            ),
+            text.contains(&format!(
+                "Every other tool, `shell` included, {SECRETS_CLOSING}"
+            )),
             "{text}"
         );
-        assert!(text.contains("never report a secret as used"), "{text}");
 
         let none = OrientationElement::new(
             bare_environment(),
@@ -483,7 +472,12 @@ mod tests {
             BTreeMap::new(),
         );
         let text = none.content()[0].text_content();
-        assert!(text.contains("This turn, no tool resolves a reference, so every tool receives a reference as literal text"), "{text}");
+        assert!(
+            text.contains(&format!(
+                "This turn, no tool resolves a reference, so every tool {SECRETS_CLOSING}"
+            )),
+            "{text}"
+        );
         assert!(!text.contains("`shell`"), "{text}");
         assert!(!text.contains("`browser`"), "{text}");
     }
@@ -615,7 +609,6 @@ mod tests {
         environment.workspaces = vec![ReadableWorkspace {
             path: "/references/pack".into(),
             can_write: false,
-            is_trusted: true,
         }];
 
         let text = OrientationElement::new(environment, vec![], BTreeSet::new(), BTreeMap::new())
@@ -627,7 +620,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("Workspace: /references/pack — read-only, trusted"),
+            text.contains("Workspace: /references/pack — read-only\n"),
             "{text}"
         );
     }
@@ -645,23 +638,21 @@ mod tests {
             ReadableWorkspace {
                 path: "/projects/source".into(),
                 can_write: true,
-                is_trusted: true,
             },
             ReadableWorkspace {
                 path: "/references/pack".into(),
                 can_write: false,
-                is_trusted: true,
             },
         ];
         let text = OrientationElement::new(environment, vec![], BTreeSet::new(), BTreeMap::new())
             .content()[0]
             .text_content();
         assert!(
-            text.contains("Workspace: /projects/source — writable, trusted"),
+            text.contains("Workspace: /projects/source — writable\n"),
             "{text}"
         );
         assert!(
-            text.contains("Workspace: /references/pack — read-only, trusted"),
+            text.contains("Workspace: /references/pack — read-only\n"),
             "{text}"
         );
     }

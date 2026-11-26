@@ -215,7 +215,6 @@ pub(crate) fn build_session_environment(
                 let readable = ReadableWorkspace {
                     path: path.display().to_string(),
                     can_write,
-                    is_trusted: workspace.is_trusted,
                 };
                 if !workspaces.contains(&readable) {
                     workspaces.push(readable);

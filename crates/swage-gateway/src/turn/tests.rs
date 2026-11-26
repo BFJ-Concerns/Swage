@@ -23114,22 +23114,17 @@ async fn orientation_environment_carries_every_readable_workspace_from_resolved_
     let mut actual = environment
         .workspaces
         .iter()
-        .map(|workspace| {
-            (
-                workspace.path.as_str(),
-                workspace.can_write,
-                workspace.is_trusted,
-            )
-        })
+        .map(|workspace| (workspace.path.as_str(), workspace.can_write))
         .collect::<Vec<_>>();
     actual.sort_unstable();
     assert_eq!(
         actual,
         vec![
-            ("/projects/source", true, true),
-            ("/references/other", false, true),
-            ("/references/pack", false, true)
-        ]
+            ("/projects/source", true),
+            ("/references/other", false),
+            ("/references/pack", false)
+        ],
+        "an attachment the operator has not trusted is not listed"
     );
     let mut placed_session = session.clone();
     placed_session.metadata = Some(serde_json::json!({ "worker_placement_can_write": false }));
@@ -23140,7 +23135,6 @@ async fn orientation_environment_carries_every_readable_workspace_from_resolved_
         vec![swage_context::orientation::ReadableWorkspace {
             path: "/projects/source".into(),
             can_write: false,
-            is_trusted: true,
         }],
         "a placed worker must not advertise sibling topic workspaces"
     );
@@ -23179,7 +23173,6 @@ async fn orientation_environment_includes_subdirectory_placement_with_its_write_
             vec![swage_context::orientation::ReadableWorkspace {
                 path: placement.display().to_string(),
                 can_write,
-                is_trusted: true,
             }],
             "the placement must inherit parent trust and advertise its own write grant"
         );
