@@ -6,6 +6,10 @@ const ALLOWED_WORDS: &[&[u8]] = &[
     b"0xff", // Rust byte literal in arrays
     b"89ab", // UUID variant character class
     b"utf8", // Encoding name
+    // Existing syntax and labels in tracked files.
+    b"char", b"conv", b"from", b"held", b"high", b"hitl", b"hold", b"host", b"href", b"json",
+    b"land", b"link", b"main", b"name", b"null", b"open", b"page", b"path", b"plan", b"role",
+    b"root", b"rule", b"test", b"text", b"tool", b"unit", b"user", b"wght", b"yyyy",
 ];
 
 pub(crate) fn check_tracker_tags() -> Result<()> {
@@ -59,7 +63,6 @@ pub(crate) fn check_tracker_tags() -> Result<()> {
 
         let word = &matched[1..matched.len() - 1];
         if word.iter().any(u8::is_ascii_lowercase)
-            && word.iter().any(u8::is_ascii_digit)
             && !ALLOWED_WORDS.contains(&word)
             && !ignored.contains(path)
         {

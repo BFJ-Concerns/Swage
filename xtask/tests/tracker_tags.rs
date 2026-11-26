@@ -60,7 +60,10 @@ fn catches_tags_in_comments_and_strings_across_tracked_file_types() {
     let repo = TestRepository::new();
     repo.write(
         "source.rs",
-        &format!("let text = \"[{}]\"; // [{}] [{}]", "a1b2", "8uce", "utf8"),
+        &format!(
+            "let text = \"[{}]\"; // [{}] [{}] [{}] [{}]",
+            "a1b2", "rrak", "8uce", "test", "utf8"
+        ),
     );
     repo.write("notes.md", &format!("<!-- [{}] -->", "v7qg"));
     repo.git(&["add", "--", "source.rs", "notes.md"]);
@@ -68,10 +71,12 @@ fn catches_tags_in_comments_and_strings_across_tracked_file_types() {
     let output = repo.scan();
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    for expected in ["source.rs", "notes.md", "a1b2", "8uce", "v7qg"] {
+    for expected in ["source.rs", "notes.md", "a1b2", "rrak", "8uce", "v7qg"] {
         assert!(stderr.contains(expected), "{stderr}");
     }
-    assert!(!stderr.contains("utf8"), "{stderr}");
+    for allowed in ["test", "utf8"] {
+        assert!(!stderr.contains(&format!("[{allowed}]")), "{stderr}");
+    }
 }
 
 #[test]
@@ -85,8 +90,8 @@ fn skips_local_files_deleted_paths_and_known_non_tags() {
     repo.write(
         "ordinary.txt",
         &format!(
-            "[main] [1234] [A1b2] [a1b23] [{}] [{}] [{}]",
-            "0xff", "89ab", "utf8"
+            "[1234] [A1b2] [a1b23] [{}] [{}] [{}] [{}] [{}]",
+            "main", "hitl", "0xff", "89ab", "utf8"
         ),
     );
     repo.git(&["add", "--", ".gitignore", "deleted.rs", "ordinary.txt"]);
