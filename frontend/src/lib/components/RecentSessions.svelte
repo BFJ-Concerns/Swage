@@ -13,9 +13,8 @@
   found and resumed from here, never by an identifier.
 
   The list is live: it listens on the work-surface signal channel and
-  refetches when the gateway says a session changed, so a run starting or
-  settling shows here as soon as it shows in its own conversation. The
-  signal carries identity only; the list is always what the gateway answers.
+  refetches when the gateway says a session changed. The signal carries the
+  session ID, and the list displays the rows returned by the gateway.
 -->
 <script lang="ts">
   import { onMount } from "svelte";

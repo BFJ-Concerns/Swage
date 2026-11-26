@@ -160,37 +160,6 @@ export function createConversationStore(): ConversationStore {
     activeThreadIdStore.set(threadId);
   }
 
-  function updateConversationSummary(
-    conversationId: string,
-    message: {
-      content: string;
-      timestamp: string;
-      turn_state: MessageView["turn_state"];
-      origin?: MessageView["origin"];
-    },
-  ): void {
-    const conversations = get(conversationsStore);
-    const updatedSummary = conversations.find((c) => c.id === conversationId);
-    if (!updatedSummary) return;
-
-    const nextSummary: ConversationSummary = {
-      ...updatedSummary,
-      last_activity: message.origin === "platform" ? updatedSummary.last_activity : message.timestamp,
-      ...(message.content && message.origin !== "platform" ? { message_preview: message.content } : {}),
-      has_interrupted_turn:
-        updatedSummary.has_interrupted_turn || message.turn_state === "interrupted",
-      ...(message.turn_state ? { latest_turn_state: message.turn_state } : {}),
-    };
-
-    conversationsStore.set(
-      sortByRecency(
-        conversations.map((conversation) =>
-          conversation.id === conversationId ? nextSummary : conversation,
-        ),
-      ),
-    );
-  }
-
   function replaceActiveConversationIfCurrent(conversation: ConversationDetail): void {
     if (get(activeConversationStore)?.id === conversation.id) {
       activeConversationStore.set(conversation);
@@ -213,17 +182,17 @@ export function createConversationStore(): ConversationStore {
     conversationId?: string | null,
   ): void {
     const activeConversation = get(activeConversationStore);
-    const ownerId = conversationId ?? activeConversation?.id;
-    if (!ownerId) return;
+    if (!activeConversation || (conversationId != null && activeConversation.id !== conversationId)) return;
 
     // A message belongs to the thread it names, else to the thread in view.
     // It joins the visible list only when that is the thread in view: a
-    // reply to a turn sent on a branch the person has since left updates
-    // the summary and waits on its own thread.
-    const threadInView = get(activeThreadIdStore) ?? activeConversation?.root_thread_id;
+    // reply to a turn sent on a branch the person has since left waits
+    // on its own thread.
+    const threadInView = get(activeThreadIdStore) ?? activeConversation.root_thread_id;
     const threadId = message.thread_id ?? threadInView;
     const belongsToView =
       message.thread_id === undefined || threadInView === undefined || message.thread_id === threadInView;
+    if (!belongsToView) return;
     const appendedMessage: MessageView = {
       role: message.role,
       content: message.content,
@@ -237,11 +206,6 @@ export function createConversationStore(): ConversationStore {
       ...(message.tool_calls === undefined ? {} : { tool_calls: message.tool_calls }),
     };
 
-    if (activeConversation?.id !== ownerId || !belongsToView) {
-      updateConversationSummary(ownerId, message);
-      return;
-    }
-
     activeConversationStore.set({
       ...activeConversation,
       last_activity: message.origin === "platform" ? activeConversation.last_activity : message.timestamp,
@@ -250,8 +214,6 @@ export function createConversationStore(): ConversationStore {
         appendedMessage,
       ],
     });
-
-    updateConversationSummary(ownerId, message);
   }
 
   let listGeneration = 0;
@@ -319,9 +281,7 @@ export function createConversationStore(): ConversationStore {
     async selectConversation(id) {
       isLoadingStore.set(true);
       try {
-        // The server is authoritative for an off-screen conversation. Terminal
-        // stream events update its summary only; retaining synthetic messages
-        // here duplicates partial errors that have no stable turn identity.
+        // Read off-screen conversations from the gateway when selected.
         await loadConversationDetail(id);
       } finally {
         isLoadingStore.set(false);
@@ -355,7 +315,6 @@ export function createConversationStore(): ConversationStore {
         last_activity: resp.last_activity,
         message_preview: null,
         has_interrupted_turn: false,
-        latest_turn_state: null,
       };
 
       // A live refresh can already have installed the gateway's summary.
@@ -419,15 +378,6 @@ export function createConversationStore(): ConversationStore {
 
     settleUnansweredRequest(settlement, conversationId) {
       const activeConversation = get(activeConversationStore);
-      const settledConversationId = conversationId ?? activeConversation?.id;
-      const summary = get(conversationsStore).find(conversation => conversation.id === settledConversationId);
-      if (summary) {
-        updateConversationSummary(summary.id, {
-          content: "",
-          timestamp: summary.last_activity,
-          turn_state: settlement.turn_state,
-        });
-      }
       if (!activeConversation || (conversationId && activeConversation.id !== conversationId)) return;
       const index = activeConversation.messages.findLastIndex(
         (message) => message.role === "user" && message.turn_state === "pending",
@@ -443,7 +393,6 @@ export function createConversationStore(): ConversationStore {
       };
       messages[index] = settledMessage;
       activeConversationStore.set({ ...activeConversation, messages });
-      updateConversationSummary(activeConversation.id, settledMessage);
     },
 
     appendQueuedMessage(queued, conversationId) {
