@@ -1539,4 +1539,13 @@ describe("opened delegated view settlement", () => {
     expect(store.streamFor!("child").isStreaming).toBe(false);
     expect(messages[0].turn_state).toBe(expected);
   });
+
+  it("reads a loaded request the gateway has recorded but not yet started as running", () => {
+    const messages: MessageView[] = [{ role: "user", origin: "user", content: "Request", timestamp: "2026-10-20T10:00:00Z", turn_state: "pending" }];
+    const store = createStreamingStore({ conversationStore: {
+      activeConversation: { id: "other-tab", messages },
+      appendOptimisticUserMessage: vi.fn(), appendAssistantMessage: vi.fn(),
+    } });
+    expect(store.streamFor!("other-tab").isStreaming).toBe(true);
+  });
 });

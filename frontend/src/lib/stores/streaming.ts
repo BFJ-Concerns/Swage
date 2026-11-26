@@ -265,7 +265,7 @@ export function createStreamingStore(
     const conversation = options?.conversationStore?.activeConversation;
     if (!conversationId || conversation?.id !== conversationId) return false;
     const latest = conversation.messages.at(-1);
-    return ["processing", "delegating", "awaiting_approval"].includes(latest?.turn_state ?? "");
+    return ["pending", "processing", "delegating", "awaiting_approval"].includes(latest?.turn_state ?? "");
   }
 
   function currentStreamState(): InternalStreamState | undefined {
