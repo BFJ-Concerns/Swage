@@ -321,32 +321,7 @@ pub(super) async fn launch_turn_runtime(
             effort,
             cancellation_token: cancel_token,
         };
-        let experiment_state = state.clone();
-        let experiment_config = config.experimentation.clone();
-        let closing_request = async move {
-            crate::experimentation::select_session_variant(
-                &experiment_state,
-                &experiment_config,
-                crate::experimentation::LOCATION_CLOSING_ACCOUNT_REQUEST,
-                &[],
-                "authored",
-                session_id,
-                Some(prepared_turn_id),
-            )
-            .await
-            .map_err(|error| AgentError::InvalidConfig(error.to_string()))?;
-
-            Ok(swage_agent::closing_account::CLOSING_ACCOUNT_REQUEST.to_owned())
-        };
-        tokio::spawn(async move {
-            agent
-                .process_turn_streaming_with_closing_request(
-                    turn_request,
-                    event_tx,
-                    Some(Box::pin(closing_request)),
-                )
-                .await
-        })
+        tokio::spawn(async move { agent.process_turn_streaming(turn_request, event_tx).await })
     };
     Ok(handle)
 }

@@ -296,6 +296,39 @@ pub(super) async fn process_turn_with_composition_and_focus(
         return Err(GatewayError::ConfigError(error.to_string()));
     }
 
+    let authored_closing_request = (
+        "authored",
+        swage_agent::closing_account::CLOSING_ACCOUNT_REQUEST,
+    );
+    let closing_requests = [authored_closing_request];
+    let closing_request_choice = match crate::experimentation::select_session_variant(
+        state,
+        &config.experimentation,
+        crate::experimentation::LOCATION_CLOSING_ACCOUNT_REQUEST,
+        &closing_requests.map(|(name, _)| name),
+        authored_closing_request.0,
+        session_id,
+        Some(prepared_turn_id),
+    )
+    .await
+    {
+        Ok(decision) => decision.variant,
+        Err(error) => {
+            record_terminal_state_and_release(
+                state,
+                session_id,
+                prepared_turn_id,
+                TurnState::Failed,
+            )
+            .await?;
+            return Err(GatewayError::ConfigError(error.to_string()));
+        }
+    };
+    let closing_account_request = closing_requests
+        .into_iter()
+        .find_map(|(name, text)| (name == closing_request_choice).then_some(text))
+        .unwrap_or(authored_closing_request.1);
+
     // Step 5: Set up the cancellation token before any turn processing begins.
     let cancel_token = cancellation_override.unwrap_or_default();
     {
@@ -509,6 +542,7 @@ pub(super) async fn process_turn_with_composition_and_focus(
         allowed_paths,
     );
     let output_directory = managed_scratch_workspace(&state.config_root, &scope, session.id);
+    agent_config.closing_account_request = closing_account_request.to_owned();
     agent_config.tool_output_directory = Some(output_directory);
     if !task_defines_output_retries && let Some(max_retries) = max_output_retries_override {
         agent_config.max_output_retries = max_retries;

@@ -1746,20 +1746,6 @@ impl Agent {
         request: TurnRequest,
         event_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
     ) -> Result<OutboundMessage, AgentError> {
-        self.process_turn_streaming_with_closing_request(request, event_tx, None)
-            .await
-    }
-
-    /// Process a streaming turn with a closing request resolved on demand.
-    /// The future is only polled when an empty final round calls for the request.
-    pub async fn process_turn_streaming_with_closing_request(
-        &self,
-        request: TurnRequest,
-        event_tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
-        mut resolve_closing_request: Option<
-            futures::future::BoxFuture<'_, Result<String, AgentError>>,
-        >,
-    ) -> Result<OutboundMessage, AgentError> {
         let execution = request.execution;
         let thread_id = execution.thread_id;
         let user_message = request.user_message;
@@ -1983,25 +1969,10 @@ impl Agent {
                     closing_account_requested,
                 ) {
                     closing_account_requested = true;
-                    let closing_request = match resolve_closing_request.take() {
-                        Some(resolve) => match resolve.await {
-                            Ok(request) => request,
-                            Err(error) => {
-                                self.fail_turn_and_idle(turn.id, thread_id).await;
-                                let _ = event_tx.send(AgentEvent::Error {
-                                    message: error.to_string(),
-                                    provider_failure: false,
-                                });
-                                self.persist_terminal_response(&execution, &accumulated)
-                                    .await?;
-                                return Err(error);
-                            }
-                        },
-                        None => self.config.closing_account_request.clone(),
-                    };
-                    llm_request
-                        .messages
-                        .push(ChatMessage::new(Role::User, closing_request));
+                    llm_request.messages.push(ChatMessage::new(
+                        Role::User,
+                        self.config.closing_account_request.clone(),
+                    ));
                     continue 'outer;
                 }
                 if closing_account_requested && round_text.trim().is_empty() {

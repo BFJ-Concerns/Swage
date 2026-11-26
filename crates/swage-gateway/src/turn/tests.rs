@@ -8954,13 +8954,10 @@ async fn make_state_with_tool_provider_and_storage(
 }
 
 #[tokio::test]
-async fn closing_account_is_selected_on_use_and_the_fallback_reaches_the_conversation() {
+async fn closing_account_fallback_reaches_the_live_and_reloaded_conversation() {
     use swage_agent::closing_account::{CLOSING_ACCOUNT_REQUEST, ENDED_WITHOUT_ACCOUNT};
 
     let (state, session_id, captured) = make_state_with_capturing_tools(vec![
-        vec![StreamChunk::Delta {
-            content: "Hello".into(),
-        }],
         vec![
             StreamChunk::Delta {
                 content: "I will use echo.".into(),
@@ -8981,33 +8978,6 @@ async fn closing_account_is_selected_on_use_and_the_fallback_reaches_the_convers
     .await;
     let (tx, mut rx) = mpsc::unbounded_channel();
     let subscription = Arc::new(Mutex::new(SubscriptionState::new(true)));
-    let closing_selections = || {
-        state
-            .storage
-            .list_audit_events_filtered(swage_storage::AuditEventFilter {
-                session_id: Some(session_id),
-                entity_kind: Some("experiment_location".into()),
-                entity_id: Some(crate::experimentation::LOCATION_CLOSING_ACCOUNT_REQUEST.into()),
-                event_kind: Some("variant_selected".into()),
-                limit: 10,
-                ..Default::default()
-            })
-    };
-
-    process_turn(
-        &state,
-        session_id,
-        None,
-        "Hello",
-        tx.clone(),
-        subscription.clone(),
-        None,
-    )
-    .await
-    .unwrap();
-    assert!(closing_selections().await.unwrap().is_empty());
-    while rx.try_recv().is_ok() {}
-
     process_turn(&state, session_id, None, "Use echo", tx, subscription, None)
         .await
         .unwrap();
@@ -9028,17 +8998,11 @@ async fn closing_account_is_selected_on_use_and_the_fallback_reaches_the_convers
         .collect();
     assert_eq!(live, format!("I will use echo.\n\n{ENDED_WITHOUT_ACCOUNT}"));
 
-    let selections = closing_selections().await.unwrap();
-    assert_eq!(selections.len(), 1);
-    assert_eq!(
-        selections[0].metadata["turn_id"],
-        serde_json::json!(turn_id)
-    );
     {
         let requests = captured.lock().unwrap();
-        assert_eq!(requests.len(), 4);
+        assert_eq!(requests.len(), 3);
         assert_eq!(
-            requests[3].messages.last().unwrap().text_content(),
+            requests[2].messages.last().unwrap().text_content(),
             CLOSING_ACCOUNT_REQUEST
         );
     }
@@ -15901,7 +15865,7 @@ async fn session_variant_lookup_failure_serves_default_without_recording_a_draw(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn session_variant_task_prompt_records_once_for_two_real_turns() {
+async fn session_prompt_variants_are_recorded_at_the_start_of_the_first_turn() {
     let root = tempfile::tempdir().unwrap();
     let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
     let topic = storage.general_scope().await.unwrap();
@@ -15977,21 +15941,22 @@ async fn session_variant_task_prompt_records_once_for_two_real_turns() {
         .list_audit_events_by_session(session.id)
         .await
         .unwrap();
-    let draws: Vec<_> = events
+    let first_turn = turns
         .iter()
-        .filter(|e| e.entity_id == crate::experimentation::LOCATION_TASK_PROMPT)
-        .collect();
-    assert_eq!(
-        draws.len(),
-        1,
-        "a task session must not redraw its prompt on continuation"
-    );
-    assert!(
-        turns
-            .iter()
-            .any(|turn| serde_json::json!(turn.id) == draws[0].metadata["turn_id"]),
-        "the draw must identify its first real turn"
-    );
+        .find(|turn| turn.user_input.as_deref() == Some("first"))
+        .unwrap();
+    for location in [
+        crate::experimentation::LOCATION_TASK_PROMPT,
+        crate::experimentation::LOCATION_CLOSING_ACCOUNT_REQUEST,
+    ] {
+        let draws: Vec<_> = events.iter().filter(|e| e.entity_id == location).collect();
+        assert_eq!(draws.len(), 1, "{location} must have one session draw");
+        assert_eq!(
+            draws[0].metadata["turn_id"],
+            serde_json::json!(first_turn.id),
+            "{location} must bind when the session starts its first turn"
+        );
+    }
 }
 
 #[tokio::test]
