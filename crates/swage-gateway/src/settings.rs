@@ -656,19 +656,17 @@ pub async fn discover_models(
                     Some(key) => Some(key),
                     None => discovery_credential(state, &provider).await,
                 };
-                if api_key.is_some() {
-                    let verdict = swage_provider::PlaintextCredentialVerdict::judge(
-                        swage_provider::PlaintextExposure::of_base_url(base_url),
-                        provider.plaintext_credentials,
-                    );
-                    crate::provider_credential_exposure::judge(
-                        state.storage.as_ref(),
-                        &provider_id,
-                        verdict,
-                    )
-                    .await
-                    .map_err(ApiError::validation)?;
-                }
+                let verdict = swage_provider::PlaintextCredentialVerdict::judge(
+                    swage_provider::PlaintextExposure::of_request(base_url, api_key.is_some()),
+                    provider.plaintext_credentials,
+                );
+                crate::provider_credential_exposure::judge(
+                    state.storage.as_ref(),
+                    &provider_id,
+                    verdict,
+                )
+                .await
+                .map_err(ApiError::validation)?;
                 discover_openai_compatible_models(base_url, api_key.as_deref()).await?
             } else {
                 known_models(&["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
@@ -1612,6 +1610,23 @@ mod tests {
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].metadata["decision"], "refused");
 
+        // Credentials in the base URL travel as basic authentication.
+        let mut url_credentials =
+            draft(swage_protocol::client::settings::PlaintextCredentialPolicy::Refuse);
+        url_credentials.api_key = None;
+        url_credentials.base_url = Some(base_url.replacen("http://", "http://user:url-pw@", 1));
+        let refused =
+            super::discover_models(&state, "url-auth".into(), None, Some(url_credentials))
+                .await
+                .expect_err("credentials in the URL are refused too");
+        assert!(
+            refused.message().contains("plaintext"),
+            "{}",
+            refused.message()
+        );
+        assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(events().await.len(), 2);
+
         let _ = super::discover_models(
             &state,
             "lan".into(),
@@ -1623,17 +1638,16 @@ mod tests {
         .await;
         assert!(connections.load(std::sync::atomic::Ordering::SeqCst) > 0);
         let recorded = events().await;
-        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded.len(), 3);
         assert!(
             recorded
                 .iter()
                 .any(|event| event.metadata["decision"] == "warned")
         );
-        assert!(
-            recorded
-                .iter()
-                .all(|event| !event.metadata.to_string().contains("discovery-fixture-key"))
-        );
+        assert!(recorded.iter().all(|event| {
+            let kept = format!("{} {}", event.summary, event.metadata);
+            !kept.contains("discovery-fixture-key") && !kept.contains("url-pw")
+        }));
     }
 
     #[tokio::test(flavor = "multi_thread")]

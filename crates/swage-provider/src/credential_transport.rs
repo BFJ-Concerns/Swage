@@ -67,8 +67,7 @@ impl ProviderConfig {
     /// loopback. A base URL that does not parse names no host a request
     /// could reach, so it exposes nothing.
     pub fn plaintext_exposure(&self) -> Option<PlaintextExposure> {
-        self.api_key.as_ref()?;
-        PlaintextExposure::of_base_url(&self.base_url)
+        PlaintextExposure::of_request(&self.base_url, self.api_key.is_some())
     }
 
     /// The policy's verdict on this configuration's credential transport.
@@ -81,12 +80,15 @@ impl ProviderConfig {
 }
 
 impl PlaintextExposure {
-    /// The exposure of a credential sent to `base_url`: `http://` to a host
-    /// that is not loopback. A base URL that does not parse names no host a
-    /// request could reach, so it exposes nothing.
-    pub fn of_base_url(base_url: &str) -> Option<Self> {
+    /// The exposure of a request to `base_url`: a credential travels with it
+    /// — `carries_key`, or a user name or password in the base URL itself,
+    /// which the HTTP client sends as basic authentication — and the URL is
+    /// `http://` to a host that is not loopback. A base URL that does not
+    /// parse names no host a request could reach, so it exposes nothing.
+    pub fn of_request(base_url: &str, carries_key: bool) -> Option<Self> {
         let url = Url::parse(base_url).ok()?;
-        if url.scheme() != "http" {
+        let url_credential = !url.username().is_empty() || url.password().is_some();
+        if !(carries_key || url_credential) || url.scheme() != "http" {
             return None;
         }
         let host = url.host()?;
@@ -197,7 +199,30 @@ mod tests {
             None
         );
         assert_eq!(keyed("not a url").plaintext_exposure(), None);
+        assert_eq!(
+            ProviderConfig::keyless("model", "https://user:pw@models.example.com/v1")
+                .plaintext_exposure(),
+            None
+        );
         assert_eq!(keyed("http://").plaintext_exposure(), None);
+    }
+
+    #[test]
+    fn a_user_name_or_password_in_the_base_url_is_a_credential() {
+        for base_url in [
+            "http://user:pw@models.example.com/v1",
+            "http://user@models.example.com/v1",
+            "http://:pw@models.example.com/v1",
+        ] {
+            assert_eq!(
+                ProviderConfig::keyless("model", base_url).plaintext_exposure(),
+                Some(PlaintextExposure {
+                    host: "models.example.com".into(),
+                    origin: "http://models.example.com".into(),
+                }),
+                "{base_url}"
+            );
+        }
     }
 
     #[test]
