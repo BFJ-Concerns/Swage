@@ -3,6 +3,7 @@
   import { untrack } from "svelte";
   import { providerBaseUrlError } from "./provider-endpoint";
   import type { DiscoveredModel, ModelSettings, ProviderSettings } from "../../types";
+  import type { PlaintextCredentialPolicy } from "../../protocol/PlaintextCredentialPolicy";
   import type { ProviderSignInState } from "../../protocol/ProviderSignInState";
   import CodexProviderAuthentication from "./CodexProviderAuthentication.svelte";
   import ProviderModelManagement from "./ProviderModelManagement.svelte";
@@ -19,7 +20,7 @@
     onbegin: (id: string, method: "browser" | "device_code") => void; oncheck: (id: string) => void; oncopy: () => void; onend: (id: string) => void;
   }
 
-  let { secrets, secretsError, id, index, provider, displayName, kindLabel, models, defaultModel, saved, signInState, deviceCode, selected, query, discoveredModels, addedModelIds, isPersisting, onremoveprovider, onmanualadd, onremovemodel, ondefault, onselect, onquery, onrefresh, ondiscoveradd, onbegin, oncheck, oncopy, onend }: Props = $props();
+  let { secrets, secretsError, id, index, provider = $bindable(), displayName, kindLabel, models, defaultModel, saved, signInState, deviceCode, selected, query, discoveredModels, addedModelIds, isPersisting, onremoveprovider, onmanualadd, onremovemodel, ondefault, onselect, onquery, onrefresh, ondiscoveradd, onbegin, oncheck, oncopy, onend }: Props = $props();
   let collapsed = $state(false);
   let manualModelId = $state("");
   let baseUrlDraft = $state("");
@@ -85,6 +86,24 @@
           {#if secretsError}<p role="status">{secretsError}</p>{/if}
         </div></div>
         <div class="field"><div class="key">{SETTINGS_LABELS["providers.*.api_key"]}<small>{credentialGuidance}</small></div><div class="val key-val"><input aria-label={`${SETTINGS_LABELS["providers.*.api_key"]} for ${displayName}`} type="password" class="text" disabled={!canPasteCredential} bind:value={provider.api_key} placeholder={provider.api_key_secret_ref ? credentialSource : provider.api_key_env ? "Resolved from environment" : "Paste to store"} autocomplete="off" /><span class="credential-status" class:set={!!provider.api_key_secret_ref || !!provider.api_key_env}>{provider.api_key ? isPersisting ? "Saving credential" : "Credential not saved" : credentialSource}</span></div></div>
+        <div class="field">
+          <div class="key">
+            <label for={`provider-${id}-plaintext`}>{SETTINGS_LABELS["providers.*.plaintext_credentials"]}</label>
+            <small id={`provider-${id}-plaintext-help`}>Applies when a request carries a credential over HTTP to a non-loopback address. Anyone on the network path can read it.</small>
+          </div>
+          <div class="val">
+            <select
+              id={`provider-${id}-plaintext`}
+              class="text"
+              aria-describedby={`provider-${id}-plaintext-help`}
+              bind:value={() => provider.plaintext_credentials ?? "warn", (policy: PlaintextCredentialPolicy) => provider.plaintext_credentials = policy}
+            >
+              <option value="warn">Warn and send (default)</option>
+              <option value="refuse">Block requests</option>
+              <option value="allow">Send without warning</option>
+            </select>
+          </div>
+        </div>
         {#if models.some(([key]) => key === defaultModel) && !provider.api_key_secret_ref && !provider.api_key_env}<p class="readiness-note" role="status">Authenticated turns cannot run with this default model until a credential is set.</p>{/if}
       {:else}
         <CodexProviderAuthentication providerId={id} {saved} state={signInState} {deviceCode} {onbegin} {oncheck} {oncopy} {onend} />

@@ -283,6 +283,18 @@ A provider entry in `config.toml` has two credential fields
 resolved secret must have `material_kind` `"provider_key"`. OAuth-token
 records are not provider-key secrets.
 
+For credentials sent over `http://` to a non-loopback address,
+`plaintext_credentials` applies to provider requests and model discovery.
+The provider form under **Settings → Providers** exposes the policy as
+**Plaintext credentials**.
+
+- `warn` (the default) records the warning once in the audit trail
+  (`provider_credential_exposure`) and sends the request. If the audit
+  record cannot be written, the gateway logs the warning and still sends
+  the request.
+- `refuse` blocks the request and records the refusal once.
+- `allow` sends the request without a warning.
+
 The built-in Codex app server (`protocol = "codex"`, the gateway spawning
 `codex app-server` and driving it over stdio) is temporarily disabled.
 `validate_resolved_catalog_references` in `swage-config/src/validation.rs`

@@ -460,6 +460,33 @@ describe("SettingsPage", () => {
     expect(sent.api_key_secret_ref).toBe(owned.reference); expect(sent.api_key_env).toBeNull(); expect(sent.api_key).toBe("");
   });
 
+  it("uses the selected plaintext policy for discovery and saves it with the provider", async () => {
+    const settings = configuredProvider("environment");
+    settings.providers.proxy.base_url = "http://proxy.example/v1";
+    vi.mocked(settingsApi.fetchSettings).mockResolvedValue(settings);
+    component = mount(SettingsPage, { target: document.body, props: { tab: "providers" } });
+    await flushUi();
+
+    const label = [...document.querySelectorAll("label")].find(
+      (candidate) => candidate.textContent?.trim() === "Plaintext credentials",
+    );
+    const policy = label?.control as HTMLSelectElement;
+    expect(policy.value).toBe("warn");
+    policy.value = "refuse";
+    policy.dispatchEvent(new Event("change", { bubbles: true }));
+    await flushUi();
+    buttonNamed("Refresh").click();
+    await flushUi();
+
+    expect(settingsApi.discoverModels).toHaveBeenLastCalledWith("proxy", "", expect.objectContaining({
+      plaintext_credentials: "refuse",
+    }));
+    await waitForSaveCall();
+    const provider = vi.mocked(settingsApi.saveSettings).mock.calls.at(-1)![0].providers.proxy;
+    expect(provider.plaintext_credentials).toBe("refuse");
+    expect(provider.api_key_env).toBe("PROXY_KEY");
+  });
+
   it("renders model choices with a font that has lower-case glyphs", () => {
     for (const source of [defaultModelSource, modelManagementSource]) {
       const css = compile(source, { generate: "client", css: "external" }).css!.code;

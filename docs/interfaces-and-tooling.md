@@ -276,13 +276,15 @@ A credential travels in plaintext when the provider's `base_url` is
 `http://` and names an address other than this machine's loopback: anyone
 on the path can read it. A local model server on `localhost` or `127.0.0.1`
 is never plaintext in this sense, and needs no setting. For a remote
-`http://` endpoint the provider entry's `plaintext_credentials` decides what
-happens, judged when the provider is built:
+`http://` endpoint, **Plaintext credentials** in the provider's form under
+**Settings → Providers** sets `plaintext_credentials`. The policy applies
+when the provider is built and when model discovery sends a credential.
 
 - `warn` (the default) — requests are sent, after one warning for the
   provider in the audit record (event kind `provider_credential_exposure`).
-  A rebuild of the same provider finds the warning and adds none; if the
-  warning cannot be recorded, nothing is sent.
+  A rebuild of the same provider finds the warning and adds none. If the
+  audit record cannot be written, the gateway logs the warning and still
+  sends the request.
 - `refuse` — nothing is sent: every request fails with the reason, and the
   refusal is recorded once.
 - `allow` — requests are sent and nothing is recorded.
