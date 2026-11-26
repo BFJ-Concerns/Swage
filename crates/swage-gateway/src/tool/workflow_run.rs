@@ -28,7 +28,21 @@ impl Tool for WorkflowRunTool {
     }
 
     fn description(&self) -> &str {
-        "Start either an available workflow by name or a newly authored workflow from JavaScript source. A request that an available workflow already serves — an unattended research sweep, say — is started here, by name, in the same turn it is asked for, rather than carried out conversationally first. Provide exactly one of name or source. Inline source inherits this session's dispatch bounds and cannot deliver outside the run; use wait=true only when this turn needs the final result. Before authoring source, activate the Workflow Authoring skill: it documents the whole script surface — agent, agentStart, wait, parallel, pipeline, workflow, gate, postEvent, awaitEvent, budget, the meta/defaults headers, and the determinism rules."
+        "Start a workflow run. A workflow is a script that carries out a job as many agent \
+         calls, each one recorded, so that an interrupted run carries on from where it \
+         stopped. Give `name` to start a workflow this session can already see, as \
+         `workflow_list` shows them, or `source` to run a script written in this session \
+         without saving it: one of the two, never both. Where an available workflow already \
+         does what is being asked for, starting it is the way to do the job, in place of \
+         carrying the work out by hand in the conversation. A script run from `source` can \
+         reach no further than this session can, and can deliver nothing outside the run. \
+         The call returns once the run has started, with the run's record in `run`, which carries its \
+         `id` and `state`, and `workflow_run_status` reads the run by that id later. \
+         With `wait` the call holds until the run stops running and returns its final \
+         output; a run still going after ten minutes fails the wait and not the run. A run \
+         that has failed by the time the call returns is reported as a failed call. \
+         The script interface is set out by the `workflow-authoring` skill and by the \
+         `workflow-engine` document that `docs_read` returns."
     }
     fn execution_outcome(
         &self,
@@ -44,33 +58,33 @@ impl Tool for WorkflowRunTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
-            "description": "Provide exactly one of name or source.",
+            "description": "Which workflow to start, what to hand it, and whether to wait for it.",
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "The available workflow's name in this topic. Use this or source, but not both."
+                    "description": "The name of an available workflow, as `workflow_list` gives it."
                 },
                 "source": {
                     "type": "string",
-                    "description": "JavaScript source for a one-off workflow authored in this session. Use this or name, but not both."
+                    "description": "The JavaScript source of a workflow to run once, unsaved."
                 },
                 "args": {
-                    "description": "Arguments handed to the script as `args`; any JSON value the workflow expects."
+                    "description": "The value the script receives as `args`: whatever JSON the workflow's argument contract asks for."
                 },
                 "budget": {
                     "type": "object",
-                    "description": "Optional run limits.",
+                    "description": "Limits on the run. Each is optional.",
                     "properties": {
                         "max_agent_calls": {"type": "integer", "description": "Most agent calls the run may make."},
-                        "max_total_tokens": {"type": "integer", "description": "Token ceiling across all the run's agent calls."},
-                        "reserved_closing_tokens": {"type": "integer", "description": "Tokens held back from ordinary work and released when the run enters wind-down."},
+                        "max_total_tokens": {"type": "integer", "description": "Most tokens the run's agent calls may use between them."},
+                        "reserved_closing_tokens": {"type": "integer", "description": "Tokens kept back from the run's ordinary work and released to it when it winds down."},
                         "max_concurrent_agent_calls": {"type": "integer", "description": "Most agent calls in flight at once."}
                     }
                 },
                 "wait": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Wait for the run to finish and return its final output. Leave false to start it detached and get the run reference."
+                    "description": "Hold the call until the run stops running, and return its final output, for when this turn cannot go on without it. Left out or false, the call returns once the run has started."
                 }
             },
             "additionalProperties": false
