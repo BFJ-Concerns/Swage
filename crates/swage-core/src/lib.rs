@@ -19,6 +19,7 @@ pub mod request;
 pub mod runtime;
 pub mod scope;
 pub mod secret;
+pub mod secret_masking;
 pub mod tags;
 pub mod tool;
 
@@ -57,6 +58,7 @@ pub use request::{
     ToolCompletionRequest, ToolCompletionResponse,
 };
 pub use scope::ScopeLocation;
+pub use secret_masking::{REDACTED_SECRET, RegisteredSecretValues};
 pub use swage_protocol::client::settings::{Effort, EffortCapability};
 pub use tool::{
     CompactToolReplay, ReplayRetrieval, ToolCall, ToolDefinition, ToolReplayReasoning, ToolResult,

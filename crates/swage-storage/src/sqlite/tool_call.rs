@@ -102,8 +102,13 @@ fn parse_dt(s: &str) -> rusqlite::Result<DateTime<Utc>> {
 impl ToolCallStore for SqliteStorage {
     async fn create_tool_call(
         &self,
-        tool_call: NewToolCall,
+        mut tool_call: NewToolCall,
     ) -> Result<ToolCallRecord, StorageError> {
+        self.mask(&mut tool_call.arguments);
+        self.mask(&mut tool_call.model_arguments);
+        self.mask_option(&mut tool_call.result);
+        self.mask_option(&mut tool_call.model_result);
+        self.mask_option(&mut tool_call.display_summary);
         self.with_conn(|conn| {
             let id = Uuid::new_v4();
             let now = Utc::now();
@@ -213,8 +218,10 @@ impl ToolCallStore for SqliteStorage {
         execution: Option<swage_protocol::client::conversation::ToolExecution>,
     ) -> Result<(), StorageError> {
         let id = id.to_string();
-        let result = result.to_owned();
-        let model_result = model_result.to_owned();
+        let mut result = result.to_owned();
+        let mut model_result = model_result.to_owned();
+        self.mask(&mut result);
+        self.mask(&mut model_result);
         let status = status.to_owned();
 
         self.with_conn(move |conn| {

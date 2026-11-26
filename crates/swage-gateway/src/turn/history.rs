@@ -1,10 +1,9 @@
 use super::{
     AppState, BTreeMap, ChatMessage, GatewayError, HashMap, HashSet, Role, ToolCall,
     ToolCallRecord, ToolResult, Uuid, build_tool_round_messages,
-    provider_record::{
-        REDACTED_SECRET, known_secret_values, redact_secret_values, redact_serialised_text,
-    },
+    provider_record::known_secret_values,
 };
+use swage_core::secret_masking::{REDACTED_SECRET, mask_json_strings, mask_serialised_text};
 
 #[cfg(test)]
 pub(super) async fn rebuild_thread_history_messages(
@@ -214,7 +213,7 @@ fn replay_result(record: &ToolCallRecord, secret_values: Option<&[String]>) -> S
         return REDACTED_SECRET.into();
     };
     if let Some(mut result) = crate::tool::tool_result_read::recovered_model_result(record) {
-        redact_serialised_text(&mut result, secret_values);
+        mask_serialised_text(&mut result, secret_values);
         return result;
     }
     if secret_values.is_empty() {
@@ -225,7 +224,7 @@ fn replay_result(record: &ToolCallRecord, secret_values: Option<&[String]>) -> S
     let (account, envelope) = stored.rsplit_once('\n').unwrap_or(("", stored));
     let Ok(replay) = serde_json::from_str::<swage_core::CompactToolReplay>(envelope) else {
         let mut result = stored.clone();
-        redact_serialised_text(&mut result, secret_values);
+        mask_serialised_text(&mut result, secret_values);
         return result;
     };
     let mut result = if replay.truncated {
@@ -244,8 +243,8 @@ fn replay_result(record: &ToolCallRecord, secret_values: Option<&[String]>) -> S
         replay.preview
     };
     let mut account = account.to_owned();
-    let account_changed = redact_serialised_text(&mut account, secret_values);
-    let result_changed = redact_serialised_text(&mut result, secret_values);
+    let account_changed = mask_serialised_text(&mut account, secret_values);
+    let result_changed = mask_serialised_text(&mut result, secret_values);
     if !account_changed && !result_changed {
         return stored.clone();
     }
@@ -312,7 +311,7 @@ fn parse_redacted_model_arguments(
             );
             return Ok(serde_json::json!({}));
         };
-        if redact_secret_values(&mut arguments, secret_values) {
+        if mask_json_strings(&mut arguments, secret_values) {
             return Ok(bounded_arguments(&arguments));
         }
     }

@@ -223,6 +223,7 @@ impl SecretManager {
             .create_audit_event(created_secret_event(SecretAuditSubject::from(&record)))
             .await
             .map_err(GatewayError::Storage)?;
+        self.refresh_registered_values().await;
         Ok(secret_response(record, request.value))
     }
 
@@ -263,7 +264,9 @@ impl SecretManager {
         writes.events.push(event);
         self.storage
             .write_credentials_with_audit(writes.creations, writes.rotations, writes.events)
-            .await
+            .await?;
+        self.refresh_registered_values().await;
+        Ok(())
     }
 
     pub async fn generate_secret(
@@ -360,6 +363,7 @@ impl SecretManager {
             .create_audit_event(rotated_secret_event(SecretAuditSubject::from(&rotated)))
             .await
             .map_err(GatewayError::Storage)?;
+        self.refresh_registered_values().await;
         Ok(secret_response(rotated, request.value))
     }
 
@@ -371,6 +375,7 @@ impl SecretManager {
             .map_err(GatewayError::Storage)?;
         self.audit_secret_event(&record, "revoked", "secret revoked", json!({}))
             .await?;
+        self.refresh_registered_values().await;
         Ok(secret_response(record, None))
     }
 
@@ -382,6 +387,7 @@ impl SecretManager {
             .map_err(GatewayError::Storage)?;
         self.audit_secret_event(&record, "restored", "secret restored", json!({}))
             .await?;
+        self.refresh_registered_values().await;
         Ok(secret_response(record, None))
     }
 
@@ -441,12 +447,24 @@ impl SecretManager {
         })
     }
 
+    /// Read every active secret's current value from its backend and make
+    /// it the set the store masks out of what it records. Called whenever
+    /// the set may have changed, and at startup; a failed read leaves the
+    /// set as it was and is logged, since the change it follows has already
+    /// been made.
+    pub async fn refresh_registered_values(&self) {
+        if let Err(error) = self.known_values().await {
+            tracing::warn!(%error, "registered secret values could not be read; record masking keeps the previous set");
+        }
+    }
+
     /// Every active secret's current value, for redacting captured provider
     /// traffic. Read from the backends at call time — the same reads
     /// `resolve` makes — so a value that changed since the last turn is
     /// redacted under its new form. A backend that cannot currently be read
     /// (an env variable unset, a file not yet written) contributes nothing
-    /// rather than failing the capture.
+    /// rather than failing the capture. The values read become the set the
+    /// store masks out of every record it writes.
     pub async fn known_values(&self) -> Result<Vec<String>, GatewayError> {
         let records = self
             .storage
@@ -467,7 +485,9 @@ impl SecretManager {
                 Err(_) => {}
             }
         }
-        Ok(values)
+        let registered = self.storage.registered_secret_values();
+        registered.replace(values);
+        Ok(registered.current().as_ref().clone())
     }
 
     /// Bring a harness-owned credential store under governance: the Codex
@@ -1177,6 +1197,40 @@ pub(crate) mod tests {
         let values = manager.known_values().await.unwrap();
         assert!(values.contains(&"live-access".to_string()));
         assert!(values.contains(&"live-refresh".to_string()));
+    }
+
+    /// The store masks a value from the moment it is registered, and stops
+    /// once it is revoked, without waiting for a turn to read the values.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_store_masks_a_value_from_its_registration_to_its_revocation() {
+        let _guard = with_secret_env();
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let manager = SecretManager::new(storage.clone());
+        let masked = |storage: &SqliteStorage| {
+            let mut text = "key registered-now-value".to_string();
+            storage.registered_secret_values().mask(&mut text);
+            text
+        };
+        assert_eq!(masked(&storage), "key registered-now-value");
+
+        let secret = manager
+            .create_secret(CreateSecretRequest {
+                name: "managed".into(),
+                material_kind: "provider_key".into(),
+                owner_kind: "service".into(),
+                backend_kind: MANAGED_BACKEND.into(),
+                scope_kind: "gateway".into(),
+                scope_id: None,
+                metadata: None,
+                value: Some("registered-now-value".into()),
+                external_reference: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(masked(&storage), "key [REDACTED_SECRET]");
+
+        manager.revoke_secret(secret.id).await.unwrap();
+        assert_eq!(masked(&storage), "key registered-now-value");
     }
 
     /// Redaction reads every backend the same way resolution does, and an

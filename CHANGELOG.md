@@ -173,6 +173,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- A value registered as a secret is masked as `[REDACTED_SECRET]` in every conversation record the gateway writes and in what the conversation socket carries, however it came in: a person's message, queued or delegated input, a tool's arguments and result, an approval's request, a schedule's message, a reply or a context snapshot. A tool's result is masked before the model reads it, so its shortened preview never ends inside a registered value. Registering, rotating, revoking or restoring a secret changes what is masked at once.
 - `tool_result_read` masks registered secret values in the stored result it returns, as the conversation's history does, instead of reading them back whole.
 - The project-docs skill no longer hands agent-guidance changes to a skill Swage does not ship: it reports proposed changes to `AGENTS.md`, and edits that file only when the request covers it.
 - The orientation gives a registered secret's reference as `secret://<backend>/<id>`, the form the gateway resolves, where it gave `secret://<id>`, which was refused.

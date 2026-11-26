@@ -6312,6 +6312,10 @@ fn mock_secret_record(
 
 #[async_trait]
 impl swage_storage::store::SecretStore for MockStorage {
+    fn registered_secret_values(&self) -> swage_core::RegisteredSecretValues {
+        swage_core::RegisteredSecretValues::default()
+    }
+
     async fn write_credentials_with_audit(
         &self,
         creations: Vec<swage_storage::NewSecretRecord>,

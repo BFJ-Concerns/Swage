@@ -43,6 +43,9 @@ use migrations::run_migrations;
 /// SQLite-backed storage with WAL mode and async-safe connection access.
 pub struct SqliteStorage {
     conn: Mutex<Connection>,
+    /// Every registered secret value, masked out of each conversation record
+    /// this store writes. The secret store keeps it current.
+    secret_values: swage_core::RegisteredSecretValues,
 }
 
 impl SqliteStorage {
@@ -78,7 +81,23 @@ impl SqliteStorage {
 
         Ok(Self {
             conn: Mutex::new(conn),
+            secret_values: swage_core::RegisteredSecretValues::default(),
         })
+    }
+
+    /// The registered values this store masks out of what it records.
+    pub(crate) fn mask(&self, text: &mut String) {
+        self.secret_values.mask(text);
+    }
+
+    /// [`Self::mask`] over an optional text.
+    pub(crate) fn mask_option(&self, text: &mut Option<String>) {
+        self.secret_values.mask_option(text);
+    }
+
+    /// [`Self::mask`] over the strings of a JSON document, keys included.
+    pub(crate) fn mask_json(&self, value: &mut serde_json::Value) {
+        swage_core::secret_masking::mask_json_strings(value, &self.secret_values.current());
     }
 
     /// Acquire the connection lock and run a blocking closure.
@@ -109,6 +128,185 @@ fn map_rusqlite_error(error: rusqlite::Error) -> StorageError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every value scanned for in a test: a registered value must rest in
+    /// no column of any row, whichever writer recorded it.
+    async fn rows_holding(storage: &SqliteStorage, needle: &str) -> Vec<String> {
+        let needle = needle.to_owned();
+        storage
+            .with_conn(move |conn| {
+                let mut tables = conn.prepare(
+                    "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+                )?;
+                let tables: Vec<String> = tables
+                    .query_map([], |row| row.get(0))?
+                    .collect::<Result<_, _>>()?;
+                let mut found = Vec::new();
+                for table in tables {
+                    let mut columns = conn.prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))?;
+                    let columns: Vec<String> = columns
+                        .query_map([], |row| row.get(0))?
+                        .collect::<Result<_, _>>()?;
+                    for column in columns {
+                        let count: i64 = conn.query_row(
+                            &format!("SELECT COUNT(*) FROM \"{table}\" WHERE instr(CAST(\"{column}\" AS TEXT), ?1) > 0"),
+                            [&needle],
+                            |row| row.get(0),
+                        )?;
+                        if count > 0 {
+                            found.push(format!("{table}.{column}"));
+                        }
+                    }
+                }
+                Ok(found)
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_registered_value_rests_in_no_conversation_record() {
+        use crate::model::*;
+        use crate::store::*;
+
+        let storage = SqliteStorage::in_memory().unwrap();
+        let secret = r#"zq7-"registered"-value"#;
+        storage
+            .registered_secret_values()
+            .replace(vec![secret.to_string()]);
+        let text = format!("the key is {secret}, keep it");
+        let json = serde_json::json!({ "cmd": format!("echo {secret}") });
+
+        let topic = storage.general_scope().await.unwrap();
+        let session = storage
+            .create_session(crate::fixtures::new_session(topic.id))
+            .await
+            .unwrap();
+        let thread = ThreadStore::create(
+            &storage,
+            NewThread {
+                session_id: session.id,
+                agent_id: crate::fixtures::FIXTURE_AGENT_ID.into(),
+            },
+        )
+        .await
+        .unwrap();
+        let turn = storage
+            .create_turn(NewTurn {
+                thread_id: thread.id,
+                agent_id: crate::fixtures::FIXTURE_AGENT_ID.into(),
+                state: TurnState::Pending,
+                user_input: Some(text.clone()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            turn.user_input.as_deref(),
+            Some("the key is [REDACTED_SECRET], keep it"),
+            "the record handed back is the masked one"
+        );
+        storage
+            .append_message(AppendMessage {
+                thread_id: thread.id,
+                attachments: Vec::new(),
+                turn_id: Some(turn.id),
+                role: swage_core::Role::User,
+                origin: MessageOrigin::User,
+                content: text.clone(),
+                agent_id: crate::fixtures::FIXTURE_AGENT_ID.into(),
+            })
+            .await
+            .unwrap();
+        storage.update_response(turn.id, &text).await.unwrap();
+        storage
+            .record_turn_failure_message(turn.id, &text)
+            .await
+            .unwrap();
+        storage
+            .update_structured_output(turn.id, &json)
+            .await
+            .unwrap();
+        storage
+            .store_snapshot(turn.id, &json.to_string())
+            .await
+            .unwrap();
+        let call = storage
+            .create_tool_call(NewToolCall {
+                execution: None,
+                turn_id: turn.id,
+                agent_id: crate::fixtures::FIXTURE_AGENT_ID.into(),
+                call_id: "call-1".into(),
+                tool: "shell".into(),
+                arguments: json.to_string(),
+                model_arguments: json.to_string(),
+                result: None,
+                model_result: None,
+                status: None,
+                duration_ms: None,
+                truncated: false,
+                total_bytes: None,
+                provider_round: 1,
+                position: 0,
+                parent_call_id: None,
+                display_summary: Some(text.clone()),
+            })
+            .await
+            .unwrap();
+        storage
+            .update_tool_call_result(
+                call.id,
+                &serde_json::json!({ "output": text }).to_string(),
+                &text,
+                "success",
+                1,
+                false,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        storage
+            .create_approval(NewApprovalRequest {
+                turn_id: turn.id,
+                agent_id: crate::fixtures::FIXTURE_AGENT_ID.into(),
+                kind: ApprovalKind::Tool,
+                tool_name: Some("shell".into()),
+                tool_arguments: Some(json.clone()),
+                hook_name: None,
+                prompt: text.clone(),
+                context: Some(json.clone()),
+                timeout_at: chrono::Utc::now() + chrono::Duration::seconds(30),
+                timeout_policy: swage_core::ApprovalTimeoutPolicy::Reject,
+            })
+            .await
+            .unwrap();
+        storage
+            .enqueue_turn_input(NewQueuedTurnInput {
+                delivery_targets: Vec::new(),
+                client_id: None,
+                attended: true,
+                session_id: session.id,
+                thread_id: thread.id,
+                origin: MessageOrigin::User,
+                content: text.clone(),
+                attachments: Vec::new(),
+                schedule_run_id: None,
+                channel_message_ids: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        let escaped = serde_json::to_string(secret).unwrap();
+        let escaped = &escaped[1..escaped.len() - 1];
+        assert_eq!(rows_holding(&storage, secret).await, Vec::<String>::new());
+        assert_eq!(rows_holding(&storage, escaped).await, Vec::<String>::new());
+        assert!(
+            !rows_holding(&storage, swage_core::REDACTED_SECRET)
+                .await
+                .is_empty()
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn in_memory_opens_and_migrates() {

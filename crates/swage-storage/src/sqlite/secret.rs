@@ -403,6 +403,10 @@ fn create_secret_record(
 
 #[async_trait]
 impl SecretStore for SqliteStorage {
+    fn registered_secret_values(&self) -> swage_core::RegisteredSecretValues {
+        self.secret_values.clone()
+    }
+
     async fn write_credentials_with_audit(
         &self,
         creations: Vec<NewSecretRecord>,
@@ -843,6 +847,7 @@ mod tests {
 
         let storage = SqliteStorage {
             conn: tokio::sync::Mutex::new(conn),
+            secret_values: swage_core::RegisteredSecretValues::default(),
         };
         let restored = storage.get_managed_secret_value(secret_id).await.unwrap();
         assert_eq!(restored, Some("legacy-secret".into()));

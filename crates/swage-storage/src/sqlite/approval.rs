@@ -124,9 +124,16 @@ fn row_to_approval(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApprovalRequest>
 impl ApprovalStore for SqliteStorage {
     async fn create_approval(
         &self,
-        approval: NewApprovalRequest,
+        mut approval: NewApprovalRequest,
     ) -> Result<ApprovalRequest, StorageError> {
         approval.validate()?;
+        self.mask(&mut approval.prompt);
+        if let Some(arguments) = approval.tool_arguments.as_mut() {
+            self.mask_json(arguments);
+        }
+        if let Some(context) = approval.context.as_mut() {
+            self.mask_json(context);
+        }
 
         self.with_conn(move |conn| {
             let id = Uuid::new_v4();

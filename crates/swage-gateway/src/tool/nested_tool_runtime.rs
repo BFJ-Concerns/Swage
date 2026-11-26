@@ -228,9 +228,13 @@ impl NestedToolRuntime {
         duration_ms: u64,
         execution: swage_protocol::client::conversation::ToolExecution,
     ) -> Result<(), swage_core::StorageError> {
-        let result_text = serde_json::to_string(result).unwrap_or_else(|_| result.to_string());
-        // History can replay this result to the provider. Scan it before
-        // compaction, as the ordinary agent call path does.
+        let mut result_text = serde_json::to_string(result).unwrap_or_else(|_| result.to_string());
+        // History can replay this result to the provider. Mask and scan it
+        // before compaction, as the ordinary agent call path does, so the
+        // shortened preview never ends inside a registered value.
+        self.storage
+            .registered_secret_values()
+            .mask(&mut result_text);
         let safe_result = swage_safety::LeakDetector::default().scan(&result_text);
         let model_result = swage_core::compact_tool_result_for_model_with_reference(
             &safe_result,

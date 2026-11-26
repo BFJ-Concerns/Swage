@@ -129,7 +129,13 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
 
     // Spawn a forwarding task: reads from both the per-turn mpsc channel and
     // the server-wide broadcast channel, writing each event to the WebSocket.
-    let mut forward_task = tokio::spawn(forward_events(ws_sink, session_id, rx, bcast_rx));
+    let mut forward_task = tokio::spawn(forward_events(
+        ws_sink,
+        session_id,
+        rx,
+        bcast_rx,
+        state.storage.registered_secret_values(),
+    ));
 
     if state.shutdown_signal.is_cancelled() {
         let _ = tx.send(ServerEvent::Shutdown {
@@ -217,12 +223,14 @@ async fn handle_connection(socket: WebSocket, state: AppState, session_id: Uuid)
     crate::presence::record_client_disconnected(&state, session_id).await;
 }
 
-/// Forward the connection's ordered session stream and unrelated broadcasts.
+/// Forward the connection's ordered session stream and unrelated broadcasts,
+/// each frame masked against the registered secret values as the record is.
 async fn forward_events<S>(
     mut ws_sink: S,
     session_id: Uuid,
     mut rx: mpsc::UnboundedReceiver<ServerEvent>,
     mut bcast_rx: broadcast::Receiver<ServerEvent>,
+    secret_values: swage_core::RegisteredSecretValues,
 ) where
     S: futures::Sink<Message> + Unpin,
 {
@@ -235,7 +243,8 @@ async fn forward_events<S>(
                     Some(event) => {
                         let is_shutdown = matches!(event, ServerEvent::Shutdown { .. });
                         match serde_json::to_string(&event) {
-                            Ok(json) => {
+                            Ok(mut json) => {
+                                secret_values.mask(&mut json);
                                 if ws_sink.send(Message::Text(json.into())).await.is_err() {
                                     // Client disconnected — stop forwarding.
                                     break;
@@ -262,7 +271,8 @@ async fn forward_events<S>(
                         }
                         let is_shutdown = matches!(event, ServerEvent::Shutdown { .. });
                         match serde_json::to_string(&event) {
-                            Ok(json) => {
+                            Ok(mut json) => {
+                                secret_values.mask(&mut json);
                                 // Attempt the send; ignore the result for broadcast events.
                                 let _ = ws_sink.send(Message::Text(json.into())).await;
                                 if is_shutdown {
@@ -321,6 +331,50 @@ mod tests {
     use crate::turn::TurnInput;
     use swage_core::{FinishReason, StreamChunk};
 
+    /// What the socket carries is masked as the record is: a tool's result
+    /// holding a registered value reaches the client with the value masked.
+    #[tokio::test]
+    async fn a_registered_value_never_reaches_the_socket() {
+        let secret = r#"sock-"registered"-value"#;
+        let values = swage_core::RegisteredSecretValues::default();
+        values.replace(vec![secret.to_string()]);
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let (_broadcast_sender, broadcast) = broadcast::channel(4);
+        let (sink, mut output) = futures::channel::mpsc::unbounded::<Message>();
+        let forwarding = tokio::spawn(forward_events(
+            sink,
+            Uuid::new_v4(),
+            receiver,
+            broadcast,
+            values,
+        ));
+        sender
+            .send(ServerEvent::ToolEnd {
+                execution: None,
+                call_id: "call-1".into(),
+                tool: "shell".into(),
+                result: serde_json::json!({ "output": format!("key {secret} end") }),
+                status: "success".into(),
+                duration_ms: 1,
+                truncated: false,
+                total_bytes: None,
+                parent_call_id: None,
+            })
+            .unwrap();
+        sender
+            .send(ServerEvent::Shutdown {
+                reason: "test finished".into(),
+            })
+            .unwrap();
+        forwarding.await.unwrap();
+
+        let Some(Message::Text(frame)) = output.next().await else {
+            panic!("expected the tool's result");
+        };
+        let event: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(event["result"]["output"], "key [REDACTED_SECRET] end");
+    }
+
     #[tokio::test]
     async fn ready_queue_and_turn_events_reach_the_socket_in_emission_order() {
         // Repeat with both inputs ready: an unbiased merge must not get lucky.
@@ -368,7 +422,13 @@ mod tests {
                 .await
                 .unwrap();
             let (sink, mut output) = futures::channel::mpsc::unbounded::<Message>();
-            let forwarding = tokio::spawn(forward_events(sink, session_id, receiver, broadcast));
+            let forwarding = tokio::spawn(forward_events(
+                sink,
+                session_id,
+                receiver,
+                broadcast,
+                state.storage.registered_secret_values(),
+            ));
             let mut events = Vec::new();
             for _ in 0..6 {
                 let message =

@@ -90,7 +90,7 @@ impl Tool for ToolResultReadTool {
                  checked: {error}"
             ),
         })?;
-        crate::turn::redact_serialised_text(&mut result, &secret_values);
+        swage_core::secret_masking::mask_serialised_text(&mut result, &secret_values);
         let result = result.as_str();
 
         let mut value = truncated_output_value(result, self.max_output_bytes);
