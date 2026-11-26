@@ -17,12 +17,6 @@ import type { ConversationBranch } from "../types";
 import { makeConversationDetail, makeConversationSummary } from "./fixtures/conversations";
 import { makeAgentDefinition } from "./fixtures/agent-definitions";
 
-import * as securityApi from "../api/settings";
-vi.mock("../api/settings", () => ({ fetchConversationSecuritySettings: vi.fn(async () => ({
-  available_tools: [], scope: { kind: "install" }, overrides: {}, relaxed: [],
-  effective: { sandbox_enabled: true, allow_degraded_execution: false, access_gate: "token", require_approval: [] },
-})) }));
-
 type MountedComponent = ReturnType<typeof mount>;
 
 function makeBranch(overrides: Partial<ConversationBranch> = {}): ConversationBranch {
@@ -118,19 +112,6 @@ describe("ConversationChannel thread controls", () => {
     if (component) unmount(component);
     component = undefined;
     document.body.replaceChildren();
-  });
-
-  it("shows the active session's security reading in its conversation channel", async () => {
-    vi.mocked(securityApi.fetchConversationSecuritySettings).mockResolvedValueOnce({
-      available_tools: [], scope: { kind: "install" }, overrides: {},
-      effective: { sandbox_enabled: false, allow_degraded_execution: false, access_gate: "token", require_approval: [] },
-      relaxed: [{ check: "sandbox", relaxed_by: { kind: "install" }, detail: "Off" }],
-    });
-    const store = makeConversationStore([], null);
-    component = mountChannel(store);
-    await new Promise((resolve) => setTimeout(resolve, 0)); flushSync();
-    expect(document.body.textContent).toContain("Sandbox — relaxed by the install");
-    expect(securityApi.fetchConversationSecuritySettings).toHaveBeenCalledWith(store.activeConversation!.id);
   });
 
   it("shows no thread switcher while the conversation has no branch", () => {

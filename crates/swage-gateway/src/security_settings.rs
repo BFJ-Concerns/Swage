@@ -29,7 +29,6 @@ use swage_protocol::client::security_settings::{
     SecurityOverrides, SecuritySettingsResponse, SettingsScope,
 };
 use swage_protocol::client::settings::RequireApprovalEntry;
-use uuid::Uuid;
 
 use crate::config_change::{ConfigChange, record_config_change};
 use crate::error::ApiError;
@@ -85,32 +84,6 @@ pub async fn save_security_settings(
     )
     .await?;
     Ok(current)
-}
-
-/// The security settings a session runs under: its topic's scope, or the
-/// install's for a session in the general scope.
-pub async fn security_settings_for_session(
-    state: &AppState,
-    session_id: Uuid,
-) -> Result<SecuritySettingsResponse, ApiError> {
-    let session = state
-        .storage
-        .get_session(session_id)
-        .await
-        .map_err(storage_error)?
-        .ok_or_else(|| ApiError::not_found("conversation", session_id))?;
-    let topic = state
-        .topic_store
-        .get(session.topic_id)
-        .await
-        .map_err(storage_error)?
-        .ok_or_else(|| ApiError::not_found("topic", session.topic_id))?;
-    let scope = if topic.is_general {
-        SettingsScope::Install
-    } else {
-        SettingsScope::Topic { topic_id: topic.id }
-    };
-    read_security_settings(state, scope).await
 }
 
 /// A scope with its configuration file and location resolved.

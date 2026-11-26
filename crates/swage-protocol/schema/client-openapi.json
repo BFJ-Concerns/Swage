@@ -10817,38 +10817,6 @@
         "summary": "Branch a conversation at an earlier message into a sibling thread."
       }
     },
-    "/api/conversations/{id}/security": {
-      "get": {
-        "operationId": "conversation_security_settings",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SecuritySettingsResponse"
-                }
-              }
-            },
-            "description": "Success."
-          },
-          "default": {
-            "$ref": "#/components/responses/Error"
-          }
-        },
-        "summary": "Read the security checks a conversation's session runs under."
-      }
-    },
     "/api/docs": {
       "get": {
         "operationId": "list_documents",

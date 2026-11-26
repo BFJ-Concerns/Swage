@@ -6,7 +6,7 @@
   import type { RequireApprovalEntry } from "../../protocol/RequireApprovalEntry";
   import type { AccessGateMode } from "../../protocol/AccessGateMode";
   import ApprovalToolPicker from "./ApprovalToolPicker.svelte";
-  import { CHECK_LABELS, relaxedBy, securitySettingsChanged } from "../../security-settings";
+  import { CHECK_LABELS, relaxedBy } from "../../security-settings";
 
   let { topicId = null, onSaved }: { topicId?: string | null; onSaved?: () => void | Promise<void> } = $props();
   let security = $state<SecuritySettingsResponse | null>(null);
@@ -43,7 +43,6 @@
     if (!topicId && edited.has("access_gate")) overrides.access_gate = access === "inherit" ? null : access as AccessGateMode;
     try {
       loaded(await (topicId ? saveTopicSecuritySettings(topicId, overrides) : saveInstallSecuritySettings(overrides)));
-      securitySettingsChanged();
       await onSaved?.();
       notice = security!.relaxed.length ? "Saved. New turns use these settings." : `Saved. Every shipped check is in force for ${scopeLabel}.`;
     } catch (err) { error = err instanceof Error ? err.message : "Failed to save security settings."; }

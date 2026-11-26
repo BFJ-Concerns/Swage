@@ -198,17 +198,6 @@ pub async fn save_topic_security_settings(
     ))
 }
 
-/// The security checks the conversation's session runs under: its topic's
-/// scope, or the install's for a session in the general scope.
-pub async fn conversation_security_settings(
-    State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<swage_protocol::client::security_settings::SecuritySettingsResponse>, ApiError> {
-    Ok(Json(
-        crate::security_settings::security_settings_for_session(&state, id).await?,
-    ))
-}
-
 pub async fn discover_provider_models(
     State(state): State<AppState>,
     Path(provider_id): Path<String>,

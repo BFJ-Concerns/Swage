@@ -1118,24 +1118,6 @@ pub fn routes() -> Vec<Route> {
             },
         },
         Route {
-            operation_id: "conversation_security_settings",
-            method: Method::Get,
-            path: "/api/conversations/{id}/security",
-            path_parameters: vec![Parameter {
-                name: "id",
-                kind: ParameterType::Uuid,
-            }],
-            query_parameters: vec![],
-            summary: "Read the security checks a conversation's session runs under.",
-            request_optional: false,
-
-            request: None,
-            response: Response {
-                status: 200,
-                body: schema::<SecuritySettingsResponse>(),
-            },
-        },
-        Route {
             operation_id: "list_documents",
             method: Method::Get,
             path: "/api/docs",

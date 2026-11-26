@@ -401,8 +401,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/pair/codes", post(handlers::issue_pairing_code))
         .route("/api/pair", post(handlers::pair_client))
         // Security checks per scope: the install here, a topic under
-        // /api/topics/{id}/settings/security, a session's view under
-        // /api/conversations/{id}/security.
+        // /api/topics/{id}/settings/security.
         .route(
             "/api/settings/security",
             get(handlers::get_install_security_settings)
@@ -411,10 +410,6 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/topics/{id}/settings/security",
             get(handlers::get_topic_security_settings).put(handlers::save_topic_security_settings),
-        )
-        .route(
-            "/api/conversations/{id}/security",
-            get(handlers::conversation_security_settings),
         )
         .route(
             "/api/settings/providers/{id}/models",

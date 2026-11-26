@@ -155,18 +155,6 @@ vi.mock("../lib/api/operator", () => ({
 }));
 
 vi.mock("../lib/api/settings", () => ({
-  fetchConversationSecuritySettings: vi.fn(async () => ({
-    available_tools: [],
-    scope: { kind: "install" },
-    overrides: {},
-    relaxed: [],
-    effective: {
-      sandbox_enabled: true,
-      allow_degraded_execution: false,
-      access_gate: "token",
-      require_approval: [],
-    },
-  })),
   discoverModels: vi.fn(),
   fetchSettings: vi.fn(),
   fetchProviderSecrets: vi.fn(),

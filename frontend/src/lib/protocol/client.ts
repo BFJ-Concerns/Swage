@@ -368,11 +368,6 @@ export async function saveTopicSecuritySettings(id: string, body: SaveSecuritySe
   return request<SecuritySettingsResponse>("PUT", `/api/topics/${encodeURIComponent(id)}/settings/security`, body);
 }
 
-/** Read the security checks a conversation's session runs under. */
-export async function conversationSecuritySettings(id: string): Promise<SecuritySettingsResponse> {
-  return request<SecuritySettingsResponse>("GET", `/api/conversations/${encodeURIComponent(id)}/security`);
-}
-
 /** List the platform's own documentation, hosted by the gateway. */
 export async function listDocuments(): Promise<DocumentListResponse> {
   return request<DocumentListResponse>("GET", `/api/docs`);

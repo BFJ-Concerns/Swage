@@ -68,12 +68,6 @@ export async function saveTopicSecuritySettings(
   return generated.saveTopicSecuritySettings(topicId, overrides);
 }
 
-export async function fetchConversationSecuritySettings(
-  conversationId: string,
-): Promise<SecuritySettingsResponse> {
-  return generated.conversationSecuritySettings(conversationId);
-}
-
 export async function fetchProviderSignIn(providerId: string): Promise<ProviderSignInState> {
   return generated.getProviderSignInState(providerId);
 }

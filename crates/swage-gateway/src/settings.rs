@@ -1830,17 +1830,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn global_permanent_approval_updates_general_session_security_reading() {
+    async fn global_permanent_approval_updates_install_security_reading() {
         use std::sync::Arc;
-        use swage_storage::{SessionStore, SqliteStorage, TopicStore};
+        use swage_storage::SqliteStorage;
 
         let root = tempfile::tempdir().expect("config root");
         let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
-        let general = storage.general_scope().await.expect("general scope");
-        let session = storage
-            .create_session(swage_storage::fixtures::new_session(general.id))
-            .await
-            .expect("session");
         let mut config = swage_config::ResolvedConfig::default();
         config.tools.permissions.require_approval = vec![
             swage_config::model::RequireApprovalEntry::Simple("shell".into()),
@@ -1855,9 +1850,12 @@ mod tests {
             None,
             root.path().to_path_buf(),
         );
-        let before = crate::security_settings::security_settings_for_session(&state, session.id)
-            .await
-            .expect("initial session reading");
+        let before = crate::security_settings::read_security_settings(
+            &state,
+            swage_protocol::client::security_settings::SettingsScope::Install,
+        )
+        .await
+        .expect("initial install reading");
         assert_eq!(before.effective.require_approval.len(), 2);
 
         persist_permanent_tool_approval_globally(&state, "shell")
@@ -1872,13 +1870,16 @@ mod tests {
                 "file_write".into()
             )]
         );
-        let after = crate::security_settings::security_settings_for_session(&state, session.id)
-            .await
-            .expect("session reading after approval");
+        let after = crate::security_settings::read_security_settings(
+            &state,
+            swage_protocol::client::security_settings::SettingsScope::Install,
+        )
+        .await
+        .expect("install reading after approval");
         assert_eq!(
             serde_json::to_value(after.effective.require_approval).unwrap(),
             serde_json::json!(["file_write"]),
-            "general session security must stop requiring approval for the globally approved tool"
+            "the install must stop requiring approval for the globally approved tool"
         );
     }
 
