@@ -25912,12 +25912,12 @@ async fn assert_later_replay_accounts_for_reads(offered: bool) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn later_replay_accounts_for_reads_with_retrieval() {
-    assert_later_replay_accounts_for_reads(true).await;
+    Box::pin(assert_later_replay_accounts_for_reads(true)).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn later_replay_accounts_for_reads_without_retrieval() {
-    assert_later_replay_accounts_for_reads(false).await;
+    Box::pin(assert_later_replay_accounts_for_reads(false)).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

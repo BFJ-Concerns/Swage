@@ -185,7 +185,7 @@ async fn sandboxed_git_refuses_inherited_askpass_and_audits_governed_credentials
     let gitconfig = root.path().join("gitconfig");
     std::fs::write(
         &gitconfig,
-        format!("[core]\naskPass = {}\n", askpass.display()),
+        format!("[{}]\naskPass = {}\n", "core", askpass.display()),
     )
     .unwrap();
     env.set_var("GIT_CONFIG_NOSYSTEM", "1");

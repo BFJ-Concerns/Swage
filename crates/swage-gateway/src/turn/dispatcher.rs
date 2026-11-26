@@ -475,11 +475,10 @@ pub(crate) fn ssh_files_without_keys(home: &Path) -> Vec<PathBuf> {
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
         .map(|entry| entry.path())
         .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| {
-                    matches!(name, "config" | "known_hosts" | "known_hosts2")
-                        || name.ends_with(".pub")
+            // Exactly ssh's own names: a public half is `<key>.pub`.
+            path.extension().is_some_and(|extension| extension == "pub")
+                || path.file_name().is_some_and(|name| {
+                    name == "config" || name == "known_hosts" || name == "known_hosts2"
                 })
         })
         .map(|path| sandbox_path(&path))
