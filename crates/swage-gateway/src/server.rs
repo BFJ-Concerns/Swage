@@ -77,6 +77,7 @@ async fn activity_recording_middleware(
 /// - `POST /api/topics` / `GET /api/topics` - topic management
 /// - conversation, thread, turn, approval, and agent-message APIs
 /// - `GET /api/conversations/{id}/ws` - WebSocket upgrade for live turn events
+/// - `POST /api/conversations/{id}/cancel` - stop a conversation's running turn
 /// - `GET /api/work-surface/ws` - listen-only WebSocket for work-surface signals
 /// - `GET /api/skills`, `POST /api/shutdown`, `GET /api/health`
 /// - `*` - embedded frontend SPA (with fallback)
@@ -152,6 +153,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/conversations/{id}",
             get(handlers::get_conversation).delete(handlers::delete_conversation),
+        )
+        .route(
+            "/api/conversations/{id}/cancel",
+            post(handlers::cancel_conversation_turn),
         )
         .route("/api/conversations/{id}/ws", get(websocket::ws_handler))
         .route(

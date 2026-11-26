@@ -1,4 +1,8 @@
 <script lang="ts">
+  import { cancelWorkflowRun } from "../api/workflow-runs";
+  import { stopConversationTurn } from "../api/conversations";
+  import { openSharedWorkSurfaceChannel, type WorkSurfaceChannel } from "../api/work-surface";
+  import { conversationPath } from "../router";
   import { messagePreview } from "../message-preview";
   import { onMount } from "svelte";
   import {
@@ -17,13 +21,29 @@
   import type { ScheduleRun } from "../protocol/ScheduleRun";
   import { passedOneShot, runUnsettled, UNSETTLED_RUN_REFRESH_MS } from "../one-shot-runs";
 
+  let { onNavigate, channelFactory = openSharedWorkSurfaceChannel }: {
+    onNavigate?: (path: string) => void;
+    // The page's gateway signal channel; tests supply a fake.
+    channelFactory?: () => WorkSurfaceChannel;
+  } = $props();
+
   let overview = $state<OperatorOverview | null>(null);
   let isLoading = $state(true);
-  let errorMessage = $state<string | null>(null);
+  // Why the overview could not be read; the next read replaces it.
+  let loadError = $state<string | null>(null);
+  // Why the person's last action failed. It stays through the reloads the
+  // gateway's signals cause, until the person acts again.
+  let actionError = $state<string | null>(null);
   let activeActionKey = $state<string | null>(null);
   let openScheduleId = $state<string | null>(null);
   let scheduleRuns = $state<Record<string, ScheduleRun[]>>({});
   let showHistory = $state(false);
+  // Every run cancelled from here keeps a link to its account, newest first:
+  // a cancelled run leaves the live fleet once it settles.
+  let cancelledRunIds = $state<string[]>([]);
+  // Why a Stop did not reach a session, by session. The session keeps
+  // running, so the reason stays on its row until a later Stop is accepted.
+  let stopErrors = $state<Record<string, string>>({});
   const approvalsIdle = $derived((overview?.approvals.length ?? 0) === 0);
 
   function describeSpec(schedule: Schedule): string {
@@ -92,7 +112,7 @@
       try {
         scheduleRuns = { ...scheduleRuns, ...(await readRuns(watched)) };
       } catch (error) {
-        errorMessage =
+        loadError =
           error instanceof Error ? error.message : "Failed to refresh schedule runs";
         runRefreshFailures += 1;
       }
@@ -112,20 +132,42 @@
     });
   }
 
+  // A slow read must not overwrite a later one.
+  let loadGeneration = 0;
+
   async function loadOverview(): Promise<void> {
+    const generation = ++loadGeneration;
     isLoading = true;
-    errorMessage = null;
 
     try {
-      overview = await fetchOperatorOverview();
+      const next = await fetchOperatorOverview();
+      if (generation !== loadGeneration) return;
+      overview = next;
+      loadError = null;
       const passed = overview.schedules.schedules.filter(passedOneShot).map((schedule) => schedule.id);
       scheduleRuns = { ...scheduleRuns, ...(await readRuns(passed)) };
     } catch (error) {
-      errorMessage =
-        error instanceof Error ? error.message : "Failed to load operator overview";
+      if (generation === loadGeneration) {
+        loadError = error instanceof Error ? error.message : "Failed to load operator overview";
+      }
     } finally {
-      isLoading = false;
+      if (generation === loadGeneration) isLoading = false;
     }
+  }
+
+  // The gateway signals when a session's turn begins, waits on the person or
+  // settles and when a run starts, parks or ends; signals come in bursts, so
+  // one read answers each.
+  const SIGNAL_COALESCE_MS = 100;
+  const FLEET_SIGNALS = new Set(["session_updated", "workflow_run_updated", "lagged"]);
+  let signalTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function reloadOnSignal(): void {
+    if (signalTimer !== null) return;
+    signalTimer = setTimeout(() => {
+      signalTimer = null;
+      void loadOverview();
+    }, SIGNAL_COALESCE_MS);
   }
 
   async function runAction(
@@ -133,13 +175,13 @@
     task: () => Promise<void>,
   ): Promise<void> {
     activeActionKey = actionKey;
-    errorMessage = null;
+    actionError = null;
 
     try {
       await task();
       await loadOverview();
     } catch (error) {
-      errorMessage =
+      actionError =
         error instanceof Error ? error.message : "Operator action failed";
     } finally {
       activeActionKey = null;
@@ -148,6 +190,31 @@
 
   function actionBusy(actionKey: string): boolean {
     return activeActionKey === actionKey;
+  }
+
+  async function cancelRun(runId: string): Promise<void> {
+    await cancelWorkflowRun(runId);
+    cancelledRunIds = [runId, ...cancelledRunIds.filter((id) => id !== runId)];
+  }
+
+  async function stopSession(sessionId: string): Promise<void> {
+    const next = { ...stopErrors };
+    delete next[sessionId];
+    try {
+      await stopConversationTurn(sessionId);
+    } catch (error) {
+      next[sessionId] = error instanceof Error ? error.message : "Stop did not reach the session.";
+    }
+    stopErrors = next;
+  }
+
+  function navigate(event: MouseEvent): void {
+    if (!onNavigate || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button !== 0) return;
+    const path = (event.currentTarget as HTMLAnchorElement).getAttribute("href");
+    if (path) {
+      event.preventDefault();
+      onNavigate(path);
+    }
   }
 
   function toneForHealth(health: string): string {
@@ -161,19 +228,24 @@
     }
   }
 
-  onMount(async () => {
-    await loadOverview();
+  onMount(() => {
+    void loadOverview();
+    const channel = channelFactory();
+    channel.onSignal((event) => {
+      if (FLEET_SIGNALS.has(event.type)) reloadOnSignal();
+    });
+    channel.onReconnect(reloadOnSignal);
+    return () => {
+      channel.close();
+      if (signalTimer !== null) clearTimeout(signalTimer);
+    };
   });
 </script>
 
 <section class="ops-deck">
   <header class="ops-header">
     <div>
-      <p class="eyebrow">Operator Deck</p>
-      <h1>Live control surface for the running gateway</h1>
-      <p class="lede">
-        Sessions, approvals, automations, channels, and devices in one place.
-      </p>
+      <h1>Gateway supervision</h1>
     </div>
     <div class="header-actions">
       <button class="refresh-btn history-btn" onclick={() => (showHistory = !showHistory)}>
@@ -187,8 +259,11 @@
 
   {#if showHistory}<OperatorHistoryPane />{/if}
 
-  {#if errorMessage}
-    <div class="ops-alert" role="alert">{errorMessage}</div>
+  {#if actionError}
+    <div class="ops-alert" role="alert">{actionError}</div>
+  {/if}
+  {#if loadError}
+    <div class="ops-alert" role="alert">{loadError}</div>
   {/if}
 
   {#if isLoading && !overview}
@@ -226,35 +301,73 @@
       <article class="panel panel-wide">
         <div class="panel-head">
           <div>
-            <p class="panel-kicker">Sessions</p>
-            <h2>Live and recent sessions</h2>
+            <p class="panel-kicker">Fleet</p>
+            <h2>Live work and recent sessions</h2>
           </div>
-          <span class="panel-count">{overview.sessions.length}</span>
+          <span class="panel-count">{overview.sessions.length + overview.workflow_runs.length}</span>
         </div>
-        <div class="ledger">
+        {#each cancelledRunIds as runId (runId)}
+          <p class="detail-copy"><a onclick={navigate} href={`/workflow-runs/${encodeURIComponent(runId)}`}>View account of cancelled run {runId}</a></p>
+        {/each}
+        <div class="ledger fleet-ledger">
+          {#each overview.workflow_runs as run (run.id)}
+            <div class="ledger-row">
+              <div class="session-summary">
+                <div class="primary-line">
+                  <a onclick={navigate} href={`/workflow-runs/${encodeURIComponent(run.id)}`}>{run.name}</a>
+                  <span>Agent {run.agent_id ?? "not recorded"}</span>
+                  <StatusBadge register={run.state === "running" ? "in-motion" : "not-yet"} label={run.state} />
+                </div>
+                <div class="secondary-line">
+                  {#if run.parent_session_id}<a onclick={navigate} href={conversationPath(run.parent_session_id)}>Parent {run.parent_session_id}</a>{:else}No spawning session recorded{/if}
+                  {#if run.parent_run_id} · <a onclick={navigate} href={`/workflow-runs/${encodeURIComponent(run.parent_run_id)}`}>Parent run {run.parent_run_id}</a>{/if}
+                  · {run.activity}
+                </div>
+              </div>
+              <button class="action-btn" disabled={actionBusy(`cancel-${run.id}`)} onclick={() => runAction(`cancel-${run.id}`, () => cancelRun(run.id))}>Cancel</button>
+            </div>
+          {/each}
           {#each overview.sessions as session (session.id)}
             <div class="ledger-row">
               <div class="session-summary">
                 <div class="primary-line">
-                  <span class="mono">{session.id}</span>
+                  <a onclick={navigate} class="mono" href={conversationPath(session.id)}>{session.id}</a>
+                  <span>Agent {session.agent_id}</span>
                   {#if session.has_active_connection}
                     <StatusBadge register="calm" label="connected" />
                   {/if}
-                  {#if session.has_running_turn}
+                  {#if session.awaiting_approval}
+                    <StatusBadge register="wants-a-human" label="waiting on you" />
+                  {:else if session.has_running_turn}
                     <StatusBadge register="in-motion" label="running" />
                   {/if}
-                  {#if session.has_interrupted_turn}
-                    <StatusBadge register="wants-a-human" label="interrupted" />
+                  {#if session.ending}
+                    <StatusBadge register="wants-a-human" label={session.ending === "cancelled" ? "cancelled (cut short)" : session.ending} />
                   {/if}
                 </div>
                 <div class="secondary-line session-preview">
                   {session.topic_name} ·
                   {messagePreview(session.message_preview ?? "No messages yet")}
                 </div>
+                <div class="secondary-line">
+                  {#if session.parent_session_id}<a onclick={navigate} href={conversationPath(session.parent_session_id)}>Parent {session.parent_session_id}</a>{:else}No spawning session recorded{/if}
+                  {#if session.source} · {session.source}{/if} · {session.activity}
+                </div>
+                {#if stopErrors[session.id]}<p role="alert">Stop did not reach this session: {stopErrors[session.id]}</p>{/if}
               </div>
-              <span class="timestamp">{new Date(session.last_activity).toLocaleString()}</span>
+              <div class="action-row">
+                {#if session.has_running_turn}
+                  {#if session.workflow_run_id}
+                    <button class="action-btn" disabled={actionBusy(`cancel-${session.workflow_run_id}`)} onclick={() => runAction(`cancel-${session.workflow_run_id}`, () => cancelRun(session.workflow_run_id!))}>Cancel run</button>
+                  {:else}
+                    <button class="action-btn" disabled={actionBusy(`stop-${session.id}`)} onclick={() => runAction(`stop-${session.id}`, () => stopSession(session.id))}>Stop</button>
+                  {/if}
+                {/if}
+                <span class="timestamp">{new Date(session.last_activity).toLocaleString()}</span>
+              </div>
             </div>
           {/each}
+
         </div>
       </article>
 
@@ -519,13 +632,12 @@
     display: flex;
     justify-content: space-between;
     gap: 24px;
-    align-items: flex-start;
-    margin-bottom: 22px;
+    align-items: center;
+    margin-bottom: 16px;
     border-bottom: 2px solid var(--ink);
-    padding-bottom: 18px;
+    padding-bottom: 12px;
   }
 
-  .eyebrow,
   .panel-kicker,
   .metric-label {
     font-family: var(--font-mono);
@@ -541,12 +653,11 @@
   h1 {
     font-family: var(--font-display);
     font-weight: 400;
-    font-size: clamp(2rem, 3.8vw, 2.8rem);
+    font-size: 24px;
     line-height: 1;
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: var(--ink);
-    max-width: 16ch;
     margin: 0;
   }
 
@@ -561,7 +672,6 @@
     margin: 0;
   }
 
-  .lede,
   .detail-copy,
   .secondary-line,
   .metric-meta,
@@ -726,6 +836,11 @@
     display: flex;
     flex-direction: column;
     gap: 0;
+  }
+
+  .fleet-ledger {
+    max-height: min(42vh, 420px);
+    overflow-y: auto;
   }
 
   .ledger-row {

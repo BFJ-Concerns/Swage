@@ -6,6 +6,7 @@ All notable changes to Swage are documented in this file.
 
 ### Added
 
+- A provider whose credential would travel in plain `http://` to an address off this machine is recorded once in the audit trail (`provider_credential_exposure`) and still sent to; its `plaintext_credentials` setting (`warn`, `refuse` or `allow`, set in `config.toml` or through the settings API) refuses such requests instead or sends them without the record. Model discovery follows the same setting, and the record keeps only the base URL's scheme, host and port. Loopback addresses are never affected.
 - A gateway bound beyond loopback serves another machine only once it has paired with the gateway's token, which the gateway generates on first start. `swage gateway pair` prints a one-time code on the gateway's machine; the web UI, the desktop app and `swage run` (`--pairing-code`, or a prompt on its terminal) pair once with it and remember the token. Loopback stays tokenless. `[server] access` relaxes the gate for the whole install to `warn` (admitted and logged) or `off`.
 - Settings → Security, for the install and for each topic under its own Security tab, shows the sandbox, approval prompts and (for the install) the access gate as they apply there, with each relaxed check and the scope that relaxed it, and edits them. Approval-gated tools are chosen from the registered tools with a timeout for each. A save applies to the next turn without a restart and is recorded once in the audit trail.
 - Agents can create and edit agent definitions through conversation, making them available in Settings and the new-session picker; each change records the previous and new definition in configuration history.
@@ -109,6 +110,8 @@ All notable changes to Swage are documented in this file.
 - Workflow scripts can now continue a worker in the same session by reusing the handle returned by an earlier worker call.
 - Turn records now include redacted provider response metadata, including status, request identifiers, stop reasons, usage, and content-block sizes, without retaining response content.
 - Sessions now receive working guidance tailored to the configured model family, with common guidance retained for unrecognised models.
+- The Operator view of everything running stays current without a reload: it re-reads on the gateway's session and workflow-run signals, shows each running session's and run's agent and spawning session, reads a session waiting on the person's approval as "waiting on you", and lists a request waiting on the person as it arrives. Its Stop and Cancel controls wind work down, delegated children included, and a refused Stop or Cancel keeps its reason on screen.
+- `POST /api/conversations/{id}/cancel` stops a conversation's running turn whichever client holds its socket; the web UI's Stop uses it, and a tab that does not hold the socket follows the turn's end through the gateway's session signal.
 
 ### Changed
 
@@ -172,9 +175,12 @@ All notable changes to Swage are documented in this file.
 ### Removed
 
 - The terminal client (`swage chat`) and its `swage-tui` crate; the web UI and desktop shell are the conversation interfaces.
+- The conversation socket's `cancel` frame; clients stop a turn through `POST /api/conversations/{id}/cancel`.
 
 ### Fixed
 
+- `tool_result_read` masks registered secret values in the stored result it returns, as the conversation's history does, instead of reading them back whole.
+- An error that ends no turn — a message that could not be queued, a skill or approval request the gateway could not carry out — no longer marks the running request failed, and a gateway shutdown shows an unanswered request as interrupted, as the record says.
 - The project-docs skill no longer hands agent-guidance changes to a skill Swage does not ship: it reports proposed changes to `AGENTS.md`, and edits that file only when the request covers it.
 - The orientation gives a registered secret's reference as `secret://<backend>/<id>`, the form the gateway resolves, where it gave `secret://<id>`, which was refused.
 - The workflow tools no longer tell the agent to activate the workflow-authoring skill, which only the person can do: they name the skill as the catalogue lists it and the hosted `workflow-engine` document.

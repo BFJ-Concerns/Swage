@@ -94,7 +94,7 @@ async function send(page: Page, prompt: string): Promise<void> {
   await expect(page.getByLabel("Your message").getByText(prompt, { exact: true })).toBeVisible();
 }
 
-async function providerRequests(): Promise<Array<{ prompt: string | null; effort: string | null }>> {
+async function providerRequests(): Promise<Array<{ prompt: unknown; effort: string | null; model: string }>> {
   const root = process.env.SWAGE_E2E_INVOCATION_DIR;
   if (!root) throw new Error("The E2E invocation directory was not provided");
   try {
@@ -102,7 +102,7 @@ async function providerRequests(): Promise<Array<{ prompt: string | null; effort
       .trim()
       .split("\n")
       .filter(Boolean)
-      .map((line) => JSON.parse(line) as { prompt: string | null; effort: string | null });
+      .map((line) => JSON.parse(line) as { prompt: unknown; effort: string | null; model: string });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
@@ -117,6 +117,76 @@ async function sendNewConversation(page: Page, prompt: string, effort?: "high"):
   await expect(page.getByLabel("Your message").getByText(prompt, { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
 }
+
+test("colours code tokens and follows message links with native fragment behaviour", async ({ page }) => {
+  await page.goto("/");
+  await openComposer(page);
+  await sendNewConversation(page, "render code and links");
+
+  const code = page.locator("pre code").filter({ hasText: 'const answer = "green";' });
+  const tokenColours = () => code.evaluate((block) => [
+    getComputedStyle(block).color,
+    ...Array.from(block.querySelectorAll("span"), (span) => getComputedStyle(span).color),
+  ]);
+  for (const theme of ["Light", "Dark"]) {
+    await page.getByRole("button", { name: `${theme} theme` }).click();
+    const colours = await tokenColours();
+    expect(new Set(colours).size).toBeGreaterThanOrEqual(3);
+  }
+
+  await page.getByRole("link", { name: "Here", exact: true }).click();
+  await expect(page.locator(":target")).toHaveText("Anchor text");
+  await page.getByRole("link", { name: "Top", exact: true }).click();
+  await expect(page).toHaveURL(/#$/);
+  await expect(page.locator(":target")).toHaveCount(0);
+
+  await page.getByRole("link", { name: "Settings", exact: true }).click();
+  await expect(page).toHaveURL(/\/settings\/display$/);
+  await page.goBack();
+  await page.getByRole("link", { name: "Settings fragment", exact: true }).click();
+  await expect(page).toHaveURL(/\/settings\/display#test-anchor$/);
+});
+
+test("refreshes open agent pickers and uses the preferred model on the first turn", async ({ page, context }) => {
+  const pickerPage = await context.newPage();
+  await pickerPage.goto("/");
+  const frontAgent = pickerPage.getByRole("combobox", { name: "Agent" });
+  await expect(frontAgent).toBeVisible();
+  await page.goto("/");
+  await openComposer(page);
+  await sendNewConversation(page, "Create a preferred agent");
+  await expect(page.getByLabel("Assistant message").getByText("Definition tool returned to the provider.")).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Agent" }).getByRole("option", { name: "Preferred agent" })).toHaveCount(1);
+  await expect(frontAgent.getByRole("option", { name: "Preferred agent" })).toHaveCount(1);
+
+  await sendNewConversation(page, "Set an unknown preferred model");
+  await expect.poll(async () => {
+    const requests = await providerRequests();
+    return requests.flatMap(({ prompt }) => Array.isArray(prompt) ? prompt : [])
+      .find((part) => part.type === "tool_result" && part.tool_use_id === "refuse-e2e-agent");
+  }).toMatchObject({
+    is_error: true,
+    content: expect.stringMatching(/unknown-model.*not in the configured catalogue.*preferred-model/),
+  });
+
+  async function sendWithAgent(prompt: string, override?: string) {
+    await pickerPage.goto("/");
+    await frontAgent.selectOption("preferred-agent");
+    await openComposer(pickerPage);
+    await expect(frontAgent).toHaveValue("preferred-agent");
+    const model = pickerPage.getByRole("combobox", { name: "Model" });
+    await expect(model).toHaveValue("preferred-model");
+    if (override) await model.selectOption(override);
+    await sendNewConversation(pickerPage, prompt);
+    await expect.poll(async () => {
+      const requests = await providerRequests();
+      return requests.find((request) => request.prompt === prompt)?.model;
+    }).toBe(override ?? "preferred-model");
+  }
+
+  await sendWithAgent("First turn on the agent preference");
+  await sendWithAgent("First turn on the explicit model", "e2e-model");
+});
 
 const effortJourneyPrompts = [
   "first high effort conversation",

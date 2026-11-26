@@ -596,19 +596,6 @@
             "type": "object"
           },
           {
-            "description": "Cancel the currently active turn.",
-            "properties": {
-              "type": {
-                "const": "cancel",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type"
-            ],
-            "type": "object"
-          },
-          {
             "description": "Subscribe to one or more observability channels by name.\n\nValid channel names: `\"context\"`, `\"tools\"`. Unknown names are silently\nignored so forward-compatible clients do not break on older servers.",
             "properties": {
               "channels": {
@@ -3312,6 +3299,15 @@
         ],
         "type": "object"
       },
+      "PlaintextCredentialPolicy": {
+        "description": "What a provider does with a request that would carry its credential over\nplain `http://` to an address that is not loopback: refuse every request,\nsend after one recorded warning, or send silently.",
+        "enum": [
+          "refuse",
+          "warn",
+          "allow"
+        ],
+        "type": "string"
+      },
       "PostWorkflowRunEventRequest": {
         "properties": {
           "kind": {
@@ -3530,6 +3526,18 @@
           "has_credential": {
             "type": "boolean"
           },
+          "plaintext_credentials": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlaintextCredentialPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The provider's plaintext-credential policy; `warn` when unset."
+          },
           "protocol": {
             "$ref": "#/components/schemas/ProviderProtocol"
           },
@@ -3716,6 +3724,10 @@
               "null"
             ]
           },
+          "awaiting_approval": {
+            "description": "The running turn is held on a request only the person can answer.",
+            "type": "boolean"
+          },
           "created_at": {
             "format": "date-time",
             "type": "string"
@@ -3776,7 +3788,8 @@
           "created_at",
           "last_activity",
           "has_interrupted_turn",
-          "has_running_turn"
+          "has_running_turn",
+          "awaiting_approval"
         ],
         "type": "object"
       },
@@ -4126,6 +4139,18 @@
               "string",
               "null"
             ]
+          },
+          "plaintext_credentials": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlaintextCredentialPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The provider's plaintext-credential policy; left out, the running\nvalue stands (`warn` for a new provider)."
           },
           "protocol": {
             "$ref": "#/components/schemas/ProviderProtocol"
@@ -5184,6 +5209,24 @@
             "type": "object"
           },
           {
+            "description": "A workflow run started, parked on a durable wait, or ended. Views of\nrunning work refetch; the event is the signal, not the content.",
+            "properties": {
+              "run_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "type": {
+                "const": "workflow_run_updated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
             "description": "A session row may have changed or entered or left a list. Refetch\nsession lists to read the current rows from the gateway.",
             "properties": {
               "session_id": {
@@ -5198,6 +5241,19 @@
             "required": [
               "type",
               "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Agent pickers refetch their effective definitions after a mutation.",
+            "properties": {
+              "type": {
+                "const": "agent_definitions_changed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
             ],
             "type": "object"
           },
@@ -7468,16 +7524,11 @@
           "synthesis": {
             "type": "boolean"
           },
-          "synthesis_unverified": {
-            "default": false,
-            "description": "Whether the configured speech model's availability is still unverified.",
-            "type": "boolean"
-          },
           "transcription": {
             "type": "boolean"
           },
           "unavailable_reason": {
-            "description": "Why transcription or synthesis is unavailable, naming what to\nconfigure; absent when both are available.",
+            "description": "Why transcription or synthesis is unavailable. Absent when both are available.",
             "type": [
               "string",
               "null"
@@ -10794,6 +10845,31 @@
           }
         },
         "summary": "Branch a conversation at an earlier message into a sibling thread."
+      }
+    },
+    "/api/conversations/{id}/cancel": {
+      "post": {
+        "operationId": "cancel_conversation_turn",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Success, no body."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Stop the conversation's running turn, whichever client holds its connection."
       }
     },
     "/api/docs": {

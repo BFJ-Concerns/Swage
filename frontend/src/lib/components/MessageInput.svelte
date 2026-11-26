@@ -40,7 +40,14 @@
 
   // Local draft content — cleared after every successful send.
   let content = $state("");
-  let selectedModel = $state("");
+  let modelOverride = $state("");
+  const preferredModel = $derived(canSelectAgent
+    ? agentDefinitions.find((definition) => definition.id === selectedAgentId)?.model_id
+    : undefined);
+  const modelFallback = $derived(preferredModel && modelOptions.includes(preferredModel)
+    ? preferredModel
+    : selectedModelId ?? modelOptions[0] ?? "");
+  const selectedModel = $derived(modelOverride || modelFallback);
   let modelSessionId = $state<string | null | undefined>(undefined);
   let modelDefaultId = $state<string | null | undefined>(undefined);
   let selectedEffort = $state<"" | Effort>("");
@@ -56,13 +63,30 @@
   });
 
   $effect(() => {
-    const fallback = selectedModelId ?? modelOptions[0] ?? "";
-    if (sessionId !== modelSessionId || selectedModelId !== modelDefaultId || !modelOptions.includes(selectedModel)) {
-      selectedModel = fallback;
+    if (sessionId !== modelSessionId || (!canSelectAgent && selectedModelId !== modelDefaultId) ||
+        (modelOverride && !modelOptions.includes(modelOverride))) {
+      modelOverride = "";
       modelSessionId = sessionId;
       modelDefaultId = selectedModelId;
     }
   });
+
+  // Why the last Stop did not reach the turn. The turn keeps running, so this
+  // is a notice beside the control, never the turn's own failure; it clears
+  // once nothing is running here.
+  let stopError = $state<string | null>(null);
+  $effect(() => {
+    if (!isStreamingHere) stopError = null;
+  });
+
+  async function stop(): Promise<void> {
+    stopError = null;
+    try {
+      await store!.cancelTurn();
+    } catch (error) {
+      stopError = error instanceof Error ? error.message : "Stop did not reach the turn.";
+    }
+  }
 
   // Direct reference to the textarea DOM node for height adjustment and refocus.
   let textarea: HTMLTextAreaElement | undefined = $state(undefined);
@@ -87,7 +111,10 @@
     // a reason to refuse: the gateway queues the message for the next turn.
     if (!store || !trimmed || hasNoConfiguredModels) return;
 
-    store.startTurn(trimmed, selectedModel || null, selectedAgentId || null, selectedEffort || null);
+    // At session start the gateway resolves the agent's current preference
+    // unless the person explicitly chose a model in the composer.
+    const requestedModel = canSelectAgent && selectedAgentId ? modelOverride : selectedModel;
+    store.startTurn(trimmed, requestedModel || null, selectedAgentId || null, selectedEffort || null);
 
     // Clear draft and return focus to the textarea so the user can keep typing.
     content = "";
@@ -140,7 +167,8 @@
         {#if modelOptions.length > 0}
           <select
             class="model-select"
-            bind:value={selectedModel}
+            value={selectedModel}
+            onchange={(event) => { modelOverride = event.currentTarget.value; }}
             aria-label="Model"
             disabled={!store || isStreamingHere}
           >
@@ -151,6 +179,9 @@
         {/if}
       </div>
     {/if}
+    {#if stopError}
+      <p class="stop-notice" role="alert">Stop did not reach the turn: {stopError}</p>
+    {/if}
     {#if hasNoConfiguredModels}
       <p class="model-guidance">
         No models are configured. Add a provider in
@@ -160,7 +191,7 @@
   </div>
 
   {#if isStreamingHere}
-    <button class="action stop" onclick={() => store!.cancelTurn()}>
+    <button class="action stop" onclick={stop}>
       Stop
     </button>
   {:else}
@@ -238,7 +269,8 @@
     cursor: pointer;
   }
 
-  .model-guidance {
+  .model-guidance,
+  .stop-notice {
     margin: 0;
     padding: 7px 14px;
     border-top: 1px dotted var(--rule-soft);

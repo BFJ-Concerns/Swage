@@ -198,6 +198,11 @@ export async function deleteConversation(id: string): Promise<void> {
   return request<void>("DELETE", `/api/conversations/${encodeURIComponent(id)}`);
 }
 
+/** Stop the conversation's running turn, whichever client holds its connection. */
+export async function cancelConversationTurn(id: string): Promise<void> {
+  return request<void>("POST", `/api/conversations/${encodeURIComponent(id)}/cancel`);
+}
+
 /** Read a turn context report. */
 export async function getTurnContext(id: string): Promise<TurnContextResponse> {
   return request<TurnContextResponse>("GET", `/api/turns/${encodeURIComponent(id)}/context`);

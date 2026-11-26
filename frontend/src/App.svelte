@@ -20,6 +20,7 @@
   import PairingDialog from "./lib/components/PairingDialog.svelte";
   import { getConversation } from "./lib/api/conversations";
   import { fetchSettings } from "./lib/api/settings";
+  import { openSharedWorkSurfaceChannel } from "./lib/api/work-surface";
   import { listEffectiveAgentDefinitions } from "./lib/api/agent-definitions";
   import type { EffectiveAgentDefinitionResponse } from "./lib/protocol/EffectiveAgentDefinitionResponse";
   import type { ConversationStore } from "./lib/stores/conversations";
@@ -33,6 +34,7 @@
     type StreamingStore,
   } from "./lib/stores/streaming";
   import { createTopicStore } from "./lib/stores/topics";
+  import { watchOpenConversation } from "./lib/open-conversation-updates";
   import { conversationPath, createRouter } from "./lib/router";
   import type { Route } from "./lib/router";
   import { getDesktopRuntime } from "./lib/runtime";
@@ -136,10 +138,14 @@
   // The sidebar and agent list follow the session's scope: its topic, or
   // the general scope for a session without one. A scope already in view
   // is left alone so nothing reloads needlessly.
-  async function bringScopeIntoView(topicId: string | null): Promise<void> {
+  async function bringScopeIntoView(
+    topicId: string | null,
+    knownDefinitions?: EffectiveAgentDefinitionResponse[],
+  ): Promise<void> {
     const inView = topicStore.currentTopic?.id ?? null;
     if (inView === topicId && scopeLoadedFor === topicId) return;
     scopeLoadedFor = topicId;
+    agentDefinitions = knownDefinitions ?? [];
     // Clear the old rows before publishing the new scope. Awaiting even a
     // local topic selection can yield a rendered frame beneath its header.
     const loading = conversationStore.loadConversations(topicId);
@@ -149,12 +155,22 @@
       if (!topicId && inView) topicStore.closeTopic();
       await loading;
     }
+    if (scopeLoadedFor === topicId) await loadScopeAgentDefinitions(topicId);
+  }
+
+  let scopeDefinitionsGeneration = 0;
+  async function loadScopeAgentDefinitions(topicId: string | null): Promise<void> {
+    const generation = ++scopeDefinitionsGeneration;
     try {
-      agentDefinitions = await listEffectiveAgentDefinitions(topicId);
+      const definitions = await listEffectiveAgentDefinitions(topicId);
+      if (generation === scopeDefinitionsGeneration && scopeLoadedFor === topicId) {
+        agentDefinitions = definitions;
+      }
     } catch (error) {
       console.error("Failed to load agent definitions:", error);
     }
   }
+
   // The scope whose sidebar and agent list are loaded; null for the general
   // scope, undefined before any load.
   let scopeLoadedFor: string | null | undefined = undefined;
@@ -446,6 +462,17 @@
     };
   });
 
+  // A conversation open in this tab while another tab holds its socket follows
+  // the gateway's session signal, so a turn stopped or settled elsewhere — or
+  // by this tab's own Stop — shows here too.
+  onMount(() =>
+    watchOpenConversation({
+      openConversationId: () => conversationStore.activeConversation?.id ?? null,
+      holdsSocket: () => connectionStore.status === "connected",
+      refresh: () => conversationStore.refreshActiveConversation(),
+    }),
+  );
+
   // Passed to ConnectionIndicator so the user can trigger a manual reconnect.
   function handleRetry(): void {
     const id = conversationStore.activeConversation?.id;
@@ -489,9 +516,11 @@
       connectionStore.disconnect();
       conversationStore.clearActiveConversation();
       activeSurface = "conversation";
-      pendingStart = choice;
       router.navigate("/");
-      await bringScopeIntoView(choice.topicId);
+      const knownDefinitions = startScope === choice.topicId ? startAgentDefinitions : undefined;
+      const loading = bringScopeIntoView(choice.topicId, knownDefinitions);
+      pendingStart = choice;
+      await loading;
     } catch (err) {
       console.error("Failed to start a session:", err);
     }
@@ -501,7 +530,10 @@
   // agents. The request is checked when it settles so a slow answer for an
   // earlier choice never replaces a later one.
   let startScopeGeneration = 0;
+  let startScope: string | null | undefined;
   async function loadStartAgentDefinitions(topicId: string | null): Promise<void> {
+    if (startScope !== topicId) startAgentDefinitions = [];
+    startScope = topicId;
     const generation = ++startScopeGeneration;
     try {
       const definitions = await listEffectiveAgentDefinitions(topicId);
@@ -511,6 +543,19 @@
       console.error("Failed to load agent definitions:", error);
     }
   }
+
+  onMount(() => {
+    const channel = openSharedWorkSurfaceChannel();
+    function refreshPickers(): void {
+      if (scopeLoadedFor !== undefined) void loadScopeAgentDefinitions(scopeLoadedFor);
+      if (startScope !== undefined) void loadStartAgentDefinitions(startScope);
+    }
+    channel.onSignal((event) => {
+      if (event.type === "agent_definitions_changed" || event.type === "lagged") refreshPickers();
+    });
+    channel.onReconnect(refreshPickers);
+    return () => channel.close();
+  });
 
   async function createTopic(name: string): Promise<void> {
     await topicStore.createTopic(name);

@@ -4463,6 +4463,7 @@ fn held_worker_route_config(threshold_ms: Option<u64>) -> swage_config::Resolved
             api_key_env: None,
             command: None,
             state_dir: None,
+            plaintext_credentials: Default::default(),
         },
     );
     config.models.default = "steady".to_string();
@@ -6598,6 +6599,28 @@ async fn cancelling_a_parked_run_settles_journal_and_records_terminal_budget() {
             None,
             root.path().to_path_buf(),
         );
+        // Views of running work hear the run park and, once cancelled, end.
+        // The broadcast is short, so its signals are gathered as they come.
+        let mut events = state.broadcast.subscribe();
+        let signals = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            loop {
+                match events.recv().await {
+                    Ok(event)
+                        if crate::websocket::work_surface::work_surface_signal(&event)
+                            .is_some() =>
+                    {
+                        let done = matches!(event, ServerEvent::WorkflowRunCompleted { .. });
+                        seen.push(event);
+                        if done {
+                            return seen;
+                        }
+                    }
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return seen,
+                }
+            }
+        });
         launch_existing_run(state.clone(), run.clone(), source, None)
             .await
             .expect("launch waiting run");
@@ -6609,6 +6632,25 @@ async fn cancelling_a_parked_run_settles_journal_and_records_terminal_budget() {
         let cancel_requested = api.cancel(run.id).await;
         assert_eq!(cancel_requested.id, run.id);
         wait_for_run_state(&storage, run.id, "cancelled").await;
+        let signals = tokio::time::timeout(std::time::Duration::from_secs(10), signals)
+            .await
+            .expect("the cancelled run is announced")
+            .expect("signal collector");
+        assert!(
+            signals.iter().any(|event| matches!(
+                event,
+                ServerEvent::WorkflowRunUpdated { run_id } if *run_id == run.id
+            )),
+            "parking is signalled: {signals:?}"
+        );
+        assert!(
+            matches!(
+                signals.last(),
+                Some(ServerEvent::WorkflowRunCompleted { event })
+                    if event.run.id == run.id && event.run.state == WorkflowRunState::Cancelled
+            ),
+            "the parked run's cancellation is announced as its end: {signals:?}"
+        );
         let journal = storage
             .list_workflow_journal(run.id)
             .await
@@ -12483,7 +12525,11 @@ async fn ordinary_failed_agent_call_keeps_interrupted_handover_event_accounting(
         .expect("failed call error");
     assert!(call_error.starts_with("AgentCallError:"));
     let terminal_error = run.error_message.as_deref().expect("terminal error");
-    assert!(terminal_error.contains(call_error));
+    assert_eq!(
+        terminal_error.matches(call_error).count(),
+        1,
+        "{terminal_error}"
+    );
     assert!(!terminal_error.contains("AgentCallError: AgentCallError:"));
 
     let journal = storage
@@ -20420,4 +20466,62 @@ mod dispatch_attempt_reader_tests {
             }
         }
     }
+}
+
+/// A run starting and reaching its terminal state reaches the signal channel
+/// that views of running work listen on, so a list of live runs refetches as
+/// the run changes rather than waiting for the person to refresh it.
+#[tokio::test(flavor = "multi_thread")]
+async fn run_start_and_completion_reach_the_signal_channel() {
+    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+    let topic = storage.general_scope().await.expect("topic");
+    let state = AppState::for_test(
+        Arc::clone(&storage) as Arc<dyn Storage>,
+        Arc::clone(&storage) as Arc<dyn TopicStore>,
+        Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let mut events = state.broadcast.subscribe();
+    let Json(started) = start_inline_run(
+        State(state.clone()),
+        Path(topic.id),
+        Json(StartInlineWorkflowRunRequest {
+            source: "return null".into(),
+            args: Value::Null,
+            budget: None,
+        }),
+    )
+    .await
+    .expect("start");
+    let mut signalled_start = false;
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let event = events.recv().await.expect("broadcast open");
+            let Some(signal) = crate::websocket::work_surface::work_surface_signal(&event) else {
+                continue;
+            };
+            if matches!(event, ServerEvent::WorkflowRunStarted { .. } | ServerEvent::WorkflowRunCompleted { .. }) {
+                // The signal socket carries the run's id, never the run.
+                assert!(
+                    matches!(signal, ServerEvent::WorkflowRunUpdated { run_id } if run_id == started.id),
+                    "a run's start and end reach the signal socket as its id alone: {signal:?}"
+                );
+            }
+            match event {
+                ServerEvent::WorkflowRunStarted { event } if event.run.id == started.id => {
+                    signalled_start = true;
+                }
+                ServerEvent::WorkflowRunCompleted { event } if event.run.id == started.id => {
+                    break event.run;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the run's completion is signalled");
+    assert!(signalled_start, "the run's start is signalled");
+    assert_ne!(completed.state, WorkflowRunState::Running);
 }

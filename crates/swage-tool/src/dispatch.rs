@@ -15,7 +15,6 @@ use swage_safety::LeakDetector;
 
 use crate::context::ToolContext;
 use crate::output::ToolOutput;
-use crate::params::redact_params;
 use crate::permission::{PermissionCheckResult, PermissionConfig, check_permission};
 use crate::rate_limit::{RateLimitConfig, RateLimitDecision, RateLimiter};
 use crate::registry::ToolRegistry;
@@ -79,14 +78,12 @@ impl ToolExecutionStrategy for DefaultExecutionStrategy {
 ///    with a descriptive `ExecutionFailed` error.
 /// 4. **Argument validation** — schema checks and the tool's I/O-free
 ///    preflight short-circuit before `execute()` is invoked.
-/// 5. **Parameter redaction** — a sanitised copy is produced for logging;
-///    the original unredacted params are passed to `execute()`.
-/// 6. **Execute** — the tool runs; wall-clock time is measured by the
+/// 5. **Execute** — the tool runs; wall-clock time is measured by the
 ///    framework (not the tool itself).
-/// 7. **Leak detection** — the raw output is serialised to JSON, scanned,
+/// 6. **Leak detection** — the raw output is serialised to JSON, scanned,
 ///    and parsed back. If scanning breaks the JSON structure, the scanned
 ///    text is wrapped as a string value so output is never silently lost.
-/// 8. **ToolOutput assembly** — duration is always set; `raw` is populated
+/// 7. **ToolOutput assembly** — duration is always set; `raw` is populated
 ///    only when `debug_mode` is enabled.
 pub struct ToolDispatcher {
     registry: Arc<ToolRegistry>,
@@ -320,12 +317,7 @@ impl ToolDispatcher {
         validate_tool_schema(tool_name, &schema, &params)?;
         tool.validate_call(&params)?;
 
-        // Step 5: Parameter redaction for logging.
-        // The redacted copy is available here for future hook/audit integration;
-        // the original params are passed to execute() below.
-        let _redacted_params = redact_params(&params, tool.sensitive_keys());
-
-        // Step 6: Execute with wall-clock timing.
+        // Step 5: Execute with wall-clock timing.
         // If an execution strategy is set, delegate to it; otherwise call the
         // tool directly (the default, backward-compatible path).
         let start = Instant::now();
@@ -344,7 +336,7 @@ impl ToolDispatcher {
         let execution = tool.execution_outcome(&raw_output);
         let duration = start.elapsed();
 
-        // Step 7: Leak detection — serialise, scan, parse back.
+        // Step 6: Leak detection — serialise, scan, parse back.
         let raw_str = serde_json::to_string(&raw_output).unwrap_or_default();
         let scanned_str = self.leak_detector.scan(&raw_str);
         let result: Value = serde_json::from_str(&scanned_str).unwrap_or({
@@ -354,7 +346,7 @@ impl ToolDispatcher {
             Value::String(scanned_str)
         });
 
-        // Step 8: Assemble ToolOutput.
+        // Step 7: Assemble ToolOutput.
         Ok(ToolOutput {
             execution,
             result,
@@ -413,10 +405,7 @@ impl ToolDispatcher {
         validate_tool_schema(tool_name, &schema, &params)?;
         tool.validate_call(&params)?;
 
-        // Step 5: Parameter redaction.
-        let _redacted_params = redact_params(&params, tool.sensitive_keys());
-
-        // Step 6: Execute with timing.
+        // Step 5: Execute with timing.
         let start = Instant::now();
         let raw_output = match &self.execution_strategy {
             Some(strategy) => {
@@ -433,13 +422,13 @@ impl ToolDispatcher {
         let execution = tool.execution_outcome(&raw_output);
         let duration = start.elapsed();
 
-        // Step 7: Leak detection.
+        // Step 6: Leak detection.
         let raw_str = serde_json::to_string(&raw_output).unwrap_or_default();
         let scanned_str = self.leak_detector.scan(&raw_str);
         let result: Value =
             serde_json::from_str(&scanned_str).unwrap_or(Value::String(scanned_str));
 
-        // Step 8: Assemble output.
+        // Step 7: Assemble output.
         Ok(ToolOutput {
             execution,
             result,

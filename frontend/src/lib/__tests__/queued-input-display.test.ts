@@ -23,7 +23,7 @@ async function openConversation() {
   vi.mocked(api.listBranches).mockResolvedValue([]);
   const conversation = createConversationStore();
   await conversation.selectConversation("conv-1");
-  const connection = { sendMessage: vi.fn(), cancelTurn: vi.fn() };
+  const connection = { sendMessage: vi.fn() };
   const streaming = createStreamingStore({ conversationStore: conversation, connectionStore: connection });
   component = mount(MessageDisplay, { target: document.body, props: { store: conversation, streamingStore: streaming } });
   flushSync();

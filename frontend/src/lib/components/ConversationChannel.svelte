@@ -117,6 +117,12 @@
     });
   }
 
+  const activeAgentModel = $derived(agentDefinitions.find(
+    (definition) => definition.id === activeConversation?.agent_id,
+  )?.model_id);
+  const composerModel = $derived(activeConversation?.selected_model_id ??
+    (activeAgentModel && modelOptions.includes(activeAgentModel) ? activeAgentModel : defaultModelId));
+
   function abandonBranch(): void {
     conversationStore.abandonActiveBranch?.().catch((error: unknown) => {
       console.error("Failed to abandon branch:", error);
@@ -189,7 +195,7 @@
     {:else if activeStream?.pendingApproval ?? streamingStore.pendingApproval}
       <ApprovalCard approval={activeStream?.pendingApproval ?? streamingStore.pendingApproval!} />
     {:else}
-      <MessageInput store={streamingStore} {modelOptions} {modelCatalogueReady} selectedModelId={activeConversation?.selected_model_id ?? defaultModelId} sessionId={activeConversation?.id ?? null} {agentDefinitions} canSelectAgent={!activeConversation} bind:selectedAgentId {onNavigate} />
+      <MessageInput store={streamingStore} {modelOptions} {modelCatalogueReady} selectedModelId={composerModel} sessionId={activeConversation?.id ?? null} {agentDefinitions} canSelectAgent={!activeConversation} bind:selectedAgentId {onNavigate} />
     {/if}
   </div>
 </section>
