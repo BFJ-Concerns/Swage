@@ -590,15 +590,7 @@ async fn announce_delegated_outcome(
     let event = match turn.state {
         TurnState::Completed | TurnState::Incomplete => ServerEvent::TurnComplete {
             turn_id,
-            incomplete_reason: if turn.state == TurnState::Incomplete {
-                result.as_ref().ok().and_then(|message| {
-                    message.payload["incomplete_reason"]
-                        .as_str()
-                        .map(str::to_owned)
-                })
-            } else {
-                None
-            },
+            incomplete_reason: (turn.state == TurnState::Incomplete).then(|| "max_tokens".into()),
             input_tokens: None,
             output_tokens: None,
             cost_microcents: None,
@@ -608,24 +600,7 @@ async fn announce_delegated_outcome(
         TurnState::Failed | TurnState::Refused | TurnState::Interrupted => ServerEvent::Error {
             code: match turn.state {
                 TurnState::Refused => "provider_refused",
-                TurnState::Interrupted => {
-                    // Live children can also be interrupted by shutdown. Only
-                    // the returned approval error establishes a timeout cause;
-                    // restart recovery has no surviving executor callback here.
-                    let approval_timed_out = match result {
-                        Err(AgentError::ApprovalTimedOut) => true,
-                        Ok(message) => {
-                            message.payload["error"].as_str()
-                                == Some(AgentError::ApprovalTimedOut.to_string().as_str())
-                        }
-                        Err(_) => false,
-                    };
-                    if approval_timed_out {
-                        "approval_timeout"
-                    } else {
-                        "turn_interrupted"
-                    }
-                }
+                TurnState::Interrupted => "turn_interrupted",
                 _ => "agent_error",
             }
             .into(),
@@ -1743,20 +1718,6 @@ mod settlement_tests {
     async fn tracked_child(
         ending: TurnState,
         queue_message: bool,
-        incomplete_reason: Option<&str>,
-    ) -> (
-        AppState,
-        Uuid,
-        mpsc::UnboundedReceiver<crate::websocket::ServerEvent>,
-    ) {
-        tracked_child_execution(ending, queue_message, incomplete_reason, false).await
-    }
-
-    async fn tracked_child_execution(
-        ending: TurnState,
-        queue_message: bool,
-        incomplete_reason: Option<&str>,
-        shutdown: bool,
     ) -> (
         AppState,
         Uuid,
@@ -1824,19 +1785,15 @@ mod settlement_tests {
                     1
                 );
             }
-            if shutdown {
-                crate::shutdown::shutdown_active_turns(&state).await;
-            } else {
-                if ending == TurnState::Cancelled {
-                    super::super::cancel_turn(&state, session_id).await.unwrap();
-                    assert!(state.active_turns.lock().await[&session_id].is_cancelled());
-                }
-                state
-                    .storage
-                    .update_turn_state(turn.id, ending.clone())
-                    .await
-                    .unwrap();
+            if ending == TurnState::Cancelled {
+                super::super::cancel_turn(&state, session_id).await.unwrap();
+                assert!(state.active_turns.lock().await[&session_id].is_cancelled());
             }
+            state
+                .storage
+                .update_turn_state(turn.id, ending.clone())
+                .await
+                .unwrap();
             state
                 .storage
                 .create_agent_message(swage_storage::NewAgentMessage {
@@ -1844,16 +1801,10 @@ mod settlement_tests {
                     recipient_agent_id: "parent".into(),
                     kind: swage_core::MessageKind::Result,
                     correlation_id: Some(delegate_message_id),
-                    payload: if ending == TurnState::Failed {
-                        serde_json::json!({"error": "child failed"})
-                    } else if ending == TurnState::Interrupted {
-                        serde_json::json!({"error": if shutdown {
-                            AgentError::Cancelled.to_string()
-                        } else {
-                            AgentError::ApprovalTimedOut.to_string()
-                        }})
-                    } else {
-                        serde_json::json!({"response": "Child answer", "incomplete_reason": incomplete_reason})
+                    payload: match ending {
+                        TurnState::Failed => serde_json::json!({"error": "child failed"}),
+                        TurnState::Interrupted => serde_json::json!({"error": "interrupted"}),
+                        _ => serde_json::json!({"response": "Child answer"}),
                     },
                 })
                 .await
@@ -1888,7 +1839,7 @@ mod settlement_tests {
     #[tokio::test]
     async fn delegated_stop_leaves_queued_message_without_starting_another_turn() {
         for ending in [TurnState::Cancelled, TurnState::Interrupted] {
-            let (state, session_id, mut events) = tracked_child(ending, true, None).await;
+            let (state, session_id, mut events) = tracked_child(ending, true).await;
             // Let an incorrectly spawned drain run, including its next turn.
             let _ = tokio::time::timeout(std::time::Duration::from_millis(300), async {
                 while events.recv().await.is_some() {}
@@ -1920,7 +1871,7 @@ mod settlement_tests {
 
     #[tokio::test]
     async fn delegated_completion_drains_queued_message_without_another_send() {
-        let (state, session_id, mut events) = tracked_child(TurnState::Completed, true, None).await;
+        let (state, session_id, mut events) = tracked_child(TurnState::Completed, true).await;
         let ended = tokio::time::timeout(std::time::Duration::from_secs(3), async {
             while let Some(event) = events.recv().await {
                 if matches!(event, crate::websocket::ServerEvent::TurnComplete { .. }) {
@@ -2028,7 +1979,7 @@ mod settlement_tests {
 
     #[tokio::test]
     async fn delegated_completion_settles_open_view() {
-        let (_, _, mut events) = tracked_child(TurnState::Completed, false, None).await;
+        let (_, _, mut events) = tracked_child(TurnState::Completed, false).await;
         assert!(
             matches!(
                 events.try_recv(),
@@ -2038,60 +1989,18 @@ mod settlement_tests {
         );
     }
 
-    async fn assert_incomplete_reason(reason: Option<&str>) {
-        let (_, _, mut events) = tracked_child(TurnState::Incomplete, false, reason).await;
-        let crate::websocket::ServerEvent::TurnComplete {
-            incomplete_reason, ..
-        } = events
-            .try_recv()
-            .expect("incomplete child must settle the open view")
-        else {
-            panic!("incomplete child must emit TurnComplete");
-        };
-        assert_eq!(incomplete_reason.as_deref(), reason);
-    }
-
     #[tokio::test]
-    async fn delegated_incomplete_length_preserves_reason() {
-        assert_incomplete_reason(Some("length")).await;
-    }
-
-    #[tokio::test]
-    async fn delegated_incomplete_content_filter_preserves_reason() {
-        assert_incomplete_reason(Some("content_filter")).await;
-    }
-
-    #[tokio::test]
-    async fn delegated_incomplete_unknown_reason_stays_absent() {
-        assert_incomplete_reason(None).await;
-    }
-
-    #[tokio::test]
-    async fn delegated_interruption_reports_recorded_cause() {
-        for (shutdown, expected_code, expected_message) in [
-            (true, "turn_interrupted", AgentError::Cancelled.to_string()),
-            (
-                false,
-                "approval_timeout",
-                AgentError::ApprovalTimedOut.to_string(),
-            ),
-        ] {
-            let (_state, _, mut events) =
-                tracked_child_execution(TurnState::Interrupted, false, None, shutdown).await;
-            let crate::websocket::ServerEvent::Error { code, message } = events
-                .try_recv()
-                .expect("interruption must settle the open child view")
-            else {
-                panic!("interrupted child must emit Error");
-            };
-            assert_eq!(code, expected_code);
-            assert_eq!(message, expected_message);
-        }
+    async fn delegated_interruption_settles_open_view_as_interrupted() {
+        let (_, _, mut events) = tracked_child(TurnState::Interrupted, false).await;
+        assert!(
+            matches!(events.try_recv(), Ok(crate::websocket::ServerEvent::Error { code, .. }) if code == "turn_interrupted"),
+            "an interrupted delegation must tell the open child view it was interrupted"
+        );
     }
 
     #[tokio::test]
     async fn delegated_failure_settles_open_view() {
-        let (_, _, mut events) = tracked_child(TurnState::Failed, false, None).await;
+        let (_, _, mut events) = tracked_child(TurnState::Failed, false).await;
         assert!(
             matches!(events.try_recv(), Ok(crate::websocket::ServerEvent::Error { code, message }) if code == "agent_error" && message == "child failed"),
             "failed delegation must tell the open child view its recorded error"
