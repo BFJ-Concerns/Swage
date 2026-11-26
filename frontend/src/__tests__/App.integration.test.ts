@@ -586,6 +586,7 @@ describe("App", () => {
             message_preview: "Pick up where we left off",
             has_interrupted_turn: false,
             has_running_turn: false,
+            awaiting_approval: false,
           },
         },
         last_activity: "2026-09-15T09:00:00Z",

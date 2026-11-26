@@ -3589,6 +3589,10 @@
               "null"
             ]
           },
+          "awaiting_approval": {
+            "description": "The running turn is held on a request only the person can answer.",
+            "type": "boolean"
+          },
           "created_at": {
             "format": "date-time",
             "type": "string"
@@ -3649,7 +3653,8 @@
           "created_at",
           "last_activity",
           "has_interrupted_turn",
-          "has_running_turn"
+          "has_running_turn",
+          "awaiting_approval"
         ],
         "type": "object"
       },

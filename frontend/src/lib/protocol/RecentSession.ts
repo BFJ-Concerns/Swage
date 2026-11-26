@@ -23,6 +23,10 @@ last_activity: string, message_preview?: string | null, has_interrupted_turn: bo
  */
 has_running_turn: boolean,
 /**
+ * The running turn is held on a request only the person can answer.
+ */
+awaiting_approval: boolean,
+/**
  * Set while the inactivity sweep has the session hidden from the
  * recent list.
  */
