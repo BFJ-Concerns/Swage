@@ -973,19 +973,6 @@
           ]
         },
         {
-          "description": "Cancel the currently active turn.",
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "const": "cancel"
-            }
-          },
-          "required": [
-            "type"
-          ]
-        },
-        {
           "description": "Subscribe to one or more observability channels by name.\n\nValid channel names: `\"context\"`, `\"tools\"`. Unknown names are silently\nignored so forward-compatible clients do not break on older servers.",
           "type": "object",
           "properties": {

@@ -290,16 +290,6 @@ pub(crate) async fn dispatch_client_message(
             }
         }
 
-        ClientEvent::Cancel {} => {
-            if let Err(e) = turn::cancel_turn(state, session_id).await {
-                tracing::warn!(%session_id, error = %e, "cancel_turn failed");
-                let _ = tx.send(ServerEvent::Error {
-                    code: error_codes::INTERNAL_ERROR.to_string(),
-                    message: e.to_string(),
-                });
-            }
-        }
-
         ClientEvent::ActivateSkill { name } => {
             let available = match discover_available_for_session(state, session_id).await {
                 Ok(available) => available,

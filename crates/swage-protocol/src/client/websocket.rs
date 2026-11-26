@@ -51,8 +51,6 @@ pub enum ClientEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
-    /// Cancel the currently active turn.
-    Cancel {},
     /// Subscribe to one or more observability channels by name.
     ///
     /// Valid channel names: `"context"`, `"tools"`. Unknown names are silently

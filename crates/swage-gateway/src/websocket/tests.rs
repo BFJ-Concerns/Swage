@@ -18,13 +18,6 @@ fn client_event_send_message_deserialises() {
 }
 
 #[test]
-fn client_event_cancel_deserialises() {
-    let json = r#"{"type": "cancel"}"#;
-    let event: ClientEvent = serde_json::from_str(json).unwrap();
-    assert!(matches!(event, ClientEvent::Cancel {}));
-}
-
-#[test]
 fn server_event_token_serialises() {
     let event = ServerEvent::Token {
         content: "hi".to_string(),

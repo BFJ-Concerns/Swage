@@ -423,4 +423,3 @@ describe("connection explanations", () => {
     expect(store.errorMessage).toBeNull();
   });
 });
-
