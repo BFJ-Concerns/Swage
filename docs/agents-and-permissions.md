@@ -568,6 +568,32 @@ require_approval = ["write_file", { tool = "execute_command", timeout = 600 }]
 The object form accepts `tool` (required), `timeout` (seconds), and
 `timeout_policy` for individual tools.
 
+### Requests beyond the grants
+
+A tool call that asks for a location outside the session's granted
+locations is decided before it runs. In a session nobody attends — a turn
+started by the API, a schedule, a workflow or a delegation — the request is
+refused unless a judge allows it, and the agent is told why: with no judge
+configured, the refusal says so. An attended session asks the person, as
+above.
+
+A judge is a model named in settings, off by default:
+
+```toml
+[judge]
+model = "claude-haiku"   # a model catalogue key or alias
+```
+
+Given the tool, its arguments, the agent's stated justification and the
+task the turn is doing, the judge answers yes or no with a reason. In an
+unattended session it decides alone, and anything but a clear yes — a no,
+an unreadable reply, a judge that could not be reached — refuses. In an
+attended session the person is asked unless the judge is confident. A yes
+lets that one request through and adds nothing to the session's grants.
+Every judgement is recorded as a `request_judged` audit event with the
+tool, the arguments, the justification, the verdict and the reason. The
+judge's instruction is the `prompts.request_judge` experiment location.
+
 ## Context configuration
 
 The `[context]` section of the configuration file controls how the gateway
@@ -681,9 +707,10 @@ forced_variant = "family-fallback"
 Restart the gateway after changing either key.
 
 The shipped locations are `context.assembly`, `context.working_norms`,
-`task.prompt`, `prompts.memory_curator`, and `prompts.succession_summary`
-(the instruction a conversation summary is written under, selected when a
-session first needs a summary).
+`task.prompt`, `prompts.memory_curator`, `prompts.succession_summary` (the
+instruction a conversation summary is written under, selected when a
+session first needs a summary) and `prompts.request_judge` (the judge's
+instruction).
 
 ### Alternatives
 
