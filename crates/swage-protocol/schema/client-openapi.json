@@ -10205,7 +10205,7 @@
   },
   "info": {
     "title": "Swage client surface",
-    "version": "0.2.0"
+    "version": "0.0.1"
   },
   "openapi": "3.1.0",
   "paths": {
