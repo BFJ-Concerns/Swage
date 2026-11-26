@@ -22,8 +22,10 @@ use crate::provider::ProviderConfig;
 pub struct PlaintextExposure {
     /// The host the request would reach, as the base URL names it.
     pub host: String,
-    /// The base URL the provider was configured with.
-    pub base_url: String,
+    /// The base URL's origin — scheme, host and port. The rest of the base
+    /// URL (a path, a query, user information) can itself carry a credential,
+    /// so nothing that keeps or shows the exposure holds more than this.
+    pub origin: String,
 }
 
 impl PlaintextExposure {
@@ -33,7 +35,7 @@ impl PlaintextExposure {
             "provider '{provider_id}' refuses to send its credential in plaintext to {} \
              ({}); use an https:// base URL or a loopback address, or set this provider's \
              plaintext_credentials to \"warn\" or \"allow\"",
-            self.host, self.base_url
+            self.host, self.origin
         )
     }
 
@@ -42,7 +44,7 @@ impl PlaintextExposure {
         format!(
             "provider '{provider_id}' sends its credential in plaintext to {} ({}); anyone \
              on the path can read it",
-            self.host, self.base_url
+            self.host, self.origin
         )
     }
 }
@@ -66,18 +68,7 @@ impl ProviderConfig {
     /// could reach, so it exposes nothing.
     pub fn plaintext_exposure(&self) -> Option<PlaintextExposure> {
         self.api_key.as_ref()?;
-        let url = Url::parse(&self.base_url).ok()?;
-        if url.scheme() != "http" {
-            return None;
-        }
-        let host = url.host()?;
-        if is_loopback(&host) {
-            return None;
-        }
-        Some(PlaintextExposure {
-            host: host.to_string(),
-            base_url: self.base_url.clone(),
-        })
+        PlaintextExposure::of_base_url(&self.base_url)
     }
 
     /// The policy's verdict on this configuration's credential transport.
@@ -85,13 +76,40 @@ impl ProviderConfig {
         &self,
         policy: PlaintextCredentialPolicy,
     ) -> PlaintextCredentialVerdict {
-        let Some(exposure) = self.plaintext_exposure() else {
-            return PlaintextCredentialVerdict::Send;
+        PlaintextCredentialVerdict::judge(self.plaintext_exposure(), policy)
+    }
+}
+
+impl PlaintextExposure {
+    /// The exposure of a credential sent to `base_url`: `http://` to a host
+    /// that is not loopback. A base URL that does not parse names no host a
+    /// request could reach, so it exposes nothing.
+    pub fn of_base_url(base_url: &str) -> Option<Self> {
+        let url = Url::parse(base_url).ok()?;
+        if url.scheme() != "http" {
+            return None;
+        }
+        let host = url.host()?;
+        if is_loopback(&host) {
+            return None;
+        }
+        Some(Self {
+            host: host.to_string(),
+            origin: url.origin().ascii_serialization(),
+        })
+    }
+}
+
+impl PlaintextCredentialVerdict {
+    /// The policy's verdict on an exposure, or on its absence.
+    pub fn judge(exposure: Option<PlaintextExposure>, policy: PlaintextCredentialPolicy) -> Self {
+        let Some(exposure) = exposure else {
+            return Self::Send;
         };
         match policy {
-            PlaintextCredentialPolicy::Refuse => PlaintextCredentialVerdict::Refused(exposure),
-            PlaintextCredentialPolicy::Warn => PlaintextCredentialVerdict::SendWarned(exposure),
-            PlaintextCredentialPolicy::Allow => PlaintextCredentialVerdict::Send,
+            PlaintextCredentialPolicy::Refuse => Self::Refused(exposure),
+            PlaintextCredentialPolicy::Warn => Self::SendWarned(exposure),
+            PlaintextCredentialPolicy::Allow => Self::Send,
         }
     }
 }
@@ -139,16 +157,33 @@ mod tests {
 
     #[test]
     fn a_credential_over_http_to_a_remote_host_is_exposed() {
-        for (base_url, host) in [
-            ("http://10.0.0.5:8080/v1", "10.0.0.5"),
-            ("http://models.example.com/v1", "models.example.com"),
-            ("http://[fd00::5]:8080/v1", "[fd00::5]"),
+        for (base_url, host, origin) in [
+            (
+                "http://10.0.0.5:8080/v1",
+                "10.0.0.5",
+                "http://10.0.0.5:8080",
+            ),
+            (
+                "http://models.example.com/v1",
+                "models.example.com",
+                "http://models.example.com",
+            ),
+            (
+                "http://[fd00::5]:8080/v1",
+                "[fd00::5]",
+                "http://[fd00::5]:8080",
+            ),
+            (
+                "http://user:pw@10.0.0.5/key-in-path/v1?token=t",
+                "10.0.0.5",
+                "http://10.0.0.5",
+            ),
         ] {
             assert_eq!(
                 keyed(base_url).plaintext_exposure(),
                 Some(PlaintextExposure {
                     host: host.into(),
-                    base_url: base_url.into(),
+                    origin: origin.into(),
                 }),
                 "{base_url}"
             );
@@ -200,7 +235,7 @@ mod tests {
         assert!(reason.contains("plaintext_credentials"));
         let warning = exposure.warning("lan-models");
         assert!(warning.contains("'lan-models'"));
-        assert!(warning.contains("http://models.example.com/v1"));
+        assert!(warning.contains("http://models.example.com"));
         assert!(!reason.contains("secret") && !warning.contains("secret"));
     }
 }

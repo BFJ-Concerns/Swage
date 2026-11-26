@@ -9,7 +9,7 @@
 //! already there and writes nothing.
 
 use swage_core::StorageError;
-use swage_provider::PlaintextExposure;
+use swage_provider::{PlaintextCredentialVerdict, PlaintextExposure};
 use swage_storage::store::Storage;
 use swage_storage::{AuditEventFilter, NewAuditEvent};
 use uuid::Uuid;
@@ -37,6 +37,44 @@ impl ExposureDecision {
     }
 }
 
+/// Act on a provider's plaintext-credential verdict before anything that
+/// could send is built or run. `Ok` means the credential may be sent — under
+/// the warn policy with its one warning in the audit record, written here if
+/// the record does not already carry it, or in the gateway log if the record
+/// cannot be written. `Err` carries the reason nothing is sent: the policy
+/// refuses.
+pub(crate) async fn judge(
+    storage: &dyn Storage,
+    provider_id: &str,
+    verdict: PlaintextCredentialVerdict,
+) -> Result<(), String> {
+    match verdict {
+        PlaintextCredentialVerdict::Send => Ok(()),
+        PlaintextCredentialVerdict::SendWarned(exposure) => {
+            match record_once(storage, provider_id, &exposure, ExposureDecision::Warned).await {
+                Ok(true) => tracing::warn!("{}", exposure.warning(provider_id)),
+                Ok(false) => {}
+                Err(error) => tracing::warn!(
+                    "{} (the audit record of this warning could not be written: {error})",
+                    exposure.warning(provider_id)
+                ),
+            }
+            Ok(())
+        }
+        PlaintextCredentialVerdict::Refused(exposure) => {
+            if let Err(error) =
+                record_once(storage, provider_id, &exposure, ExposureDecision::Refused).await
+            {
+                tracing::warn!(
+                    provider_id,
+                    "the refusal to send a credential in plaintext could not be recorded: {error}"
+                );
+            }
+            Err(exposure.refusal_reason(provider_id))
+        }
+    }
+}
+
 /// Record the decision unless the provider's latest record already carries
 /// this exposure and decision. Returns whether a record was written.
 ///
@@ -59,7 +97,7 @@ pub(crate) async fn record_once(
         })
         .await?;
     if latest.first().is_some_and(|event| {
-        event.metadata["base_url"] == exposure.base_url
+        event.metadata["origin"] == exposure.origin
             && event.metadata["decision"] == decision.as_str()
     }) {
         return Ok(false);
@@ -78,7 +116,7 @@ pub(crate) async fn record_once(
             event_kind: EVENT_KIND.into(),
             summary,
             metadata: serde_json::json!({
-                "base_url": exposure.base_url,
+                "origin": exposure.origin,
                 "host": exposure.host,
                 "decision": decision.as_str(),
             }),
@@ -111,6 +149,35 @@ mod tests {
             })
             .await
             .unwrap()
+    }
+
+    /// A base URL can carry a credential of its own in its path, query or
+    /// user information; the record keeps only the origin.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_record_keeps_the_origin_and_not_the_rest_of_the_base_url() {
+        let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+        let exposure =
+            exposure("http://user:url-pass@10.0.0.5:8080/url-path-key/v1?k=url-query-key");
+
+        record_once(storage.as_ref(), "lan", &exposure, ExposureDecision::Warned)
+            .await
+            .unwrap();
+        record_once(
+            storage.as_ref(),
+            "lan",
+            &exposure,
+            ExposureDecision::Refused,
+        )
+        .await
+        .unwrap();
+
+        let events = recorded(&storage).await;
+        assert_eq!(events.len(), 2);
+        for event in events {
+            assert_eq!(event.metadata["origin"], "http://10.0.0.5:8080");
+            let kept = format!("{} {}", event.summary, event.metadata);
+            assert!(!kept.contains("url-"), "{kept}");
+        }
     }
 
     /// One record per provider for each exposure and decision: a repeat is

@@ -441,11 +441,10 @@ pub(crate) async fn create_voice_provider(
             ));
         }
     };
-    if let Err(reason) = judge_credential_transport(
-        &model_endpoint.provider_id,
-        provider_endpoint,
-        &provider_config,
+    if let Err(reason) = crate::provider_credential_exposure::judge(
         storage,
+        &model_endpoint.provider_id,
+        provider_config.plaintext_credential_verdict(provider_endpoint.plaintext_credentials),
     )
     .await
     {
@@ -1099,47 +1098,6 @@ pub(crate) async fn create_provider(
     .await
 }
 
-/// The provider's plaintext-credential policy, applied before anything that
-/// could send is built. `Ok` means the provider may be built as configured —
-/// under the warn policy with its one warning in the audit record, written
-/// here if the record does not already carry it. `Err` carries the reason a
-/// provider that sends nothing gives every request: the policy refuses.
-async fn judge_credential_transport(
-    provider_id: &str,
-    endpoint: &swage_config::ProviderEndpointConfig,
-    provider_config: &swage_provider::ProviderConfig,
-    storage: &dyn swage_storage::store::Storage,
-) -> Result<(), String> {
-    use crate::provider_credential_exposure::{ExposureDecision, record_once};
-    use swage_provider::PlaintextCredentialVerdict;
-
-    match provider_config.plaintext_credential_verdict(endpoint.plaintext_credentials) {
-        PlaintextCredentialVerdict::Send => Ok(()),
-        PlaintextCredentialVerdict::SendWarned(exposure) => {
-            match record_once(storage, provider_id, &exposure, ExposureDecision::Warned).await {
-                Ok(true) => tracing::warn!("{}", exposure.warning(provider_id)),
-                Ok(false) => {}
-                Err(error) => tracing::warn!(
-                    "{} (the audit record of this warning could not be written: {error})",
-                    exposure.warning(provider_id)
-                ),
-            }
-            Ok(())
-        }
-        PlaintextCredentialVerdict::Refused(exposure) => {
-            if let Err(error) =
-                record_once(storage, provider_id, &exposure, ExposureDecision::Refused).await
-            {
-                tracing::warn!(
-                    provider_id,
-                    "the refusal to send a credential in plaintext could not be recorded: {error}"
-                );
-            }
-            Err(exposure.refusal_reason(provider_id))
-        }
-    }
-}
-
 async fn create_provider_with_retry(
     config: &swage_config::ResolvedConfig,
     secret_manager: &crate::secret::SecretManager,
@@ -1217,11 +1175,11 @@ async fn create_provider_with_retry(
             }
         };
         providers.push(
-            match judge_credential_transport(
-                &model_endpoint.provider_id,
-                provider_endpoint,
-                &provider_config,
+            match crate::provider_credential_exposure::judge(
                 storage,
+                &model_endpoint.provider_id,
+                provider_config
+                    .plaintext_credential_verdict(provider_endpoint.plaintext_credentials),
             )
             .await
             {
@@ -2326,7 +2284,13 @@ mod tests {
         let events = plaintext_exposure_events(&storage).await;
         assert_eq!(events.len(), 1, "{events:?}");
         assert_eq!(events[0].metadata["decision"], "warned");
-        assert_eq!(events[0].metadata["base_url"], base_url);
+        let origin = events[0].metadata["origin"]
+            .as_str()
+            .expect("origin recorded");
+        assert!(
+            base_url.starts_with(origin),
+            "{origin} is {base_url}'s origin"
+        );
 
         let allow_storage =
             Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
