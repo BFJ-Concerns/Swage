@@ -80,7 +80,6 @@ impl GatewayService {
     ) -> Result<(), ClientError> {
         if args.port.is_some()
             || args.host.is_some()
-            || args.config.is_some()
             || args.foreground
             || args.log_file.is_some()
             || args.force
@@ -274,7 +273,6 @@ mod tests {
             force: false,
             port: Some(4000),
             host: None,
-            config: None,
             foreground: false,
             log_file: None,
         };
@@ -337,7 +335,6 @@ mod tests {
             force: false,
             port: None,
             host: None,
-            config: None,
             foreground: false,
             log_file: None,
         }
@@ -402,19 +399,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn all_six_overrides_are_refused_before_any_service_command() {
+    async fn all_overrides_are_refused_before_any_service_command() {
         let service = GatewayService {
             unit: "swage.service".into(),
             user: false,
         };
-        for index in 0..6 {
+        for index in 0..5 {
             let mut args = restart_args();
             match index {
                 0 => args.port = Some(4321),
                 1 => args.host = Some("127.0.0.1".into()),
-                2 => args.config = Some("other".into()),
-                3 => args.foreground = true,
-                4 => args.log_file = Some("other.log".into()),
+                2 => args.foreground = true,
+                3 => args.log_file = Some("other.log".into()),
                 _ => args.force = true,
             }
             let manager = manager(false, 42);
