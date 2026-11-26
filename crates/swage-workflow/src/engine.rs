@@ -4196,6 +4196,49 @@ return review.content;
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn host_calls_refuse_text_sliced_through_an_emoji() {
+        let host = Arc::new(FakeHost {
+            outputs: Mutex::new(VecDeque::from([json!("unused agent output")])),
+            deliveries: Mutex::new(Vec::new()),
+            records: Mutex::new(Vec::new()),
+            spent: 0,
+            remaining: None,
+        });
+        let output = WorkflowEngine::new(EngineLimits::default())
+            .execute_hosted(
+                r#"
+                const half = "😀".slice(0, 1);
+                const errors = {};
+                try { log(half); }
+                catch (error) { errors.log = [error.name, error.message]; }
+                try { await agent(half); }
+                catch (error) { errors.agent = [error.name, error.message]; }
+                log("😀");
+                return errors;
+                "#,
+                "null",
+                CancellationToken::new(),
+                Some(Arc::clone(&host) as Arc<dyn WorkflowHost>),
+                ScriptCapabilities::default(),
+            )
+            .await
+            .expect("the script can catch the two refusals");
+        let errors: Value = serde_json::from_str(&output).unwrap();
+        for call in ["log", "agent"] {
+            assert_eq!(errors[call][0], "HostArgumentsError");
+            assert!(
+                errors[call][1]
+                    .as_str()
+                    .is_some_and(|message| message
+                        .contains(&format!("could not read arguments for '{call}'"))),
+                "{errors}"
+            );
+        }
+        assert_eq!(*host.records.lock().unwrap(), [("log".into(), "😀".into())]);
+        assert_eq!(host.outputs.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn budget_reads_and_parallel_failures_use_host_state_and_journal_log() {
         let host = Arc::new(FakeHost {
             outputs: Mutex::new(VecDeque::new()),
