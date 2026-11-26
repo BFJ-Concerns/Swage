@@ -115,6 +115,13 @@
       ? "Delegation depth must be a whole number of at least 1."
       : null,
   );
+  const curatorIdleError = $derived(
+    settings && (nullableNumber(settings.memory.curator_idle_minutes) == null
+      || !Number.isInteger(settings.memory.curator_idle_minutes)
+      || settings.memory.curator_idle_minutes < 1)
+      ? "Memory curation idle minutes must be a whole number of at least 1."
+      : null,
+  );
   let status = $state("");
   let saveSucceeded = $state(false);
   $effect(() => {
@@ -241,6 +248,10 @@
       error = delegationDepthError;
       return false;
     }
+    if (curatorIdleError) {
+      error = curatorIdleError;
+      return false;
+    }
     const archiveDelayChanged = settings.sessions.archive_after_days !== lastSavedArchiveDelay;
     const holdSearchDraft = searchIsIncomplete(settings.tool_runtime.search);
     const submittedSearchDraft = JSON.stringify(settings.tool_runtime.search);
@@ -258,8 +269,6 @@
       preset.temperature = nullableNumber(preset.temperature);
     }
     settings.hitl.timeout = nullableNumber(settings.hitl.timeout) ?? 0;
-    settings.sessions.archive_after_days = Math.min(3650, settings.sessions.archive_after_days);
-    settings.memory.curator_idle_minutes = Math.min(10080, Math.max(1, nullableNumber(settings.memory.curator_idle_minutes) ?? 10));
     settings.context.timeout = nullableNumber(settings.context.timeout) ?? 0;
     settings.context.budget = nullableNumber(settings.context.budget);
     let submittedFingerprint: string | null = null;
