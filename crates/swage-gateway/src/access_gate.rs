@@ -109,6 +109,15 @@ impl AccessGate {
         }
     }
 
+    /// Whether `peer` is the gateway's own machine: loopback, or the one
+    /// address the gateway is bound to. A dual-stack listener reports an IPv4
+    /// peer as IPv4-mapped IPv6 (`::ffff:127.0.0.1`), so the address is
+    /// compared in its canonical form.
+    fn is_own_machine(&self, peer: IpAddr) -> bool {
+        let peer = peer.to_canonical();
+        peer.is_loopback() || self.bound_address == Some(peer)
+    }
+
     /// Whether the binding reaches beyond loopback at all.
     pub fn beyond_loopback(&self) -> bool {
         self.beyond_loopback
@@ -215,7 +224,7 @@ pub fn issue_pairing_code(
     peer: Option<SocketAddr>,
 ) -> Result<PairingCodeResponse, ApiError> {
     let gate = &state.access_gate;
-    if !peer.is_some_and(|addr| addr.ip().is_loopback() || gate.bound_address == Some(addr.ip())) {
+    if !peer.is_some_and(|addr| gate.is_own_machine(addr.ip())) {
         return Err(ApiError::forbidden(
             "pairing codes are issued from the gateway's own machine only",
         ));
@@ -247,6 +256,7 @@ fn specific_address(host: &str) -> Option<IpAddr> {
     let host = host.trim().trim_start_matches('[').trim_end_matches(']');
     host.parse::<IpAddr>()
         .ok()
+        .map(|ip| ip.to_canonical())
         .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
 }
 
@@ -258,9 +268,7 @@ fn peer_is_local(gate: &AccessGate, request: &Request<Body>) -> bool {
     request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .is_some_and(|ConnectInfo(addr)| {
-            addr.ip().is_loopback() || gate.bound_address == Some(addr.ip())
-        })
+        .is_some_and(|ConnectInfo(addr)| gate.is_own_machine(addr.ip()))
 }
 
 /// Whether the request opens a WebSocket, the one client that cannot send a
@@ -426,6 +434,24 @@ mod tests {
             presented_token(&request("/api/topics?token=jkl", &[], None)),
             None
         );
+    }
+
+    #[test]
+    fn an_ipv4_mapped_peer_on_a_dual_stack_binding_is_read_as_ipv4() {
+        let wildcard = AccessGate::with_token("::", "t");
+        assert!(peer_is_local(
+            &wildcard,
+            &request("/api/topics", &[], Some("[::ffff:127.0.0.1]:1"))
+        ));
+        assert!(!peer_is_local(
+            &wildcard,
+            &request("/api/topics", &[], Some("[::ffff:192.0.2.9]:1"))
+        ));
+        let bound = AccessGate::with_token("::ffff:192.168.1.20", "t");
+        assert!(peer_is_local(
+            &bound,
+            &request("/api/topics", &[], Some("192.168.1.20:1"))
+        ));
     }
 
     #[test]
