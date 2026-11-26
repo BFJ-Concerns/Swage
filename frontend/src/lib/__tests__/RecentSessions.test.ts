@@ -13,20 +13,25 @@ import RecentSessions from "../components/RecentSessions.svelte";
 import * as sessionsApi from "../api/sessions";
 import type { RecentSession } from "../protocol/RecentSession";
 import type { RecentSessionsEntry } from "../protocol/RecentSessionsEntry";
-import type { WorkSurfaceChannel } from "../api/work-surface";
 import type { ServerEvent } from "../types";
 
 // A stand-in for the server end of the work-surface channel: `emit` pushes
 // into whatever the list subscribed with, and nothing after `close`, as the
 // real channel delivers nothing once closed.
-function fakeChannel(): WorkSurfaceChannel & { emit(event: ServerEvent): void; closed: boolean } {
+function fakeChannel() {
   const handlers: ((event: ServerEvent) => void)[] = [];
+  const reconnectHandlers: (() => void)[] = [];
   const channel = {
     closed: false,
     onSignal(handler: (event: ServerEvent) => void) {
       handlers.push(handler);
     },
-    onReconnect() {},
+    onReconnect(handler: () => void) {
+      reconnectHandlers.push(handler);
+    },
+    reconnect() {
+      for (const handler of reconnectHandlers) handler();
+    },
     close() {
       channel.closed = true;
     },
@@ -149,35 +154,72 @@ describe("RecentSessions", () => {
     expect(scheduled!.querySelector(".interrupted")?.textContent?.replace("⚠", "").trim()).toBe("Last response failed");
   });
 
-  it("refetches when the gateway signals a session changed, and closes the channel on unmount", async () => {
+  it("updates the mounted list through failure, visibility restore and reconnect", async () => {
     vi.useFakeTimers();
+    let hidden = false;
+    const visibility = vi.spyOn(document, "hidden", "get").mockImplementation(() => hidden);
+    const channel = fakeChannel();
     try {
-      vi.mocked(sessionsApi.listRecentSessions).mockResolvedValue([
-        conversationEntry(makeSession({ id: "conv-1", message_preview: "Plan the release" })),
-      ]);
-      const channel = fakeChannel();
+      const load = vi.mocked(sessionsApi.listRecentSessions);
+      const preview = "Plan the release";
+      const session = makeSession({ id: "conv-1", message_preview: preview, has_running_turn: true });
+      const worker = makeSession({ id: "worker-1", origin: { kind: "delegation", parent_session_id: session.id } });
+      const entry = (changes: Partial<RecentSession>) => [conversationEntry({ ...session, ...changes }, [worker])];
+      load.mockResolvedValue(entry({ latest_turn_state: "pending" }));
 
-      component = mount(RecentSessions, { target: document.body, props: { channelFactory: () => channel } });
+      component = mount(RecentSessions, {
+        target: document.body,
+        props: {
+          channelFactory: () => channel,
+          topics: [{ id: "research", name: "Research", description: "", slug: "research", created_at: "" }],
+        },
+      });
       await vi.runOnlyPendingTimersAsync();
-      expect(sessionsApi.listRecentSessions).toHaveBeenCalledTimes(1);
-
-      // A burst of signals is one refetch; a signal for another list's
-      // concern (a surface) is none.
-      channel.emit({ type: "session_updated", session_id: "conv-1" });
-      channel.emit({ type: "session_updated", session_id: "conv-2" });
-      channel.emit({ type: "surface_updated", surface_id: "s-1", module_id: null });
+      expect(document.querySelector(".row.source")?.textContent).toContain("running");
+      expect(document.querySelector(".row.source .interrupted")).toBeNull();
+      flushSync(() => buttonNamed("Research").click());
       await vi.runOnlyPendingTimersAsync();
-      expect(sessionsApi.listRecentSessions).toHaveBeenCalledTimes(2);
+      const disclosure = document.querySelector<HTMLButtonElement>(".group-summary")!;
+      flushSync(() => disclosure.click());
+      expect(disclosure.getAttribute("aria-expanded")).toBe("false");
 
-      // A signal just before unmount schedules a refetch that unmounting
-      // cancels, and the channel is closed.
-      channel.emit({ type: "session_updated", session_id: "conv-1" });
+      const signal = { type: "session_updated", session_id: session.id } as const;
+      const before = load.mock.calls.length;
+      load.mockResolvedValue(entry({ latest_turn_state: "failed", has_running_turn: false }));
+      channel.emit(signal);
+      channel.emit(signal);
+      await vi.runOnlyPendingTimersAsync();
+      expect(load).toHaveBeenCalledTimes(before + 1);
+      expect(load).toHaveBeenLastCalledWith("research", false);
+      expect(document.querySelector(".row.source .interrupted")?.textContent).toContain("Last response failed");
+      expect(document.querySelector(".group-summary")).toBe(disclosure);
+      expect(disclosure.getAttribute("aria-expanded")).toBe("false");
+
+      hidden = true;
+      document.dispatchEvent(new Event("visibilitychange"));
+      load.mockResolvedValue(entry({ latest_turn_state: "completed", has_running_turn: false }));
+      channel.emit(signal);
+      await vi.runOnlyPendingTimersAsync();
+      expect(load).toHaveBeenCalledTimes(before + 1);
+      hidden = false;
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.runOnlyPendingTimersAsync();
+      expect(document.querySelector(".row.source .preview")?.textContent).toBe(preview);
+      expect(document.querySelector(".row.source .interrupted")).toBeNull();
+
+      load.mockResolvedValue(entry({ latest_turn_state: "interrupted", has_running_turn: false }));
+      channel.reconnect();
+      await vi.runOnlyPendingTimersAsync();
+      expect(document.querySelector(".row.source .interrupted")?.textContent).toContain("Interrupted");
+
+      channel.emit(signal);
       unmount(component);
       component = undefined;
       expect(channel.closed).toBe(true);
       await vi.runOnlyPendingTimersAsync();
-      expect(sessionsApi.listRecentSessions).toHaveBeenCalledTimes(2);
+      expect(load).toHaveBeenCalledTimes(before + 3);
     } finally {
+      visibility.mockRestore();
       vi.useRealTimers();
     }
   });

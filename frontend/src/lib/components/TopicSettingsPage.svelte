@@ -4,7 +4,8 @@
      default surfaces and tags, and its sessions. -->
 <script lang="ts">
   import { sessionOutcomeLabel } from "../session-outcome";
-  import { onMount, untrack } from "svelte";
+  import { onMount } from "svelte";
+  import { watchSessionList } from "../session-list-updates";
   import WorkspaceAccessOptions from "./WorkspaceAccessOptions.svelte";
   import {
     attachTopicWorkspace,
@@ -55,6 +56,10 @@
   // reading an empty placeholder as "no attachments yet".
   let worktopicsLoaded = $state(false);
   let sessions = $state<ConversationSummary[]>([]);
+  let sessionCount = $state(0);
+  let sessionRetry = $state(0);
+  let sessionError = $state<string | null>(null);
+  let sessionListLoading = $state(false);
   let isLoading = $state(false);
   let error = $state<string | null>(null);
   let workspacePath = $state("");
@@ -86,12 +91,40 @@
 
   onMount(loadTopicSettings);
 
-  let previousTab: TopicSettingsTab | undefined;
   $effect(() => {
-    if (previousTab !== undefined && previousTab !== tab && tab === "sessions") {
-      untrack(() => { void loadTopicSettings(); });
-    }
-    previousTab = tab;
+    const topicId = topic?.id;
+    void sessionRetry;
+    if (tab !== "sessions" || !topicId) return;
+    sessions = [];
+    sessionError = null;
+    sessionListLoading = true;
+
+    let current = true;
+    const refresh = async (): Promise<void> => {
+      try {
+        const list = await listTopicSessions(topicId);
+        if (!current) return;
+        sessions = list;
+        sessionCount = list.length;
+        sessionError = null;
+      } catch (err) {
+        if (!current) return;
+        if (sessionListLoading) {
+          sessionError = err instanceof Error ? err.message : "Failed to load sessions.";
+        }
+      } finally {
+        if (current) sessionListLoading = false;
+      }
+    };
+    const initial = refresh();
+    const stop = watchSessionList(async () => {
+      await initial;
+      if (current) await refresh();
+    });
+    return () => {
+      current = false;
+      stop();
+    };
   });
 
   // The surfaces tab loads its library and defaults when it is shown,
@@ -168,11 +201,11 @@
     try {
       const [workspaceList, sessionList] = await Promise.all([
         listTopicWorkspaces(topic.id),
-        listTopicSessions(topic.id),
+        tab === "sessions" ? Promise.resolve(null) : listTopicSessions(topic.id),
       ]);
+      if (sessionList) sessionCount = sessionList.length;
       workspaces = workspaceList;
       worktopicsLoaded = true;
-      sessions = sessionList;
       relinkDrafts = Object.fromEntries(
         workspaceList.map((workspace) => [workspace.id, relinkDrafts[workspace.id] ?? ""]),
       );
@@ -336,7 +369,7 @@
           </div>
           <div class="shell-row">
             <span class="shell-label">Sessions</span>
-            <span class="shell-value">{sessions.length}</span>
+            <span class="shell-value">{sessionCount}</span>
           </div>
         </div>
       </section>
@@ -484,19 +517,26 @@
       <section class="shell-section">
         <h2 class="shell-section-title">Sessions</h2>
         <div class="record-list">
-          {#each sessions as session (session.id)}
-            {@const outcome = sessionOutcomeLabel(session.latest_turn_state)}
-            <article class="record-row">
-              <strong>{session.message_preview || "Untitled session"}</strong>
-              {#if outcome}<span><span aria-hidden="true">⚠</span> {outcome}</span>{/if}
-              <span>{session.agent_id} · {new Date(session.last_activity).toLocaleString()}</span>
-              {#if onNavigate}
-                <button type="button" onclick={() => onNavigate?.(`/conversations/${encodeURIComponent(session.id)}`)}>Open</button>
-              {/if}
-            </article>
+          {#if sessionError}
+            <p class="shell-empty" role="alert">{sessionError}</p>
+            <button type="button" onclick={() => { sessionRetry += 1; }}>Retry</button>
+          {:else if sessionListLoading}
+            <p class="shell-empty">Loading sessions…</p>
           {:else}
-            <p class="shell-empty">No sessions have been created in this topic.</p>
-          {/each}
+            {#each sessions as session (session.id)}
+              {@const outcome = sessionOutcomeLabel(session.latest_turn_state)}
+              <article class="record-row">
+                <strong>{session.message_preview || "Untitled session"}</strong>
+                {#if outcome}<span><span aria-hidden="true">⚠</span> {outcome}</span>{/if}
+                <span>{session.agent_id} · {new Date(session.last_activity).toLocaleString()}</span>
+                {#if onNavigate}
+                  <button type="button" onclick={() => onNavigate?.(`/conversations/${encodeURIComponent(session.id)}`)}>Open</button>
+                {/if}
+              </article>
+            {:else}
+              <p class="shell-empty">No sessions have been created in this topic.</p>
+            {/each}
+          {/if}
         </div>
       </section>
     {/if}

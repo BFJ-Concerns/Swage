@@ -6,7 +6,16 @@ import { fromStore, writable } from "svelte/store";
 import TopicSettingsPage from "../components/TopicSettingsPage.svelte";
 import * as topicsApi from "../api/topics";
 import * as surfacesApi from "../api/surfaces";
-import type { Topic } from "../types";
+import type { ServerEvent, Topic } from "../types";
+
+let onSessionSignal: ((event: ServerEvent) => void) | undefined;
+vi.mock("../api/work-surface", () => ({
+  createWorkSurfaceChannel: () => ({
+    onSignal(handler: (event: ServerEvent) => void) { onSessionSignal = handler; },
+    onReconnect() {},
+    close() { onSessionSignal = undefined; },
+  }),
+}));
 
 vi.mock("../api/topics", () => ({
   attachTopicWorkspace: vi.fn(),
@@ -108,7 +117,7 @@ describe("TopicSettingsPage", () => {
     expect(recovered!.textContent).not.toContain("Interrupted");
   });
 
-  it("refreshes outcomes when opening the Sessions tab", async () => {
+  it("refreshes outcomes when opening and while viewing the Sessions tab", async () => {
     const tab = writable<import("../router").TopicSettingsTab>("overview");
     const currentTab = fromStore(tab);
     const props = { topic, get tab() { return currentTab.current; } };
@@ -122,6 +131,20 @@ describe("TopicSettingsPage", () => {
     const row = document.querySelector(".record-row");
     expect(row?.textContent).toContain("Last response failed");
     expect(topicsApi.listTopicSessions).toHaveBeenCalledTimes(2);
+
+    vi.mocked(topicsApi.listTopicSessions).mockResolvedValue([
+      { id: "session-1", agent_id: "gateway", created_at: "2026-10-01T00:00:00Z", last_activity: "2026-10-01T00:00:00Z", message_preview: "Review the release", has_interrupted_turn: false, latest_turn_state: "completed" },
+    ]);
+    expect(onSessionSignal).toBeDefined();
+    onSessionSignal?.({ type: "session_updated", session_id: "session-1" });
+    await flushUi();
+    expect(document.querySelector(".record-row")).toBe(row);
+    expect(row?.textContent).toContain("Review the release");
+    expect(row?.textContent).not.toContain("Last response failed");
+
+    tab.set("overview");
+    await flushUi();
+    expect(onSessionSignal).toBeUndefined();
   });
 
   it("waits for the workspace load before showing an empty list", async () => {

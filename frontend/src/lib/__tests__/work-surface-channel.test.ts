@@ -92,6 +92,17 @@ describe("work-surface channel", () => {
     vi.useRealTimers();
   });
 
+  it("can notify a list after the first subscription is ready", () => {
+    installFakeSocket();
+    const channel = createWorkSurfaceChannel({ notifyOnFirstOpen: true });
+    const ready = vi.fn();
+    channel.onReconnect(ready);
+    expect(ready).not.toHaveBeenCalled();
+    FakeSocket.last?.onopen?.();
+    expect(ready).toHaveBeenCalledOnce();
+    channel.close();
+  });
+
   it("notifies subscribers only after a reconnect succeeds", () => {
     vi.useFakeTimers();
     installFakeSocket();

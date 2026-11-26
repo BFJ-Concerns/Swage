@@ -239,6 +239,7 @@
     },
     loadConversations: (topicId) =>
       conversationStore.loadConversations(topicId),
+    refreshConversations: () => conversationStore.refreshConversations!(),
     selectConversation: selectAndNavigate,
     // The proxy captures topicId from topicStore at call time so child
     // components don't need to know about topics.

@@ -19,6 +19,8 @@ export interface WorkSurfaceChannel {
 export interface WorkSurfaceChannelOptions {
   // Overrides the base URL. Defaults to same origin, converting http → ws.
   wsBaseUrl?: string;
+  // Refresh the initial snapshot after the server has subscribed.
+  notifyOnFirstOpen?: boolean;
 }
 
 // Reconnection backoff, matching the conversation socket's shape: a dropped
@@ -69,7 +71,7 @@ export function createWorkSurfaceChannel(
 
     ws.onopen = () => {
       reconnectDelay = BACKOFF_BASE_MS;
-      if (hasConnected) {
+      if (hasConnected || options?.notifyOnFirstOpen) {
         for (const handler of reconnectHandlers) handler();
       }
       hasConnected = true;

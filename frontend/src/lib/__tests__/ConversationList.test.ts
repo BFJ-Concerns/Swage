@@ -7,13 +7,24 @@
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { mount, unmount, flushSync } from "svelte";
+import * as api from "../api/conversations";
+import { createConversationStore } from "../stores/conversations";
 import ConversationList from "../components/ConversationList.svelte";
 import type { ConversationStore } from "../stores/conversations";
-import type { ConversationSummary, ConversationDetail } from "../types";
+import type { ConversationSummary, ConversationDetail, ServerEvent } from "../types";
 import {
   makeConversationDetail,
   makeConversationSummary,
 } from "./fixtures/conversations";
+
+let sessionSignal: ((event: ServerEvent) => void) | undefined;
+vi.mock("../api/work-surface", () => ({
+  createWorkSurfaceChannel: () => ({
+    onSignal(handler: (event: ServerEvent) => void) { sessionSignal = handler; },
+    onReconnect() {},
+    close() { sessionSignal = undefined; },
+  }),
+}));
 
 type MountedComponent = ReturnType<typeof mount>;
 
@@ -88,6 +99,28 @@ describe("ConversationList", () => {
     expect(recovered!.textContent).not.toContain("⚠");
     expect(recovered!.textContent).not.toContain("Last response failed");
     expect(recovered!.textContent).not.toContain("Interrupted");
+  });
+
+  it("reconciles the existing sidebar rows from the selected scope on a signal", async () => {
+    const summary = makeConversationSummary({ id: "existing", message_preview: "Check the launch", latest_turn_state: "failed" });
+    const list = vi.spyOn(api, "listConversations").mockResolvedValue([summary]);
+    try {
+      const store = createConversationStore();
+      await store.loadConversations("research");
+      component = mount(ConversationList, { target: document.body, props: { store } });
+      flushSync();
+      const row = document.querySelector(".conversation-item");
+      expect(row?.textContent).toContain("Last response failed");
+
+      list.mockResolvedValue([{ ...summary, latest_turn_state: "completed" }]);
+      expect(sessionSignal).toBeDefined();
+      sessionSignal?.({ type: "session_updated", session_id: summary.id });
+      await vi.waitFor(() => expect(row?.textContent).not.toContain("Last response failed"));
+      expect(document.querySelector(".conversation-item")).toBe(row);
+      expect(list).toHaveBeenLastCalledWith("research");
+    } finally {
+      list.mockRestore();
+    }
   });
 
   // --- Empty state ---

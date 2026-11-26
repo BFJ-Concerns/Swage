@@ -1,8 +1,9 @@
 <!--
   Sidebar conversation list — shows all conversations, supports create and delete.
-  Pure renderer — reads from conversation store passed as a prop.
+  The list reloads the store when the gateway announces a change.
 -->
 <script lang="ts">
+  import { watchSessionList } from "../session-list-updates";
   import type { ConversationStore } from "../stores/conversations";
   import { relativeTime } from "../utils/relative-time";
   import { sessionOutcomeLabel } from "../session-outcome";
@@ -16,6 +17,11 @@
   }
 
   let { store, onNewConversation }: Props = $props();
+
+  $effect(() => {
+    const current = store;
+    if (current?.refreshConversations) return watchSessionList(() => current.refreshConversations!());
+  });
 
   // Track which conversation is awaiting inline delete confirmation.
   // Only one can be pending at a time — clicking another collapses any open one.
@@ -252,8 +258,7 @@
   }
 
   .item-header {
-    display: flex;
-    align-items: baseline;
+    display: grid;
     gap: 4px;
     min-width: 0;
   }
@@ -274,7 +279,6 @@
   }
 
   .interrupted {
-    flex-shrink: 0;
     color: var(--ink-orange);
     font-size: 11px;
     line-height: 1;

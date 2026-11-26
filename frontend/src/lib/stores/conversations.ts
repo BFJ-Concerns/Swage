@@ -20,6 +20,7 @@ export interface ConversationStore {
   readonly activeConversation: ConversationDetail | null;
   readonly isLoading: boolean;
   loadConversations(topicId: string | null): Promise<void>;
+  refreshConversations?(): Promise<void>;
   selectConversation(id: string): Promise<void>;
   // topicId is required by the underlying store but optional here so that
   // the router-aware proxy in App.svelte can satisfy this interface without
@@ -254,6 +255,13 @@ export function createConversationStore(): ConversationStore {
   }
 
   let listGeneration = 0;
+  let currentScope: { topicId: string | null; initial: Promise<void> } | undefined;
+
+  async function readConversationList(topicId: string | null): Promise<void> {
+    const generation = ++listGeneration;
+    const list = await api.listConversations(topicId);
+    if (generation === listGeneration) conversationsStore.set(sortByRecency(list));
+  }
 
   return {
     // ---------------------------------------------------------------------------
@@ -285,15 +293,26 @@ export function createConversationStore(): ConversationStore {
     // ---------------------------------------------------------------------------
 
     async loadConversations(topicId) {
-      const generation = ++listGeneration;
       conversationsStore.set([]);
       isLoadingStore.set(true);
+      const scope = { topicId, initial: readConversationList(topicId) };
+      currentScope = scope;
       try {
-        const list = await api.listConversations(topicId);
-        if (generation !== listGeneration) return;
-        conversationsStore.set(sortByRecency(list));
+        await scope.initial;
       } finally {
-        if (generation === listGeneration) isLoadingStore.set(false);
+        if (currentScope === scope) isLoadingStore.set(false);
+      }
+    },
+
+    async refreshConversations() {
+      const scope = currentScope;
+      if (!scope) return;
+      await scope.initial.catch(() => {});
+      if (currentScope !== scope) return;
+      try {
+        await readConversationList(scope.topicId);
+      } catch {
+        // A transient refresh failure leaves the current list visible.
       }
     },
 

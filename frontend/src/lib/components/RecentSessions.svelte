@@ -21,7 +21,7 @@
   import { onMount } from "svelte";
   import { listRecentSessions } from "../api/sessions";
   import { sessionOutcomeLabel } from "../session-outcome";
-  import { createWorkSurfaceChannel } from "../api/work-surface";
+  import { watchSessionList } from "../session-list-updates";
   import type { WorkSurfaceChannel } from "../api/work-surface";
   import { messagePreview } from "../message-preview";
   import { relativeTime } from "../utils/relative-time";
@@ -42,7 +42,7 @@
     channelFactory?: () => WorkSurfaceChannel;
   }
 
-  let { topics = [], onSelectSession, onOpenWorkflowRun, channelFactory = createWorkSurfaceChannel }: Props = $props();
+  let { topics = [], onSelectSession, onOpenWorkflowRun, channelFactory }: Props = $props();
 
   let topicFilter = $state<string | null>(null);
   let topicSearch = $state("");
@@ -57,14 +57,11 @@
   let groupExpanded = $state<Record<string, boolean>>(readGroupExpanded());
   // A slow response for an earlier filter must not overwrite a later one.
   let loadGeneration = 0;
-  // Signals arrive in bursts (a turn settling signals once per session it
-  // touched); one refetch answers the burst.
-  const SIGNAL_COALESCE_MS = 100;
-  let signalTimer: ReturnType<typeof setTimeout> | null = null;
+  let foregroundLoad: Promise<void>;
 
-  async function load(): Promise<void> {
+  async function load(background = false): Promise<void> {
     const generation = ++loadGeneration;
-    loadState = "loading";
+    if (!background) loadState = "loading";
     try {
       const loaded = await listRecentSessions(topicFilter, showArchived);
       if (generation !== loadGeneration) return;
@@ -73,44 +70,38 @@
       loadState = "loaded";
     } catch (error) {
       if (generation !== loadGeneration) return;
+      if (background && loadState === "loaded") return;
       errorMessage = error instanceof Error ? error.message : String(error);
       loadState = "error";
     }
   }
 
-  function reloadOnSignal(): void {
-    if (signalTimer !== null) return;
-    signalTimer = setTimeout(() => {
-      signalTimer = null;
-      void load();
-    }, SIGNAL_COALESCE_MS);
-  }
-
   onMount(() => {
-    void load();
-    const channel = channelFactory();
-    channel.onSignal((event) => {
-      // A dropped signal may have been the one for a session shown here.
-      if (event.type === "session_updated" || event.type === "lagged") reloadOnSignal();
-    });
-    channel.onReconnect(reloadOnSignal);
+    let mounted = true;
+    foregroundLoad = load();
+    const stop = watchSessionList(async () => {
+      let initial: Promise<void>;
+      do {
+        initial = foregroundLoad;
+        await initial;
+      } while (initial !== foregroundLoad);
+      if (mounted) await load(true);
+    }, channelFactory);
     return () => {
-      channel.close();
-      if (signalTimer !== null) {
-        clearTimeout(signalTimer);
-        signalTimer = null;
-      }
+      mounted = false;
+      stop();
+      loadGeneration += 1;
     };
   });
 
   function setFilter(topicId: string | null): void {
     topicFilter = topicId;
-    void load();
+    foregroundLoad = load();
   }
 
   function toggleArchived(): void {
     showArchived = !showArchived;
-    void load();
+    foregroundLoad = load();
   }
 
   function sourceSession(entry: RecentSessionsEntry): RecentSession | null {

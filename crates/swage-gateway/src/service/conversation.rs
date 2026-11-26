@@ -321,6 +321,7 @@ impl ConversationService {
             })
             .await?;
         self.open_default_surfaces(session.id).await?;
+        super::announce_session_updated(&self.broadcast, session.id);
 
         Ok(ConversationResponse {
             id: session.id,
@@ -606,6 +607,7 @@ impl ConversationService {
         if person_opened {
             self.open_default_surfaces(session.id).await?;
         }
+        super::announce_session_updated(&self.broadcast, session.id);
 
         Ok(ConversationResponse {
             id: session.id,
@@ -631,7 +633,9 @@ impl ConversationService {
             .await?
             .ok_or(GatewayError::ConversationNotFound { id })?;
 
-        self.storage.delete_session(id).await?;
+        if self.storage.delete_session(id).await? {
+            super::announce_session_updated(&self.broadcast, id);
+        }
         Ok(())
     }
 

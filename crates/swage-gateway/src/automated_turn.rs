@@ -335,8 +335,8 @@ mod tests {
             ]
         );
 
-        let announced = announcements
-            .try_recv()
+        let announced = std::iter::from_fn(|| announcements.try_recv().ok())
+            .find(|event| matches!(event, crate::websocket::ServerEvent::MessageAppended { .. }))
             .expect("the brief is announced on the broadcast");
         match announced {
             swage_protocol::client::websocket::ServerEvent::MessageAppended {
@@ -378,10 +378,10 @@ mod tests {
             .expect("turn should complete");
 
         assert!(
-            !matches!(
-                announcements.try_recv(),
-                Ok(swage_protocol::client::websocket::ServerEvent::MessageAppended { .. })
-            ),
+            !std::iter::from_fn(|| announcements.try_recv().ok()).any(|event| matches!(
+                event,
+                crate::websocket::ServerEvent::MessageAppended { .. }
+            )),
             "a person's own message is never announced back to them"
         );
     }
