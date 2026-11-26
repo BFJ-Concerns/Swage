@@ -1977,7 +1977,12 @@ async fn shipped_guidance_reads_without_approval_and_stays_read_only() {
             } else {
                 assert_eq!(call.status.as_deref(), Some("success"), "{result}");
                 let expected = match call_id {
-                    "skill" => "Authoring and running workflows",
+                    // The skill's own title, read from the file the tool
+                    // was pointed at, so the check is on what was read.
+                    "skill" => source
+                        .lines()
+                        .find_map(|line| line.strip_prefix("# "))
+                        .expect("the skill has a title"),
                     "workflow" => "export const defaults",
                     "list" | "search" => "research-sweep.js",
                     _ => unreachable!(),

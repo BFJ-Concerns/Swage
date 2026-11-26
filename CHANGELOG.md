@@ -111,6 +111,8 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- The workflow-authoring and project-docs skills are rewritten for any installation. The workflow-authoring skill names no model in its examples (a worker with no `model` runs on the configured default), gives each function's error names, and no longer assumes two model families or the development-process skills are in reach.
+- The shipped default agent's description says what it gives a session: no instructions of its own, with the model and tools the installation's settings provide.
 - The text the gateway itself gives a model is rewritten to say what is wanted and only what holds in every session: the common and family working norms, the orientation, the framing of memory, the memory curator's instructions, the instructions for conversation summaries and stall diagnoses, the note on a shortened tool result, and the lead-in to an active skill. A conversation summary now opens with the rules the user set that are still in force, written as instructions, and a continuing session is told those rules still apply.
 - The supplied and hosted guides explain creating and editing agent definitions in conversation, including the required tool grant, limits and configuration history, alongside the operator API.
 - Anthropic turns without an explicit output limit use the model's documented limit instead of a fixed 4,096 tokens. A limit the request sets is kept, and a model Anthropic does not document falls back to the catalogue's limit.
@@ -170,6 +172,7 @@ All notable changes to Swage are documented in this file.
 ### Fixed
 
 - `tool_result_read` masks registered secret values in the stored result it returns, as the conversation's history does, instead of reading them back whole.
+- The project-docs skill no longer hands agent-guidance changes to a skill Swage does not ship: it reports proposed changes to `AGENTS.md`, and edits that file only when the request covers it.
 - The memory curator's own session is no longer told that it cannot write memory: a session offered `memory_write` is told it keeps memory.
 - Failed settings saves leave configuration, managed credentials and the active runtime unchanged. History distinguishes absent values from strings and identifies its audit-event and saved-context sources.
 - `file_edit` refuses an ambiguous passage whose occurrences overlap, rather than replacing one of them.
