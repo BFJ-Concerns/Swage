@@ -47,7 +47,7 @@ async fn hook_name_returns_identifier() {
 #[tokio::test]
 async fn hook_execute_returns_continue() {
     let hook = AlwaysContinueHook;
-    let event = HookEvent::SessionStart {
+    let event = HookEvent::SessionEnd {
         session_id: "test-session".into(),
     };
     let outcome = hook.execute(&event).await;
@@ -71,14 +71,6 @@ async fn hook_execute_returns_block_with_reason() {
 }
 
 // -- HookEvent variant construction -----------------------------------------
-
-#[test]
-fn hook_event_session_start() {
-    let event = HookEvent::SessionStart {
-        session_id: "abc-123".into(),
-    };
-    assert_eq!(event.event_name(), "SessionStart");
-}
 
 #[test]
 fn hook_event_session_end() {
@@ -124,14 +116,6 @@ fn hook_event_after_response() {
 }
 
 #[test]
-fn hook_event_pre_compact() {
-    let event = HookEvent::PreCompact {
-        context: json!({"messages": []}),
-    };
-    assert_eq!(event.event_name(), "PreCompact");
-}
-
-#[test]
 fn hook_event_agent_stop() {
     let event = HookEvent::AgentStop {
         agent_id: "agent-42".into(),
@@ -143,12 +127,12 @@ fn hook_event_agent_stop() {
 
 #[test]
 fn hook_event_is_clone() {
-    let event = HookEvent::SessionStart {
+    let event = HookEvent::SessionEnd {
         session_id: "s1".into(),
     };
     let cloned = event.clone();
-    assert_eq!(cloned.event_name(), "SessionStart");
-    assert_eq!(event.event_name(), "SessionStart");
+    assert_eq!(cloned.event_name(), "SessionEnd");
+    assert_eq!(event.event_name(), "SessionEnd");
 }
 
 #[test]
@@ -345,7 +329,7 @@ async fn hook_trait_is_object_safe() {
 async fn hook_can_be_sent_across_threads() {
     let hook: Box<dyn Hook> = Box::new(AlwaysContinueHook);
     let handle = tokio::spawn(async move {
-        let event = HookEvent::SessionStart {
+        let event = HookEvent::SessionEnd {
             session_id: "threaded".into(),
         };
         hook.execute(&event).await
@@ -398,9 +382,6 @@ async fn mock_hook_handles_all_event_variants() {
     let hook = AlwaysContinueHook;
 
     let events = vec![
-        HookEvent::SessionStart {
-            session_id: "s".into(),
-        },
         HookEvent::SessionEnd {
             session_id: "s".into(),
         },
@@ -418,9 +399,6 @@ async fn mock_hook_handles_all_event_variants() {
         },
         HookEvent::AfterResponse {
             content: "c".into(),
-        },
-        HookEvent::PreCompact {
-            context: json!(null),
         },
         HookEvent::AgentStop {
             agent_id: "a".into(),
