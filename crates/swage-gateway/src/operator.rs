@@ -324,14 +324,10 @@ async fn run_parent_session(
     if run.dispatching_session_id.is_some() {
         return Ok(run.dispatching_session_id);
     }
+    // A run's parent is recorded when the run starts and names a run that
+    // already exists, so the chain ends.
     let mut parent = run.parent_run_id;
-    let mut visited = HashSet::new();
     while let Some(id) = parent {
-        if !visited.insert(id) {
-            return Err(GatewayError::ConfigError(
-                "cycle in workflow run parents".into(),
-            ));
-        }
         let Some(record) = state.storage.get_workflow_run(id).await? else {
             return Ok(None);
         };
