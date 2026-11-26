@@ -13,12 +13,19 @@
 //! `localeCompare`, `toLocaleLowerCase`, `toLocaleUpperCase`) read the host's
 //! default locale, so the cage replaces each with the same loud failure as
 //! `Math.random`: a program that needs locale-aware text gets a host call.
+//! A program's buffers are fixed-length: the cage refuses the `maxByteLength`
+//! option of `ArrayBuffer`, because the engine reserves a resizable buffer's
+//! memory where the program's memory limit cannot count it.
 //!
-//! Two limits bound every program: a heap ceiling, and a ceiling on how long it
-//! may execute without yielding to the host. Crossing either terminates the
-//! isolate with the reason recorded as a [`Termination`], which the caller
-//! surfaces into its own record — the engine knows how a program ended, the
-//! caller knows what the program was.
+//! Two limits bound every program: a memory ceiling, and a ceiling on how long
+//! it may execute without yielding to the host. The memory ceiling is one
+//! number held against each of the two stores the engine keeps a program in —
+//! its heap, and the bytes of its buffers, which live outside the heap (the
+//! `buffers` module has the whole of that contract). Crossing a limit
+//! terminates the isolate with the reason recorded as a [`Termination`], and
+//! a call into a terminated program returns that termination and nothing
+//! else. The caller surfaces it into its own record — the engine knows how a
+//! program ended, the caller knows what the program was.
 //!
 //! The isolate is built and used on one thread: V8 isolates do not move
 //! between threads, so a [`Program`] is not `Send`. The gateway already gives
@@ -47,6 +54,10 @@ use deno_core::{JsRuntime, OpState, PollEventLoopOptions, RuntimeOptions, extens
 use futures::FutureExt;
 use tokio_util::sync::CancellationToken;
 
+mod buffers;
+
+use buffers::BufferBudget;
+
 /// The engine identity recorded on durable runs: the V8 version this binary
 /// embeds.
 pub fn engine_version() -> String {
@@ -56,7 +67,10 @@ pub fn engine_version() -> String {
 /// The two ceilings every program runs under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IsolateLimits {
-    /// The most heap the program's isolate may hold before it is terminated.
+    /// The most heap the program's isolate may hold before it is terminated,
+    /// and separately the most bytes its buffers may hold: `ArrayBuffer`
+    /// contents live outside the heap, and are held to the same number on
+    /// their own.
     pub heap_bytes: usize,
     /// The longest the program may execute without yielding to the host. A
     /// program awaiting a host call is not executing; a loop that never
@@ -67,7 +81,11 @@ pub struct IsolateLimits {
 /// Why an isolate was terminated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Termination {
+    /// The isolate's heap — objects, strings, closures — reached its limit.
     HeapLimit,
+    /// The program's buffers asked for more bytes than its limit allows,
+    /// and collecting garbage did not make room.
+    BufferLimit,
     TimeLimit,
     Cancelled,
 }
@@ -77,6 +95,7 @@ impl Termination {
     pub const fn reason(self) -> &'static str {
         match self {
             Self::HeapLimit => "heap_limit",
+            Self::BufferLimit => "buffer_limit",
             Self::TimeLimit => "time_limit",
             Self::Cancelled => "cancelled",
         }
@@ -87,6 +106,9 @@ impl fmt::Display for Termination {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::HeapLimit => "the program exceeded its heap limit and was terminated",
+            Self::BufferLimit => {
+                "the program's buffers exceeded its memory limit and it was terminated"
+            }
             Self::TimeLimit => {
                 "the program ran past its execution time limit without yielding and was terminated"
             }
@@ -216,6 +238,16 @@ extension!(
 /// with a loud failure, since each answers from the host rather than the
 /// program. A program that needs output, a clock or locale-aware text gets a
 /// host call; the cage never polyfills.
+///
+/// Last it puts `ArrayBuffer` behind a constructor that refuses the
+/// `maxByteLength` option. The engine's own constructor is reachable from
+/// nowhere afterwards — the global and `ArrayBuffer.prototype.constructor`
+/// were its only names — so every buffer a program makes is fixed-length and
+/// allocated under its buffer budget. The option is read once and never
+/// passed on: a getter cannot answer the cage one way and the engine another.
+/// The trap is strict and its handler frozen because a stack trace hands a
+/// script the `this` of every sloppy frame on it, the handler's included,
+/// and a handler a script could rewrite would hand over the constructor.
 const CAGE: &str = r#"
 (() => {
     const core = globalThis.Deno && globalThis.Deno.core;
@@ -269,6 +301,35 @@ const CAGE: &str = r#"
             refuse(owner, name, `${label}.${name}`, hostLocale);
         }
     }
+    const construct = Reflect.construct;
+    const fixedLengthArrayBuffer = new Proxy(ArrayBuffer, Object.freeze({
+        construct(target, args, newTarget) {
+            "use strict";
+            const options = args[1];
+            if (Object(options) === options && options.maxByteLength !== undefined) {
+                const error = new Error(
+                    "A resizable ArrayBuffer is not available: its memory would not count " +
+                    "against the script's memory limit. Make a new buffer of the size needed " +
+                    "and copy into it."
+                );
+                error.name = "ResizableBufferError";
+                throw error;
+            }
+            return construct(target, [args[0]], newTarget);
+        },
+    }));
+    Object.defineProperty(ArrayBuffer.prototype, "constructor", {
+        value: fixedLengthArrayBuffer,
+        configurable: false,
+        enumerable: false,
+        writable: false,
+    });
+    Object.defineProperty(globalThis, "ArrayBuffer", {
+        value: fixedLengthArrayBuffer,
+        configurable: true,
+        enumerable: false,
+        writable: true,
+    });
 })();
 "#;
 
@@ -282,6 +343,8 @@ const HEAP_UNWIND_ROOM: usize = 16 * 1024 * 1024;
 /// What the watchdog thread and the heap callback share with the program.
 struct Watch {
     handle: v8::IsolateHandle,
+    /// Shared with the isolate's buffer allocator, which counts into it.
+    buffers: Arc<BufferBudget>,
     /// Set while the isolate is executing JavaScript on its thread.
     busy_since: Mutex<Option<Instant>>,
     termination: Mutex<Option<Termination>>,
@@ -295,6 +358,18 @@ impl Watch {
             *termination = Some(why);
             self.handle.terminate_execution();
         }
+    }
+
+    /// The engine has run out of ways to find the program memory. It says so
+    /// through one callback for both stores, so the store is told apart
+    /// here: a buffer request the allocator refused and has not granted since
+    /// is what brought the engine to it, and otherwise the heap is full.
+    fn out_of_memory(&self) {
+        self.terminate(if self.buffers.refusal_stands() {
+            Termination::BufferLimit
+        } else {
+            Termination::HeapLimit
+        });
     }
 
     fn termination(&self) -> Option<Termination> {
@@ -361,22 +436,28 @@ impl Program {
             ),
         };
         let entered = runtime_context.as_ref().map(tokio::runtime::Runtime::enter);
+        let buffers = Arc::new(BufferBudget::new(limits.heap_bytes));
         let mut runtime = JsRuntime::try_new(RuntimeOptions {
             extensions: host.into_iter().map(swage_host::init).collect(),
-            create_params: Some(v8::CreateParams::default().heap_limits(0, limits.heap_bytes)),
+            create_params: Some(
+                v8::CreateParams::default()
+                    .heap_limits(0, limits.heap_bytes)
+                    .array_buffer_allocator(buffers::allocator(Arc::clone(&buffers))),
+            ),
             ..RuntimeOptions::default()
         })
         .map_err(|error| IsolateError::Engine(error.to_string()))?;
 
         let watch = Arc::new(Watch {
             handle: runtime.v8_isolate().thread_safe_handle(),
+            buffers,
             busy_since: Mutex::new(None),
             termination: Mutex::new(None),
             stopped: AtomicBool::new(false),
         });
         let heap_watch = Arc::clone(&watch);
         runtime.add_near_heap_limit_callback(move |current_limit, _initial_limit| {
-            heap_watch.terminate(Termination::HeapLimit);
+            heap_watch.out_of_memory();
             current_limit + HEAP_UNWIND_ROOM
         });
         let watchdog = {
@@ -422,7 +503,7 @@ impl Program {
         self.watch.busy();
         let result = self.runtime().execute_script(name, source);
         self.watch.idle();
-        result.map_err(|error| self.script_failure(CoreErrorKind::Js(error).into()))
+        self.outcome(result.map_err(|error| CoreErrorKind::Js(error).into()))
     }
 
     /// [`Self::execute`] for a source that evaluates to a string; any other
@@ -484,10 +565,8 @@ impl Program {
             outcome
         })
         .await;
-        match outcome {
-            Ok(value) => self.string_of(&value),
-            Err(error) => Err(self.script_failure(error)),
-        }
+        let value = self.outcome(outcome)?;
+        self.string_of(&value)
     }
 
     /// Why the program was terminated, if it was.
@@ -533,17 +612,19 @@ impl Program {
             .map(tokio::runtime::Runtime::enter)
     }
 
-    /// A termination outranks whatever the engine reported about it: the
-    /// exception V8 raises to unwind a terminated program is not the
-    /// program's own.
-    fn script_failure(&self, error: CoreError) -> IsolateError {
+    /// What a call into the program came to. A termination outranks whatever
+    /// the engine reported: the exception V8 raises to unwind a terminated
+    /// program is not the program's own, and a value from a program that was
+    /// terminated as it finished — one that caught the engine's `RangeError`
+    /// for a refused buffer and returned, say — is not a result.
+    fn outcome<T>(&self, engine: Result<T, CoreError>) -> Result<T, IsolateError> {
         if let Some(termination) = self.watch.termination() {
-            return IsolateError::Terminated(termination);
+            return Err(IsolateError::Terminated(termination));
         }
-        match error.into_kind() {
+        engine.map_err(|error| match error.into_kind() {
             CoreErrorKind::Js(error) => IsolateError::Script(ScriptException::from_js(&error)),
             other => IsolateError::Engine(other.to_string()),
-        }
+        })
     }
 }
 
@@ -782,6 +863,243 @@ mod tests {
             "{error:?}"
         );
         assert_eq!(program.termination(), Some(Termination::HeapLimit));
+    }
+
+    /// A program under an 8 MiB limit, with the time limit out of the way.
+    fn program_with_8_mib() -> Program {
+        Program::new(
+            IsolateLimits {
+                heap_bytes: 8 * 1024 * 1024,
+                continuous_execution: Duration::from_secs(30),
+            },
+            None,
+            None,
+        )
+        .expect("isolate")
+    }
+
+    #[test]
+    fn buffers_within_the_limit_work_and_dropped_ones_are_not_counted() {
+        let mut program = program_with_8_mib();
+        // Each buffer is 1 MiB and dropped at once: 64 MiB pass through an
+        // 8 MiB limit, because the engine collects before a refusal stands.
+        let sum = program
+            .execute_for_string(
+                "test",
+                r#"let sum = 0;
+                for (let round = 0; round < 64; round++) {
+                    const bytes = new Uint8Array(1024 * 1024);
+                    bytes[bytes.length - 1] = round;
+                    sum += new Float64Array(bytes.buffer, 0, 8).length + bytes.at(-1);
+                }
+                String(sum)"#
+                    .to_owned(),
+            )
+            .expect("runs within its limit");
+        assert_eq!(sum, "2528");
+        assert_eq!(program.termination(), None);
+    }
+
+    #[test]
+    fn a_buffer_past_the_limit_terminates_the_program_and_names_the_reason() {
+        let mut program = program_with_8_mib();
+        let error = program
+            .execute(
+                "test",
+                "const held = []; for (;;) { held.push(new Uint8Array(1024 * 1024)); }".to_owned(),
+            )
+            .expect_err("terminates");
+        assert!(
+            matches!(error, IsolateError::Terminated(Termination::BufferLimit)),
+            "{error:?}"
+        );
+        assert_eq!(program.termination(), Some(Termination::BufferLimit));
+        assert!(
+            program.watch.buffers.held() <= 8 * 1024 * 1024,
+            "{} bytes held",
+            program.watch.buffers.held()
+        );
+    }
+
+    /// The engine raises a `RangeError` for the refused request, which a
+    /// program can catch; catching it does not keep the program running.
+    #[test]
+    fn a_program_that_catches_the_refusal_is_still_terminated() {
+        let mut program = program_with_8_mib();
+        let error = program
+            .execute(
+                "test",
+                r#"let caught = 0;
+                for (;;) {
+                    try { new ArrayBuffer(64 * 1024 * 1024); } catch (error) { caught++; }
+                }"#
+                .to_owned(),
+            )
+            .expect_err("terminates");
+        assert!(
+            matches!(error, IsolateError::Terminated(Termination::BufferLimit)),
+            "{error:?}"
+        );
+    }
+
+    /// With no call or loop after the refusal the engine has no point at
+    /// which to end the program, so the call's own end does: the value the
+    /// program went on to produce is not returned.
+    #[test]
+    fn a_refusal_met_at_the_end_of_a_call_is_reported_by_that_call() {
+        let mut program = program_with_8_mib();
+        let error = program
+            .execute_for_string(
+                "test",
+                "let outcome = 'made'; try { new ArrayBuffer(64 * 1024 * 1024); } catch (error) { outcome = 'caught'; } outcome"
+                    .to_owned(),
+            )
+            .expect_err("terminates");
+        assert!(
+            matches!(error, IsolateError::Terminated(Termination::BufferLimit)),
+            "{error:?}"
+        );
+    }
+
+    /// The engine aborts the process if it is refused the bytes of a typed
+    /// array it kept in its heap and now has to move out, which it does on
+    /// the first use of `.buffer`. This build keeps none there: the smallest
+    /// array's bytes are counted from its constructor, and with the budget
+    /// full that is where the refusal lands.
+    #[test]
+    fn the_smallest_typed_array_is_counted_and_refused_in_its_constructor() {
+        let mut program = program_with_8_mib();
+        let before = program.watch.buffers.held();
+        program
+            .execute(
+                "test",
+                "globalThis.small = Array.from({ length: 1000 }, () => new Uint8Array(16));"
+                    .to_owned(),
+            )
+            .expect("runs within its limit");
+        assert_eq!(program.watch.buffers.held() - before, 16_000);
+
+        let rest = 8 * 1024 * 1024 - program.watch.buffers.held();
+        let error = program
+            .execute(
+                "test",
+                format!("globalThis.rest = new ArrayBuffer({rest}); new Uint8Array(16).buffer;"),
+            )
+            .expect_err("terminates");
+        assert!(
+            matches!(error, IsolateError::Terminated(Termination::BufferLimit)),
+            "{error:?}"
+        );
+    }
+
+    /// Each program has a budget of its own. An isolate stays on the thread
+    /// that built it, so the two programs get a thread each.
+    #[test]
+    fn one_programs_buffer_limit_leaves_another_running() {
+        let exhausted = std::thread::spawn(|| {
+            program_with_8_mib()
+                .execute("test", "new ArrayBuffer(64 * 1024 * 1024)".to_owned())
+                .expect_err("terminates")
+        })
+        .join()
+        .expect("the exhausted program's thread");
+        assert!(
+            matches!(
+                exhausted,
+                IsolateError::Terminated(Termination::BufferLimit)
+            ),
+            "{exhausted:?}"
+        );
+        let length = program_with_8_mib()
+            .execute_for_string(
+                "test",
+                "String(new ArrayBuffer(4 * 1024 * 1024).byteLength)".to_owned(),
+            )
+            .expect("the neighbour has its own budget");
+        assert_eq!(length, "4194304");
+    }
+
+    /// Every way a script can name the constructor reaches the cage's, so
+    /// none of them makes a resizable buffer; fixed-length buffers,
+    /// subclasses included, are made as usual.
+    #[test]
+    fn the_cage_refuses_a_resizable_buffer_by_every_name_for_the_constructor() {
+        let mut program = program();
+        let outcomes = program
+            .execute_for_string(
+                "test",
+                r#"const resizable = { maxByteLength: 1024 };
+                class Subclass extends ArrayBuffer {}
+                [
+                    () => new ArrayBuffer(8, resizable),
+                    () => new ArrayBuffer.prototype.constructor(8, resizable),
+                    () => new (new Uint8Array(128).buffer.constructor)(8, resizable),
+                    () => Reflect.construct(ArrayBuffer, [8, resizable]),
+                    () => new Subclass(8, resizable),
+                    () => new ArrayBuffer(8, { get maxByteLength() { return 1024; } }),
+                    () => new ArrayBuffer(8).resizable,
+                    () => new ArrayBuffer(8, {}).byteLength,
+                    () => new ArrayBuffer(8, { maxByteLength: undefined }).byteLength,
+                    () => new Subclass(8) instanceof ArrayBuffer,
+                    () => new ArrayBuffer(8).slice(2).byteLength,
+                    () => ArrayBuffer.isView(new DataView(new ArrayBuffer(8))),
+                ].map((make) => {
+                    try { return String(make()); }
+                    catch (error) { return error.name; }
+                }).join(",")"#
+                    .to_owned(),
+            )
+            .expect("runs");
+        assert_eq!(
+            outcomes,
+            [
+                "ResizableBufferError",
+                "ResizableBufferError",
+                "ResizableBufferError",
+                "ResizableBufferError",
+                "ResizableBufferError",
+                "ResizableBufferError",
+                "false",
+                "8",
+                "8",
+                "true",
+                "6",
+                "true",
+            ]
+            .join(",")
+        );
+    }
+
+    /// A stack trace hands a script the function and `this` of each sloppy
+    /// frame on it. Neither the cage's constructor trap nor the engine's
+    /// constructor beneath it gives one up, so a script cannot rewrite the
+    /// trap or call past it.
+    #[test]
+    fn a_stack_trace_does_not_reach_past_the_cages_buffer_constructor() {
+        let mut program = program();
+        let reached = program
+            .execute_for_string(
+                "test",
+                r#"const reached = [];
+                Error.prepareStackTrace = (error, sites) => {
+                    for (const site of sites) {
+                        const name = site.getFunctionName();
+                        if (name !== "construct" && name !== "ArrayBuffer") continue;
+                        reached.push(typeof site.getFunction(), typeof site.getThis());
+                    }
+                    return "";
+                };
+                try { new ArrayBuffer(8, { maxByteLength: 16 }); } catch (error) { error.stack; }
+                try { new ArrayBuffer(-1); } catch (error) { error.stack; }
+                reached.join(",")"#
+                    .to_owned(),
+            )
+            .expect("runs");
+        assert_eq!(
+            reached,
+            ["undefined"; 6].join(","),
+            "one pair for the trap's frame, then the engine's constructor and the call into it"
+        );
     }
 
     #[test]
