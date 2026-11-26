@@ -8767,6 +8767,107 @@ async fn make_state_with_tool_provider_and_storage(
     (state, session_id, storage)
 }
 
+#[tokio::test]
+async fn closing_account_is_selected_on_use_and_the_fallback_reaches_the_conversation() {
+    use swage_agent::closing_account::{CLOSING_ACCOUNT_REQUEST, ENDED_WITHOUT_ACCOUNT};
+
+    let (state, session_id, captured) = make_state_with_capturing_tools(vec![
+        vec![StreamChunk::Delta {
+            content: "Hello".into(),
+        }],
+        vec![
+            StreamChunk::Delta {
+                content: "I will use echo.".into(),
+            },
+            StreamChunk::ToolUse {
+                call_id: "closing-account-tool".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({"text": "echoed"}),
+            },
+        ],
+        vec![StreamChunk::Done {
+            finish_reason: Some(FinishReason::Stop),
+        }],
+        vec![StreamChunk::Done {
+            finish_reason: Some(FinishReason::Stop),
+        }],
+    ])
+    .await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let subscription = Arc::new(Mutex::new(SubscriptionState::new(true)));
+    let closing_selections = || {
+        state
+            .storage
+            .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                session_id: Some(session_id),
+                entity_kind: Some("experiment_location".into()),
+                entity_id: Some(crate::experimentation::LOCATION_CLOSING_ACCOUNT_REQUEST.into()),
+                event_kind: Some("variant_selected".into()),
+                limit: 10,
+                ..Default::default()
+            })
+    };
+
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Hello",
+        tx.clone(),
+        subscription.clone(),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(closing_selections().await.unwrap().is_empty());
+    while rx.try_recv().is_ok() {}
+
+    process_turn(&state, session_id, None, "Use echo", tx, subscription, None)
+        .await
+        .unwrap();
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let completed = events
+        .iter()
+        .position(|event| matches!(event, ServerEvent::TurnComplete { .. }))
+        .unwrap();
+    let ServerEvent::TurnComplete { turn_id, .. } = &events[completed] else {
+        unreachable!()
+    };
+    let live: String = events[..completed]
+        .iter()
+        .filter_map(|event| match event {
+            ServerEvent::Token { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(live, format!("I will use echo.\n\n{ENDED_WITHOUT_ACCOUNT}"));
+
+    let selections = closing_selections().await.unwrap();
+    assert_eq!(selections.len(), 1);
+    assert_eq!(
+        selections[0].metadata["turn_id"],
+        serde_json::json!(turn_id)
+    );
+    {
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(
+            requests[3].messages.last().unwrap().text_content(),
+            CLOSING_ACCOUNT_REQUEST
+        );
+    }
+    let turn = state.storage.get_turn(*turn_id).await.unwrap().unwrap();
+    assert_eq!(turn.assistant_response.as_deref(), Some(live.as_str()));
+    let conversation =
+        crate::service::ConversationService::new(state.storage.clone(), state.topic_store.clone())
+            .get_conversation(session_id)
+            .await
+            .unwrap();
+    let reply = conversation.messages.last().unwrap();
+    assert_eq!(reply.content, live);
+    assert_eq!(reply.tool_calls[0].call_id, "closing-account-tool");
+}
+
 pub(crate) async fn make_state_with_capturing_tools(
     rounds: Vec<Vec<StreamChunk>>,
 ) -> (

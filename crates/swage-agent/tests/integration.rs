@@ -637,7 +637,7 @@ async fn a_second_empty_round_settles_with_the_statement_that_no_account_was_giv
     assert_eq!(
         outbound.response,
         format!(
-            "Next I'll update the queue risks. {}",
+            "Next I'll update the queue risks. \n\n{}",
             swage_agent::closing_account::ENDED_WITHOUT_ACCOUNT
         )
     );
