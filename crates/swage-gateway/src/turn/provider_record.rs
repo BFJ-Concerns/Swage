@@ -190,11 +190,14 @@ pub(super) async fn known_secret_values(
     Ok(values)
 }
 
-fn redact_text(text: &mut String, secret_values: &[String]) -> bool {
+pub(super) const REDACTED_SECRET: &str = "[REDACTED_SECRET]";
+
+pub(super) fn redact_text(text: &mut String, secret_values: &[impl AsRef<str>]) -> bool {
     let mut replaced = false;
     for secret in secret_values {
+        let secret = secret.as_ref();
         if text.contains(secret) {
-            *text = text.replace(secret, "[REDACTED_SECRET]");
+            *text = text.replace(secret, REDACTED_SECRET);
             replaced = true;
         }
     }

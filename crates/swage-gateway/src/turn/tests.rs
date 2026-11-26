@@ -10168,11 +10168,11 @@ async fn later_turn_rebuilds_tool_replay_from_persisted_compact_rows() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn later_snapshot_masks_registered_secret_before_argument_compaction() {
+async fn later_snapshot_masks_registered_secret_before_tool_replay_compaction() {
     let _guard = crate::secret::tests::with_secret_env();
-    let secret = "unique-long-fixture-material-".repeat(110);
+    let secret = "unique-long-fixture-material-\n".repeat(110);
     let text = format!("prefix {secret}");
-    let (state, session_id) = start_result_turn(text, Arc::new(FileReadMockTool)).await;
+    let (state, session_id) = start_result_turn(text, Arc::new(EchoMockTool)).await;
     state
         .secret_manager
         .create_secret(crate::secret::CreateSecretRequest {
@@ -10200,29 +10200,51 @@ async fn later_snapshot_masks_registered_secret_before_argument_compaction() {
     let stored_prefix = stored_arguments["text"].as_str().unwrap();
     assert_eq!(stored_prefix.len(), 2000);
     assert!(stored_prefix.contains("unique-long-fixture-material-"));
+    let stored_result: swage_core::CompactToolReplay =
+        serde_json::from_str(calls[0].model_result.as_ref().unwrap()).unwrap();
+    assert!(stored_result.truncated);
+    assert!(
+        stored_result
+            .preview
+            .contains("unique-long-fixture-material-")
+    );
+    let malformed_call = NewToolCall {
+        execution: None,
+        turn_id: first_turn,
+        agent_id: calls[0].agent_id.clone(),
+        call_id: "malformed-call".into(),
+        tool: calls[0].tool.clone(),
+        arguments: "{".into(),
+        model_arguments: calls[0].model_arguments.clone(),
+        result: Some("Result of the call with malformed arguments".into()),
+        model_result: Some(swage_core::compact_tool_result_for_model(
+            "Result of the call with malformed arguments",
+            false,
+        )),
+        status: Some("success".into()),
+        duration_ms: None,
+        truncated: false,
+        total_bytes: None,
+        provider_round: calls[0].provider_round,
+        position: calls[0].position + 1,
+        parent_call_id: None,
+        display_summary: None,
+    };
+    state
+        .storage
+        .create_tool_call(malformed_call.clone())
+        .await
+        .unwrap();
     state
         .storage
         .create_tool_call(NewToolCall {
-            execution: None,
-            turn_id: first_turn,
-            agent_id: calls[0].agent_id.clone(),
-            call_id: "malformed-call".into(),
-            tool: calls[0].tool.clone(),
-            arguments: "{".into(),
-            model_arguments: calls[0].model_arguments.clone(),
-            result: Some("Result of the call with malformed arguments".into()),
-            model_result: Some(swage_core::compact_tool_result_for_model(
-                "Result of the call with malformed arguments",
-                false,
-            )),
-            status: Some("success".into()),
-            duration_ms: None,
-            truncated: false,
-            total_bytes: None,
-            provider_round: calls[0].provider_round,
-            position: calls[0].position + 1,
-            parent_call_id: None,
-            display_summary: None,
+            call_id: "unverifiable-result".into(),
+            arguments: "{}".into(),
+            model_arguments: "{}".into(),
+            result: None,
+            model_result: calls[0].model_result.clone(),
+            position: malformed_call.position + 1,
+            ..malformed_call
         })
         .await
         .unwrap();
@@ -10238,7 +10260,7 @@ async fn later_snapshot_masks_registered_secret_before_argument_compaction() {
     state.replace_runtime(
         state.active_config(),
         Arc::new(provider),
-        crate::tool::ToolDispatcher::allow_all(vec![Arc::new(FileReadMockTool) as Arc<dyn Tool>]),
+        crate::tool::ToolDispatcher::allow_all(vec![Arc::new(EchoMockTool) as Arc<dyn Tool>]),
     );
     let (tx, _rx) = mpsc::unbounded_channel();
     process_turn(
@@ -10270,6 +10292,24 @@ async fn later_snapshot_masks_registered_secret_before_argument_compaction() {
         ToolReplayPart::ToolCall { call_id, arguments, .. }
             if call_id == "malformed-call" && arguments == &serde_json::json!({})
     )));
+    assert!(replay.iter().any(|part| matches!(
+        part,
+        ToolReplayPart::ToolResult { call_id, content, .. }
+            if call_id == "unverifiable-result" && content == "[REDACTED_SECRET]"
+    )));
+    let result = replay
+        .iter()
+        .find_map(|part| match part {
+            ToolReplayPart::ToolResult {
+                call_id, content, ..
+            } if call_id == &calls[0].call_id => Some(content),
+            _ => None,
+        })
+        .unwrap();
+    let result: swage_core::CompactToolReplay = serde_json::from_str(result).unwrap();
+    assert_eq!(result.preview, r#"{"output":"prefix [REDACTED_SECRET]"}"#);
+    assert_eq!(result.full_result_ref, stored_result.full_result_ref);
+    assert!(!result.truncated);
     for content in [&wire, &snapshot] {
         assert!(content.contains("prefix [REDACTED_SECRET]"));
         assert!(!content.contains("unique-long-fixture-material-"));
