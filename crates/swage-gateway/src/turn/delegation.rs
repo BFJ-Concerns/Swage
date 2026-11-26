@@ -1511,23 +1511,25 @@ impl DelegationHandler for GatewayDelegationHandler {
                 // child's registration releases it.
                 let child_task = AbortOnDropHandle::new(tokio::spawn(
                     async move {
-                        let execution = Box::pin(executor.execute_delegation(
-                            &delegate_msg,
-                            Some(sender_turn_id),
-                            Some(sender_session_id),
-                            topic_id,
-                            target_agent_config,
-                            target_context_transfer_config,
-                            Some(target_dispatcher),
-                            session_metadata,
-                            child_cancel_token.clone(),
-                            Some(started_tx),
-                            existing_child,
-                            placement
-                                .as_ref()
-                                .map(|placement| placement.path.to_string_lossy().into_owned()),
-                            child_effort,
-                        ));
+                        let execution = Box::pin(
+                            executor.execute_delegation(
+                                &delegate_msg,
+                                Some(sender_turn_id),
+                                Some(sender_session_id),
+                                topic_id,
+                                target_agent_config,
+                                target_context_transfer_config,
+                                Some(target_dispatcher),
+                                session_metadata,
+                                child_cancel_token.clone(),
+                                Some(started_tx),
+                                existing_child,
+                                placement
+                                    .as_ref()
+                                    .map(|placement| placement.path.to_string_lossy().into_owned()),
+                                child_effort,
+                            ),
+                        );
                         track_delegated_session(
                             &tracking_state,
                             child_cancel_token,
