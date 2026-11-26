@@ -56,11 +56,10 @@ test-integration package target *filter:
 # CI runs this same recipe, so the local gate and CI cannot drift apart.
 # The full gate: check-gate, tests, projection freshness, and desktop smoke.
 verify:
-    cargo run -p xtask -- verify
+    env -u SWAGE_HOME cargo run -p xtask -- verify
 
 # Alias for `verify`, kept for muscle memory.
-ci:
-    cargo run -p xtask -- verify
+ci: verify
 
 sweep:
     cargo run -p xtask -- sweep

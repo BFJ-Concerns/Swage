@@ -2818,7 +2818,6 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
         };
 
-        let _home = SwageHomeGuard::new();
         let requests = Arc::new(AtomicUsize::new(0));
         let counted = requests.clone();
         let upstream = Router::new().route(
@@ -2841,7 +2840,7 @@ mod tests {
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
         let storage = Arc::new(crate::turn::tests::MockStorage::new());
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone(),
             storage,
             Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -3029,9 +3028,8 @@ mod tests {
 
     #[tokio::test]
     async fn delegation_depth_saves_hot_applies_reloads_and_refuses_zero() {
-        let home = SwageHomeGuard::new();
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone(),
             storage,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
@@ -3062,7 +3060,7 @@ mod tests {
             "new chains read the saved depth without a restart"
         );
         let reloaded = swage_config::load_resolved_config_from(
-            home.path(),
+            &state.config_root,
             &ScopeLocation::General,
             "default",
         )
@@ -3761,9 +3759,8 @@ mod tests {
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn image_scheme_settings_save_hot_apply_reload_and_refuse() {
-        let swage_home = SwageHomeGuard::new();
         let storage = std::sync::Arc::new(crate::turn::tests::MockStorage::new());
-        let state = AppState::new(
+        let state = AppState::for_test(
             storage.clone() as std::sync::Arc<dyn swage_storage::store::Storage>,
             storage as std::sync::Arc<dyn swage_storage::store::TopicStore>,
             std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![]))
@@ -3789,7 +3786,7 @@ mod tests {
         assert_eq!(state.active_config().attachments.accepted_schemes, ["http"]);
         assert!(!state.restart_required());
         let reloaded = swage_config::load_resolved_config_from(
-            swage_home.path(),
+            &state.config_root,
             &ScopeLocation::General,
             "default",
         )
@@ -3819,7 +3816,7 @@ mod tests {
             );
             assert_eq!(state.active_config().attachments.accepted_schemes, ["http"]);
             let reloaded = swage_config::load_resolved_config_from(
-                swage_home.path(),
+                &state.config_root,
                 &ScopeLocation::General,
                 "default",
             )

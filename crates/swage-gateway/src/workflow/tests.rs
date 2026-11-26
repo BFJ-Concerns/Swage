@@ -19661,7 +19661,7 @@ async fn run_accounts_inspection_reads_an_outstanding_provider_round() {
         .expect("session");
     let opened = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
-    let state = AppState::new(
+    let state = AppState::for_test(
         storage.clone(),
         storage.clone(),
         Arc::new(GatedRoundProvider {
@@ -19729,7 +19729,7 @@ async fn run_accounts_api_cancellation_retains_source_and_time() {
         .await
         .expect("session");
     let opened = Arc::new(Notify::new());
-    let state = AppState::new(
+    let state = AppState::for_test(
         storage.clone(),
         storage.clone(),
         Arc::new(GatedRoundProvider {
@@ -19835,7 +19835,7 @@ async fn review_fix_start_snapshot_time_precedes_a_concurrent_completion() {
         .create_session(swage_storage::fixtures::new_session(topic.id))
         .await
         .unwrap();
-    let state = AppState::new(
+    let state = AppState::for_test(
         storage.clone(),
         storage.clone(),
         Arc::new(GatedRoundProvider {
