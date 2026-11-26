@@ -1706,6 +1706,7 @@ pub async fn get_turn(
 fn isolation_view(isolation: swage_storage::TurnIsolation) -> TurnIsolationView {
     match isolation {
         swage_storage::TurnIsolation::Isolated => TurnIsolationView::Isolated,
+        swage_storage::TurnIsolation::SandboxDisabled => TurnIsolationView::SandboxDisabled,
         swage_storage::TurnIsolation::Degraded { reason } => TurnIsolationView::Degraded { reason },
     }
 }
@@ -1927,7 +1928,7 @@ async fn execute_external_delegate_message(
             silent_ws_tx,
             crate::turn::effective_tool_permissions_record(&effective_target_resolved),
             composition,
-            dispatcher_build.dispatcher.offered_tools(),
+            dispatcher_build.dispatcher.offered(),
         ),
         snapshot_recorder: Some(crate::turn::delegation_snapshot_recorder_for_state(
             state.clone(),

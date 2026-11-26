@@ -197,8 +197,8 @@ failure reason quotes the cause. `sandbox.allow_degraded_execution = true`
 skips that approval.
 
 To run a topic without the sandbox, set this in its `config.toml`; its turns
-then record a degraded execution boundary so the audit trail says they ran
-unconfined:
+then record that the sandbox was switched off, so the audit trail says they
+ran unconfined by choice rather than degraded:
 
 ```toml
 [sandbox]

@@ -15,10 +15,9 @@ use super::{
     AgentConfig, AppState, CancellationToken, ExecutionIsolation, GatewayDispatcherBuild,
     GatewayDispatcherRequest, GatewayError, SandboxDegradationApproval,
     SandboxDegradationApprovalRequest, ServerEvent, TurnAttendance, TurnState, Uuid,
-    build_gateway_dispatcher, mpsc, record_degraded_execution,
-    record_failed_turn_and_release_on_error, record_terminal_state_and_release,
-    record_turn_isolation, release_active_turn, request_sandbox_degradation_approval,
-    shutdown_sandbox_guard,
+    build_gateway_dispatcher, mpsc, record_failed_turn_and_release_on_error,
+    record_terminal_state_and_release, record_turn_isolation, record_unsandboxed_execution,
+    release_active_turn, request_sandbox_degradation_approval, shutdown_sandbox_guard,
 };
 
 /// What the coordinator resolved for building the turn's dispatcher.
@@ -90,7 +89,7 @@ pub(super) async fn settle_turn_dispatcher(
             let detected_degradation = ExecutionIsolation::Degraded {
                 reason: format!("sandbox_setup_failed: {error}"),
             };
-            if let Err(audit_error) = record_degraded_execution(
+            if let Err(audit_error) = record_unsandboxed_execution(
                 state,
                 &detected_degradation,
                 execution_context,
@@ -239,7 +238,7 @@ pub(super) async fn settle_turn_dispatcher(
                 TurnState::Failed,
             )
             .await?;
-            record_degraded_execution(
+            record_unsandboxed_execution(
                 state,
                 &isolation,
                 execution_context,
@@ -252,7 +251,7 @@ pub(super) async fn settle_turn_dispatcher(
             )));
         }
     };
-    if let Err(error) = record_degraded_execution(
+    if let Err(error) = record_unsandboxed_execution(
         state,
         &dispatcher_build.isolation,
         execution_context,

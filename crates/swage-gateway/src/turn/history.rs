@@ -1,6 +1,7 @@
 use super::{
-    BTreeMap, ChatMessage, GatewayError, HashMap, HashSet, Role, ToolCall, ToolCallRecord,
-    ToolResult, Uuid, build_tool_round_messages,
+    AppState, BTreeMap, ChatMessage, GatewayError, HashMap, HashSet, Role, ToolCall,
+    ToolCallRecord, ToolResult, Uuid, build_tool_round_messages,
+    provider_record::{REDACTED_SECRET, known_secret_values, redact_secret_values, redact_text},
 };
 
 #[cfg(test)]
@@ -8,13 +9,35 @@ pub(super) async fn rebuild_thread_history_messages(
     storage: &dyn swage_storage::store::Storage,
     thread_id: Uuid,
 ) -> Result<Vec<ChatMessage>, GatewayError> {
-    rebuild_thread_history_messages_with_retrieval(storage, thread_id, None).await
+    rebuild_thread_history(storage, thread_id, None, Some(&[])).await
 }
 
 pub(super) async fn rebuild_thread_history_messages_with_retrieval(
+    state: &AppState,
+    thread_id: Uuid,
+    retrieval: swage_core::ReplayRetrieval,
+) -> Result<Vec<ChatMessage>, GatewayError> {
+    let secret_values = match known_secret_values(state).await {
+        Ok(values) => Some(values),
+        Err(_) => {
+            tracing::warn!(%thread_id, "omitting replayed arguments and results because secret redaction is unavailable");
+            None
+        }
+    };
+    rebuild_thread_history(
+        state.storage.as_ref(),
+        thread_id,
+        Some(retrieval),
+        secret_values.as_deref(),
+    )
+    .await
+}
+
+async fn rebuild_thread_history(
     storage: &dyn swage_storage::store::Storage,
     thread_id: Uuid,
     retrieval: Option<swage_core::ReplayRetrieval>,
+    secret_values: Option<&[String]>,
 ) -> Result<Vec<ChatMessage>, GatewayError> {
     let stored_history = storage.list_messages_by_thread(thread_id).await?;
     let mut rebuilt = Vec::new();
@@ -61,6 +84,7 @@ pub(super) async fn rebuild_thread_history_messages_with_retrieval(
             rebuilt.extend(compact_tool_replay_messages_with_retrieval(
                 &tool_calls,
                 retrieval,
+                secret_values,
             )?);
         }
 
@@ -85,6 +109,7 @@ pub(super) async fn rebuild_thread_history_messages_with_retrieval(
             rebuilt.extend(compact_tool_replay_messages_with_retrieval(
                 &tool_calls,
                 retrieval,
+                secret_values,
             )?);
         }
     }
@@ -96,12 +121,13 @@ pub(super) async fn rebuild_thread_history_messages_with_retrieval(
 pub(super) fn compact_tool_replay_messages(
     records: &[ToolCallRecord],
 ) -> Result<Vec<ChatMessage>, swage_core::StorageError> {
-    compact_tool_replay_messages_with_retrieval(records, None)
+    compact_tool_replay_messages_with_retrieval(records, None, Some(&[]))
 }
 
 fn compact_tool_replay_messages_with_retrieval(
     records: &[ToolCallRecord],
     retrieval: Option<swage_core::ReplayRetrieval>,
+    secret_values: Option<&[String]>,
 ) -> Result<Vec<ChatMessage>, swage_core::StorageError> {
     let parent_rounds: HashMap<&str, i32> = records
         .iter()
@@ -140,21 +166,7 @@ fn compact_tool_replay_messages_with_retrieval(
         let mut tool_results = Vec::new();
 
         for record in round_records {
-            // A started row proves the model selected the call, even when
-            // settlement failed. Describe the unknown outcome without
-            // writing a second record or exposing an unscanned raw result.
-            let model_result = crate::tool::tool_result_read::recovered_model_result(record)
-                .or_else(|| record.model_result.clone())
-                .unwrap_or_else(|| {
-                    swage_core::compact_tool_result_for_model_with_reference(
-                        swage_storage::store::INTERRUPTED_TOOL_RESULT,
-                        true,
-                        swage_core::tool_result_reference(
-                            &record.turn_id.to_string(),
-                            &record.call_id,
-                        ),
-                    )
-                });
+            let model_result = replay_result(record, secret_values);
             let model_result = match (
                 retrieval,
                 serde_json::from_str::<swage_core::CompactToolReplay>(&model_result),
@@ -167,7 +179,10 @@ fn compact_tool_replay_messages_with_retrieval(
             tool_calls.push(ToolCall {
                 call_id: record.call_id.clone(),
                 name: record.tool.clone(),
-                arguments: parse_model_arguments(record)?,
+                arguments: match secret_values {
+                    Some(values) => parse_redacted_model_arguments(record, values)?,
+                    None => serde_json::json!({}),
+                },
             });
             tool_results.push(ToolResult {
                 call_id: record.call_id.clone(),
@@ -182,6 +197,137 @@ fn compact_tool_replay_messages_with_retrieval(
     }
 
     Ok(replay_messages)
+}
+
+fn replay_result(record: &ToolCallRecord, secret_values: Option<&[String]>) -> String {
+    let Some(stored) = &record.model_result else {
+        // A started row records the call but its outcome is unknown.
+        return swage_core::compact_tool_result_for_model_with_reference(
+            swage_storage::store::INTERRUPTED_TOOL_RESULT,
+            true,
+            swage_core::tool_result_reference(&record.turn_id.to_string(), &record.call_id),
+        );
+    };
+    let Some(secret_values) = secret_values else {
+        return REDACTED_SECRET.into();
+    };
+    if let Some(mut result) = crate::tool::tool_result_read::recovered_model_result(record) {
+        redact_result_text(&mut result, secret_values);
+        return result;
+    }
+    if secret_values.is_empty() {
+        return stored.clone();
+    }
+
+    // An approval account can precede the single-line replay envelope.
+    let (account, envelope) = stored.rsplit_once('\n').unwrap_or(("", stored));
+    let Ok(replay) = serde_json::from_str::<swage_core::CompactToolReplay>(envelope) else {
+        let mut result = stored.clone();
+        redact_result_text(&mut result, secret_values);
+        return result;
+    };
+    let mut result = if replay.truncated {
+        // The preview can end inside a secret. Check the complete
+        // model-facing result before applying the preview limit again.
+        let Some(full_result) = verified_full_result(record, &replay) else {
+            tracing::warn!(
+                turn_id = %record.turn_id,
+                call_id = %record.call_id,
+                "omitting replayed result because the full result could not be verified"
+            );
+            return REDACTED_SECRET.into();
+        };
+        full_result
+    } else {
+        replay.preview
+    };
+    let mut account = account.to_owned();
+    let account_changed = redact_result_text(&mut account, secret_values);
+    let result_changed = redact_result_text(&mut result, secret_values);
+    if !account_changed && !result_changed {
+        return stored.clone();
+    }
+    let envelope = if result_changed {
+        let is_error = replay
+            .is_error
+            .unwrap_or(record.status.as_deref() != Some("success"));
+        match replay.full_result_ref {
+            Some(reference) => swage_core::compact_tool_result_for_model_with_reference(
+                &result, is_error, reference,
+            ),
+            None => swage_core::compact_tool_result_for_model(&result, is_error),
+        }
+    } else {
+        envelope.to_owned()
+    };
+    if account.is_empty() {
+        envelope
+    } else {
+        format!("{account}\n{envelope}")
+    }
+}
+
+fn verified_full_result(
+    record: &ToolCallRecord,
+    replay: &swage_core::CompactToolReplay,
+) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    use std::sync::LazyLock;
+    use swage_safety::LeakDetector;
+
+    static DETECTOR: LazyLock<LeakDetector> = LazyLock::new(LeakDetector::default);
+
+    let original = record.result.as_deref()?;
+    let matches_replay = |text: &str| {
+        text.len() == replay.bytes
+            && text.starts_with(replay.preview.as_str())
+            && Sha256::digest(text.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+                == replay.sha256
+    };
+    if matches_replay(original) {
+        return Some(original.to_owned());
+    }
+    // The stored digest is of the model-facing result after pattern scanning.
+    let scanned = DETECTOR.scan(original);
+    matches_replay(&scanned).then_some(scanned)
+}
+
+fn redact_result_text(text: &mut String, secret_values: &[String]) -> bool {
+    let mut changed = false;
+    for secret in secret_values {
+        let encoded = serde_json::to_string(secret).expect("secret text serialises");
+        let escaped = &encoded[1..encoded.len() - 1];
+        if escaped != secret.as_str() {
+            changed |= redact_text(text, &[escaped]);
+        }
+        changed |= redact_text(text, &[secret.as_str()]);
+    }
+    changed
+}
+
+fn parse_redacted_model_arguments(
+    record: &ToolCallRecord,
+    secret_values: &[String],
+) -> Result<serde_json::Value, swage_core::StorageError> {
+    if !secret_values.is_empty() {
+        // A bounded argument can contain only the start of a registered
+        // value. Inspect the original before applying the replay bound.
+        let Ok(mut arguments) = serde_json::from_str(&record.arguments) else {
+            tracing::warn!(
+                turn_id = %record.turn_id,
+                call_id = %record.call_id,
+                "omitting replayed arguments because the original arguments could not be decoded"
+            );
+            return Ok(serde_json::json!({}));
+        };
+        if redact_secret_values(&mut arguments, secret_values) {
+            return Ok(bounded_arguments(&arguments));
+        }
+    }
+    parse_model_arguments(record)
 }
 
 pub(super) fn parse_model_arguments(
@@ -208,10 +354,12 @@ pub(super) fn parse_model_arguments(
     );
     // Recover the row's original parameters, never a preview that may end
     // mid-JSON, using the same bound as newly stored model arguments.
-    Ok(
-        serde_json::from_str(&swage_core::compact_tool_arguments_for_model(&arguments))
-            .expect("compacted tool arguments are valid JSON"),
-    )
+    Ok(bounded_arguments(&arguments))
+}
+
+fn bounded_arguments(arguments: &serde_json::Value) -> serde_json::Value {
+    serde_json::from_str(&swage_core::compact_tool_arguments_for_model(arguments))
+        .expect("compacted tool arguments are valid JSON")
 }
 
 fn is_tool_argument_envelope(arguments: &serde_json::Value) -> bool {

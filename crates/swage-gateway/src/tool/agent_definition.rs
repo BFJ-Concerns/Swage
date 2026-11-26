@@ -263,8 +263,8 @@ impl Tool for AgentDefinitionTool {
          `tool_permissions`, `skills`, `output_schema` and `output_max_retries` are optional), \
          `update` (change named fields of an existing definition — a field you leave out keeps \
          its stored value, and setting an optional field to null clears it), `delete`, or `list` \
-         (every definition this session's topic can see, as the new-session picker shows them, \
-         the shipped ones included).\n\n\
+         (every definition this session's topic can see, the shipped ones included; each \
+         row's `selectable` says whether the new-session picker offers it).\n\n\
          Reach for this when the person asks for a new or changed agent, assistant, persona or \
          role they can choose for future sessions, or asks what agents exist. It does not change \
          the session you are in: a definition governs sessions started under it, and a change \
@@ -274,7 +274,8 @@ impl Tool for AgentDefinitionTool {
          A definition is stored for every topic unless `scope` is `topic`, which stores it for \
          this session's topic alone, where it hides a global definition with the same id. Every \
          create, update and delete is written to the audit trail with the definition's whole \
-         state before and after, and shows at once in the agent settings and the picker. \
+         state before and after. The stored definition is the one the agent settings list \
+         and, when it is selectable, the one the new-session picker offers. \
          Deleting is permanent (the definition can be recreated); a session already running under \
          a deleted definition falls back to the configuration's defaults. The shipped default \
          agent and the memory curator cannot be changed or deleted. `tool_permissions` can only \
@@ -314,7 +315,7 @@ impl Tool for AgentDefinitionTool {
                 },
                 "description": {
                     "type": "string",
-                    "description": "One or two sentences on what the agent is for, shown beside its name in the picker. Required on create; on update, replaces the stored text."
+                    "description": "One or two sentences on what the agent is for, shown beside its name in the agent settings. Required on create; on update, replaces the stored text."
                 },
                 "instructions": {
                     "type": "string",

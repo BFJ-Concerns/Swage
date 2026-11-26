@@ -141,9 +141,9 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 async-trait = "0.1.91"
 futures = "0.3.33"
-rquickjs = { version = "=0.12.2", features = ["futures"] }
-rquickjs-core = "=0.12.2"
-rquickjs-sys = "=0.12.2"
+rquickjs = { version = "0.12.2", features = ["futures"] }
+rquickjs-core = "0.12.2"
+rquickjs-sys = "0.12.2"
 
 # Identifiers and time
 uuid = { version = "1", features = ["v4", "serde"] }
