@@ -103,7 +103,6 @@
 
   let lastSavedSearch: SettingsResponse["tool_runtime"]["search"] = null;
   let hasInvalidBundlesJson = $state(false);
-  let hasInvalidApprovalJson = $state(false);
   let lastSavedArchiveDelay = $state(7);
   const archiveDelayError = $derived(
     settings && (nullableNumber(settings.sessions.archive_after_days) == null || settings.sessions.archive_after_days < 1)
@@ -151,9 +150,8 @@
     if (tab !== "automation") {
       // The panel discards invalid editor text when it unmounts. Its guard
       // must describe the valid settings that remain, not the lost draft.
-      if (hasInvalidApprovalJson || error === AUTOMATION_JSON_SAVE_ERROR) error = null;
+      if (error === AUTOMATION_JSON_SAVE_ERROR) error = null;
       hasInvalidBundlesJson = false;
-      hasInvalidApprovalJson = false;
     }
   });
   const HOT_AUTOSAVE_TABS: ReadonlySet<SettingsTabId> = new Set([
@@ -257,7 +255,7 @@
     const archiveDelayChanged = settings.sessions.archive_after_days !== lastSavedArchiveDelay;
     const holdSearchDraft = searchIsIncomplete(settings.tool_runtime.search);
     const submittedSearchDraft = JSON.stringify(settings.tool_runtime.search);
-    if (hasInvalidBundlesJson || hasInvalidApprovalJson) {
+    if (hasInvalidBundlesJson) {
       error = AUTOMATION_JSON_SAVE_ERROR;
       return false;
     }
@@ -601,11 +599,10 @@
           <AutomationSettingsPanel
             bind:settings
             {archiveDelayError}
-            onValidation={(bundlesInvalid, approvalsInvalid, message) => {
+            onValidation={(bundlesInvalid) => {
               hasInvalidBundlesJson = bundlesInvalid;
               if (bundlesInvalid) status = "";
-              hasInvalidApprovalJson = approvalsInvalid;
-              error = message;
+              error = null;
             }}
           />
         </section>

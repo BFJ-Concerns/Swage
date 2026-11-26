@@ -1,7 +1,7 @@
 <script lang="ts">
   import { SETTINGS_LABELS } from "../../settings-labels";
   import type { SettingsResponse } from "../../types";
-  interface Props { archiveDelayError?: string | null; settings: SettingsResponse; onValidation?: (bundlesInvalid: boolean, approvalsInvalid: boolean, message: string | null) => void; }
+  interface Props { archiveDelayError?: string | null; settings: SettingsResponse; onValidation?: (bundlesInvalid: boolean) => void; }
   let { archiveDelayError = null, settings = $bindable(), onValidation }: Props = $props();
   const BUNDLES_SHAPE_MESSAGE = "Tool bundles must be a JSON object of string arrays.";
   const id = $props.id();
@@ -16,7 +16,7 @@
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(BUNDLES_SHAPE_MESSAGE);
       const bundles: Record<string, string[]> = {};
       for (const [name, tools] of Object.entries(parsed)) { if (!Array.isArray(tools) || tools.some((tool) => typeof tool !== "string")) throw new Error(BUNDLES_SHAPE_MESSAGE); bundles[name] = tools; }
-      settings.tool_permissions.bundles = bundles; bundlesError = null; invalidBundlesDraft = null; changed(); onValidation?.(false, false, null);
+      settings.tool_permissions.bundles = bundles; bundlesError = null; invalidBundlesDraft = null; changed(); onValidation?.(false);
     } catch (error) {
       invalidBundlesDraft = value;
       const message = error instanceof Error ? error.message : "";
@@ -33,7 +33,7 @@
       bundlesError = error instanceof SyntaxError
         ? `Tool bundles: invalid JSON${suffix}. Use an object mapping bundle names to arrays of tool names.`
         : `Tool bundles: ${message || "Use an object mapping bundle names to arrays of tool names."}`;
-      onValidation?.(true, false, null);
+      onValidation?.(true);
     }
   }
 
