@@ -26,9 +26,10 @@ and optional output schema. Each definition carries a stable `id` that sessions 
 
 ### How the overlay works
 
-When a session starts, the gateway resolves the file-based configuration
-cascade (Global → Topic → Agent `.toml` files) into a resolved config, then
-overlays the agent definition on top:
+At each turn, the gateway overlays the session's topic and agent layers
+(their `config.toml` files and `instructions/` directories, Global → Topic →
+Agent) on the running configuration — the global layer as loaded at startup
+and replaced by Settings saves — then overlays the agent definition on top:
 
 1. Instructions are appended after operator instructions.
 2. Tool permissions are intersected — allow sets are intersected, deny sets are
@@ -474,7 +475,10 @@ on (`SandboxConfig::default()` in `swage-protocol/src/client/settings.rs`). A
 topic inherits sandbox settings from the global configuration; an agent can
 override them. When `sandbox.enabled` resolves to `false`, local gateway turns
 run unsandboxed without requiring `allow_degraded_execution`. The persisted
-turn boundary is `Degraded` with reason `sandbox_disabled_by_configuration`.
+turn boundary is `SandboxDisabled`, and the audit trail carries an
+`execution_sandbox_disabled` event; `Degraded` and
+`execution_isolation_degraded` are kept for a sandbox that was meant to run
+and could not.
 
 To turn sandboxing off for a topic, add this to its `config.toml`:
 
@@ -572,7 +576,7 @@ The `[context]` section of the configuration cascade (Global → Topic → Agent
 |---|---|---|---|
 | `assembly` | string | `"default"` | Named context assembly to use |
 | `alternatives` | array of strings | `[]` | Named assemblies registered as hidden alternatives; selection records the chosen name locally |
-| `timeout` | integer (1–60) | `5` | Assembly timeout in seconds |
+| `timeout` | positive integer | `5` | Assembly timeout in seconds |
 | `budget` | integer or absent | absent | Context token budget; must be positive when set |
 | `compaction_threshold` | `{ messages = N }` or `{ tokens = N }`, or absent | absent (100 messages) | Size past which a turn's context is compacted; `N` must be positive |
 | `diagnosis_reader_model` | string or absent | absent (session's own model) | Model entry or alias for the diagnosis readers during wall succession |
@@ -633,9 +637,11 @@ are made by editing `config.toml`. Restart the gateway to apply them:
 - **Desktop app:** quit and reopen the app.
 - **Standalone process:** stop and start the process.
 
-Sessions whose topic or agent has its own `config.toml` re-resolve the full
-configuration hierarchy (global file included) on each turn, so edits can
-reach those sessions without a restart.
+Only the global `config.toml` needs the restart: it is read when the gateway
+starts and rewritten by Settings saves, which apply at once. A topic's or
+agent's `config.toml` and `instructions/` are read at each turn and overlaid
+on the running configuration, so an edit there applies to the next turn
+under that scope, in every session alike, with no restart.
 
 ### Global switch
 
@@ -672,8 +678,10 @@ forced_variant = "family-fallback"
 Restart the gateway after changing either key.
 
 Location ids are application-defined strings. The shipped locations are
-`context.assembly`, `context.working_norms`, `task.prompt`, and
-`prompts.memory_curator`.
+`context.assembly`, `context.working_norms`, `task.prompt`,
+`prompts.memory_curator`, and `prompts.succession_summary` (the instruction a
+conversation summary is written under, selected when a session first needs a
+summary).
 
 ### Alternatives
 
@@ -694,7 +702,7 @@ assembly = "default"
 alternatives = ["my-variant"]
 ```
 
-The script runs in a caged QuickJS runtime (no IO, no network, no timers)
+The script runs in a caged V8 isolate (no IO, no network, no timers, no clock)
 with four globals:
 
 - `elements` — the turn's context elements, read-only:
@@ -718,8 +726,11 @@ add(byName.prompts);
 add(byName.history);
 ```
 
-A script that errors (missing file, syntax error, runtime error) falls back
-to the built-in default assembly. A script that runs without error but
+Each assembly has separate 32 MiB ceilings for its heap and its
+fixed-length buffer backing stores. Resizable buffers are unavailable.
+
+When a script errors or reaches a limit, the built-in default assembly
+runs and the context report records the reason. A script that runs without error but
 leaves out baseline elements has them restored by the baseline floor, with
 warnings — except elements the script declares as omitted via `omit()`,
 which stay out. If the final composition ends up genuinely empty (every
@@ -727,7 +738,7 @@ baseline element was declared omitted and the script added nothing else),
 the assembly also falls back to the default.
 
 The other shipped locations (`context.working_norms`, `task.prompt`,
-`prompts.memory_curator`) have their alternatives defined in the gateway
+`prompts.memory_curator`, `prompts.succession_summary`) have their alternatives defined in the gateway
 source and cannot be extended through configuration. For
 `context.working_norms` the registered variants are `authored-v1` (the
 default) and `family-fallback`.
@@ -2060,10 +2071,9 @@ configuration; their names come from the plugin manifest.
 
 # Workflow engine
 
-The workflow engine executes front-loaded JavaScript scripts inside a
-sandboxed QuickJS runtime. Each run is a single script evaluation; the host
-(the gateway) journals every non-deterministic call so a crashed or parked
-run replays from its journal.
+Each workflow run evaluates its script in a separate V8 isolate
+(`swage-isolate`). The gateway journals calls to the host so an interrupted
+or parked run can replay them.
 
 Primary sources: `crates/swage-workflow/src/engine.rs` (the JS sandbox and
 host bindings), `crates/swage-workflow/src/host.rs` (the `WorkflowHost`
@@ -2090,8 +2100,9 @@ serialisation, so the cap is a soft admission gate on `start_run`
 callers rather than a hard gateway-wide limit.
 
 `start_run` validates the budget, creates a `NewWorkflowRun` record
-(with `source_hash` as SHA-256 of source, `engine_version:
-"rquickjs-0.12.0"`), then calls `launch_existing_run`.
+(with `source_hash` as SHA-256 of source and `engine_version` as the
+`v8-<version>` returned by `swage_workflow::engine_version()`), then calls
+`launch_existing_run`.
 
 `launch_existing_run` is the shared path for new and resumed runs:
 
@@ -2117,11 +2128,17 @@ Terminal state resolution:
 
 ## Scripts
 
-Scripts are JavaScript evaluated in a sandboxed QuickJS runtime with only
-these intrinsics: `Eval`, `Json`, `Promise`, `MapSet`, `RegExpCompiler`,
-`RegExp`. `globalThis.eval` is deleted; `Math.random` throws
-`NondeterministicCallError`. `Date`, `setTimeout`, `fetch`, `process` are
-absent.
+The isolate has no ambient access to I/O, timers, or clocks. `Math.random`
+and host-locale methods such as `toLocaleString()` throw
+`NondeterministicCallError`. Workflows obtain external values through the
+host API so replay can reproduce them.
+
+`EngineLimits::memory_bytes` independently caps the heap and the combined
+backing stores of live buffers. Programs can use fixed-length buffers and
+typed arrays. Resizable buffers are unavailable. Reaching the heap,
+buffer or uninterrupted execution limit returns
+`WorkflowEngineError::Terminated` and the gateway records an
+`engine_terminated` audit event.
 
 ### Meta header
 
@@ -2598,9 +2615,9 @@ would change and replay would fail.
 
 ## Cancellation
 
-The `CancellationToken` is installed as the QuickJS interrupt handler
-(checked between JS opcodes) and raced against the execution future via
-`tokio::select!`. Result: `WorkflowEngineError::Cancelled`.
+The isolate checks the cancellation token while waiting on a host call.
+Its watchdog checks the same token to stop running JavaScript, including a
+loop that never yields. The engine returns `WorkflowEngineError::Cancelled`.
 
 `cancel_run` cancels the token. For parked runs (no engine to signal),
 it directly sets state to `cancelled` in storage.
