@@ -176,8 +176,15 @@ pub(crate) async fn apply_provider_snapshot_event(
 pub(super) async fn known_secret_values(
     state: &AppState,
 ) -> Result<Vec<String>, swage_core::StorageError> {
-    let mut values = state
-        .secret_manager
+    registered_secret_values(&state.secret_manager).await
+}
+
+/// Every registered secret's value, longest first so that a value containing
+/// another is masked whole.
+pub(crate) async fn registered_secret_values(
+    secret_manager: &crate::secret::SecretManager,
+) -> Result<Vec<String>, swage_core::StorageError> {
+    let mut values = secret_manager
         .known_values()
         .await
         .map_err(|error| match error {
@@ -202,6 +209,22 @@ pub(super) fn redact_text(text: &mut String, secret_values: &[impl AsRef<str>]) 
         }
     }
     replaced
+}
+
+/// Mask every registered value in text that may hold them inside serialised
+/// JSON, where a value with quotes, backslashes or control characters appears
+/// escaped: both the escaped and the plain form are replaced.
+pub(crate) fn redact_serialised_text(text: &mut String, secret_values: &[String]) -> bool {
+    let mut changed = false;
+    for secret in secret_values {
+        let encoded = serde_json::to_string(secret).expect("secret text serialises");
+        let escaped = &encoded[1..encoded.len() - 1];
+        if escaped != secret.as_str() {
+            changed |= redact_text(text, &[escaped]);
+        }
+        changed |= redact_text(text, &[secret.as_str()]);
+    }
+    changed
 }
 
 pub(super) fn redact_secret_values(
