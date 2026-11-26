@@ -741,12 +741,17 @@ pub(super) async fn process_turn_with_composition_and_focus(
             let ending_turn_id = turn_id.unwrap_or(prepared_turn_id);
             // A shutdown records interruption before waking the same token
             // used by Stop. The turn's recorded outcome decides what to send.
-            if state
+            let interrupted_by_shutdown = state
                 .turn_shutdown_started
                 .load(std::sync::atomic::Ordering::Acquire)
-                && let Ok(Some(turn)) = state.storage.get_turn(ending_turn_id).await
-                && turn.state == TurnState::Interrupted
-            {
+                && state
+                    .storage
+                    .get_turn(ending_turn_id)
+                    .await
+                    .is_ok_and(|turn| {
+                        turn.is_some_and(|turn| turn.state == TurnState::Interrupted)
+                    });
+            if interrupted_by_shutdown {
                 let message = crate::shutdown::TURN_SHUTDOWN_REASON;
                 if let Some(reason) = projection::record_failure_explanation(
                     state,
