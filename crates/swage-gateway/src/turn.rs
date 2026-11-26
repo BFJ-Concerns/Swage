@@ -738,9 +738,33 @@ pub(super) async fn process_turn_with_composition_and_focus(
             ));
         }
         Ok(Err(AgentError::Cancelled)) => {
-            // Cancellation is cooperative — the agent already set
-            // TurnState::Cancelled and ThreadState::Idle in storage.
-            let _ = ws_tx.send(ServerEvent::Cancelled {});
+            let ending_turn_id = turn_id.unwrap_or(prepared_turn_id);
+            // A shutdown records interruption before waking the same token
+            // used by Stop. The turn's recorded outcome decides what to send.
+            if state
+                .turn_shutdown_started
+                .load(std::sync::atomic::Ordering::Acquire)
+                && let Ok(Some(turn)) = state.storage.get_turn(ending_turn_id).await
+                && turn.state == TurnState::Interrupted
+            {
+                let message = crate::shutdown::TURN_SHUTDOWN_REASON;
+                if let Some(reason) = projection::record_failure_explanation(
+                    state,
+                    session_id,
+                    ending_turn_id,
+                    message,
+                )
+                .await
+                {
+                    record_integrity_lost.get_or_insert(reason);
+                }
+                let _ = ws_tx.send(ServerEvent::Error {
+                    code: "gateway_shutdown".to_owned(),
+                    message: message.to_owned(),
+                });
+            } else {
+                let _ = ws_tx.send(ServerEvent::Cancelled {});
+            }
         }
         Ok(Err(error @ AgentError::ApprovalTimedOut)) => {
             let message = error.to_string();

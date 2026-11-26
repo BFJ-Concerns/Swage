@@ -266,6 +266,34 @@ describe("provider failure notice", () => {
     expect(document.querySelector(".turn-error p")?.textContent).toContain("using model Queued-Model failed");
   });
 
+  it("shows the gateway's model for a failed turn with no reply", () => {
+    const request: MessageView = {
+      role: "user", content: "Hello", timestamp: "2026-10-15T12:00:00Z",
+      turn_state: "failed",
+      failure_message: "Model routed-model:free: provider 'proxy' at https://example.test: connection reset",
+    };
+    component = mount(MessageDisplay, { target: document.body, props: { store: makeConversationStore([request]) } });
+    flushSync();
+    const summary = document.querySelector(".turn-error p")!.textContent!;
+    expect(summary).toContain("provider proxy");
+    expect(summary).toContain("using model routed-model:free failed");
+  });
+
+  it.each([
+    ["gateway_shutdown", "The gateway shut down while the turn was running."],
+    ["approval_timeout", "approval timed out before tool execution; turn interrupted"],
+  ])("shows the cause of %s directly", (code, reason) => {
+    const streaming = makeStreamingStore();
+    Object.defineProperty(streaming, "turnError", { get: () => ({ code, message: reason }) });
+    const request: MessageView = { role: "user", content: "Hello", timestamp: "2026-10-15T12:00:00Z" };
+    component = mount(MessageDisplay, {
+      target: document.body,
+      props: { store: makeConversationStore([request]), streamingStore: streaming },
+    });
+    flushSync();
+    expect(document.querySelector(".turn-error p")?.textContent).toBe(reason);
+  });
+
   it("offers generic recovery without inventing a provider or error category", () => {
     const streaming = makeStreamingStore();
     Object.defineProperty(streaming, "turnError", { get: () => ({ code: "provider_error", message: "opaque diagnostic" }) });

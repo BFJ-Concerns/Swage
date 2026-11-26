@@ -7344,6 +7344,91 @@ async fn cancelled_turn_stores_partial_and_marks_cancelled() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_reports_interruption_live_and_in_the_reloaded_conversation() {
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session_id = storage
+        .create_session(new_session(topic.id))
+        .await
+        .unwrap()
+        .id;
+    ThreadStore::create(
+        storage.as_ref(),
+        NewThread {
+            session_id,
+            agent_id: "gateway".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let state = AppState::for_test(
+        storage.clone(),
+        storage.clone(),
+        Arc::new(PendingProvider),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+    );
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let running_state = state.clone();
+    let handle = tokio::spawn(async move {
+        process_turn(
+            &running_state,
+            session_id,
+            None,
+            "Hi",
+            tx,
+            Arc::new(Mutex::new(SubscriptionState::new(true))),
+            None,
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !matches!(
+            rx.recv().await.expect("turn event"),
+            ServerEvent::Token { .. }
+        ) {}
+    })
+    .await
+    .unwrap();
+    crate::shutdown::shutdown_active_turns(&state).await;
+    handle.await.unwrap().unwrap();
+
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ServerEvent::Cancelled {}))
+    );
+    let live_reason = events
+        .iter()
+        .find_map(|event| match event {
+            ServerEvent::Error { code, message } if code == "gateway_shutdown" => {
+                Some(message.as_str())
+            }
+            _ => None,
+        })
+        .unwrap();
+    let conversation = crate::service::ConversationService::new(storage.clone(), storage.clone())
+        .get_conversation(session_id)
+        .await
+        .unwrap();
+    let partial = conversation.messages.last().unwrap();
+    assert_eq!(partial.content, INTERRUPTED_PARTIAL);
+    assert_eq!(
+        partial.turn_state,
+        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+    );
+    assert_eq!(partial.failure_message.as_deref(), Some(live_reason));
+    let turn = storage
+        .get_turn(partial.turn_id.unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(turn.failure_message.as_deref(), Some(live_reason));
+}
+
 #[tokio::test]
 async fn cancelled_turn_without_partial_stores_no_assistant_response() {
     let storage = Arc::new(MockStorage::new());
@@ -7801,6 +7886,24 @@ async fn provider_retry_events_name_the_requested_turn_model() {
             "retry status must name the request model"
         );
     }
+    let live_failure = events
+        .iter()
+        .find_map(|event| match event {
+            ServerEvent::Error { message, .. } => Some(message.as_str()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(live_failure.contains(&requested_model));
+    let conversation =
+        crate::service::ConversationService::new(state.storage.clone(), state.topic_store.clone())
+            .get_conversation(session_id)
+            .await
+            .unwrap();
+    assert_eq!(conversation.messages.len(), 1);
+    assert_eq!(
+        conversation.messages[0].failure_message.as_deref(),
+        Some(live_failure)
+    );
 }
 
 #[tokio::test]
@@ -7834,6 +7937,89 @@ async fn provider_error_marks_turn_failed() {
     let thread_id = threads[0].id;
     let turns = state.storage.list_turns_by_thread(thread_id).await.unwrap();
     assert_eq!(turns[0].state, TurnState::Failed);
+}
+
+#[tokio::test]
+async fn provider_failure_keeps_partial_response_with_its_tool_calls() {
+    let (state, session_id, _) = make_state_with_capturing_tools(vec![
+        vec![
+            StreamChunk::Delta {
+                content: "Starting. ".into(),
+            },
+            StreamChunk::ToolUse {
+                call_id: "effect-before-failure".into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({"text": "echoed"}),
+            },
+        ],
+        vec![
+            StreamChunk::Delta {
+                content: "Partial reply".into(),
+            },
+            StreamChunk::Error {
+                message: "provider disconnected".into(),
+            },
+        ],
+    ])
+    .await;
+    let mut config = state.active_config();
+    config.set_default_model_id("partial-response-model".to_owned());
+    state.replace_runtime(
+        crate::test_support::with_mock_provider_entries(config),
+        state.active_provider(),
+        crate::tool::ToolDispatcher::allow_all(vec![Arc::new(EchoMockTool) as Arc<dyn Tool>]),
+    );
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        "Use echo",
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .unwrap();
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let live_partial: String = events
+        .iter()
+        .filter_map(|event| match event {
+            ServerEvent::Token { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    let live_failure = events
+        .iter()
+        .find_map(|event| match event {
+            ServerEvent::Error { code, message } if code == "agent_error" => Some(message.as_str()),
+            _ => None,
+        })
+        .unwrap();
+
+    let conversation =
+        crate::service::ConversationService::new(state.storage.clone(), state.topic_store.clone())
+            .get_conversation(session_id)
+            .await
+            .unwrap();
+    let reply = conversation.messages.last().unwrap();
+    assert_eq!(live_partial, "Starting. Partial reply");
+    assert_eq!(reply.content, live_partial);
+    assert_eq!(reply.tool_calls[0].call_id, "effect-before-failure");
+    assert_eq!(reply.failure_message.as_deref(), Some(live_failure));
+    assert!(live_failure.contains("partial-response-model"));
+    assert!(live_failure.contains("provider disconnected"));
+    let turn = state
+        .storage
+        .get_turn(reply.turn_id.unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(turn.state, TurnState::Failed);
+    assert_eq!(
+        turn.assistant_response.as_deref(),
+        Some(live_partial.as_str())
+    );
 }
 
 #[tokio::test]
@@ -22590,6 +22776,22 @@ async fn interrupt_policy_expiry_records_unexecuted_call_and_timeout_terminal_ev
         .await
         .unwrap()
         .remove(0);
+    let conversation =
+        crate::service::ConversationService::new(state.storage.clone(), state.topic_store.clone())
+            .get_conversation(session_id)
+            .await
+            .unwrap();
+    let expired = conversation.messages.last().unwrap();
+    assert_eq!(
+        expired.turn_state,
+        Some(swage_protocol::client::conversation::TurnState::Interrupted)
+    );
+    assert!(
+        expired
+            .failure_message
+            .as_deref()
+            .is_some_and(|reason| reason.contains("approval timed out"))
+    );
     let calls = state
         .storage
         .list_tool_calls_by_turn(turn.id)

@@ -634,6 +634,21 @@ describe("error events", () => {
     ]);
   });
 
+  it("keeps a failed partial response and its tool calls on the same message", () => {
+    const conv = createMockConversationStore();
+    const store = createStreamingStore({ conversationStore: conv });
+    store.startTurn("question");
+    store.handleServerEvent({ type: "tool_start", call_id: "call-1", tool: "echo", arguments: {} });
+    store.handleServerEvent({ type: "token", content: "partial" });
+    store.handleServerEvent({ type: "error", code: "agent_error", message: "Model example: provider unavailable" });
+    expect(conv.getMessages().find(message => message.role === "assistant")).toMatchObject({
+      content: "partial",
+      turn_state: "failed",
+      tool_calls: [{ call_id: "call-1" }],
+    });
+    expect(store.activeToolCalls).toEqual([]);
+  });
+
   it("keeps a streamed refusal as refused rather than failed", () => {
     const conv = createMockConversationStore();
     const store = createStreamingStore({ conversationStore: conv });
@@ -719,7 +734,10 @@ describe("error events", () => {
     store.handleServerEvent(event, "conv-a");
 
     expect(appendAssistantMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ content: "Partial A", turn_state: "failed" }),
+      expect.objectContaining({
+        content: "Partial A",
+        turn_state: event.type === "shutdown" ? "interrupted" : "failed",
+      }),
       "conv-a",
     );
     expect(store.streamFor?.("conv-a").streamedContent).toBe("");
@@ -1130,6 +1148,7 @@ describe("shutdown events", () => {
       .filter((m) => m.role === "assistant");
     expect(assistantMessages).toHaveLength(1);
     expect(assistantMessages[0].content).toBe("partial");
+    expect(assistantMessages[0].turn_state).toBe("interrupted");
   });
 });
 

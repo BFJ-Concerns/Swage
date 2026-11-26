@@ -208,10 +208,14 @@
   const turnError = $derived(streamInView ? (stream?.turnError ?? streamingStore?.turnError ?? null) : null);
   const providerRetry = $derived(streamInView ? (stream?.providerRetry ?? streamingStore?.providerRetry ?? null) : null);
   const recordedFailure = $derived(messages.at(-1)?.failure_message === turnError?.message);
-  function errorSummary(detail: string, model?: string | null, catalogueSelection = false): string {
-    // The diagnostic belongs to this failure; a conversation selection can
-    // already have changed or still reflect a previous turn.
-    const provider = detail.match(/^(?:provider error: )?provider '([^']+)' at /)?.[1];
+  const liveInterruption = $derived(turnError?.code === "gateway_shutdown" || turnError?.code === "approval_timeout");
+  function errorSummary(detail: string, model?: string | null, catalogueSelection = false, interrupted = false): string {
+    if (interrupted) return detail;
+    // The diagnostic identifies the model that sent the request. The
+    // conversation's current selection can change before the notice renders.
+    const recorded = detail.match(/^Model (.+?): /);
+    const diagnostic = recorded ? detail.slice(recorded[0].length) : detail;
+    const provider = diagnostic.match(/^(?:provider error: )?provider '([^']+)' at /)?.[1];
     let reportedCause: string | undefined;
     const jsonStart = detail.indexOf("{");
     if (jsonStart >= 0) {
@@ -222,7 +226,8 @@
     }
     const route = provider ? ` to provider ${provider}` : "";
     const namedModel = catalogueSelection && provider && model?.startsWith(`${provider}:`) ? model.slice(provider.length + 1) : model;
-    const selection = namedModel ? ` using model ${namedModel}` : "";
+    const effectiveModel = recorded?.[1] ?? namedModel;
+    const selection = effectiveModel ? ` using model ${effectiveModel}` : "";
     return `The request${route}${selection} failed. ${reportedCause ? `Reported cause: ${reportedCause}` : "See the details for the reported cause."}`;
   }
   const retryWaitSeconds = $derived(
@@ -302,7 +307,7 @@
   // live region below updates a handful of times per turn, not per token.
   const streamingStatus = $derived(
     turnError
-      ? errorSummary(turnError.message, turnError.selectedModelId, true)
+      ? errorSummary(turnError.message, turnError.selectedModelId, true, liveInterruption)
       : providerRetry
         ? `Retrying provider: attempt ${providerRetry.attempt} of ${providerRetry.max_retries}`
         : isStreaming
@@ -429,7 +434,7 @@
           </p>
         {/if}
         {#if message.failure_message}
-          {@render failureNotice(message.failure_message, message.model, retryContent(message))}
+          {@render failureNotice(message.failure_message, message.model, retryContent(message), false, message.turn_state === "interrupted")}
         {/if}
         {#if !message.failure_message && retryContent(message) !== null && !isStreaming}
           <button class="branch-link" onclick={() => retry(retryContent(message)!)}>Retry</button>
@@ -520,16 +525,16 @@
 
     <!-- ---- Turn error: shown inline after any partial response ---- -->
     {#if turnError && !recordedFailure}
-      {@render failureNotice(turnError.message, turnError.selectedModelId, lastPersonsMessage?.content ?? null, true)}
+      {@render failureNotice(turnError.message, turnError.selectedModelId, lastPersonsMessage?.content ?? null, true, liveInterruption)}
     {/if}
   {/if}
 </div>
 
-{#snippet failureNotice(detail: string, model: string | null | undefined, content: string | null, catalogueSelection = false)}
+{#snippet failureNotice(detail: string, model: string | null | undefined, content: string | null, catalogueSelection = false, interrupted = false)}
   <div class="turn-error" role="alert">
     <span class="error-icon" aria-hidden="true">⚠</span>
     <div class="error-message">
-      <p>{errorSummary(detail, model, catalogueSelection)}</p>
+      <p>{errorSummary(detail, model, catalogueSelection, interrupted)}</p>
       <div class="error-actions"><button class="branch-link" disabled={isStreaming || content === null} onclick={() => content !== null && retry(content)}>Retry</button><a href="/settings/providers">Provider settings</a></div>
       <details><summary>Technical details</summary><pre>{detail}</pre></details>
     </div>

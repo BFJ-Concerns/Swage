@@ -455,27 +455,29 @@ export function createStreamingStore(
           stream.providerRetryStore.set(null);
           break;
 
-        case "error": {
-          // Preserve the terminal reason beside whatever the user saw.
-          const approvalTimedOut = event.code === "approval_timeout";
-          const refused = event.code === "provider_refused";
-          if (approvalTimedOut && !get(stream.streamedContentStore) && options?.conversationStore?.settleUnansweredRequest) {
+        case "error":
+        case "shutdown": {
+          const code = event.type === "shutdown" ? "gateway_shutdown" : event.code;
+          const message = event.type === "shutdown" ? event.reason : event.message;
+          const interrupted = code === "approval_timeout" || code === "gateway_shutdown";
+          const refused = code === "provider_refused";
+          const toolCalls = get(stream.activeToolCallsStore);
+          const settleCalls = interrupted || refused || code === "agent_error";
+          const hasActiveTurn = get(stream.isStreamingStore) || event.type === "error";
+          if (interrupted && hasActiveTurn && !get(stream.streamedContentStore) && options?.conversationStore?.settleUnansweredRequest) {
             options.conversationStore.settleUnansweredRequest(
-              { turn_state: "interrupted", tool_calls: get(stream.activeToolCallsStore) }, ownerId,
+              { turn_state: "interrupted", tool_calls: toolCalls }, ownerId,
             );
-            stream.activeToolCallsStore.set([]);
           } else {
             settleResponse(
-              ownerId, stream, approvalTimedOut ? "interrupted" : refused ? "refused" : "failed", undefined,
-              refused ? get(stream.activeToolCallsStore) : undefined,
+              ownerId, stream, interrupted ? "interrupted" : refused ? "refused" : "failed", undefined,
+              settleCalls ? toolCalls : undefined,
             );
           }
-          stream.turnErrorStore.set({ code: event.code, message: event.message, ...(stream.selectedModelId ? { selectedModelId: stream.selectedModelId } : {}) });
+          stream.turnErrorStore.set({ code, message, ...(stream.selectedModelId ? { selectedModelId: stream.selectedModelId } : {}) });
           setStreamActive(ownerId, stream, false);
           stream.turnStartedAtStore.set(null);
-          // Refused turns own their calls in history; other errors retain
-          // live calls so the UI can show what was in flight.
-          if (refused) stream.activeToolCallsStore.set([]);
+          if (settleCalls) stream.activeToolCallsStore.set([]);
           stream.providerRetryStore.set(null);
           break;
         }
@@ -519,17 +521,6 @@ export function createStreamingStore(
           stream.providerRetryStore.set(null);
           break;
         }
-
-        case "shutdown":
-          // The gateway is shutting down. Preserve any partial content and
-          // surface the shutdown as a turn error so the UI can notify the user.
-          // The WebSocket will close shortly after this event arrives.
-          settleResponse(ownerId, stream, "failed");
-          stream.turnErrorStore.set({ code: "gateway_shutdown", message: event.reason });
-          setStreamActive(ownerId, stream, false);
-          stream.turnStartedAtStore.set(null);
-          stream.providerRetryStore.set(null);
-          break;
 
         case "provider_retry_started":
           stream.providerRetryStore.set({

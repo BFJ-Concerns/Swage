@@ -2831,6 +2831,10 @@ impl Agent {
                             });
                         }
                         Some(StreamChunk::Error { message }) => {
+                            let persisted = self.persist_terminal_response(
+                                execution,
+                                &format!("{accumulated_prefix}{text}"),
+                            ).await;
                             self.fail_turn_and_idle(execution.turn_id, execution.thread_id).await;
                             let _ = event_tx.send(AgentEvent::ProviderRoundSettled {
                                 turn_id: execution.turn_id,
@@ -2843,6 +2847,12 @@ impl Agent {
                                 message: message.clone(),
                                 provider_failure: true,
                             });
+                            if let Err(error) = persisted {
+                                let _ = event_tx.send(AgentEvent::RecordIntegrityLost {
+                                    turn_id: execution.turn_id,
+                                    reason: format!("partial response could not be persisted: {error}"),
+                                });
+                            }
                             return Err(AgentError::ProviderFailed(
                                 swage_core::ProviderError::StreamError(message),
                             ));
