@@ -665,9 +665,11 @@ async fn track_delegated_session(
                     let session_id = started.child_session_id;
                     let turn_id = started.child_turn_id;
                     state.active_turns.lock().await.insert(session_id, token);
+                    let registration = RegisteredChild { state: state.clone(), session_id, turn_id, settled: false };
                     crate::service::announce_session_updated(&state.broadcast, session_id);
                     if let Some(sender) = forward_started { let _ = sender.send(started); }
                     let result = execution.await;
+                    registration.settle();
                     announce_delegated_outcome(state, session_id, turn_id, &result).await;
                     state.active_turns.lock().await.remove(&session_id);
                     crate::service::announce_session_updated(&state.broadcast, session_id);
@@ -689,6 +691,67 @@ async fn track_delegated_session(
             }
             result
         },
+    }
+}
+
+/// A delegated child registered as running. A Wait-mode child is awaited
+/// inside its parent's tool call, which is dropped when the parent is stopped;
+/// the child's execution goes with it. Dropped before it settles, the
+/// registration records the child's turn as cancelled, tells its open view so,
+/// and releases the session from the running registry, so the child is not
+/// shown or treated as running afterwards. Its queue stays standing, as after
+/// any stop.
+struct RegisteredChild {
+    state: AppState,
+    session_id: Uuid,
+    turn_id: Uuid,
+    settled: bool,
+}
+
+impl RegisteredChild {
+    /// The child's execution returned; its caller settles it.
+    fn settle(mut self) {
+        self.settled = true;
+    }
+}
+
+impl Drop for RegisteredChild {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let (state, session_id, turn_id) = (self.state.clone(), self.session_id, self.turn_id);
+        // Drop is synchronous; the cleanup awaits storage and the registry.
+        std::mem::drop(tokio::spawn(async move {
+            use swage_storage::TurnState;
+            match state.storage.get_turn(turn_id).await {
+                Ok(Some(turn))
+                    if matches!(
+                        turn.state,
+                        TurnState::Pending
+                            | TurnState::Processing
+                            | TurnState::Delegating
+                            | TurnState::AwaitingApproval
+                    ) =>
+                {
+                    if let Err(error) = state
+                        .storage
+                        .update_turn_state(turn_id, TurnState::Cancelled)
+                        .await
+                    {
+                        tracing::warn!(%turn_id, %error, "could not record a dropped delegated turn as cancelled");
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%turn_id, %error, "could not read a dropped delegated turn");
+                }
+            }
+            announce_delegated_outcome(&state, session_id, turn_id, &Err(AgentError::Cancelled))
+                .await;
+            state.active_turns.lock().await.remove(&session_id);
+            crate::service::announce_session_updated(&state.broadcast, session_id);
+        }));
     }
 }
 
@@ -2095,6 +2158,88 @@ mod settlement_tests {
         let ended = next_signal(&mut signals);
         drop(registration);
         assert_eq!(ended.await, session_id);
+    }
+
+    #[tokio::test]
+    async fn a_child_dropped_with_its_stopped_parent_is_released_and_recorded_cancelled() {
+        let (state, session_id) = super::super::tests::make_state_with_session(vec![]).await;
+        let thread_id = state.storage.list_by_session(session_id).await.unwrap()[0].id;
+        let turn = state
+            .storage
+            .create_turn(NewTurn {
+                thread_id,
+                agent_id: "gateway".into(),
+                state: TurnState::Processing,
+                user_input: Some("Delegated request".into()),
+                parent_turn_id: None,
+            })
+            .await
+            .unwrap();
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        state.listen_to_session(session_id, events).await;
+        let (started, started_rx) = oneshot::channel();
+        started
+            .send(swage_agent::DetachedDelegation {
+                delegate_message_id: Uuid::new_v4(),
+                child_session_id: session_id,
+                child_thread_id: thread_id,
+                target_agent_id: "gateway".into(),
+                child_turn_id: turn.id,
+                status: None,
+                status_as_of: None,
+                error_message: None,
+            })
+            .ok()
+            .unwrap();
+        let tracking = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                let execution = Box::pin(std::future::pending::<
+                    Result<swage_storage::AgentMessage, AgentError>,
+                >());
+                track_delegated_session(
+                    &state,
+                    CancellationToken::new(),
+                    started_rx,
+                    None,
+                    execution,
+                )
+                .await
+            })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !state.active_turns.lock().await.contains_key(&session_id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the child registers as running");
+
+        // The parent's stop drops its tool call, and the child with it.
+        tracking.abort();
+        let _ = tracking.await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while state.active_turns.lock().await.contains_key(&session_id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the dropped child leaves the running registry");
+        let recorded = state.storage.get_turn(turn.id).await.unwrap().unwrap();
+        assert_eq!(recorded.state, TurnState::Cancelled);
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(crate::websocket::ServerEvent::Cancelled {}) = receiver.recv().await {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(
+            settled.is_ok(),
+            "the child's open view is told it was cancelled"
+        );
     }
 
     #[tokio::test]
