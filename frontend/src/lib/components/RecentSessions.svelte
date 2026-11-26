@@ -149,6 +149,7 @@
 
   function latestOutcome(entry: RecentSessionsEntry): string {
     const latest = entry.automated[0];
+    if (latest.awaiting_approval) return "Waiting on you";
     if (latest.has_running_turn) return "Running";
     const outcome = sessionOutcomeLabel(latest.latest_turn_state);
     if (outcome) return outcome;
@@ -262,7 +263,7 @@
               <span class="meta">
                 {#if session}
                   <span class="topic-label" title={session.topic_name}>{session.topic_name}</span>
-                  {#if session.has_running_turn}<span class="running">running</span>{/if}
+                  {#if session.awaiting_approval}<span class="waiting">waiting on you</span>{:else if session.has_running_turn}<span class="running">running</span>{/if}
                   {#if outcome}<span class="interrupted"><span aria-hidden="true">⚠</span> {outcome}</span>{/if}
                 {:else if entry.source.kind === "schedule"}
                   schedule
@@ -298,7 +299,7 @@
                       <span class="meta">
                         {originLabel(automated)} · {automated.agent_id}
                         {#if outcome}<span class="interrupted"><span aria-hidden="true">⚠</span> {outcome}</span>{/if}
-                        {#if automated.has_running_turn}<span class="running">running</span>{/if}
+                        {#if automated.awaiting_approval}<span class="waiting">waiting on you</span>{:else if automated.has_running_turn}<span class="running">running</span>{/if}
                       </span>
                       <span class="timestamp">{relativeTime(automated.last_activity)}</span>
                     </span>
@@ -504,7 +505,8 @@
     color: var(--ink-orange);
   }
 
-  .interrupted {
+  .interrupted,
+  .waiting {
     margin-left: 6px;
     color: var(--ink-orange);
   }

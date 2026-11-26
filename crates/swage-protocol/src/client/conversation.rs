@@ -414,6 +414,8 @@ pub struct RecentSession {
     pub latest_turn_state: Option<TurnState>,
     /// A turn is executing on the session right now.
     pub has_running_turn: bool,
+    /// The running turn is held on a request only the person can answer.
+    pub awaiting_approval: bool,
     /// Set while the inactivity sweep has the session hidden from the
     /// recent list.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -30,4 +30,4 @@ scope?: ApprovalDecisionScope,
 /**
  * Optional explanation from the human reviewer.
  */
-reason?: string | null, } | { "type": "cancel", } | { "type": "subscribe", channels: Array<string>, } | { "type": "unsubscribe", channels: Array<string>, } | { "type": "activate_skill", name: string, } | { "type": "deactivate_skill", name: string, };
+reason?: string | null, } | { "type": "subscribe", channels: Array<string>, } | { "type": "unsubscribe", channels: Array<string>, } | { "type": "activate_skill", name: string, } | { "type": "deactivate_skill", name: string, };

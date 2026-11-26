@@ -8723,6 +8723,7 @@ async fn launch_existing_run(
                     metadata: serde_json::json!({}),
                 })
                 .await;
+            let _ = broadcast.send(ServerEvent::WorkflowRunUpdated { run_id });
             remove_active_workflow_generation(&active, run_id, &cancellation).await;
             return;
         }
@@ -9538,7 +9539,15 @@ pub async fn cancel_run(
             .await
             .map_err(internal)?
             .ok_or_else(|| ApiError::not_found("workflow run", id))?;
-        return Ok(Json(run_wire(cancelled)?));
+        let cancelled = run_wire(cancelled)?;
+        // The run is terminal now, as a running run is once its engine
+        // stops: announce it the same way.
+        let _ = state.broadcast.send(ServerEvent::WorkflowRunCompleted {
+            event: swage_protocol::client::workflow::WorkflowRunCompletedEvent {
+                run: cancelled.clone(),
+            },
+        });
+        return Ok(Json(cancelled));
     }
     Ok(Json(run_wire(run)?))
 }

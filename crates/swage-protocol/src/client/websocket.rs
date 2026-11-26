@@ -51,8 +51,6 @@ pub enum ClientEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
-    /// Cancel the currently active turn.
-    Cancel {},
     /// Subscribe to one or more observability channels by name.
     ///
     /// Valid channel names: `"context"`, `"tools"`. Unknown names are silently
@@ -147,6 +145,9 @@ pub enum ServerEvent {
     /// Clients showing the catalogue refetch it — the event is the signal,
     /// not the content.
     LibraryUpdated { entry_id: Uuid },
+    /// A workflow run started, parked on a durable wait, or ended. Views of
+    /// running work refetch; the event is the signal, not the content.
+    WorkflowRunUpdated { run_id: Uuid },
     /// A session row may have changed or entered or left a list. Refetch
     /// session lists to read the current rows from the gateway.
     SessionUpdated { session_id: Uuid },
