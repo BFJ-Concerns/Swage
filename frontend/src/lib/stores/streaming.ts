@@ -477,7 +477,13 @@ export function createStreamingStore(
           break;
 
         case "error": {
-          if (event.code === "request_failed" || event.code === "invalid_frame") {
+          if (
+            event.code === "request_failed" ||
+            event.code === "invalid_frame" ||
+            // A message that could not be delivered to a turn this tab only
+            // reads (another tab holds its socket) started nothing here.
+            (event.code === "not_connected" && !get(stream.isStreamingStore))
+          ) {
             // A request this client sent failed, or a frame could not be
             // read; any running turn carries on, so only the reason is shown.
             stream.turnErrorStore.set({ code: event.code, message: event.message });

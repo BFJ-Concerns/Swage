@@ -1480,6 +1480,37 @@ describe("errors that end no turn", () => {
   });
 });
 
+describe("an undeliverable message beside a turn this tab only reads", () => {
+  it("leaves the running request standing", () => {
+    const messages: MessageView[] = [{ role: "user", origin: "user", content: "Long task", timestamp: "2026-10-20T10:00:00Z", turn_state: "processing" }];
+    const settleUnansweredRequest = vi.fn();
+    const sendMessage = vi.fn();
+    const store = createStreamingStore({
+      conversationStore: {
+        activeConversation: { id: "other-tab", messages },
+        appendOptimisticUserMessage: vi.fn(), appendAssistantMessage: vi.fn(), settleUnansweredRequest,
+      },
+      connectionStore: { sendMessage },
+    });
+    store.startTurn("Follow-up");
+    expect(sendMessage).toHaveBeenCalled();
+    store.handleServerEvent({ type: "error", code: "not_connected", message: "Not connected to the conversation — the message was not sent." }, "other-tab");
+    expect(settleUnansweredRequest).not.toHaveBeenCalled();
+    expect(store.streamFor!("other-tab").isStreaming).toBe(true);
+    expect(store.streamFor!("other-tab").turnError?.code).toBe("not_connected");
+  });
+
+  it("still ends a send this tab started", () => {
+    const conv = createMockConversationStore();
+    const settleUnansweredRequest = vi.fn();
+    const store = createStreamingStore({ conversationStore: { ...conv, settleUnansweredRequest } });
+    store.startTurn("question");
+    store.handleServerEvent({ type: "error", code: "not_connected", message: "Not connected" });
+    expect(store.isStreaming).toBe(false);
+    expect(settleUnansweredRequest).toHaveBeenCalledWith({ turn_state: "failed", tool_calls: [] }, "test-conversation");
+  });
+});
+
 describe("gateway shutdown", () => {
   it("settles an unanswered request as interrupted, as the gateway records it", () => {
     const conv = createMockConversationStore();
