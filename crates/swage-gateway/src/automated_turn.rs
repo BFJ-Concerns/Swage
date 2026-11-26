@@ -335,8 +335,15 @@ mod tests {
             ]
         );
 
-        let announced = announcements
-            .try_recv()
+        // The turn also signals session lists as it starts and settles;
+        // those signals carry no message and are not the announcement.
+        let announced = std::iter::from_fn(|| announcements.try_recv().ok())
+            .find(|event| {
+                !matches!(
+                    event,
+                    swage_protocol::client::websocket::ServerEvent::SessionUpdated { .. }
+                )
+            })
             .expect("the brief is announced on the broadcast");
         match announced {
             swage_protocol::client::websocket::ServerEvent::MessageAppended {
