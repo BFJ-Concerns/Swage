@@ -8745,8 +8745,15 @@ async fn launch_existing_run(
                 "failed",
                 None,
                 Some(match stack {
-                    Some(stack) => format!("{message}\n{stack}"),
-                    None => message,
+                    Some(stack)
+                        if stack
+                            .strip_prefix(&message)
+                            .is_some_and(|rest| rest.is_empty() || rest.starts_with('\n')) =>
+                    {
+                        stack
+                    }
+                    Some(stack) if !stack.is_empty() => format!("{message}\n{stack}"),
+                    _ => message,
                 }),
             ),
             Ok(Err(problem)) => ("failed", None, Some(problem.to_string())),
