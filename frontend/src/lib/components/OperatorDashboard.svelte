@@ -151,9 +151,9 @@
   }
 
   // The gateway signals when a session's turn begins or settles and when a
-  // run starts or ends; signals come in bursts, so one read answers each.
+  // run starts, parks or ends; signals come in bursts, so one read answers each.
   const SIGNAL_COALESCE_MS = 100;
-  const FLEET_SIGNALS = new Set(["session_updated", "workflow_run_started", "workflow_run_completed", "lagged"]);
+  const FLEET_SIGNALS = new Set(["session_updated", "workflow_run_started", "workflow_run_updated", "workflow_run_completed", "lagged"]);
   let signalTimer: ReturnType<typeof setTimeout> | null = null;
 
   function reloadOnSignal(): void {

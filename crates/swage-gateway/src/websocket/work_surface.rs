@@ -32,9 +32,10 @@ use super::ServerEvent;
 /// `SurfaceUpdated` tells an open surface that a surface it may be showing has
 /// changed; `LibraryUpdated` tells a catalogue view that the shared library
 /// changed; `SessionUpdated` tells a session list that a session's running
-/// state changed; `WorkflowRunStarted` and `WorkflowRunCompleted` tell a view
-/// of running work that a run began or reached its terminal state (their
-/// payload is the run, but listeners refetch rather than read it);
+/// state changed; `WorkflowRunStarted`, `WorkflowRunUpdated` and
+/// `WorkflowRunCompleted` tell a view of running work that a run began,
+/// parked, or reached its terminal state (listeners refetch rather than read
+/// any payload);
 /// `Shutdown` tells it the gateway is going away. Everything else on the
 /// broadcast channel belongs to a conversation or to observability.
 pub(crate) fn is_work_surface_signal(event: &ServerEvent) -> bool {
@@ -44,6 +45,7 @@ pub(crate) fn is_work_surface_signal(event: &ServerEvent) -> bool {
             | ServerEvent::LibraryUpdated { .. }
             | ServerEvent::SessionUpdated { .. }
             | ServerEvent::WorkflowRunStarted { .. }
+            | ServerEvent::WorkflowRunUpdated { .. }
             | ServerEvent::WorkflowRunCompleted { .. }
             | ServerEvent::Lagged { .. }
             | ServerEvent::Shutdown { .. }

@@ -6534,6 +6534,25 @@ async fn cancelling_a_parked_run_settles_journal_and_records_terminal_budget() {
             None,
             root.path().to_path_buf(),
         );
+        // Views of running work hear the run park and, once cancelled, end.
+        // The broadcast is short, so its signals are gathered as they come.
+        let mut events = state.broadcast.subscribe();
+        let signals = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            loop {
+                match events.recv().await {
+                    Ok(event) if crate::websocket::work_surface::is_work_surface_signal(&event) => {
+                        let done = matches!(event, ServerEvent::WorkflowRunCompleted { .. });
+                        seen.push(event);
+                        if done {
+                            return seen;
+                        }
+                    }
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return seen,
+                }
+            }
+        });
         launch_existing_run(state.clone(), run.clone(), source, None)
             .await
             .expect("launch waiting run");
@@ -6545,6 +6564,25 @@ async fn cancelling_a_parked_run_settles_journal_and_records_terminal_budget() {
         let cancel_requested = api.cancel(run.id).await;
         assert_eq!(cancel_requested.id, run.id);
         wait_for_run_state(&storage, run.id, "cancelled").await;
+        let signals = tokio::time::timeout(std::time::Duration::from_secs(10), signals)
+            .await
+            .expect("the cancelled run is announced")
+            .expect("signal collector");
+        assert!(
+            signals.iter().any(|event| matches!(
+                event,
+                ServerEvent::WorkflowRunUpdated { run_id } if *run_id == run.id
+            )),
+            "parking is signalled: {signals:?}"
+        );
+        assert!(
+            matches!(
+                signals.last(),
+                Some(ServerEvent::WorkflowRunCompleted { event })
+                    if event.run.id == run.id && event.run.state == WorkflowRunState::Cancelled
+            ),
+            "the parked run's cancellation is announced as its end: {signals:?}"
+        );
         let journal = storage
             .list_workflow_journal(run.id)
             .await

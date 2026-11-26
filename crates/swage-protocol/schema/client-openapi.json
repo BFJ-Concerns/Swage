@@ -4918,6 +4918,24 @@
             "type": "object"
           },
           {
+            "description": "A workflow run's state changed without starting or ending — it parked\non a durable wait. Views of running work refetch; the event is the\nsignal, not the content.",
+            "properties": {
+              "run_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "type": {
+                "const": "workflow_run_updated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "run_id"
+            ],
+            "type": "object"
+          },
+          {
             "description": "A session's list-visible state changed: a turn began or settled on\nit, so it is running, idle, or left interrupted. Clients showing\nsession lists refetch — the event is the signal, not the content.",
             "properties": {
               "session_id": {

@@ -372,21 +372,24 @@ describe("OperatorDashboard", () => {
       expect(fleetRow("child-1").textContent).not.toContain("running");
       expect(fleetRow("child-1").querySelector("button")).toBeNull();
 
-      // A run ending, a dropped burst and a reconnect each re-read the fleet.
+      // A run ending, a run parking, a dropped burst and a reconnect each
+      // re-read the fleet.
       vi.mocked(operatorApi.fetchOperatorOverview).mockResolvedValue({ ...overview, workflow_runs: [] });
       channel.signal({ type: "workflow_run_completed", run: { id: "run-1" } } as unknown as ServerEvent);
       await vi.advanceTimersByTimeAsync(100);
       expect(document.querySelector('.ledger a[href="/workflow-runs/run-1"]')).toBeNull();
+      channel.signal({ type: "workflow_run_updated", run_id: "run-2" });
+      await vi.advanceTimersByTimeAsync(100);
       channel.signal({ type: "lagged", dropped: 3 });
       await vi.advanceTimersByTimeAsync(100);
       channel.reconnect();
       await vi.advanceTimersByTimeAsync(100);
-      expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledTimes(reads + 4);
+      expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledTimes(reads + 5);
 
       // Signals that say nothing about running work are ignored.
       channel.signal({ type: "library_updated", entry_id: "entry-1" });
       await vi.advanceTimersByTimeAsync(100);
-      expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledTimes(reads + 4);
+      expect(operatorApi.fetchOperatorOverview).toHaveBeenCalledTimes(reads + 5);
 
       unmount(component);
       component = undefined;
