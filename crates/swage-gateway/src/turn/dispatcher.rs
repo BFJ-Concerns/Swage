@@ -235,7 +235,9 @@ const CARGO_CACHE_DIRS: &[&str] = &["registry", "git"];
 const SHARED_CACHE_PATHS: &[(&str, Option<&str>)] = &[
     (".cache", None),
     (".npm", Some("npm")),
-    (".local/share/pnpm", Some("pnpm")),
+    // pnpm's store only: its home beside it holds the global binaries on
+    // the operator's PATH.
+    (".local/share/pnpm/store", Some("pnpm")),
     ("go/pkg", Some("go")),
 ];
 

@@ -445,7 +445,7 @@ git metadata where a linked worktree keeps it outside the tree, temporary
 space, the shared build and package caches under the home (`~/.cache`,
 the `registry` and `git` caches in Cargo's home — `CARGO_HOME`, else
 `~/.cargo`, the rest of which stays read-only — `~/.npm`,
-`~/.local/share/pnpm`, `~/go/pkg`) and any attachment
+`~/.local/share/pnpm/store`, `~/go/pkg`) and any attachment
 granted write. A cache that does not exist yet is created before the turn
 where its tool is installed, so a first fetch can fill it; a token kept
 inside a cache stays masked.
