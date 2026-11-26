@@ -77,15 +77,15 @@ impl HttpClient {
     /// POST JSON body to `path` and return a stream of parsed SSE events.
     ///
     /// `extra_headers` are merged with the client's defaults for this request.
-    pub async fn post_stream<B: Serialize>(
+    pub async fn post_stream(
         &self,
         path: &str,
-        body: &B,
+        body: &impl Serialize,
         extra_headers: HeaderMap,
     ) -> Result<
         (
             StreamResponseMetadata,
-            impl Stream<Item = Result<SseEvent, ProviderError>> + use<B>,
+            impl Stream<Item = Result<SseEvent, ProviderError>>,
         ),
         ProviderError,
     > {

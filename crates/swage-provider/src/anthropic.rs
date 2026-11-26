@@ -139,7 +139,9 @@ pub(crate) fn anthropic_output_limit(model: &str) -> Option<u32> {
 /// The `max_tokens` sent for a model whose limit is not yet known, when the
 /// caller set none of its own: the largest limit Anthropic documents for any
 /// model. A model that allows less refuses it with a statement of its own
-/// limit (`api_stated_output_limit`), and the request is sent again at that.
+/// limit (`api_stated_output_limit`), which the adapter keeps as the model's
+/// limit (`output_limit`); the retry layer sends the request again as an
+/// attempt of its own, so each attempt's record carries what it sent.
 const ANTHROPIC_UNKNOWN_MODEL_OUTPUT_REQUEST: u32 = 128_000;
 
 /// The output limit the Messages API states for the model when it refuses a
@@ -184,25 +186,26 @@ impl StatedOutputLimits {
             .copied()
     }
 
-    /// The `max_tokens` to send a refused request again at: the limit the
-    /// API stated, when the refused value was the adapter's own choice (the
-    /// caller set none) and the statement asks for less. The stated limit is
-    /// remembered for the model, so the next request starts from it.
-    fn lowered_request(
+    /// Keep the limit a refusal states as the model's, when the refused
+    /// `max_tokens` was the adapter's own choice (the caller set none) and
+    /// the statement asks for less. A caller's own limit is never replaced.
+    fn learn_from_refusal(
         &self,
         caller: Option<u32>,
         body: &MessagesRequest,
         error: &ProviderError,
-    ) -> Option<u32> {
-        let stated = api_stated_output_limit(error)?;
-        if caller.is_some() || stated >= body.max_tokens {
-            return None;
+    ) {
+        if caller.is_some() {
+            return;
         }
-        self.0
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(Self::key(&body.model), stated);
-        Some(stated)
+        if let Some(stated) =
+            api_stated_output_limit(error).filter(|&stated| stated < body.max_tokens)
+        {
+            self.0
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(Self::key(&body.model), stated);
+        }
     }
 }
 
@@ -1236,27 +1239,19 @@ impl AnthropicProvider {
             .unwrap_or(ANTHROPIC_UNKNOWN_MODEL_OUTPUT_REQUEST)
     }
 
-    /// POST a messages request, sending it once more at the API-stated
-    /// output limit when the adapter's own `max_tokens` was refused.
+    /// POST a messages request, keeping any output limit its refusal states.
     async fn post_messages<R: serde::de::DeserializeOwned>(
         &self,
         client: &HttpClient,
         caller: Option<u32>,
-        mut body: MessagesRequest,
+        body: MessagesRequest,
     ) -> Result<R, ProviderError> {
-        match client.post_json(ANTHROPIC_MESSAGES_PATH, &body).await {
-            Err(error) => match self
-                .stated_output_limits
-                .lowered_request(caller, &body, &error)
-            {
-                Some(stated) => {
-                    body.max_tokens = stated;
-                    client.post_json(ANTHROPIC_MESSAGES_PATH, &body).await
-                }
-                None => Err(error),
-            },
-            result => result,
+        let result = client.post_json(ANTHROPIC_MESSAGES_PATH, &body).await;
+        if let Err(error) = &result {
+            self.stated_output_limits
+                .learn_from_refusal(caller, &body, error);
         }
+        result
     }
 
     /// Build a `CountTokensRequest` from a `CompletionRequest` — the same
@@ -1396,26 +1391,19 @@ impl LlmProvider for AnthropicProvider {
         // stream() is synchronous, so we spawn a task that drives the async
         // SSE stream and forwards chunks to the caller via a channel — the
         // same pattern used by the legacy stream_message().
-        let mut body = self.build_request_for_completion(&request, true);
+        let body = self.build_request_for_completion(&request, true);
         let client = self.make_http_client();
         let caller = request.max_tokens;
         let stated_output_limits = self.stated_output_limits.clone();
 
         spawn_stream_forwarder(move |tx| async move {
-            let mut sent = client
+            let (metadata, sse_stream) = match client
                 .post_stream(ANTHROPIC_MESSAGES_PATH, &body, HeaderMap::new())
-                .await;
-            if let Err(error) = &sent
-                && let Some(stated) = stated_output_limits.lowered_request(caller, &body, error)
+                .await
             {
-                body.max_tokens = stated;
-                sent = client
-                    .post_stream(ANTHROPIC_MESSAGES_PATH, &body, HeaderMap::new())
-                    .await;
-            }
-            let (metadata, sse_stream) = match sent {
                 Ok(s) => s,
                 Err(e) => {
+                    stated_output_limits.learn_from_refusal(caller, &body, &e);
                     let _ = tx.send(StreamChunk::Error {
                         message: e.to_string(),
                     });
@@ -1604,18 +1592,41 @@ mod tests {
         );
     }
 
+    /// The retry layer over this adapter, with no transient retries: a
+    /// resend at a learned output limit must not depend on that budget.
+    fn retrying(provider: AnthropicProvider) -> crate::retry::RetryProvider {
+        crate::retry::RetryProvider::new(
+            provider,
+            crate::retry::RetryConfig {
+                max_retries: 0,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn sent_output_limits(server: std::thread::JoinHandle<Vec<serde_json::Value>>) -> Vec<u64> {
+        server
+            .join()
+            .unwrap()
+            .iter()
+            .map(|body| body["max_tokens"].as_u64().unwrap())
+            .collect()
+    }
+
     /// A model the documented table does not name is asked for the largest
-    /// documented limit; when it refuses, the request goes again at the limit
-    /// the API stated, and that limit is the model's from then on.
+    /// documented limit. Its refusal teaches the adapter the limit the API
+    /// states, the retry layer sends the request again as a new attempt, and
+    /// that limit is the model's from then on.
     #[tokio::test]
     async fn an_undocumented_model_takes_the_output_limit_the_api_states() {
         let fixture = include_str!("../tests/fixtures/claude-succession-response.json");
         let (address, server) = scripted_messages_server(vec![
             output_limit_refusal(ANTHROPIC_UNKNOWN_MODEL_OUTPUT_REQUEST, 64_000),
             (200, "application/json", fixture.to_owned()),
+            output_limit_refusal(64_000, 32_000),
             (200, "application/json", fixture.to_owned()),
         ]);
-        let provider = provider_at(address, "claude-opus-9");
+        let provider = retrying(provider_at(address, "claude-opus-9"));
         assert_eq!(provider.output_limit("claude-opus-9"), None);
 
         let first = provider
@@ -1636,29 +1647,24 @@ mod tests {
             .await;
         assert!(second.is_ok(), "{second:?}");
 
-        let sent: Vec<_> = server
-            .join()
-            .unwrap()
-            .iter()
-            .map(|body| body["max_tokens"].as_u64().unwrap())
-            .collect();
         assert_eq!(
-            sent,
+            sent_output_limits(server),
             [
                 u64::from(ANTHROPIC_UNKNOWN_MODEL_OUTPUT_REQUEST),
                 64_000,
-                64_000
+                64_000,
+                32_000
             ]
         );
     }
 
     /// A limit the caller set is the caller's: a refusal of it is returned,
-    /// not quietly lowered.
+    /// not quietly lowered, and teaches the adapter nothing.
     #[tokio::test]
     async fn a_callers_refused_output_limit_is_returned_as_the_error() {
         let (address, server) =
             scripted_messages_server(vec![output_limit_refusal(90_000, 64_000)]);
-        let provider = provider_at(address, "claude-opus-9");
+        let provider = retrying(provider_at(address, "claude-opus-9"));
         let result = provider
             .complete(CompletionRequest {
                 max_tokens: Some(90_000),
@@ -1673,8 +1679,11 @@ mod tests {
         assert_eq!(provider.output_limit("claude-opus-9"), None);
     }
 
+    /// Each attempt of a stream is recorded with the request it sent: the
+    /// refused one at the largest documented limit, the next at the limit
+    /// the refusal stated.
     #[tokio::test]
-    async fn a_streamed_request_is_sent_again_at_the_stated_output_limit() {
+    async fn each_streamed_attempt_records_the_output_limit_it_sent() {
         let stream_body = concat!(
             "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
             "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
@@ -1684,7 +1693,7 @@ mod tests {
             output_limit_refusal(ANTHROPIC_UNKNOWN_MODEL_OUTPUT_REQUEST, 32_000),
             (200, "text/event-stream", stream_body.to_owned()),
         ]);
-        let provider = provider_at(address, "claude-opus-9");
+        let provider = retrying(provider_at(address, "claude-opus-9"));
         let chunks: Vec<_> = provider
             .stream(crate::test_support::empty_completion_request())
             .collect()
@@ -1695,14 +1704,39 @@ mod tests {
                 .any(|chunk| matches!(chunk, StreamChunk::Error { .. })),
             "{chunks:?}"
         );
-        let sent: Vec<_> = server
-            .join()
-            .unwrap()
+        let settled: Vec<_> = chunks
             .iter()
-            .map(|body| body["max_tokens"].as_u64().unwrap())
+            .filter_map(|chunk| match chunk {
+                StreamChunk::ProviderAttempt(record) if record.ended_at_ms.is_some() => Some((
+                    record.attempt,
+                    record.request.as_ref().unwrap()["body"]["max_tokens"]
+                        .as_u64()
+                        .unwrap(),
+                    record.outcome,
+                    record.error.is_some(),
+                )),
+                _ => None,
+            })
             .collect();
         assert_eq!(
-            sent,
+            settled,
+            [
+                (
+                    1,
+                    u64::from(ANTHROPIC_UNKNOWN_MODEL_OUTPUT_REQUEST),
+                    swage_core::ProviderAttemptOutcome::Failed,
+                    true
+                ),
+                (
+                    2,
+                    32_000,
+                    swage_core::ProviderAttemptOutcome::Succeeded,
+                    false
+                ),
+            ]
+        );
+        assert_eq!(
+            sent_output_limits(server),
             [u64::from(ANTHROPIC_UNKNOWN_MODEL_OUTPUT_REQUEST), 32_000]
         );
         assert_eq!(provider.output_limit("claude-opus-9"), Some(32_000));

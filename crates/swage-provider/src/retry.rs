@@ -139,6 +139,17 @@ impl RetryProvider {
 /// Streaming adapters expose rendered errors here, so only the leading status
 /// token is authoritative. Provider body text must never supply a status or
 /// override the envelope.
+/// The output limit the inner provider fills in for the model a request
+/// names, when the request sets none of its own. A refused attempt of such a
+/// request after which this has changed taught the provider the model's
+/// limit — an undocumented model's refusal states it — so the request it
+/// would send now differs from the refused one, and is sent at once as a new
+/// attempt, outside the transient-retry budget and without backoff. That
+/// happens once per call: a second change is treated as an ordinary failure.
+fn provider_output_limit(inner: &dyn LlmProvider, model: Option<&str>) -> Option<u32> {
+    inner.output_limit(model.unwrap_or_else(|| inner.model_id()))
+}
+
 fn is_permanent_stream_error(message: &str) -> bool {
     if message.starts_with("authentication failed for provider ") {
         return true;
@@ -202,9 +213,19 @@ impl LlmProvider for RetryProvider {
         request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
         let mut attempt = 0u32;
+        let mut resent_at_learned_limit = false;
         loop {
+            let limit_before = provider_output_limit(self.inner.as_ref(), request.model.as_deref());
             match self.inner.complete(request.clone()).await {
                 Ok(response) => return Ok(response),
+                Err(_)
+                    if !resent_at_learned_limit
+                        && request.max_tokens.is_none()
+                        && provider_output_limit(self.inner.as_ref(), request.model.as_deref())
+                            != limit_before =>
+                {
+                    resent_at_learned_limit = true;
+                }
                 Err(err) if err.is_retriable() && attempt < self.config.max_retries => {
                     let delay = self.compute_backoff(attempt, &err);
                     tokio::time::sleep(delay).await;
@@ -222,9 +243,19 @@ impl LlmProvider for RetryProvider {
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, ProviderError> {
         let mut attempt = 0u32;
+        let mut resent_at_learned_limit = false;
         loop {
+            let limit_before = provider_output_limit(self.inner.as_ref(), request.model.as_deref());
             match self.inner.complete_with_tools(request.clone()).await {
                 Ok(response) => return Ok(response),
+                Err(_)
+                    if !resent_at_learned_limit
+                        && request.max_tokens.is_none()
+                        && provider_output_limit(self.inner.as_ref(), request.model.as_deref())
+                            != limit_before =>
+                {
+                    resent_at_learned_limit = true;
+                }
                 Err(err) if err.is_retriable() && attempt < self.config.max_retries => {
                     let delay = self.compute_backoff(attempt, &err);
                     tokio::time::sleep(delay).await;
@@ -252,11 +283,13 @@ impl LlmProvider for RetryProvider {
         spawn_stream_forwarder(move |tx| async move {
             let mut attempt = 0u32;
             let mut active_retry: Option<u32> = None;
+            let mut resent_at_learned_limit = false;
 
             loop {
                 if tx.is_closed() {
                     return;
                 }
+                let limit_before = provider_output_limit(inner.as_ref(), request.model.as_deref());
                 let snapshot = inner.provider_request_snapshot(&request, true);
                 let mut attempt_record = ProviderAttemptRecord {
                     provider: snapshot["provider"]
@@ -272,7 +305,7 @@ impl LlmProvider for RetryProvider {
                     request: Some(snapshot),
                     id: format!("{:032x}", rand::random::<u128>()),
                     round: 0,
-                    attempt: attempt + 1,
+                    attempt: attempt + u32::from(resent_at_learned_limit) + 1,
                     started_at_ms: now_ms(),
                     ended_at_ms: None,
                     outcome: ProviderAttemptOutcome::Outstanding,
@@ -381,6 +414,16 @@ impl LlmProvider for RetryProvider {
                     }
                     return;
                 };
+
+                if !is_anomaly
+                    && !resent_at_learned_limit
+                    && request.max_tokens.is_none()
+                    && provider_output_limit(inner.as_ref(), request.model.as_deref())
+                        != limit_before
+                {
+                    resent_at_learned_limit = true;
+                    continue;
+                }
 
                 if attempt >= config.max_retries
                     || (!is_anomaly && is_permanent_stream_error(&message))
