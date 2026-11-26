@@ -128,6 +128,29 @@ impl SigningConfig {
         })
     }
 
+    /// Refuse to sign with an OpenPGP program that lies where the turn's
+    /// sandboxed commands can write: the host runs it unsandboxed, so one
+    /// the sandbox could replace — a `gpg` planted in a writable directory on
+    /// `PATH`, say — would run its code outside the sandbox. A commit that
+    /// signs then fails with the cause.
+    pub fn refusing_programs_under(mut self, writable: &[PathBuf]) -> Self {
+        if let Ok(SigningKey::Openpgp(key)) = &self.material {
+            let program = Path::new(&key.program);
+            let program = program
+                .canonicalize()
+                .unwrap_or_else(|_| program.to_path_buf());
+            if writable.iter().any(|path| {
+                program.starts_with(path.canonicalize().unwrap_or_else(|_| path.clone()))
+            }) {
+                self.material = Err(format!(
+                    "the OpenPGP program {} lies where sandboxed commands can write, so the host will not run it",
+                    key.program
+                ));
+            }
+        }
+        self
+    }
+
     /// The SSH configuration for one `user.signingkey` value: a `key::`
     /// literal, or a path to the public or private key file.
     pub fn from_signing_key(signing_key: &str, commit_gpgsign: bool, tag_gpgsign: bool) -> Self {
@@ -160,13 +183,41 @@ async fn openpgp_key(workspace: &Path, signing_key: Option<String>) -> Result<Op
             "the operator signs with OpenPGP but neither user.signingkey nor a committer identity is configured".to_owned()
         })?,
     };
-    let program = match host_git_config(workspace, &["--get", "gpg.openpgp.program"]).await {
-        Some(program) => program,
-        None => host_git_config(workspace, &["--get", "gpg.program"])
-            .await
-            .unwrap_or_else(|| "gpg".to_owned()),
-    };
-    Ok(OpenPgpKey { key, program })
+    // The host runs this program unsandboxed, so it comes only from the
+    // operator's own global or system configuration: the workspace's
+    // repository configuration is writable from the sandbox.
+    let mut configured = None;
+    'scopes: for scope in ["--global", "--system"] {
+        for name in ["gpg.openpgp.program", "gpg.program"] {
+            if let Some(program) = host_git_config(workspace, &[scope, "--get", name]).await {
+                configured = Some(program);
+                break 'scopes;
+            }
+        }
+    }
+    let named = configured.unwrap_or_else(|| "gpg".to_owned());
+    let program = resolve_program(&named).ok_or_else(|| {
+        format!("the operator's OpenPGP program {named} is not an executable on the host's PATH")
+    })?;
+    Ok(OpenPgpKey {
+        key,
+        program: program.display().to_string(),
+    })
+}
+
+/// A program as the host would run it: an absolute path as given, a bare
+/// name looked up on `PATH`. A relative path names nothing fixed.
+fn resolve_program(program: &str) -> Option<PathBuf> {
+    let path = Path::new(program);
+    if path.is_absolute() {
+        return path.is_file().then(|| path.to_path_buf());
+    }
+    if program.contains('/') {
+        return None;
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|directory| directory.join(program))
+        .find(|candidate| candidate.is_file())
 }
 
 /// `Name <email>`, as git names the committer to `gpg -u`.
@@ -971,10 +1022,11 @@ mod tests {
         let _ = SigningConfig::from_host_git(&unconfigured).await;
     }
 
-    /// An operator who signs with OpenPGP is read with their key and
-    /// program, and without a key git signs as the committer. The repository
-    /// sets every value read, since the host's reader also sees the
-    /// machine's own global configuration.
+    /// An operator who signs with OpenPGP is read with their key, and
+    /// without a key git signs as the committer. The program never comes
+    /// from the repository's configuration, which the sandbox can write: a
+    /// program the repository names is ignored, and the one used is an
+    /// absolute path.
     #[tokio::test]
     async fn an_openpgp_configuration_names_the_key_and_program_git_would_use() {
         let dir = tempfile::tempdir().unwrap();
@@ -994,23 +1046,63 @@ mod tests {
         git(&["config", "commit.gpgsign", "true"]);
         git(&["config", "gpg.format", "openpgp"]);
         git(&["config", "user.signingkey", "0xFIXTURE"]);
-        git(&["config", "gpg.openpgp.program", "gpg2"]);
+        let planted = dir.path().join("planted-gpg");
+        std::fs::write(&planted, "#!/bin/sh\n").unwrap();
+        git(&["config", "gpg.openpgp.program", planted.to_str().unwrap()]);
+        git(&["config", "gpg.program", planted.to_str().unwrap()]);
 
         let signing = SigningConfig::from_host_git(dir.path())
             .await
             .expect("the workspace signs");
         assert_eq!(signing.format, "openpgp");
-        assert_eq!(
-            signing.material,
-            Ok(SigningKey::Openpgp(OpenPgpKey {
-                key: "0xFIXTURE".into(),
-                program: "gpg2".into(),
-            }))
-        );
+        match signing.material {
+            Ok(SigningKey::Openpgp(key)) => {
+                assert_eq!(key.key, "0xFIXTURE");
+                assert_ne!(Path::new(&key.program), planted.as_path());
+                assert!(Path::new(&key.program).is_absolute(), "{}", key.program);
+            }
+            // A host with no gpg at all refuses; the planted program is
+            // still not chosen.
+            Err(reason) => assert!(!reason.contains("planted-gpg"), "{reason}"),
+            other => panic!("{other:?}"),
+        }
         assert_eq!(
             host_committer_identity(dir.path()).await.as_deref(),
             Some("Operator <operator@example.invalid>")
         );
+    }
+
+    /// A program inside the turn's write set is refused, so the host never
+    /// runs one the sandbox could have replaced.
+    #[test]
+    fn a_signing_program_the_sandbox_can_write_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("cache").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("gpg"), "#!/bin/sh\n").unwrap();
+        let signing = |program: PathBuf| SigningConfig {
+            format: "openpgp".into(),
+            material: Ok(SigningKey::Openpgp(OpenPgpKey {
+                key: "0xOPERATOR".into(),
+                program: program.display().to_string(),
+            })),
+            commit_gpgsign: true,
+            tag_gpgsign: false,
+        };
+        let writable = vec![dir.path().join("cache")];
+
+        let refused = signing(bin.join("gpg")).refusing_programs_under(&writable);
+        assert!(
+            refused
+                .material
+                .as_ref()
+                .is_err_and(|reason| reason.contains("where sandboxed commands can write")),
+            "{:?}",
+            refused.material
+        );
+        let elsewhere = dir.path().join("system-gpg");
+        let kept = signing(elsewhere).refusing_programs_under(&writable);
+        assert!(kept.material.is_ok());
     }
 
     /// The host signs only with the operator's key, in their format.

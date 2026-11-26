@@ -920,12 +920,24 @@ pub(crate) async fn build_gateway_dispatcher(
     )
     .await
     {
-        Some(signing) => Some(crate::git_signer::SignerServer::start(
-            state.storage.clone(),
-            session_id,
-            turn_id,
-            signing,
-        )?),
+        Some(signing) => {
+            // What this turn's sandbox may write, so that the host never
+            // runs a signing program the sandbox could have replaced.
+            let writable = PolicyRoots::from_environment(&state.config_root)
+                .ok()
+                .and_then(|roots| {
+                    build_sandbox_config(agent_config, workspace_policy.as_ref(), &roots, config)
+                        .ok()
+                })
+                .map(|policy| policy.write_paths)
+                .unwrap_or_default();
+            Some(crate::git_signer::SignerServer::start(
+                state.storage.clone(),
+                session_id,
+                turn_id,
+                signing.refusing_programs_under(&writable),
+            )?)
+        }
         None => None,
     };
     let sandbox_build = build_turn_sandbox(
