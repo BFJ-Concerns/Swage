@@ -178,12 +178,7 @@ pub async fn access_gate_middleware(
                 path,
                 "request from beyond loopback carried no token; admitted under [server] access = \"warn\""
             );
-            let mut response = next.run(request).await;
-            response.headers_mut().insert(
-                "x-swage-access",
-                HeaderValue::from_static("unauthenticated"),
-            );
-            response
+            next.run(request).await
         }
         AccessGateMode::Off => next.run(request).await,
     }

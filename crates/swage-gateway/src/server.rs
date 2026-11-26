@@ -682,14 +682,10 @@ mod tests {
             .unwrap();
         assert_eq!(router.clone().oneshot(reused).await.unwrap().status(), 422);
 
-        // Relaxing the gate admits without a token, at once: warn marks the response.
+        // Relaxing the gate admits without a token, at once.
         state.runtime_config.write().unwrap().server.access = swage_config::AccessGateMode::Warn;
         let warned = send(router.clone(), "GET", "/api/topics", vec![], None).await;
         assert_eq!(warned.status(), 200);
-        assert_eq!(
-            warned.headers().get("x-swage-access").unwrap(),
-            "unauthenticated"
-        );
     }
 
 
