@@ -597,6 +597,12 @@ pub(super) async fn process_turn_with_composition_and_focus(
             tokeniser: &tokeniser,
             degradation: succession::recent_degradation(state.storage.as_ref(), thread_id).await,
             diagnosis_models: succession::diagnosis_models(&config),
+            summary_instructions: &succession::SessionSummaryInstructions {
+                state,
+                config: &config.experimentation,
+                session_id,
+                turn_id: prepared_turn_id,
+            },
         },
         elements,
         output,

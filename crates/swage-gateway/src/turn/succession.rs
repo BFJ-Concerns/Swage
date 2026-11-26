@@ -23,6 +23,12 @@
 //! whose window holds the same walls its predecessor's diagnosis answered
 //! carries that diagnosis again rather than writing a new one, and a turn
 //! whose window no longer shows a wall gets its full history back.
+//!
+//! The instruction the conversation summary is written under is the
+//! session's variant at `prompts.succession_summary`
+//! (`SessionSummaryInstructions`), drawn and recorded when a pass first
+//! asks for a summary, so the audit trail names the text behind every
+//! summary and a session that never summarises holds no selection.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -37,6 +43,8 @@ use swage_storage::{
 };
 use uuid::Uuid;
 
+use crate::experimentation::VariantSelectionError;
+
 use swage_agent::compaction::exceeds_threshold_with_model;
 use swage_agent::config::CompactionThreshold;
 use swage_context::assembly::default_assembly_carries;
@@ -45,7 +53,8 @@ use swage_context::history::HistoryElement;
 use swage_context::js_assembly::rendered_content;
 use swage_context::report::AssemblyOutput;
 use swage_context::succession::{
-    self, DEGRADATION_STRATEGY, SuccessionError, SuccessionRequest, THRESHOLD_STRATEGY,
+    self, DEGRADATION_STRATEGY, SUMMARY_INSTRUCTIONS, SuccessionError, SuccessionRequest,
+    THRESHOLD_STRATEGY,
 };
 use swage_context::tokeniser::TiktokenTokeniser;
 use swage_core::ChatMessage;
@@ -73,6 +82,87 @@ pub(super) struct SuccessionSite<'a> {
     /// The models the diagnosis's readers and synthesis are sent to, or why
     /// they could not be resolved.
     pub diagnosis_models: Result<DiagnosisModels, String>,
+    /// Where the conversation summary's instruction comes from, asked only
+    /// when a pass is about to request a summary.
+    pub summary_instructions: &'a dyn SummaryInstructionSource,
+}
+
+/// The source of the instruction a conversation summary is written under.
+#[async_trait::async_trait]
+pub(super) trait SummaryInstructionSource: Sync {
+    /// The instruction for the summary about to be requested. A call is a
+    /// use of the text: the session's source records its selection here.
+    async fn select(&self) -> Result<&'static str, VariantSelectionError>;
+}
+
+/// The variant every session's summaries are written under unless it drew
+/// another.
+const DEFAULT_SUMMARY_INSTRUCTION_VARIANT: &str = "default";
+
+/// The summariser instructions by variant id, the default first. A row here
+/// is all a further variant needs: it registers the id for selection and
+/// names the text it serves.
+const SUMMARY_INSTRUCTION_VARIANTS: &[(&str, &str)] =
+    &[(DEFAULT_SUMMARY_INSTRUCTION_VARIANT, SUMMARY_INSTRUCTIONS)];
+
+/// The text a variant id names. A session's record can outlive its variant;
+/// such a session is served the default, and the log says so.
+fn summary_instructions_for(variant: &str) -> &'static str {
+    SUMMARY_INSTRUCTION_VARIANTS
+        .iter()
+        .find(|(id, _)| *id == variant)
+        .map(|(_, text)| *text)
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                variant,
+                "the session's summary instruction variant is no longer registered; serving the default"
+            );
+            SUMMARY_INSTRUCTIONS
+        })
+}
+
+/// A session's summariser instruction: its recorded choice at
+/// `prompts.succession_summary`, or a first draw recorded against the turn
+/// whose pass asked for the summary.
+pub(super) struct SessionSummaryInstructions<'a> {
+    pub state: &'a crate::state::AppState,
+    pub config: &'a swage_config::model::ExperimentationConfig,
+    pub session_id: Uuid,
+    pub turn_id: Uuid,
+}
+
+#[async_trait::async_trait]
+impl SummaryInstructionSource for SessionSummaryInstructions<'_> {
+    async fn select(&self) -> Result<&'static str, VariantSelectionError> {
+        let registered: Vec<&str> = SUMMARY_INSTRUCTION_VARIANTS
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+        let decision = crate::experimentation::select_session_variant(
+            self.state,
+            self.config,
+            crate::experimentation::LOCATION_SUCCESSION_SUMMARY_PROMPT,
+            &registered,
+            DEFAULT_SUMMARY_INSTRUCTION_VARIANT,
+            self.session_id,
+            Some(self.turn_id),
+        )
+        .await?;
+        Ok(summary_instructions_for(&decision.variant))
+    }
+}
+
+/// The instruction for a summary `site` is about to request. A selection
+/// that cannot be made (the operator forced a variant nothing registers)
+/// fails the pass like any other cause, so the attempt and every call
+/// already made stay in the turn's record.
+async fn selected_summary_instructions(
+    site: &SuccessionSite<'_>,
+) -> Result<&'static str, SuccessionError> {
+    site.summary_instructions
+        .select()
+        .await
+        .map_err(|error| SuccessionError::Instructions(error.to_string()))
 }
 
 /// The provider-facing model ids a diagnosis is sent to; `None` sends a
@@ -134,35 +224,38 @@ pub(super) async fn succeed_over_threshold(
         // Rebuild those notes even when the diagnosis is reused: the history
         // is rebuilt from storage on every turn and may contain new work.
         let outcome = match outcome {
-            Ok(successor) => match succession::summarise(
-                &carried,
-                &history[..successor.record.messages_removed],
-                site.focus,
-                site.provider,
-                &mut calls,
-            )
-            .await
-            {
-                Ok(established) => succession::successor_after(
-                    &SuccessionRequest {
-                        carried: &carried,
-                        history: &history,
-                        focus: site.focus,
-                        retain_at_most: None,
-                    },
-                    successor.record.messages_removed,
-                    format!(
-                        "{established}\n\n{}",
-                        diagnosis
-                            .synthesis
-                            .as_deref()
-                            .expect("a successful diagnosis has a synthesis")
-                    ),
-                    DEGRADATION_STRATEGY,
-                    site.tokeniser,
-                ),
-                Err(error) => Err(error),
-            },
+            Ok(successor) => {
+                async {
+                    let established = succession::summarise(
+                        selected_summary_instructions(&site).await?,
+                        &carried,
+                        &history[..successor.record.messages_removed],
+                        site.focus,
+                        site.provider,
+                        &mut calls,
+                    )
+                    .await?;
+                    succession::successor_after(
+                        &SuccessionRequest {
+                            carried: &carried,
+                            history: &history,
+                            focus: site.focus,
+                            retain_at_most: None,
+                        },
+                        successor.record.messages_removed,
+                        format!(
+                            "{established}\n\n{}",
+                            diagnosis
+                                .synthesis
+                                .as_deref()
+                                .expect("a successful diagnosis has a synthesis")
+                        ),
+                        DEGRADATION_STRATEGY,
+                        site.tokeniser,
+                    )
+                }
+                .await
+            }
             Err(error) => Err(error),
         };
         match outcome {
@@ -226,7 +319,21 @@ pub(super) async fn succeed_over_threshold(
         retain_at_most,
     };
     let mut calls = Vec::new();
-    match succession::succeed(request, site.provider, site.tokeniser, &mut calls).await {
+    // A history too short to split asks for no summary, so it selects no
+    // instruction either.
+    let outcome = async {
+        succession::split_point(&request)?;
+        succession::succeed(
+            request,
+            selected_summary_instructions(&site).await?,
+            site.provider,
+            site.tokeniser,
+            &mut calls,
+        )
+        .await
+    }
+    .await;
+    match outcome {
         Ok(mut succession) => {
             succession.record.calls = calls;
             reassemble(
@@ -1182,6 +1289,203 @@ mod tests {
         );
     }
 
+    /// A source that serves one text and counts how often a pass asked for
+    /// it, or refuses as a forced variant nothing registers would.
+    struct ScriptedInstructions {
+        text: &'static str,
+        asked: std::sync::atomic::AtomicUsize,
+        refuses: bool,
+    }
+
+    impl ScriptedInstructions {
+        const fn serving(text: &'static str) -> Self {
+            Self {
+                text,
+                asked: std::sync::atomic::AtomicUsize::new(0),
+                refuses: false,
+            }
+        }
+
+        fn asked(&self) -> usize {
+            self.asked.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SummaryInstructionSource for ScriptedInstructions {
+        async fn select(&self) -> Result<&'static str, VariantSelectionError> {
+            self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.refuses {
+                return Err(VariantSelectionError {
+                    location_id: crate::experimentation::LOCATION_SUCCESSION_SUMMARY_PROMPT
+                        .to_owned(),
+                    forced_variant: "unregistered".to_owned(),
+                    available_variants: vec![DEFAULT_SUMMARY_INSTRUCTION_VARIANT.to_owned()],
+                });
+            }
+            Ok(self.text)
+        }
+    }
+
+    /// The authored text, for tests that are not about its selection.
+    static AUTHORED_INSTRUCTIONS: ScriptedInstructions =
+        ScriptedInstructions::serving(SUMMARY_INSTRUCTIONS);
+
+    /// One pass over eight plain messages, with or without a wall, under a
+    /// message-count threshold of `max_messages`.
+    async fn pass_over_eight_messages(
+        provider: &RecordingProvider,
+        instructions: &ScriptedInstructions,
+        degradation: bool,
+        max_messages: u32,
+    ) -> AssemblyOutput {
+        let tokeniser = TiktokenTokeniser::new("claude-sonnet-4-20250514");
+        let variables = BTreeMap::new();
+        let threshold = CompactionThreshold::MessageCount(max_messages);
+        let history: Vec<_> = (0..8)
+            .map(|index| ChatMessage::new(Role::User, format!("message {index}")))
+            .collect();
+        let elements: Vec<Box<dyn ContextElement>> = vec![Box::new(HistoryElement::new(history))];
+        let assemble = |elements: &[Box<dyn ContextElement>]| {
+            AssemblyOutput::new_unchecked(
+                elements
+                    .iter()
+                    .flat_map(|element| element.content())
+                    .collect(),
+                swage_context::report::AssemblyReport::default(),
+            )
+        };
+        let output = assemble(&elements);
+        succeed_over_threshold(
+            SuccessionSite {
+                provider,
+                threshold: &threshold,
+                model: None,
+                focus: None,
+                variables: &variables,
+                tokeniser: &tokeniser,
+                degradation: degradation.then(|| Degradation {
+                    signal: WallSignal::RepeatedFailures {
+                        failed_calls: 5,
+                        failed_turns: 0,
+                    },
+                    walls: vec!["tool_call:a".into()],
+                    previous: None,
+                }),
+                diagnosis_models: Ok(DiagnosisModels::default()),
+                summary_instructions: instructions,
+            },
+            elements,
+            output,
+            assemble,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_summary_is_written_under_the_instruction_selected_as_it_is_asked_for() {
+        for degradation in [false, true] {
+            let provider = RecordingProvider::default();
+            let instructions = ScriptedInstructions::serving("Write the notes this session drew.");
+            let max_messages = if degradation { 100 } else { 3 };
+            let result =
+                pass_over_eight_messages(&provider, &instructions, degradation, max_messages).await;
+
+            assert_eq!(instructions.asked(), 1, "one summary, one selection");
+            let requests = provider.requests.lock().unwrap();
+            let summary = requests.last().expect("the summary request");
+            assert_eq!(
+                summary.messages[0].text_content(),
+                "Write the notes this session drew."
+            );
+            assert_eq!(
+                result.report.compaction_applied[0].actual_strategy,
+                THRESHOLD_STRATEGY
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_asks_for_no_summary_selects_no_instruction() {
+        // Within its room and against no wall, nothing is summarised.
+        let provider = RecordingProvider::default();
+        let instructions = ScriptedInstructions::serving(SUMMARY_INSTRUCTIONS);
+        pass_over_eight_messages(&provider, &instructions, false, 100).await;
+        assert_eq!(instructions.asked(), 0);
+        assert!(provider.requests.lock().unwrap().is_empty());
+
+        // A diagnosis that could not be written is followed by no summary.
+        let provider = RecordingProvider {
+            failing_synthesis: true,
+            ..Default::default()
+        };
+        let result = pass_over_eight_messages(&provider, &instructions, true, 100).await;
+        assert_eq!(instructions.asked(), 0);
+        assert_eq!(result.report.compaction_applied[0].actual_strategy, "none");
+    }
+
+    #[tokio::test]
+    async fn an_instruction_that_cannot_be_selected_fails_the_pass_and_keeps_its_record() {
+        for degradation in [false, true] {
+            let provider = RecordingProvider::default();
+            let instructions = ScriptedInstructions {
+                refuses: true,
+                ..ScriptedInstructions::serving(SUMMARY_INSTRUCTIONS)
+            };
+            let result = pass_over_eight_messages(&provider, &instructions, degradation, 100).await;
+
+            let records = &result.report.compaction_applied;
+            if !degradation {
+                assert!(records.is_empty(), "within its room, nothing was attempted");
+                continue;
+            }
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].actual_strategy, "none");
+            let reason = records[0].failure_reason.as_deref().expect("the cause");
+            assert!(
+                reason.contains("instruction could not be selected")
+                    && reason.contains("unregistered"),
+                "{reason}"
+            );
+            assert_eq!(
+                records[0].calls.len(),
+                LOCATOR_COUNT + 1,
+                "the diagnosis's completions stay recorded; no summary was requested"
+            );
+            assert_eq!(provider.requests.lock().unwrap().len(), LOCATOR_COUNT + 1);
+        }
+
+        // Over its room, the refused selection is the threshold pass's
+        // recorded failure and the first assembly stands.
+        let provider = RecordingProvider::default();
+        let instructions = ScriptedInstructions {
+            refuses: true,
+            ..ScriptedInstructions::serving(SUMMARY_INSTRUCTIONS)
+        };
+        let result = pass_over_eight_messages(&provider, &instructions, false, 3).await;
+        let records = &result.report.compaction_applied;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].requested_strategy, THRESHOLD_STRATEGY);
+        assert_eq!(records[0].actual_strategy, "none");
+        assert!(provider.requests.lock().unwrap().is_empty());
+        assert_eq!(result.messages.len(), 8, "the unsucceeded context");
+    }
+
+    #[test]
+    fn every_summary_instruction_variant_names_a_text_and_a_stale_one_serves_the_default() {
+        assert_eq!(
+            SUMMARY_INSTRUCTION_VARIANTS[0],
+            (DEFAULT_SUMMARY_INSTRUCTION_VARIANT, SUMMARY_INSTRUCTIONS)
+        );
+        for (id, text) in SUMMARY_INSTRUCTION_VARIANTS {
+            assert_eq!(summary_instructions_for(id), *text);
+        }
+        assert_eq!(
+            summary_instructions_for("retired-variant"),
+            SUMMARY_INSTRUCTIONS
+        );
+    }
+
     /// A provider that keeps every request and answers each with a fixed
     /// reply, so a test reads what the readers and the synthesis were shown.
     #[derive(Default)]
@@ -1205,9 +1509,7 @@ mod tests {
             &self,
             request: CompletionRequest,
         ) -> Result<swage_core::CompletionResponse, swage_core::ProviderError> {
-            let is_summary = request.messages[0]
-                .text_content()
-                .starts_with("You write the hand-over notes");
+            let is_summary = request.messages[0].text_content() == SUMMARY_INSTRUCTIONS;
             let index = {
                 let mut requests = self.requests.lock().expect("requests");
                 let index = requests.len();
@@ -1280,6 +1582,7 @@ mod tests {
                 reader: Some("reader-model".to_string()),
                 synthesis: Some("synthesis-model".to_string()),
             }),
+            summary_instructions: &AUTHORED_INSTRUCTIONS,
         };
         // A failed call as the gateway replays it: an assistant message
         // carrying the call, then a user message carrying its error result.
@@ -1420,6 +1723,7 @@ mod tests {
                 tokeniser: &tokeniser,
                 degradation: None,
                 diagnosis_models: Ok(DiagnosisModels::default()),
+                summary_instructions: &AUTHORED_INSTRUCTIONS,
             };
             let history: Vec<_> = (0..8)
                 .map(|index| ChatMessage::new(Role::User, format!("message {index}")))
@@ -1510,6 +1814,7 @@ mod tests {
                 previous: None,
             }),
             diagnosis_models: Ok(DiagnosisModels::default()),
+            summary_instructions: &AUTHORED_INSTRUCTIONS,
         };
         let result = succeed_over_threshold(
             site,
@@ -1578,6 +1883,7 @@ mod tests {
                         previous: None,
                     }),
                     diagnosis_models: Ok(DiagnosisModels::default()),
+                    summary_instructions: &AUTHORED_INSTRUCTIONS,
                 },
                 vec![Box::new(HistoryElement::new(history))],
                 output,
@@ -1665,6 +1971,7 @@ mod tests {
                         previous: None,
                     }),
                     diagnosis_models: Ok(DiagnosisModels::default()),
+                    summary_instructions: &AUTHORED_INSTRUCTIONS,
                 },
                 elements,
                 output,

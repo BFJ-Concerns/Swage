@@ -552,7 +552,7 @@ async fn an_over_threshold_context_runs_on_a_successor_assembled_from_its_elemen
     let storage = Arc::new(MockStorage::new());
     let (state, session_id) =
         make_state_with_storage(provider_witness_chunks(), Arc::clone(&storage)).await;
-    seed_history_over_threshold(&storage, session_id).await;
+    let thread_id = seed_history_over_threshold(&storage, session_id).await;
 
     let (tx, _rx) = mpsc::unbounded_channel();
     process_turn(
@@ -603,6 +603,65 @@ async fn an_over_threshold_context_runs_on_a_successor_assembled_from_its_elemen
     assert!(
         succession_position < history_position,
         "the summary opens the conversation: {names:?}"
+    );
+    drop(db);
+
+    // The summary's instruction is the session's recorded variant, drawn by
+    // the turn whose pass asked for the summary.
+    let turn_id = storage
+        .list_turns_by_thread(thread_id)
+        .await
+        .expect("list turns")
+        .last()
+        .expect("the turn")
+        .id;
+    let draws = summary_instruction_draws(&storage, session_id).await;
+    assert_eq!(draws.len(), 1, "one selection for the session: {draws:?}");
+    assert_eq!(draws[0].event_kind, "variant_selected");
+    assert_eq!(draws[0].metadata["variant"], "default");
+    assert_eq!(draws[0].metadata["turn_id"], turn_id.to_string());
+}
+
+async fn summary_instruction_draws(
+    storage: &MockStorage,
+    session_id: Uuid,
+) -> Vec<swage_storage::AuditEvent> {
+    storage
+        .list_audit_events_by_session(session_id)
+        .await
+        .expect("list audit events")
+        .into_iter()
+        .filter(|event| {
+            event.entity_id == crate::experimentation::LOCATION_SUCCESSION_SUMMARY_PROMPT
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_turn_within_its_room_records_no_summary_instruction_selection() {
+    let storage = Arc::new(MockStorage::new());
+    let (state, session_id) =
+        make_state_with_storage(provider_witness_chunks(), Arc::clone(&storage)).await;
+    seed_history(&storage, session_id, 4).await;
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    process_turn(
+        &state,
+        session_id,
+        None,
+        TurnInput::from("continue"),
+        tx,
+        Arc::new(Mutex::new(SubscriptionState::new(true))),
+        None,
+    )
+    .await
+    .expect("the turn runs");
+
+    assert!(
+        summary_instruction_draws(&storage, session_id)
+            .await
+            .is_empty(),
+        "a session that has asked for no summary holds no selection"
     );
 }
 

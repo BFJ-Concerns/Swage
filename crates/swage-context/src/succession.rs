@@ -10,7 +10,10 @@
 //! they will be in place again, so it records what the conversation
 //! established rather than restating what the context already says), its
 //! newer part kept as it was. The agent shapes the summary through the
-//! turn's compaction focus.
+//! turn's compaction focus. The summariser's instruction is the caller's
+//! choice: `SUMMARY_INSTRUCTIONS` is the text this module carries, and the
+//! gateway serves it as the default of a recorded variant location, so the
+//! text a summary was written under is reconstructable from the audit trail.
 //!
 //! The pass runs at the turn's assembly step, at the same threshold the
 //! agent runtime compacts at; once it has run, the runtime finds the
@@ -80,6 +83,8 @@ pub enum SuccessionError {
     EmptySummary,
     #[error("the diagnosis could not be written: {0}")]
     Diagnosis(String),
+    #[error("the summariser's instruction could not be selected: {0}")]
+    Instructions(String),
     #[error("history cannot be split after message {0}")]
     SplitUnavailable(usize),
 }
@@ -151,16 +156,19 @@ pub fn summarised_count(history_len: usize, retain_at_most: Option<usize>) -> us
 }
 
 /// Run the pass: summarise the older half of `history` against `carried`
-/// and return the successor's parts. Append each completion to `calls` even
-/// when the pass fails, for the caller to attach to its compaction record.
+/// under `instructions` and return the successor's parts. Append each
+/// completion to `calls` even when the pass fails, for the caller to attach
+/// to its compaction record.
 pub async fn succeed(
     request: SuccessionRequest<'_>,
+    instructions: &str,
     provider: &dyn LlmProvider,
     tokeniser: &dyn Tokeniser,
     calls: &mut Vec<SuccessionCall>,
 ) -> Result<Succession, SuccessionError> {
     let summarised = split_point(&request)?;
     let summary = summarise(
+        instructions,
         request.carried,
         &request.history[..summarised],
         request.focus,
@@ -172,9 +180,11 @@ pub async fn succeed(
 }
 
 /// Summarise established conversation state against the context the successor
-/// carries. A diagnosis can accompany these notes without replacing them.
-/// Append the completion to `calls` before interpreting its result.
+/// carries, under `instructions` as the summariser's system message. A
+/// diagnosis can accompany these notes without replacing them. Append the
+/// completion to `calls` before interpreting its result.
 pub async fn summarise(
+    instructions: &str,
     carried: &[ChatMessage],
     history: &[ChatMessage],
     focus: Option<&str>,
@@ -182,7 +192,7 @@ pub async fn summarise(
     calls: &mut Vec<SuccessionCall>,
 ) -> Result<String, SuccessionError> {
     let response = provider
-        .complete(summary_request(carried, history, focus))
+        .complete(summary_request(instructions, carried, history, focus))
         .await;
     let mut call = recorded_call(provider, SuccessionStage::Summary, None, &response);
     if let Ok(response) = &response {
@@ -369,13 +379,17 @@ pub fn failure_record(
     }
 }
 
-const SUMMARY_INSTRUCTIONS: &str = "You write the hand-over notes an assistant continues a conversation from. \
+/// The instruction the hand-over notes are written under unless the caller
+/// selects another. Instruction text: it decides what every successor knows
+/// of its own conversation.
+pub const SUMMARY_INSTRUCTIONS: &str = "You write the hand-over notes an assistant continues a conversation from. \
 The assistant's standing context is shown first and will be in place again, word for word, when it continues — \
 never restate, paraphrase or summarise it. Summarise the conversation alone: what was asked, what was decided, \
 what was done and how it turned out, what is still open, and any fact the assistant learned that the standing \
 context does not hold. Write in the past tense, as notes to the assistant, in plain prose without headings.";
 
 fn summary_request(
+    instructions: &str,
     carried: &[ChatMessage],
     older: &[ChatMessage],
     focus: Option<&str>,
@@ -390,7 +404,7 @@ fn summary_request(
     CompletionRequest {
         effort: None,
         messages: vec![
-            ChatMessage::new(Role::System, SUMMARY_INSTRUCTIONS),
+            ChatMessage::new(Role::System, instructions),
             ChatMessage::new(
                 Role::User,
                 format!(
@@ -550,6 +564,7 @@ mod tests {
                 focus: Some("keep the open questions"),
                 retain_at_most: None,
             },
+            "Write the notes the caller chose.",
             &provider,
             &CharTokeniser,
             &mut Vec::new(),
@@ -559,6 +574,11 @@ mod tests {
 
         let request = provider.only_request();
         assert_eq!(request.messages[0].role(), Role::System);
+        assert_eq!(
+            request.messages[0].text_content(),
+            "Write the notes the caller chose.",
+            "the summariser runs under the instruction the caller selected"
+        );
         let shown = request.messages[1].text_content();
         assert!(shown.contains("already in place; do not repeat"), "{shown}");
         assert!(shown.contains("You are Swage. Topic: alpha."), "{shown}");
@@ -636,6 +656,7 @@ mod tests {
                 focus: None,
                 retain_at_most: None,
             },
+            SUMMARY_INSTRUCTIONS,
             &provider,
             &CharTokeniser,
             &mut Vec::new(),
@@ -667,6 +688,7 @@ mod tests {
                 focus: None,
                 retain_at_most: None,
             },
+            SUMMARY_INSTRUCTIONS,
             &provider,
             &CharTokeniser,
             &mut Vec::new(),
@@ -687,6 +709,7 @@ mod tests {
                 focus: None,
                 retain_at_most: None,
             },
+            SUMMARY_INSTRUCTIONS,
             &provider,
             &CharTokeniser,
             &mut Vec::new(),
