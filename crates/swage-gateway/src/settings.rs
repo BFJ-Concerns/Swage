@@ -631,7 +631,16 @@ pub async fn discover_models(
                 .api_key
                 .clone()
                 .filter(|value| !value.trim().is_empty());
-            (save_provider_into_endpoint_config(provider)?, key)
+            // A draft that does not speak of the policy is judged by the
+            // provider's running one, as a save would keep it.
+            let speaks_of_policy = provider.plaintext_credentials.is_some();
+            let mut endpoint = save_provider_into_endpoint_config(provider)?;
+            if !speaks_of_policy
+                && let Some(running) = state.active_config().providers.entries.get(&provider_id)
+            {
+                endpoint.plaintext_credentials = running.plaintext_credentials;
+            }
+            (endpoint, key)
         }
         None => (provider_for_discovery(state, &provider_id).await?, None),
     };
@@ -647,6 +656,19 @@ pub async fn discover_models(
                     Some(key) => Some(key),
                     None => discovery_credential(state, &provider).await,
                 };
+                if api_key.is_some() {
+                    let verdict = swage_provider::PlaintextCredentialVerdict::judge(
+                        swage_provider::PlaintextExposure::of_base_url(base_url),
+                        provider.plaintext_credentials,
+                    );
+                    crate::provider_credential_exposure::judge(
+                        state.storage.as_ref(),
+                        &provider_id,
+                        verdict,
+                    )
+                    .await
+                    .map_err(ApiError::validation)?;
+                }
                 discover_openai_compatible_models(base_url, api_key.as_deref()).await?
             } else {
                 known_models(&["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
@@ -1504,6 +1526,115 @@ mod tests {
     use crate::secret::CreateSecretRequest;
     use crate::test_support::SwageHomeGuard;
     use swage_storage::store::SecretStore;
+
+    /// Model discovery sends the provider's credential to its base URL, so
+    /// it answers to the same plaintext policy as the provider itself: under
+    /// refuse no connection is made, under warn the probe is sent and the
+    /// warning recorded once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn model_discovery_follows_the_plaintext_credential_policy() {
+        use swage_storage::store::AuditStore;
+
+        let Some(address) =
+            crate::handlers::local_interface_addresses()
+                .ok()
+                .and_then(|addresses| {
+                    addresses.into_iter().find(
+                        |address| matches!(address, std::net::IpAddr::V4(v4) if !v4.is_loopback()),
+                    )
+                })
+        else {
+            eprintln!("no non-loopback interface: discovery under the policy not exercised");
+            return;
+        };
+        let listener = tokio::net::TcpListener::bind((address, 0)).await.unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accepted = std::sync::Arc::clone(&connections);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+
+        let home = SwageHomeGuard::new();
+        let storage = std::sync::Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+        let state = AppState::new_with_config_root(
+            storage.clone(),
+            storage.clone(),
+            std::sync::Arc::new(crate::turn::tests::MockProvider::new(vec![])),
+            swage_config::ResolvedConfig::default(),
+            crate::tool::ToolDispatcher::allow_all(vec![]),
+            None,
+            home.path().to_path_buf(),
+        );
+        let draft = |policy| SaveProviderSettings {
+            display_name: None,
+            protocol: swage_protocol::client::settings::ProviderProtocol::OpenAi,
+            worker_staleness_threshold_ms: None,
+            base_url: Some(base_url.clone()),
+            api_key_secret_ref: None,
+            api_key_env: None,
+            api_key: Some("discovery-fixture-key".into()),
+            command: None,
+            state_dir: None,
+            plaintext_credentials: Some(policy),
+        };
+        let events = || async {
+            storage
+                .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                    event_kind: Some(crate::provider_credential_exposure::EVENT_KIND.into()),
+                    limit: 10,
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+        };
+
+        let refused = super::discover_models(
+            &state,
+            "lan".into(),
+            None,
+            Some(draft(
+                swage_protocol::client::settings::PlaintextCredentialPolicy::Refuse,
+            )),
+        )
+        .await
+        .expect_err("the refuse policy sends nothing");
+        assert!(
+            refused.message().contains("plaintext"),
+            "{}",
+            refused.message()
+        );
+        assert_eq!(connections.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let recorded = events().await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].metadata["decision"], "refused");
+
+        let _ = super::discover_models(
+            &state,
+            "lan".into(),
+            None,
+            Some(draft(
+                swage_protocol::client::settings::PlaintextCredentialPolicy::Warn,
+            )),
+        )
+        .await;
+        assert!(connections.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        let recorded = events().await;
+        assert_eq!(recorded.len(), 2);
+        assert!(
+            recorded
+                .iter()
+                .any(|event| event.metadata["decision"] == "warned")
+        );
+        assert!(
+            recorded
+                .iter()
+                .all(|event| !event.metadata.to_string().contains("discovery-fixture-key"))
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn settings_config_write_failure_keeps_managed_key_and_runtime_until_success() {
