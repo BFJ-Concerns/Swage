@@ -19928,6 +19928,7 @@ async fn sandbox_degradation_approval_uses_resolved_hitl_settings() {
     let mut turn_config = state.config.clone();
     turn_config.hitl.timeout = 7;
     turn_config.hitl.timeout_policy = swage_core::ApprovalTimeoutPolicy::Interrupt;
+    let mut signals = state.broadcast.subscribe();
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     let cancel_token = CancellationToken::new();
@@ -19939,6 +19940,7 @@ async fn sandbox_degradation_approval_uses_resolved_hitl_settings() {
             SandboxDegradationApprovalRequest {
                 config: &turn_config,
                 ws_tx: &tx,
+                session_id,
                 turn_id: turn.id,
                 agent_id: "gateway",
                 prompt: "Sandbox setup failed. Approve unsandboxed execution?".to_string(),
@@ -19989,6 +19991,11 @@ async fn sandbox_degradation_approval_uses_resolved_hitl_settings() {
         .expect("approval task should finish")
         .expect("approval should succeed");
     assert_eq!(outcome, SandboxDegradationApproval::Approved);
+    // Views of running work hear the request arrive and its answer.
+    let session_signals = std::iter::from_fn(|| signals.try_recv().ok())
+        .filter(|event| matches!(event, ServerEvent::SessionUpdated { session_id: id } if *id == session_id))
+        .count();
+    assert_eq!(session_signals, 2, "one signal for the request, one for its answer");
 }
 
 #[tokio::test]
@@ -20018,6 +20025,7 @@ async fn sandbox_degradation_rejection_refuses_the_attended_fallback() {
             SandboxDegradationApprovalRequest {
                 config: &turn_config,
                 ws_tx: &tx,
+                session_id,
                 turn_id: turn.id,
                 agent_id: "gateway",
                 prompt: "Sandbox setup failed. Approve unsandboxed execution?".to_string(),
@@ -20078,6 +20086,7 @@ async fn sandbox_degradation_approval_preserves_cancelled_wait() {
             SandboxDegradationApprovalRequest {
                 config: &turn_config,
                 ws_tx: &tx,
+                session_id,
                 turn_id: turn.id,
                 agent_id: "gateway",
                 prompt: "Sandbox setup failed. Approve unsandboxed execution?".to_string(),
@@ -20139,6 +20148,7 @@ async fn sandbox_degradation_timeout_interrupts_and_cleans_channel() {
             SandboxDegradationApprovalRequest {
                 config: &turn_config,
                 ws_tx: &tx,
+                session_id,
                 turn_id: turn.id,
                 agent_id: "gateway",
                 prompt: "Sandbox setup failed. Approve unsandboxed execution?".to_string(),
