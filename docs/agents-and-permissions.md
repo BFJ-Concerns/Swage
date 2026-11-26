@@ -433,7 +433,9 @@ cloud and cluster credentials (`~/.aws`, `~/.azure`, `~/.config/gcloud`,
 `gh` and Forgejo token files) and the gateway's own data root. A masked
 directory reads as empty and a masked file as `/dev/null`. Of `~/.ssh`, the
 files that hold no key — `config`, `known_hosts` and the `.pub` halves —
-stay readable. A grant that names the data root reopens it.
+stay readable. The shipped skills' files, written beneath the data root,
+are readable and runnable but not writable. A grant that names the data
+root reopens it.
 
 Writes go only to the workspace (when its grant allows), the workspace's
 git metadata where a linked worktree keeps it outside the tree, temporary

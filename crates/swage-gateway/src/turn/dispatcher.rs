@@ -372,6 +372,13 @@ pub(crate) fn build_sandbox_config(
     if let Some(socket) = &ssh_agent {
         builder = builder.read_only_path(socket);
     }
+    // The shipped skills' files, which their instructions tell the agent to
+    // read and run, are compiled into the gateway and written beneath its
+    // masked data root: every one is readable, none writable.
+    let shipped_skills = crate::shipped_skill_projection::root(&roots.data_root);
+    if shipped_skills.is_dir() {
+        builder = builder.read_only_path(sandbox_path(&shipped_skills));
+    }
     tracing::debug!(?granted, "sandbox policy grants");
 
     if let Some(directory) = &agent_config.tool_output_directory {

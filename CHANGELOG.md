@@ -174,6 +174,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- A sandboxed shell can read an active shipped skill's files and run its scripts, as `file_read` already could: the shipped skills' directory beneath the gateway's data root is readable and runnable from the sandbox, and never writable.
 - Unsandboxed Python workers use the calling turn’s recording proxy for HTTP requests.
 - Turns with both sandbox settings disabled can run without `HOME`, including when Python is disabled.
 - Sandboxed Python workers can use runtime libraries beneath masked directories or `/tmp`, with the runtime mounted read-only.

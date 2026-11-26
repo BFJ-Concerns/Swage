@@ -18097,6 +18097,42 @@ fn the_ssh_files_that_hold_no_key_reopen_read_only_and_the_keys_stay_masked() {
     assert!(!policy.write_paths.iter().any(|path| path.starts_with(&ssh)));
 }
 
+/// A shipped skill's files live beneath the masked data root; the policy
+/// reopens all of them to read and run, and none to write.
+#[test]
+fn the_shipped_skills_are_readable_beneath_the_masked_data_root() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path().join("home");
+    let data_root = home.join(".swage");
+    let skill = crate::shipped_skill_projection::skill_dir(&data_root, "project-docs");
+    std::fs::create_dir_all(&skill).unwrap();
+    let workspace = home.join("project");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let roots = PolicyRoots {
+        home,
+        data_root: sandbox_path(&data_root),
+    };
+    let agent_config =
+        AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
+    let policy = build_sandbox_config(
+        &agent_config,
+        None,
+        &roots,
+        &swage_config::ResolvedConfig::default(),
+    )
+    .unwrap();
+
+    let shipped = sandbox_path(&crate::shipped_skill_projection::root(&data_root));
+    assert!(policy.masked_paths.contains(&sandbox_path(&data_root)));
+    assert!(policy.read_only_paths.contains(&shipped));
+    assert!(
+        !policy
+            .write_paths
+            .iter()
+            .any(|path| shipped.starts_with(path) || path.starts_with(&shipped))
+    );
+}
+
 /// The network a sandboxed command reaches follows the setting: the host's
 /// by default, its own namespace when the person confines it or puts it
 /// behind the recording proxy.
