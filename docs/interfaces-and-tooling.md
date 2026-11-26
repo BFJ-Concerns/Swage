@@ -272,6 +272,24 @@ A provider entry has two credential fields, checked in order:
 
 When both are set, `api_key_secret_ref` wins.
 
+A credential travels in plaintext when the provider's `base_url` is
+`http://` and names an address other than this machine's loopback: anyone
+on the path can read it. A local model server on `localhost` or `127.0.0.1`
+is never plaintext in this sense, and needs no setting. For a remote
+`http://` endpoint the provider entry's `plaintext_credentials` decides what
+happens, judged when the provider is built:
+
+- `warn` (the default) — requests are sent, after one warning for the
+  provider in the audit record (event kind `provider_credential_exposure`).
+  A rebuild of the same provider finds the warning and adds none; if the
+  warning cannot be recorded, nothing is sent.
+- `refuse` — nothing is sent: every request fails with the reason, and the
+  refusal is recorded once.
+- `allow` — requests are sent and nothing is recorded.
+
+A provider with no credential is never judged. The voice provider shares
+the default provider's route and follows the same setting.
+
 The built-in Codex app server (`protocol = "codex"`) is temporarily
 disabled: a configuration naming it does not load, until Swage can ask you
 to approve the commands and file changes it makes. Settings offers no Codex

@@ -93,8 +93,9 @@ pub async fn run_gateway(port: Option<u16>, host: Option<String>) {
     let startup_secret_manager = crate::secret::SecretManager::new(
         Arc::clone(&raw_storage) as Arc<dyn swage_storage::store::Storage>
     );
-    let provider = create_provider(&config, &startup_secret_manager).await;
-    let voice_provider = create_voice_provider(&config, &startup_secret_manager).await;
+    let provider = create_provider(&config, &startup_secret_manager, raw_storage.as_ref()).await;
+    let voice_provider =
+        create_voice_provider(&config, &startup_secret_manager, raw_storage.as_ref()).await;
     let telegram = create_telegram_client(&config, &startup_secret_manager).await;
 
     // Step 6: Build the tool dispatch pipeline from the root selected above.
@@ -419,6 +420,7 @@ async fn recover_worktrees_after_crash(state: &crate::state::AppState) -> Result
 pub(crate) async fn create_voice_provider(
     config: &swage_config::ResolvedConfig,
     secret_manager: &crate::secret::SecretManager,
+    storage: &dyn swage_storage::store::Storage,
 ) -> Arc<dyn swage_provider::VoiceProvider> {
     let Some((provider_endpoint, model_endpoint)) = default_provider_model(config) else {
         return Arc::new(swage_provider::UnsupportedVoiceProvider::new(
@@ -439,6 +441,15 @@ pub(crate) async fn create_voice_provider(
             ));
         }
     };
+    if let Err(reason) = crate::provider_credential_exposure::judge(
+        storage,
+        &model_endpoint.provider_id,
+        provider_config.plaintext_credential_verdict(provider_endpoint.plaintext_credentials),
+    )
+    .await
+    {
+        return Arc::new(swage_provider::UnsupportedVoiceProvider::new(reason));
+    }
 
     match provider_endpoint.protocol {
         swage_config::Protocol::OpenAi
@@ -1015,7 +1026,7 @@ pub(crate) async fn selected_model_provider(
     {
         return runtime;
     }
-    create_provider(config, &state.secret_manager).await
+    create_provider(config, &state.secret_manager, state.storage.as_ref()).await
 }
 
 fn runtime_serves_selected_route(
@@ -1071,14 +1082,17 @@ pub(crate) fn selected_provider_route(config: &swage_config::ResolvedConfig) -> 
     ))
 }
 
-/// Create the LLM provider from resolved configuration.
+/// Create the LLM provider from resolved configuration. `storage` takes the
+/// audit record of a credential that would travel in plaintext.
 pub(crate) async fn create_provider(
     config: &swage_config::ResolvedConfig,
     secret_manager: &crate::secret::SecretManager,
+    storage: &dyn swage_storage::store::Storage,
 ) -> Arc<dyn swage_provider::LlmProvider> {
     create_provider_with_retry(
         config,
         secret_manager,
+        storage,
         swage_provider::retry::RetryConfig::default(),
     )
     .await
@@ -1087,6 +1101,7 @@ pub(crate) async fn create_provider(
 async fn create_provider_with_retry(
     config: &swage_config::ResolvedConfig,
     secret_manager: &crate::secret::SecretManager,
+    storage: &dyn swage_storage::store::Storage,
     retry: swage_provider::retry::RetryConfig,
 ) -> Arc<dyn swage_provider::LlmProvider> {
     use swage_provider::ProviderConfig;
@@ -1159,10 +1174,25 @@ async fn create_provider_with_retry(
                 )
             }
         };
-        providers.push(concrete_provider(
-            provider_endpoint.protocol.clone(),
-            provider_config.with_provider_id(&model_endpoint.provider_id),
-        ));
+        providers.push(
+            match crate::provider_credential_exposure::judge(
+                storage,
+                &model_endpoint.provider_id,
+                provider_config
+                    .plaintext_credential_verdict(provider_endpoint.plaintext_credentials),
+            )
+            .await
+            {
+                Ok(()) => concrete_provider(
+                    provider_endpoint.protocol.clone(),
+                    provider_config.with_provider_id(&model_endpoint.provider_id),
+                ),
+                Err(reason) => Box::new(swage_provider::UnsupportedLlmProvider::for_model(
+                    reason,
+                    &model_endpoint.model_id,
+                )),
+            },
+        );
     }
 
     if providers.is_empty() {
@@ -1762,6 +1792,7 @@ mod tests {
                             base_url: Some(primary_base_url),
                             command: None,
                             state_dir: None,
+                            plaintext_credentials: Default::default(),
                         },
                     ),
                     (
@@ -1775,6 +1806,7 @@ mod tests {
                             base_url: Some(secondary_base_url),
                             command: None,
                             state_dir: None,
+                            plaintext_credentials: Default::default(),
                         },
                     ),
                 ]
@@ -1804,7 +1836,8 @@ mod tests {
             max_backoff: std::time::Duration::ZERO,
         };
 
-        let provider = create_provider_with_retry(&config, &secret_manager, retry).await;
+        let provider =
+            create_provider_with_retry(&config, &secret_manager, storage.as_ref(), retry).await;
         let response = provider
             .complete(swage_core::CompletionRequest {
                 effort: None,
@@ -1846,6 +1879,7 @@ mod tests {
                         base_url: None,
                         command: None,
                         state_dir: None,
+                        plaintext_credentials: Default::default(),
                     },
                 )]
                 .into_iter()
@@ -1870,7 +1904,8 @@ mod tests {
                     .build()
                     .unwrap()
                     .block_on(async {
-                        let provider = create_provider(&config, &secret_manager).await;
+                        let provider =
+                            create_provider(&config, &secret_manager, storage.as_ref()).await;
                         let provider_model = provider.model_id().to_string();
                         let completion_error = provider
                             .complete(swage_core::CompletionRequest {
@@ -1921,7 +1956,7 @@ mod tests {
                 .enable_all()
                 .build()
                 .unwrap()
-                .block_on(create_provider(&config, &secret_manager));
+                .block_on(create_provider(&config, &secret_manager, storage.as_ref()));
         });
 
         let events = captured.lock().unwrap();
@@ -1955,6 +1990,7 @@ mod tests {
             base_url: Some("https://provider.invalid".into()),
             command: None,
             state_dir: None,
+            plaintext_credentials: Default::default(),
         };
         let model = model("provider", "test-model");
         let telegram = TelegramChannelConfig {
@@ -1977,8 +2013,8 @@ mod tests {
             ..Default::default()
         };
         let _subscriber = tracing::subscriber::set_default(Registry::default().with(events));
-        create_provider(&config, &secret_manager).await;
-        create_voice_provider(&config, &secret_manager).await;
+        create_provider(&config, &secret_manager, storage.as_ref()).await;
+        create_voice_provider(&config, &secret_manager, storage.as_ref()).await;
         let telegram_token = resolve_telegram_token(&telegram, &secret_manager)
             .await
             .expect("legacy Telegram environment credential should still resolve");
@@ -2027,6 +2063,7 @@ mod tests {
                             base_url: Some("http://localhost/openai".to_string()),
                             command: None,
                             state_dir: None,
+                            plaintext_credentials: Default::default(),
                         },
                     ),
                     (
@@ -2040,6 +2077,7 @@ mod tests {
                             base_url: Some("http://localhost/anthropic".to_string()),
                             command: None,
                             state_dir: None,
+                            plaintext_credentials: Default::default(),
                         },
                     ),
                 ]
@@ -2085,7 +2123,264 @@ mod tests {
             base_url: Some(base_url),
             command: None,
             state_dir: None,
+            plaintext_credentials: Default::default(),
         }
+    }
+
+    /// An address of this machine that is not loopback, so a request to it
+    /// is plaintext in the policy's sense, or `None` on a host with no such
+    /// interface.
+    fn non_loopback_local_address() -> Option<std::net::IpAddr> {
+        crate::handlers::local_interface_addresses()
+            .ok()?
+            .into_iter()
+            .find(|address| matches!(address, std::net::IpAddr::V4(v4) if !v4.is_loopback()))
+    }
+
+    async fn plaintext_exposure_events(
+        storage: &swage_storage::SqliteStorage,
+    ) -> Vec<swage_storage::AuditEvent> {
+        use swage_storage::store::AuditStore;
+        storage
+            .list_audit_events_filtered(swage_storage::AuditEventFilter {
+                event_kind: Some(crate::provider_credential_exposure::EVENT_KIND.into()),
+                limit: 10,
+                ..Default::default()
+            })
+            .await
+            .expect("list exposure events")
+    }
+
+    /// A one-provider, one-model configuration whose provider carries a
+    /// credential from the environment and the given policy.
+    fn keyed_provider_config(
+        base_url: String,
+        key_env: &'static str,
+        policy: swage_config::PlaintextCredentialPolicy,
+    ) -> swage_config::ResolvedConfig {
+        unsafe { std::env::set_var(key_env, "provider-key") };
+        let mut provider = endpoint(Protocol::OpenAi, base_url);
+        provider.api_key_env = Some(key_env.into());
+        provider.plaintext_credentials = policy;
+        swage_config::ResolvedConfig {
+            providers: ProviderCatalogConfig {
+                default: "lan".into(),
+                entries: [("lan".into(), provider)].into_iter().collect(),
+            },
+            models: ModelCatalogConfig {
+                default: "lan-model".into(),
+                entries: [("lan-model".into(), model("lan", "lan-wire"))]
+                    .into_iter()
+                    .collect(),
+            },
+            ..Default::default()
+        }
+    }
+
+    /// A request that names a refused model is answered with the refusal at
+    /// that model's place in the chain, not passed to another provider.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_request_for_a_refused_model_is_refused_not_rerouted() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let local_url =
+            spawn_openai_compatible_server(Arc::clone(&calls), StatusCode::OK, "local reply").await;
+        let mut config = keyed_provider_config(
+            "http://192.0.2.13:9/v1".into(),
+            "SWAGE_PLAINTEXT_REROUTE_TEST_KEY",
+            swage_config::PlaintextCredentialPolicy::Refuse,
+        );
+        config
+            .providers
+            .entries
+            .insert("local".into(), endpoint(Protocol::OpenAi, local_url));
+        config.providers.default = "local".into();
+        config
+            .models
+            .entries
+            .insert("local-model".into(), model("local", "local-wire"));
+        config.models.default = "local-model".into();
+
+        let provider =
+            create_provider_with_retry(&config, &secret_manager, storage.as_ref(), no_retry())
+                .await;
+        let error = provider
+            .complete(selected_model_request("lan-wire"))
+            .await
+            .expect_err("the refused model answers with its refusal");
+        assert!(error.to_string().contains("plaintext"), "{error}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_credential_to_a_loopback_endpoint_sends_with_nothing_recorded() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let base_url =
+            spawn_openai_compatible_server(Arc::clone(&calls), StatusCode::OK, "local reply").await;
+        let config = keyed_provider_config(
+            base_url,
+            "SWAGE_PLAINTEXT_LOOPBACK_TEST_KEY",
+            swage_config::PlaintextCredentialPolicy::Refuse,
+        );
+
+        let provider =
+            create_provider_with_retry(&config, &secret_manager, storage.as_ref(), no_retry())
+                .await;
+        let response = provider
+            .complete(selected_model_request("lan-model"))
+            .await
+            .expect("a loopback endpoint is never plaintext, whatever the policy");
+
+        assert_eq!(response.content, "local reply");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(plaintext_exposure_events(&storage).await.is_empty());
+    }
+
+    /// Under the refuse policy no request leaves: the provider built in the
+    /// chain's place answers every call with the reason, and the record
+    /// carries one refusal however often the provider is rebuilt.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_credential_to_a_remote_plaintext_endpoint_is_refused_before_transmission() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        // TEST-NET-1 (RFC 5737): routable nowhere, so a request that did
+        // leave would hang rather than succeed; none may.
+        let config = keyed_provider_config(
+            "http://192.0.2.10:9/v1".into(),
+            "SWAGE_PLAINTEXT_REFUSE_TEST_KEY",
+            swage_config::PlaintextCredentialPolicy::Refuse,
+        );
+
+        for _ in 0..2 {
+            let provider =
+                create_provider_with_retry(&config, &secret_manager, storage.as_ref(), no_retry())
+                    .await;
+            let error = provider
+                .complete(selected_model_request("lan-model"))
+                .await
+                .expect_err("the refuse policy sends nothing");
+            assert!(
+                matches!(&error, swage_core::ProviderError::InvalidConfig { message }
+                    if message.contains("plaintext") && message.contains("'lan'")),
+                "{error}"
+            );
+        }
+
+        let events = plaintext_exposure_events(&storage).await;
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].entity_id, "lan");
+        assert_eq!(events[0].metadata["decision"], "refused");
+        assert_eq!(events[0].metadata["host"], "192.0.2.10");
+        assert!(!events[0].summary.contains("provider-key"));
+    }
+
+    /// Under the warn policy the request is sent, after one warning in the
+    /// record for the provider; a rebuild finds the warning and adds none.
+    /// Under the allow policy nothing is recorded. Both need an address of
+    /// this machine that is not loopback to send to.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_credential_to_a_remote_plaintext_endpoint_warns_once_or_sends_silently() {
+        let Some(address) = non_loopback_local_address() else {
+            eprintln!("no non-loopback interface: transmission under warn and allow not exercised");
+            return;
+        };
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let base_url = spawn_openai_compatible_server_on(
+            address,
+            Arc::clone(&calls),
+            StatusCode::OK,
+            "remote reply",
+        )
+        .await;
+
+        let warn = keyed_provider_config(
+            base_url.clone(),
+            "SWAGE_PLAINTEXT_WARN_TEST_KEY",
+            swage_config::PlaintextCredentialPolicy::Warn,
+        );
+        for _ in 0..2 {
+            let provider =
+                create_provider_with_retry(&warn, &secret_manager, storage.as_ref(), no_retry())
+                    .await;
+            let response = provider
+                .complete(selected_model_request("lan-model"))
+                .await
+                .expect("the warn policy sends");
+            assert_eq!(response.content, "remote reply");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let events = plaintext_exposure_events(&storage).await;
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].metadata["decision"], "warned");
+        let origin = events[0].metadata["origin"]
+            .as_str()
+            .expect("origin recorded");
+        assert!(
+            base_url.starts_with(origin),
+            "{origin} is {base_url}'s origin"
+        );
+
+        let allow_storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let allow = keyed_provider_config(
+            base_url,
+            "SWAGE_PLAINTEXT_ALLOW_TEST_KEY",
+            swage_config::PlaintextCredentialPolicy::Allow,
+        );
+        let provider =
+            create_provider_with_retry(&allow, &secret_manager, allow_storage.as_ref(), no_retry())
+                .await;
+        provider
+            .complete(selected_model_request("lan-model"))
+            .await
+            .expect("the allow policy sends");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert!(plaintext_exposure_events(&allow_storage).await.is_empty());
+    }
+
+    /// The voice provider shares the default provider's credential and route,
+    /// so it is judged by the same policy.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_voice_provider_follows_the_default_providers_plaintext_policy() {
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let secret_manager = crate::secret::SecretManager::new(
+            Arc::clone(&storage) as Arc<dyn swage_storage::store::Storage>
+        );
+        let config = keyed_provider_config(
+            "http://192.0.2.12:9/v1".into(),
+            "SWAGE_PLAINTEXT_VOICE_TEST_KEY",
+            swage_config::PlaintextCredentialPolicy::Refuse,
+        );
+
+        let voice = create_voice_provider(&config, &secret_manager, storage.as_ref()).await;
+        let error = voice
+            .synthesise(swage_provider::SpeechRequest {
+                text: "hello".into(),
+                voice: None,
+                format: None,
+            })
+            .await
+            .expect_err("voice under the refuse policy sends nothing");
+        assert!(error.to_string().contains("plaintext"), "{error}");
+        assert_eq!(plaintext_exposure_events(&storage).await.len(), 1);
     }
 
     async fn unreachable_base_url() -> String {
@@ -2177,7 +2472,9 @@ mod tests {
             ..Default::default()
         };
 
-        let provider = create_provider_with_retry(&config, &secret_manager, no_retry()).await;
+        let provider =
+            create_provider_with_retry(&config, &secret_manager, storage.as_ref(), no_retry())
+                .await;
 
         let completion = provider
             .complete(selected_model_request("gpt-6-luna"))
@@ -2264,7 +2561,9 @@ mod tests {
             ..Default::default()
         };
 
-        let provider = create_provider_with_retry(&config, &secret_manager, no_retry()).await;
+        let provider =
+            create_provider_with_retry(&config, &secret_manager, storage.as_ref(), no_retry())
+                .await;
         let request = selected_model_request("gpt-6.1-sol");
         let _failed = provider.complete(request.clone()).await;
 
@@ -2321,6 +2620,22 @@ mod tests {
         status: StatusCode,
         content: &'static str,
     ) -> String {
+        spawn_openai_compatible_server_on(
+            std::net::Ipv4Addr::LOCALHOST.into(),
+            calls,
+            status,
+            content,
+        )
+        .await
+    }
+
+    /// The same mock provider bound on `bind`, addressed by that address.
+    async fn spawn_openai_compatible_server_on(
+        bind: std::net::IpAddr,
+        calls: Arc<AtomicUsize>,
+        status: StatusCode,
+        content: &'static str,
+    ) -> String {
         let app = Router::new().route(
             "/chat/completions",
             post(move |Json(_body): Json<Value>| {
@@ -2357,7 +2672,7 @@ mod tests {
                 }
             }),
         );
-        let listener = TcpListener::bind("127.0.0.1:0")
+        let listener = TcpListener::bind((bind, 0))
             .await
             .expect("bind mock provider");
         let addr = listener.local_addr().expect("mock provider addr");
@@ -2639,7 +2954,7 @@ mod tests {
             },
         );
 
-        let provider = create_provider(&config, &secret_manager).await;
+        let provider = create_provider(&config, &secret_manager, storage.as_ref()).await;
         let result = provider
             .complete(swage_core::CompletionRequest {
                 effort: None,
@@ -2695,6 +3010,7 @@ mod tests {
             base_url: Some("https://provider.invalid".into()),
             command: None,
             state_dir: None,
+            plaintext_credentials: Default::default(),
         };
         let model = swage_config::ModelEndpointConfig {
             provider_id: "anthropic".into(),
