@@ -448,16 +448,8 @@ async fn a_run_terminated_at_the_buffer_limit_fails_with_the_reason_recorded() {
 }
 
 async fn assert_workflow_limit_is_recorded(source: String, reason: swage_workflow::Termination) {
-    let storage = Arc::new(SqliteStorage::in_memory().expect("storage"));
+    let (state, storage) = workflow_test_state();
     let topic = storage.general_scope().await.expect("topic");
-    let state = AppState::new(
-        Arc::clone(&storage) as Arc<dyn Storage>,
-        Arc::clone(&storage) as Arc<dyn TopicStore>,
-        Arc::new(crate::turn::tests::MockProvider::new(vec![])),
-        swage_config::ResolvedConfig::default(),
-        crate::tool::ToolDispatcher::allow_all(vec![]),
-        None,
-    );
     let Json(started) = start_inline_run(
         State(state.clone()),
         Path(topic.id),
