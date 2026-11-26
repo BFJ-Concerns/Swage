@@ -1,267 +1,246 @@
 ---
 name: Project Docs
-description: Write or refresh a project's repository Markdown documentation — README.md, a docs/ tree scaled to the project (how-to guides, reference tables, runbooks), and the parallel agent-facing set (agent-docs/) with generated llms.txt indexes — grounded in the implementation as it actually is, coordinating the agent-guidance hand-off. The docs cover using the product — installing, configuring, operating, building from source — not the project's own development process; such material found in existing docs is stripped on refresh. Use when asked to document a project or repo, write or update the README or docs, create or refresh agent-facing docs or an llms.txt index, bring stale documentation up to scratch, or sync docs after a feature lands. Not for code comments or docstrings, CHANGELOG generation, LICENSE or CONTRIBUTING files, doc-site tooling such as mkdocs or docusaurus, or work solely on the agent-guidance file (AGENTS.md / CLAUDE.md) — a dedicated skill owns it.
+description: Write or refresh a project's repository documentation — its README, a docs/ tree sized to the project, and the matching agent-facing set with generated llms.txt indexes — so that it is true to the code as it stands and is about using the product. Use when asked to document a project or repository, write or update a README or docs, create or refresh agent-facing docs or an llms.txt index, bring stale documentation up to date, or sync docs after a feature lands. Not for code comments or docstrings, changelogs, LICENSE or CONTRIBUTING files, setting up a doc-site tool, or work that is only on the project's agent-guidance file (AGENTS.md, CLAUDE.md).
 ---
 
-# Project Docs
+# Project docs
 
-Produce and maintain a project's documentation as a map of implemented reality:
-accurate to the code at HEAD, scaled to the project's real size, and entirely
-about **using the product** — installing, configuring, driving, operating,
-building from source — readable by its two audiences: human users (narrative,
-rationale, guides) and coding agents (terse operational fact), with every
-substantive fact holding one canonical home. How the product is developed —
-contribution setup, release mechanics, internal design — is not documentation
-material: developer knowledge lives in the project's planning layer and the
-agent-guidance file, and reaches those homes through the report and the
-agent-guidance hand-off rather than through pages in the docs trees.
+The job is documentation a reader can rely on: every statement true of the
+code as it stands, sized to what the project really has, and about using the
+product: installing, configuring, running, operating and building it from
+source. It has two readers. A person wants narrative, reasons and guides. A
+coding agent wants terse fact it can act on. Each fact has one home, chosen
+by who acts on it.
 
-Two modes share this doctrine. **Write** creates documentation that does not
-exist; **refresh** audits existing documentation against the current
-implementation and brings it up to scratch. Most real requests are hybrids; see
-Mode Selection.
+A request is one of two kinds, or both. **Writing** creates documentation
+that does not exist. **Refreshing** checks existing documentation against the
+code and corrects it. Most requests mix them: check what exists first, then
+write only the files that are missing.
 
-## Scope
+## What this skill does not write
 
-Decline mis-triggers early, with a pointer, rather than after survey work:
+- **How the project is developed**: contribution setup, development
+  workflow, release mechanics, internal design and decision records. The
+  documents here are for someone using the product, and development knowledge
+  kept among them goes stale unnoticed because its readers are elsewhere. A
+  request for such a document is ordinary writing work and not a job for this
+  skill. On a refresh, development material found in the README, `docs/` or
+  `agent-docs/` is listed in the drift report as misplaced, with where it
+  could go, and then removed from those files unless the person wants it
+  kept.
+- **Root-level community and legal files** (`LICENSE`, `CONTRIBUTING.md`,
+  issue and pull-request templates). Their terms are the owner's decision.
+  Never create, edit or delete one; mention it in the report if something
+  about it matters.
+- **Plans**: roadmaps, task lists, wish lists. Found inside the docs, they
+  are moved to wherever the project keeps its plans, or listed in the report
+  where it has no such place. They are neither left in the docs nor dropped
+  silently.
+- **The agent-guidance file** (`AGENTS.md`, `CLAUDE.md` and files like them).
+  It is instruction text with its own conventions, and a second author
+  restructuring it causes the drift this skill exists to remove. See *The
+  agent-guidance file* below.
+- **Doc-site tooling**. Where a project already uses a generator such as
+  mkdocs or docusaurus, follow its conventions. Do not install or migrate
+  one.
 
-- **Code comments and docstrings** — ordinary coding work, not this skill.
-- **CHANGELOG and release notes** — release tooling's job.
-- **Development-process documentation** — contribution setup, development
-  workflow, release mechanics, internal design and decision records — is never
-  written: repository docs document using the product. Found during a refresh
-  in the docs the job's scope covers, such material is stripped — delete it,
-  recording each strip in the drift report and surfacing anything the planning
-  layer or the agent-guidance hand-off should keep. The strip reaches README,
-  docs/, and agent-docs/ pages only: root-level community and legal files
-  (CONTRIBUTING.md, LICENSE, forge templates) are outside this skill's
-  authority in both directions — never created, never deleted; note them in
-  the report instead.
-- **LICENSE and CONTRIBUTING** — never create these; legal and contribution terms
-  are the user's decision, not a documentation gap.
-- **Doc-site tooling** (mkdocs, docusaurus, and kin) — never set up or migrate it.
-  When a project already uses one, conform to its conventions.
-- **Planning artefacts** — roadmaps, task lists, and issue logs live in the
-  project's planning layer, not in repo docs. Planning content found *inside*
-  docs is relocated there or surfaced in the report — never silently dropped,
-  never left in place.
-- **The agent-guidance file's internals** — coordinated through the hand-off in
-  Agent-Facing Guidance below, not authored freestyle here.
+Code comments, docstrings and changelogs are other work. Say so before
+surveying anything.
 
-## Doctrine
+## What makes the documentation reliable
 
-Six gates, each stated with the unaided default it corrects:
+**Document what is implemented.** A statement about behaviour, a command, a
+setting, an interface or a dependency traces to a source read in this
+session: the file that makes it true, or a command that was run. Plans,
+TODOs, dead code, paths behind a disabled flag and the existing docs are not
+sources, since the existing docs are what is being checked. A sentence with
+no source is cut.
 
-1. **Evidence.** The default is documenting what the project intends. Rule:
-   document only what is implemented and reachable at HEAD; TODOs, roadmap
-   comments, dead code, and feature-flagged-off paths are not evidence.
-   Substantive claims — behaviour, commands, config, APIs,
-   dependencies — trace to a source read this session; connective prose is
-   exempt. Test: name the file that makes this sentence true, or cut the
-   sentence.
-2. **Earn its file.** The default is scaffolding a full docs/ kit. Rule:
-   README-only is the floor and the default; a docs/ file exists only when a
-   coherent body of grounded content exists today and fits nowhere else. Absence
-   beats scaffold: no empty sections, no placeholders. An explicit user request
-   for a specific doc overrides the default — provided real content exists to
-   ground it. Test: would deleting this file lose information that exists
-   today? (A parallel-set derived page passes by its rendering —
-   `references/parallel-sets.md`.)
-3. **One canonical home, signposts elsewhere.** The default is restating the
-   build commands in README, docs/, and the agent-guidance file until the copies
-   drift apart. Rule: a fact's authoritative substance — exact values, tables,
-   full procedures — lives in one file, chosen by who acts on it: executing
-   agents → the agent-guidance file for ambient every-session facts, the
-   `agent-docs/` set for on-demand reference (`references/parallel-sets.md`);
-   orienting users → README; deep-diving
-   users → docs/ guides and reference; users operating a deployed instance →
-   the runbook (`docs/runbook.md` and kin).
-   Other files carry a one-line signpost or a short excerpt with
-   a link. The README keeps copy-paste install/run/test lines even when the
-   canonical detail lives elsewhere — a front door that is only links orients
-   nobody. The one sanctioned exception is the parallel-set derivation
-   (`references/parallel-sets.md`): a human page restating its agent
-   counterpart is a governed derivation with a declared authority, not a
-   second home. Test: when this fact changes, exactly one authoritative edit.
-4. **Patch, don't rewrite** (refresh). The default is regenerating the file.
-   Rule: the unit of change is the wrong claim; make minimal semantic edits and
-   preserve correct prose, voice, terminology, and heading style. A whole-file
-   rewrite is allowed only when targeted patches cannot leave the file clear —
-   declare that in the drift report before doing it. Never overwrite a file you
-   have not read.
-5. **Extract, don't recall.** The default is typing reference entries from
-   memory — which invents flags, defaults, and error codes. Rule: every
-   reference-table row comes from a reproducible source — the arg parser, config
-   struct or schema, error enum, generated metadata, or a safe command actually
-   run — and the fact inventory records which. Match the code's exact spelling:
-   if the code says `timeout_ms`, the doc says `timeout_ms`. No source, no row.
-   Never hand-edit generated documentation sections — update the generator's
-   input, or report the blocker.
-6. **Scope machine-conditioned facts.** The default is writing operational
-   notes — sudo specifics, systemd units, native services, deployment paths —
-   as if they were true everywhere the project runs. Rule: a fact conditioned
-   on a particular machine or deployment is written with its scope named ("on
-   the production host…", "under the bundled systemd unit…"), never as general
-   truth; and propose such a section only when this session can verify the
-   claims on the machine they describe — otherwise leave it to a session that
-   can, noting the gap in the report. Test: would this sentence still be true
-   in a fresh clone on another machine — and if not, does it say so?
+**A file exists because it has content.** A README alone is the starting
+point and often the right size. A `docs/` page exists when there is a body of
+grounded content today that fits nowhere else; ask whether deleting it would
+lose information that exists now. Write no empty sections and no
+placeholders. A person's request for a particular document settles that the
+document should exist, provided there is real content for it.
 
-Write plain GitHub-flavoured Markdown: relative links, standard headings, an H1
-title per document. GFM extensions the host forge renders are welcome in
-moderation — alert blockquotes (`> [!NOTE]`, `> [!WARNING]`) for genuine tips
-and cautions, collapsible `<details>` sections for bulky optional content. No
-wikilinks, and no frontmatter beyond the index schema
-(`references/parallel-sets.md`, Frontmatter).
+**One home for each fact.** Exact values, tables and full procedures live in
+one file, chosen by who acts on them: an agent's on-demand reference in
+`agent-docs/`, a person getting oriented in the README, a person going deep
+in `docs/` guides and reference, a person operating a running instance in the
+runbook. Every other file carries a one-line pointer or a short excerpt with
+a link, so that a change to the fact is one edit. Two things are not
+duplication: the README keeps copy-paste install, run and test lines whatever
+else holds the detail, because a front door made only of links orients
+nobody; and a human page may restate its agent counterpart under the rules in
+`references/parallel-sets.md`.
 
-## Two Registers
+**On a refresh, correct the wrong statement and leave the rest.** The unit of
+change is the claim that is wrong. Keep prose that is correct, with its
+voice, terms and heading style. Rewrite a whole file only when corrections
+cannot leave it readable, and say so in the drift report first. Read a file
+before changing it.
 
-The two audiences take two registers, which fail differently and
-conflict in their fixes; fix a document's register by its primary reader
-before drafting:
+**Reference rows are copied from their source.** Flags, defaults, types and
+error codes written from memory are where documentation invents things. Each
+row of a reference table comes from the argument parser, the config schema,
+the error enum, generated metadata or the output of a command that was run,
+in the code's exact spelling: where the code says `timeout_ms`, so does the
+page. A row with no source is left out. A section a generator produces is
+changed by changing the generator's input; where that is not possible, report
+it.
 
-- **Agent-facing** — the agent-guidance file, and any reference whose reader is
-  an executing agent. This is instruction text: write it with prompt craft —
-  explicit scope, mechanism-grounded reasons, one term per concept, no
-  decorative prose.
-- **Human-facing** — README narrative, guides, rationale, and the runbooks.
-  Draft it to read as written
-  rather than generated: read `references/human-register.md` before drafting
-  or materially revising human-facing prose, and hold its patterns out from
-  the start.
+**Say where a fact is true.** A statement that holds only on one machine or
+deployment, such as a service unit, a deployment path or host-specific
+setup, names that scope in the sentence. Write such a section only when this
+session can check its claims on the machine they describe; otherwise leave it
+out and name the gap in the report.
 
-Both registers take a meaning-preserving clarity pass — simpler, more precise
-wording that changes no claim — after drafting and before the accuracy review.
+**Publish no secrets.** Surveying reads config files, environment handling
+and CI settings. Documentation describes the shape of a credential setting,
+such as an API key read from a named variable, and never carries a secret, a
+token, a private hostname or a path that exists only on one machine.
 
-Run the pass yourself as a separate edit — content and structure settled
-first, the clarity edit second: simpler and more precise wording only,
-changing no claim.
+## Two readers, two registers
 
-Past the README-only floor the registers become parallel documentation trees —
-a `docs/` human set and a sibling `agent-docs/` agent set, the agent set
-primary and the human set derived from it, with deterministically generated
-indexes (`llms.txt`, `llms-full.txt`, the human contents page). Read
-`references/parallel-sets.md` whenever the project keeps or earns a `docs/`
-tree; content is never written in a compromise register.
+Decide who a document is for before drafting it, because the two registers
+fail in opposite ways and a compromise serves neither.
 
-## Mode Selection
+- **For an agent**: reference an agent looks up and acts on. Terse, one term
+  per thing, each fact once, tables where the content is a list. No
+  motivation and no walkthroughs.
+- **For a person**: the README, guides, explanations and runbooks. Plain,
+  specific prose that reads as written by someone who knows the product. Read
+  `references/human-register.md` before drafting or substantially revising
+  it.
 
-- **Refresh** when the request concerns the accuracy of documentation that
-  exists; the deliverable is a drift report plus targeted patches.
-- **Write** for documentation that does not exist; the deliverable is the docs.
-- **Hybrid** (the common case): audit whatever exists refresh-style first; author
-  only files that do not exist.
-- Scoped asks ("the README is stale") audit the named file plus the facts it
-  shares homes with. Whole-repo asks audit README, docs/, and the agent-guidance
-  file at repo scale.
-- A request for a **single document** establishes its type, audience, goal, and
-  scope in and out before drafting — ask when the request leaves them unclear —
-  and proposes the document's outline before writing it in full.
+After the content and structure are settled, go over the wording once for
+clarity alone, changing no claim. Do this before the accuracy review, so that
+the review checks the text that ships.
 
-## Workflow
+Once a project has a `docs/` tree, the two registers become two trees: `docs/`
+for people and `agent-docs/` for agents, with the agent page written first
+and the human page derived from it, and indexes generated by script. Read
+`references/parallel-sets.md` whenever the project has, or this job creates,
+a `docs/` tree.
 
-Five steps whose depth scales with the ask — a scoped README refresh collapses to
-a short audit-and-patch; a whole-repo write runs the full survey:
+Use plain GitHub-flavoured Markdown: relative links, one H1 title per
+document, ordinary headings. Alert blocks (`> [!NOTE]`, `> [!WARNING]`) and
+collapsible `<details>` sections are fine where the project's forge renders
+them and the content is a real caution or bulky optional material. Use no
+wikilinks, and no front matter beyond what `references/parallel-sets.md`
+defines.
 
-1. **Inventory** existing docs and discover the project's surfaces: Markdown
-   files, manifests, CI configs, entry points, CLI/config/API definitions,
-   existing agent-guidance files.
-2. **Survey** the code for evidence, building a working fact inventory — claim,
-   source (file or command), audience, canonical home. The inventory is expected
-   for multi-file doc sets; informal notes suffice for a README-only job. Keep it
-   in the session's scratch topic, never committed to the repo. Read
-   `references/survey-protocol.md` before any survey of substance.
-3. **Plan.** Route facts to homes and fix the doc set (gate 2). For anything
-   beyond a single-file patch, propose the plan — files plus a one-line content
-   statement each — before mass drafting.
-4. **Draft or patch** — a single writer transcribing from the inventory, in the
-   register the document's reader fixes (Two Registers); refresh mode writes
-   the drift report before editing. Read `references/workflow-write.md` or
-   `references/workflow-refresh.md` for the mode's full procedure on
-   non-trivial jobs, and `references/document-shapes.md` at drafting time for
-   the shape of each earned file.
-5. **Verify.** Run the accuracy review (below), check relative links with
-   `scripts/check-doc-links.sh`, regenerate and check the indexes with
-   `scripts/doc-indexes.sh --check` where the project keeps parallel sets,
-   spot-audit duplication (exact values and
-   procedures single-homed; signposts fine), and sanity-check documented commands
-   where safe — read-only invocations such as `--help`; anything heavier only
-   when it is already part of the session's work. Then commit the documentation
-   changes as part of completion, unless the user or the project's policy holds
-   commits.
+## Sizing the job
 
-## Delegation
+- A request about one file ("the README is stale") covers that file and the
+  facts it shares a home with. A request about the whole repository covers
+  the README, `docs/`, `agent-docs/` and what the agent-guidance file states.
+- A request for a single new document settles its kind, reader, purpose and
+  scope first. Ask when the request leaves one of them open, and show an
+  outline before writing the whole.
+- A small job is done directly: read the code behind the file, correct it,
+  check it. The steps below are for jobs with several files or a whole
+  survey.
 
-Parallelism is for reading, never writing: the breadth survey and per-claim
-verification fan out; synthesis, authorship, and review verdicts stay with one
-strong agent, so the docs speak with one voice and components are described once,
-consistently. Workers return structured evidence — claim, citation, uncertainty —
-never prose to paste; their stable instructions live in `prompts/`.
+## Doing the work
 
-Prefer a workflow for that delegation (the workflow-authoring skill documents
-the surface): cheap-tier workers for the survey fan-out, and the accuracy
-review on the opposite model family from the writer, so a differently-trained
-family checks the claims rather than the writer's own. When the catalogue
-offers only one family, fall back to delegated clean-context workers for the
-fan-out and a fresh delegated worker for the accuracy review, prompted from
-`prompts/accuracy-review.md` with the claim list — a delegated worker shares no
-session context, so the review is still de-anchored from the writer's
-reasoning; note in the report that the review was same-family.
+1. **Find what exists**: the documentation files, and the places the
+   project's surfaces are defined (manifests, CI configuration, entry
+   points, command-line, config and API definitions, guidance files).
+2. **Survey the code** and build a fact inventory: each claim with its
+   source, its reader and its home. Read `references/survey-protocol.md`
+   before a survey of any size. The inventory is working notes. Keep it
+   outside the repository's tracked files and do not commit it.
+3. **Plan**: which files, with a line on what each will hold, and what is
+   deliberately left out. For anything beyond a correction to one file, show
+   the plan before drafting, so that the person can change it while that
+   costs nothing. On a refresh the plan is the drift report, written before
+   any edit.
+4. **Draft or correct**, as one writer working from the inventory.
+   `references/workflow-write.md` covers writing a new set,
+   `references/workflow-refresh.md` covers refreshing one, and
+   `references/document-shapes.md` gives the shape of each kind of page.
+5. **Check**. Run the accuracy review below. Run
+   `scripts/check-doc-links.sh` over the changed files for broken relative
+   links, and `scripts/doc-indexes.sh --check` where the project keeps both
+   trees. Look for exact values or procedures that now live in two files.
+   Try documented commands where that is safe: read-only invocations such as
+   `--help` freely; a build, a test suite or anything that changes state only
+   when it is already part of this session's work or the person asks.
+6. **Commit** the documentation changes, unless the person or the project
+   holds commits.
 
-With no delegation mechanism at all, run the same workflow sequentially and note
-in the report that the accuracy review was a same-context self-review.
+## Workers
 
-## Agent-Facing Guidance
+Reading can be shared out; writing cannot. A survey over many areas and the
+checking of many claims are work for parallel workers. The drafting and the
+decisions stay with one writer, so that the documents speak with one voice
+and each thing is described once. Workers return evidence (a claim, its
+source, what they are unsure of) and never prose to paste.
 
-The agent-facing guidance file (AGENTS.md and its pointers) is part of the doc
-kit but not authored freestyle here: the `agent-guidance` skill owns its
-structure and conventions. During the survey, compile the sourced agent-facing
-facts — commands, layout, constraints, conventions — with their canonical homes,
-then invoke `agent-guidance` to apply them; it decides the file's internals.
-Keep the register split intact: the guidance file carries terse operational fact
-and points into README and docs/ for narrative — it never duplicates them. If
-the skill is unavailable in the session, list the compiled facts in the final
-report as a pending hand-off rather than editing the file directly — a second
-freestyle writer to that file recreates exactly the drift this skill exists to
-remove.
+Use whatever the session has for this: a workflow where it can run one, or
+its delegation tool, or neither. Surveying an area is bounded reading, which
+a smaller model does well where the installation has more than one.
+`prompts/survey-worker.md` and
+`prompts/accuracy-review.md` are the workers' briefs. Send the text of the
+brief followed by the area or the claim list, since a worker sees only what
+it is sent.
 
-## Verification
+## The accuracy review
 
-The accuracy review is the gate between drafting and done: an adversarial
-reviewer receives the claim list and repo access — not the writer's reasoning —
-and tries to falsify each claim (`prompts/accuracy-review.md`). Under parallel
-sets the review runs as a chain — agent set against code, derived human pages
-against their agent counterparts, human-only claims against code
-(`references/parallel-sets.md`, The verification chain). Verdicts are
-terminal: falsified and unverifiable claims are corrected or removed before the
-docs ship — never hedged, never shipped flagged.
+Before the documentation counts as done, its claims are checked against the
+code by a reader who has the claim list and the repository and has not seen
+the writer's reasoning. That reader is a fresh worker where the session can
+dispatch one, and on a different model family from the writer where the
+installation has two, because a different family is less likely to share the
+writer's misreading. With no way to dispatch, re-read each claim against its
+source yourself after the drafting is finished. Say in the report which of
+these the review was.
 
-## Report
+Each claim comes back confirmed, falsified or unverifiable. A claim that was
+not confirmed is corrected from the evidence or removed. It does not ship
+with a hedge or a flag. Where the project keeps both trees, the review runs
+in the order `references/parallel-sets.md` gives.
 
-The final report states: files created and changed; the drift report (refresh);
-claims removed or omitted for lack of evidence; development-process content
-stripped, with anything surfaced for the planning layer or the agent-guidance
-hand-off; docs deliberately not created and
-why; agent-facing facts handed off or listed as pending; and the verification
-performed with its limits (commands not run, areas not readable). The drift
-report is conversation or PR-description material — do not commit it to the repo.
+## The agent-guidance file
+
+A whole-repository job reads the agent-guidance file as it reads the other
+documentation, and the survey will find facts that belong in it: the build
+and test commands, the layout, standing constraints. It will also find
+statements in it that the code no longer supports. Put both in the report as
+proposed changes to that file, each with its source.
+
+Edit the file only when the request covers it, and then only to correct
+statements the code contradicts; its structure and its other content stay as
+they are. Where the session has a skill for writing that kind of file, make
+the edit with that skill. The guidance file carries what an agent needs in
+every session and points into the README and `docs/` for the rest, so nothing
+is copied between them.
+
+## The report
+
+Say what was created and changed. On a refresh, give the drift report. List
+the claims removed or left out for want of evidence, the development and
+planning material removed and where it went, the documents deliberately not
+written and why, and the changes proposed for the agent-guidance file. Say
+what checking was done and where it stopped: which kind of accuracy review,
+which commands were not run, which areas could not be read. The drift report
+belongs in the conversation or a pull-request description and is not
+committed.
 
 ## References
 
-- `references/survey-protocol.md` — evidence classes and precedence, the fact
-  inventory, safe-command policy, privacy and generated-content rules; read
-  before any substantial survey.
-- `references/workflow-write.md` — choosing and shaping the doc set; read when
-  authoring more than a single file.
-- `references/workflow-refresh.md` — the two-directional audit and the drift
-  report; read when refreshing existing docs.
-- `references/document-shapes.md` — shapes and table formats for files that have
-  earned existence; read at drafting time.
-- `references/human-register.md` — the generated-text patterns human-facing
-  prose must not carry; read before drafting or materially revising
-  human-facing prose.
-- `references/parallel-sets.md` — the parallel `docs/` and `agent-docs/`
-  trees: layout, frontmatter, generated indexes, agent-primary derivation,
-  and the chained accuracy review; read whenever the project keeps or earns
-  a `docs/` tree.
-
+- `references/survey-protocol.md` — what counts as evidence, the fact
+  inventory's format, and which commands are safe to run. Read before a
+  survey of any size.
+- `references/workflow-write.md` — choosing the set of documents and shaping
+  the README. Read when writing more than one file.
+- `references/workflow-refresh.md` — auditing in both directions, the drift
+  report, and how to correct. Read when refreshing.
+- `references/document-shapes.md` — reference pages, guides and runbooks.
+  Read when drafting one.
+- `references/human-register.md` — the voice of prose written for people.
+  Read before drafting or substantially revising it.
+- `references/parallel-sets.md` — the `docs/` and `agent-docs/` trees, their
+  front matter, the generated indexes and the order of the accuracy review.
+  Read whenever the project has or gains a `docs/` tree.

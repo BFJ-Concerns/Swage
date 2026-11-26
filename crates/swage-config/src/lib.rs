@@ -30,11 +30,11 @@ pub use model::{
     ContextTransferMode, ContextTransferTargetConfig, GenerationConfig, GenerationPresetConfig,
     HierarchyLevel, HitlConfig, JudgeConfig, LogLevel, LoggingConfig, MemoryConfig,
     ModelCapabilitiesConfig, ModelCatalogConfig, ModelEndpointConfig, ModelPricing,
-    ObservabilityConfig, OutputConfig, PricingConfig, Protocol, ProviderCatalogConfig,
-    ProviderEndpointConfig, ProviderRoute, PythonExecuteToolConfig, PythonRuntimePolicy,
-    RequireApprovalEntry, ResolvedConfig, SandboxConfig, SandboxNetwork, SearchProviderConfig,
-    ServerConfig, SessionsConfig, TelegramChannelConfig, ToolConfig, ToolPermissionConfig,
-    VoiceConfig, resolve_provider_route,
+    ObservabilityConfig, OutputConfig, PlaintextCredentialPolicy, PricingConfig, Protocol,
+    ProviderCatalogConfig, ProviderEndpointConfig, ProviderRoute, PythonExecuteToolConfig,
+    PythonRuntimePolicy, RequireApprovalEntry, ResolvedConfig, SandboxConfig, SandboxNetwork,
+    SearchProviderConfig, ServerConfig, SessionsConfig, TelegramChannelConfig, ToolConfig,
+    ToolPermissionConfig, VoiceConfig, resolve_provider_route,
 };
 
 // Error types

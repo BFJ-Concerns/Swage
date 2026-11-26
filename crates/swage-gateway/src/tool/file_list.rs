@@ -30,7 +30,11 @@ impl Tool for FileListTool {
     }
 
     fn description(&self) -> &str {
-        "List the contents of a directory in the workspace."
+        "List what one directory holds, an entry to a line: its subdirectories first, then \
+         its files, each with its size in bytes, and its symbolic links, each group in name \
+         order. Only that directory is listed, not what lies below it; `file_search` finds \
+         text across a whole tree. A path that does not exist, or is not a directory, fails \
+         saying which. Listing changes nothing."
     }
 
     fn parameters(&self) -> Value {
@@ -43,7 +47,7 @@ impl Tool for FileListTool {
                 },
                 "path": {
                     "type": "string",
-                    "description": "Directory path relative to the workspace root. Use \".\" for the workspace root itself."
+                    "description": "The directory to list: relative to the session's working directory, or absolute for one elsewhere the session has been allowed to reach. `.` is the working directory itself."
                 }
             },
             "required": ["path"]

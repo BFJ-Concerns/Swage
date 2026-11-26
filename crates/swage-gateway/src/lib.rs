@@ -70,6 +70,7 @@ pub mod memory_curation;
 pub mod onboarding;
 pub mod operator;
 pub mod presence;
+pub mod provider_credential_exposure;
 pub mod recent_sessions;
 pub mod record_durability;
 pub mod request_judge;

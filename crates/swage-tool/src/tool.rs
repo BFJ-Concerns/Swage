@@ -86,14 +86,6 @@ pub trait Tool: Send + Sync {
     /// JSON Schema object describing the parameters this tool accepts.
     fn parameters(&self) -> Value;
 
-    /// Parameter keys whose values should be redacted in logs and hook output.
-    ///
-    /// Defaults to an empty slice — override for tools that accept secrets,
-    /// tokens, or other sensitive data.
-    fn sensitive_keys(&self) -> &[&str] {
-        &[]
-    }
-
     /// Parameter keys whose values may be secret references.
     ///
     /// The gateway resolves these references at the host boundary before
@@ -219,10 +211,6 @@ mod tests {
             json!({"type": "object", "properties": {}})
         }
 
-        fn sensitive_keys(&self) -> &[&str] {
-            &["secret", "token"]
-        }
-
         async fn execute(
             &self,
             _params: Value,
@@ -299,12 +287,6 @@ mod tests {
     }
 
     #[test]
-    fn sensitive_keys_default_is_empty() {
-        let tool = AddTool;
-        assert!(tool.sensitive_keys().is_empty());
-    }
-
-    #[test]
     fn display_hints_default_to_none_and_summary_reads_the_named_param() {
         assert_eq!(AddTool.display_hints(), ToolDisplayHints::default());
         assert_eq!(
@@ -344,13 +326,6 @@ mod tests {
                 expected
             );
         }
-    }
-
-    #[test]
-    fn sensitive_keys_overridden_when_specified() {
-        let tool = BrokenTool;
-        let keys = tool.sensitive_keys();
-        assert_eq!(keys, &["secret", "token"]);
     }
 
     #[tokio::test]

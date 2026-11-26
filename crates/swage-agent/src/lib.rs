@@ -7,6 +7,7 @@ pub mod agent;
 pub mod approval;
 pub mod builder;
 pub mod cancel;
+pub mod closing_account;
 pub mod compaction;
 pub mod config;
 pub mod context;

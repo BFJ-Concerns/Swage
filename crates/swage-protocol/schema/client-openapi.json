@@ -1131,6 +1131,16 @@
             "format": "date-time",
             "type": "string"
           },
+          "latest_turn_state": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TurnState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "message_preview": {
             "type": [
               "string",
@@ -3202,6 +3212,15 @@
         ],
         "type": "object"
       },
+      "PlaintextCredentialPolicy": {
+        "description": "What a provider does with a request that would carry its credential over\nplain `http://` to an address that is not loopback: refuse every request,\nsend after one recorded warning, or send silently.",
+        "enum": [
+          "refuse",
+          "warn",
+          "allow"
+        ],
+        "type": "string"
+      },
       "PostWorkflowRunEventRequest": {
         "properties": {
           "kind": {
@@ -3420,6 +3439,18 @@
           "has_credential": {
             "type": "boolean"
           },
+          "plaintext_credentials": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlaintextCredentialPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The provider's plaintext-credential policy; `warn` when unset."
+          },
           "protocol": {
             "$ref": "#/components/schemas/ProviderProtocol"
           },
@@ -3625,6 +3656,16 @@
             "description": "When the latest user or assistant message landed — the list's order.",
             "format": "date-time",
             "type": "string"
+          },
+          "latest_turn_state": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TurnState"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "message_preview": {
             "type": [
@@ -4017,6 +4058,18 @@
               "string",
               "null"
             ]
+          },
+          "plaintext_credentials": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlaintextCredentialPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The provider's plaintext-credential policy; left out, the running\nvalue stands (`warn` for a new provider)."
           },
           "protocol": {
             "$ref": "#/components/schemas/ProviderProtocol"
@@ -4971,6 +5024,24 @@
             "required": [
               "type",
               "entry_id"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "A session row may have changed or entered or left a list. Refetch\nsession lists to read the current rows from the gateway.",
+            "properties": {
+              "session_id": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "type": {
+                "const": "session_updated",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id"
             ],
             "type": "object"
           },
@@ -7177,16 +7248,11 @@
           "synthesis": {
             "type": "boolean"
           },
-          "synthesis_unverified": {
-            "default": false,
-            "description": "Whether the configured speech model's availability is still unverified.",
-            "type": "boolean"
-          },
           "transcription": {
             "type": "boolean"
           },
           "unavailable_reason": {
-            "description": "Why transcription or synthesis is unavailable, naming what to\nconfigure; absent when both are available.",
+            "description": "Why transcription or synthesis is unavailable. Absent when both are available.",
             "type": [
               "string",
               "null"

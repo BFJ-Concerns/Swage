@@ -4,10 +4,9 @@ description: Run lifecycle, journal/replay, budget partitions (including per-rou
 
 # Workflow engine
 
-The workflow engine executes front-loaded JavaScript scripts inside a
-sandboxed QuickJS runtime. Each run is a single script evaluation; the host
-(the gateway) journals every non-deterministic call so a crashed or parked
-run replays from its journal.
+Each workflow run evaluates its script in a separate V8 isolate
+(`swage-isolate`). The gateway journals calls to the host so an interrupted
+or parked run can replay them.
 
 Primary sources: `crates/swage-workflow/src/engine.rs` (the JS sandbox and
 host bindings), `crates/swage-workflow/src/host.rs` (the `WorkflowHost`
@@ -34,8 +33,8 @@ serialisation, so the cap is a soft admission gate on `start_run`
 callers rather than a hard gateway-wide limit.
 
 `start_run` validates the budget, creates a `NewWorkflowRun` record
-(with `source_hash` as SHA-256 of source, `engine_version` as
-`QUICKJS_ENGINE_VERSION`, the locked rquickjs release), then calls
+(with `source_hash` as SHA-256 of source and `engine_version` as the
+`v8-<version>` returned by `swage_workflow::engine_version()`), then calls
 `launch_existing_run`.
 
 `launch_existing_run` is the shared path for new and resumed runs:
@@ -62,11 +61,17 @@ Terminal state resolution:
 
 ## Scripts
 
-Scripts are JavaScript evaluated in a sandboxed QuickJS runtime with only
-these intrinsics: `Eval`, `Json`, `Promise`, `MapSet`, `RegExpCompiler`,
-`RegExp`. `globalThis.eval` is deleted; `Math.random` throws
-`NondeterministicCallError`. `Date`, `setTimeout`, `fetch`, `process` are
-absent.
+The isolate has no ambient access to I/O, timers, or clocks. `Math.random`
+and host-locale methods such as `toLocaleString()` throw
+`NondeterministicCallError`. Workflows obtain external values through the
+host API so replay can reproduce them.
+
+`EngineLimits::memory_bytes` independently caps the heap and the combined
+backing stores of live buffers. Programs can use fixed-length buffers and
+typed arrays. Resizable buffers are unavailable. Reaching the heap,
+buffer or uninterrupted execution limit returns
+`WorkflowEngineError::Terminated` and the gateway records an
+`engine_terminated` audit event.
 
 ### Meta header
 
@@ -543,9 +548,9 @@ would change and replay would fail.
 
 ## Cancellation
 
-The `CancellationToken` is installed as the QuickJS interrupt handler
-(checked between JS opcodes) and raced against the execution future via
-`tokio::select!`. Result: `WorkflowEngineError::Cancelled`.
+The isolate checks the cancellation token while waiting on a host call.
+Its watchdog checks the same token to stop running JavaScript, including a
+loop that never yields. The engine returns `WorkflowEngineError::Cancelled`.
 
 `cancel_run` cancels the token. For parked runs (no engine to signal),
 it directly sets state to `cancelled` in storage.

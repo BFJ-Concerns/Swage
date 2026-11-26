@@ -38,7 +38,16 @@ impl Tool for FileEditTool {
     }
 
     fn description(&self) -> &str {
-        "Edit one or more text files by replacing exact current text, replacing Markdown sections, or appending to Markdown sections. Use file_read first for current text. Relative paths resolve from the workspace; absolute paths can target other approved machine locations. The tool rejects stale, ambiguous, or unsafe edits before writing."
+        "Change parts of existing text files and leave the rest of each as it is. Every edit \
+         quotes the text it replaces as the file now holds it, so an edit written against \
+         text that has since changed fails instead of landing somewhere else. `replace` \
+         swaps one exact passage, `replace_section` rewrites a Markdown section found by its \
+         heading, and `append_to_section` adds to the end of one. One call can edit several \
+         files, and all of its edits are checked before any file is written: an edit whose \
+         text is not found or is found more than once, or whose heading is missing or \
+         repeated, fails the call with nothing changed, and the failure says which. \
+         `file_write` creates a file or replaces one whole. The result gives, for each file, \
+         the edits applied and its size in bytes before and after."
     }
 
     fn parameters(&self) -> Value {
@@ -51,40 +60,40 @@ impl Tool for FileEditTool {
                 },
                 "changes": {
                     "type": "array",
-                    "description": "Files to edit. Each file is read once, its edits are applied in order, and all files are validated before any writes occur.",
+                    "description": "The files to change, each listed once with all of its edits.",
                     "items": {
                         "type": "object",
                         "properties": {
                             "path": {
                                 "type": "string",
-                                "description": "File path. Use ./path for workspace-relative paths, or an absolute path for another approved machine location."
+                                "description": "The file to edit, which must exist: relative to the session's working directory, or absolute for one elsewhere the session has been allowed to reach."
                             },
                             "edits": {
                                 "type": "array",
-                                "description": "Ordered edits for this file.",
+                                "description": "The edits to this file, applied in order, each to the text the one before it left.",
                                 "items": {
                                     "type": "object",
                                     "properties": {
                                         "type": {
                                             "type": "string",
                                             "enum": ["replace", "replace_section", "append_to_section"],
-                                            "description": "replace changes exact old_text. replace_section changes a Markdown section by heading. append_to_section appends to a Markdown section by heading."
+                                            "description": "`replace` swaps the passage `old_text` quotes for `new_text`. `replace_section` rewrites the Markdown section under `heading`. `append_to_section` adds `new_text` to the end of that section."
                                         },
                                         "old_text": {
                                             "type": "string",
-                                            "description": "Current text copied from file_read. Required for every edit. For section edits, pass the complete current section text: either the heading plus body or the complete body under the heading."
+                                            "description": "The text as the file holds it now, character for character. For `replace`, the passage to change, with enough of its surroundings to occur exactly once unless `replace_all` is set. For the two section edits, the whole current section, with or without its heading line: it shows that the section has not changed since it was read."
                                         },
                                         "new_text": {
                                             "type": "string",
-                                            "description": "Replacement or appended text. Can be empty for deletion-style replacements."
+                                            "description": "What takes its place. For `replace`, the new passage, which may be empty to delete the old one. For `replace_section`, the new section; given without a heading line it becomes the body under the existing heading. For `append_to_section`, the text to add after the section's last line."
                                         },
                                         "heading": {
                                             "type": "string",
-                                            "description": "Required for replace_section and append_to_section. Exact visible Markdown heading text without leading # characters."
+                                            "description": "For the two section edits, and required by them: the section's heading text as it stands in the file, without its leading `#` marks. It must be the only heading in the file with that text. A section runs to the next heading of the same or a higher level, so it includes its subsections."
                                         },
                                         "replace_all": {
                                             "type": "boolean",
-                                            "description": "Only valid for type=replace. When true, every old_text occurrence is replaced; otherwise old_text must match exactly once."
+                                            "description": "For `replace` only. True replaces every occurrence of `old_text`; left out or false, `old_text` must occur exactly once."
                                         }
                                     },
                                     "required": ["type", "old_text", "new_text"],

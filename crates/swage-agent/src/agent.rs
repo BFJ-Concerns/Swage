@@ -1950,6 +1950,9 @@ impl Agent {
         let mut delegation_wait_owner = None;
         let mut round = 0usize;
         let mut incomplete_reason;
+        // The closing-account request is made at most once per turn.
+        let mut closing_account_requested = false;
+        let mut closing_notice = None;
 
         'outer: loop {
             // Check cancellation eagerly before starting each round. This
@@ -1992,8 +1995,37 @@ impl Agent {
             let round_reasoning = round_outcome.reasoning;
             accumulated.push_str(&round_text);
 
-            // An output limit settles partial work; otherwise no tool calls means a final response.
-            if incomplete_reason.is_some() || round_tool_calls.is_empty() {
+            // An output limit settles partial work; otherwise no tool calls
+            // means a final response — unless that response is empty after
+            // tool rounds, which is answered once with the closing request
+            // (`closing_account`), so the reply never ends on an interim
+            // narration of work that may not have happened.
+            if incomplete_reason.is_some() {
+                break 'outer;
+            }
+            if round_tool_calls.is_empty() {
+                if crate::closing_account::closing_account_due(
+                    &round_text,
+                    round,
+                    closing_account_requested,
+                ) {
+                    closing_account_requested = true;
+                    llm_request.messages.push(ChatMessage::new(
+                        Role::User,
+                        self.config.closing_account_request.clone(),
+                    ));
+                    continue 'outer;
+                }
+                if closing_account_requested && round_text.trim().is_empty() {
+                    let notice = crate::closing_account::ENDED_WITHOUT_ACCOUNT;
+                    let content = if accumulated.trim().is_empty() {
+                        notice.to_owned()
+                    } else {
+                        format!("\n\n{notice}")
+                    };
+                    accumulated.push_str(&content);
+                    closing_notice = Some(content);
+                }
                 break 'outer;
             }
 
@@ -2310,11 +2342,6 @@ impl Agent {
                                 "Repeated failing tool call '{}': {}",
                                 call.name, safe_result
                             );
-                            let _ = event_tx.send(AgentEvent::Error {
-                                message: reason.clone(),
-                                provider_failure: false,
-                            });
-                            self.fail_turn_and_idle(turn.id, thread_id).await;
                             return Err(AgentError::RepeatedToolFailure(reason));
                         }
                     }
@@ -2368,13 +2395,30 @@ impl Agent {
                     return Err(AgentError::Cancelled);
                 }
                 Err(error) => {
-                    self.storage
+                    if let Err(storage_error) = self
+                        .storage
                         .settle_started_tool_calls(
                             turn.id,
                             swage_storage::store::INTERRUPTED_TOOL_RESULT,
                             swage_storage::store::INTERRUPTED_TOOL_STATUS,
                         )
-                        .await?;
+                        .await
+                    {
+                        let _ = event_tx.send(AgentEvent::RecordIntegrityLost {
+                            turn_id: turn.id,
+                            reason: format!("failed turn's started tool calls could not be settled: {storage_error}"),
+                        });
+                    }
+                    self.record_failed_reply(
+                        &execution,
+                        &accumulated,
+                        AgentEvent::Error {
+                            message: error.to_string(),
+                            provider_failure: false,
+                        },
+                        &event_tx,
+                    )
+                    .await;
                     return Err(error);
                 }
             };
@@ -2404,6 +2448,7 @@ impl Agent {
         // When an output schema is configured, extract JSON from the accumulated
         // response, validate it, and retry the LLM call if validation fails. Each
         // retry streams tokens independently. Without a schema, this block is skipped.
+        let mut streamed_before_schema_retry = String::new();
         let structured_output = if incomplete_reason.is_some() {
             None
         } else if let Some(ref schema_value) = self.config.output_schema {
@@ -2448,32 +2493,26 @@ impl Agent {
                     }]
                 });
 
-                // Step 4/5: validation failed.
+                // Each attempt is validated on its own. A failed turn keeps
+                // all the text already sent, excluding any unsent closing notice.
+                let streamed = closing_notice
+                    .take()
+                    .and_then(|notice| accumulated.strip_suffix(&notice))
+                    .unwrap_or(&accumulated);
+                streamed_before_schema_retry.push_str(streamed);
+
                 if attempt > max_retries {
-                    // Step 5: all retries exhausted.
-                    let _ = event_tx.send(AgentEvent::OutputSchemaFailed {
-                        turn_id: turn.id,
-                        attempts: attempt,
-                        errors: validation_errors,
-                    });
-
-                    // Persist the failed response for debugging.
-                    let _ = self
-                        .storage
-                        .append_message(swage_storage::model::AppendMessage {
-                            thread_id,
-                            attachments: Vec::new(),
-                            turn_id: Some(turn.id),
-                            role: Role::Assistant,
-                            origin: swage_storage::MessageOrigin::Assistant,
-                            content: accumulated.clone(),
-                            agent_id: self.config.agent_id.clone(),
-                        })
-                        .await;
-
-                    // Mark turn Failed, thread Idle.
-                    self.fail_turn_and_idle(turn.id, thread_id).await;
-
+                    self.record_failed_reply(
+                        &execution,
+                        &streamed_before_schema_retry,
+                        AgentEvent::OutputSchemaFailed {
+                            turn_id: turn.id,
+                            attempts: attempt,
+                            errors: validation_errors,
+                        },
+                        &event_tx,
+                    )
+                    .await;
                     return Err(AgentError::OutputSchemaFailed { attempts: attempt });
                 }
 
@@ -2518,16 +2557,13 @@ impl Agent {
                     ..llm_request.clone()
                 };
 
-                // Clear accumulated text and re-enter the streaming loop for a fresh response.
-                accumulated.clear();
-
                 let retry_outcome = self
                     .consume_provider_stream(
                         llm_request.clone(),
                         &execution,
                         &event_tx,
                         &cancel_token,
-                        &accumulated,
+                        &streamed_before_schema_retry,
                         &mut total_input_tokens,
                         &mut total_output_tokens,
                         &mut usage_reported,
@@ -2549,13 +2585,23 @@ impl Agent {
         // 8. AfterResponse hook — may modify or block the final accumulated response.
         let response_content = match self.dispatch_after_response(&accumulated).await {
             Ok(content) => content,
-            Err(e) => {
-                self.fail_turn_and_idle(turn.id, thread_id).await;
-                let _ = event_tx.send(AgentEvent::Error {
-                    message: e.to_string(),
-                    provider_failure: false,
-                });
-                return Err(e);
+            Err(error) => {
+                let streamed = closing_notice
+                    .as_deref()
+                    .and_then(|notice| accumulated.strip_suffix(notice))
+                    .unwrap_or(&accumulated);
+                streamed_before_schema_retry.push_str(streamed);
+                self.record_failed_reply(
+                    &execution,
+                    &streamed_before_schema_retry,
+                    AgentEvent::Error {
+                        message: error.to_string(),
+                        provider_failure: false,
+                    },
+                    &event_tx,
+                )
+                .await;
+                return Err(error);
             }
         };
 
@@ -2628,6 +2674,12 @@ impl Agent {
         self.storage
             .update_state(thread_id, ThreadState::Idle)
             .await?;
+
+        if let Some(content) = closing_notice
+            && safe_content.ends_with(&content)
+        {
+            let _ = event_tx.send(AgentEvent::Token { content });
+        }
 
         // 13. Emit TurnCompleted — final event, signals the turn is done.
         let _ = event_tx.send(AgentEvent::TurnCompleted {
@@ -2807,6 +2859,10 @@ impl Agent {
                             });
                         }
                         Some(StreamChunk::Error { message }) => {
+                            let persisted = self.persist_terminal_response(
+                                execution,
+                                &format!("{accumulated_prefix}{text}"),
+                            ).await;
                             self.fail_turn_and_idle(execution.turn_id, execution.thread_id).await;
                             let _ = event_tx.send(AgentEvent::ProviderRoundSettled {
                                 turn_id: execution.turn_id,
@@ -2819,6 +2875,12 @@ impl Agent {
                                 message: message.clone(),
                                 provider_failure: true,
                             });
+                            if let Err(error) = persisted {
+                                let _ = event_tx.send(AgentEvent::RecordIntegrityLost {
+                                    turn_id: execution.turn_id,
+                                    reason: format!("partial response could not be persisted: {error}"),
+                                });
+                            }
                             return Err(AgentError::ProviderFailed(
                                 swage_core::ProviderError::StreamError(message),
                             ));
@@ -4218,6 +4280,26 @@ impl Agent {
     // -----------------------------------------------------------------------
     // Leak detection
     // -----------------------------------------------------------------------
+
+    /// Settle a failed turn that already streamed part of its reply.
+    async fn record_failed_reply(
+        &self,
+        execution: &TurnExecutionContext,
+        text: &str,
+        failure: AgentEvent,
+        event_tx: &tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    ) {
+        let persisted = self.persist_terminal_response(execution, text).await;
+        self.fail_turn_and_idle(execution.turn_id, execution.thread_id)
+            .await;
+        let _ = event_tx.send(failure);
+        if let Err(error) = persisted {
+            let _ = event_tx.send(AgentEvent::RecordIntegrityLost {
+                turn_id: execution.turn_id,
+                reason: format!("partial response could not be persisted: {error}"),
+            });
+        }
+    }
 
     /// Preserve terminal response text and the assistant row that owns recorded
     /// tool effects in conversation projections, including tool-only turns.

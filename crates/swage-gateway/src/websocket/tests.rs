@@ -1479,3 +1479,98 @@ async fn a_duplicate_socket_receives_the_reason_over_the_websocket() {
     let _ = duplicate.close(None).await;
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resuming_a_session_updates_open_recent_lists_over_the_socket() {
+    use axum::routing::get;
+    use futures::StreamExt;
+    use swage_protocol::client::conversation::{RecentSessionsResponse, RecentSessionsSource};
+    use swage_storage::store::{SessionStore, Storage, TopicStore};
+    use tokio::time::{Duration, timeout};
+
+    let root = tempfile::tempdir().unwrap();
+    let storage = Arc::new(swage_storage::SqliteStorage::in_memory().unwrap());
+    let topic = storage.general_scope().await.unwrap();
+    let session_id = storage
+        .create_session(swage_storage::fixtures::new_session(topic.id))
+        .await
+        .unwrap()
+        .id;
+    storage
+        .archive_inactive_sessions(chrono::Utc::now() + chrono::Duration::days(1), &[])
+        .await
+        .unwrap();
+
+    let state = AppState::new_with_config_root(
+        storage.clone() as Arc<dyn Storage>,
+        storage as Arc<dyn TopicStore>,
+        Arc::new(MockProvider::new(vec![])),
+        swage_config::ResolvedConfig::default(),
+        crate::tool::ToolDispatcher::allow_all(vec![]),
+        None,
+        root.path().to_path_buf(),
+    );
+    let router = axum::Router::new()
+        .route("/api/work-surface/ws", get(super::work_surface_ws_handler))
+        .route("/api/sessions", get(crate::handlers::list_recent_sessions))
+        .route("/api/conversations/{id}/ws", get(super::ws_handler))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let list_url = format!("http://{address}/api/sessions");
+    let client = reqwest::Client::new();
+    let read_list = || async {
+        client
+            .get(&list_url)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<RecentSessionsResponse>()
+            .await
+            .unwrap()
+    };
+    let (mut signals, _) =
+        tokio_tungstenite::connect_async(format!("ws://{address}/api/work-surface/ws"))
+            .await
+            .unwrap();
+    assert!(read_list().await.entries.is_empty());
+
+    let (mut conversation, _) = tokio_tungstenite::connect_async(format!(
+        "ws://{address}/api/conversations/{session_id}/ws"
+    ))
+    .await
+    .unwrap();
+    let frame = timeout(Duration::from_secs(3), signals.next())
+        .await
+        .expect("the list receives a signal without polling")
+        .unwrap()
+        .unwrap();
+    let event: ServerEvent = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+    assert!(matches!(event, ServerEvent::SessionUpdated { session_id: id } if id == session_id));
+    let list = read_list().await;
+    assert!(matches!(
+        list.entries.as_slice(),
+        [entry] if matches!(&entry.source, RecentSessionsSource::Conversation { session } if session.id == session_id)
+    ));
+    conversation.close(None).await.unwrap();
+    signals.close(None).await.unwrap();
+    server.abort();
+}
+
+/// A session's running-state change is a work-surface signal for session
+/// lists and belongs to no conversation socket: the list refetches, the
+/// conversation already has its own stream.
+#[test]
+fn session_updated_is_a_list_signal_and_not_a_conversation_event() {
+    let event = ServerEvent::SessionUpdated {
+        session_id: Uuid::new_v4(),
+    };
+    assert!(super::work_surface::is_work_surface_signal(&event));
+    assert!(!super::connection::broadcast_event_matches_session(
+        Uuid::new_v4(),
+        &event
+    ));
+}

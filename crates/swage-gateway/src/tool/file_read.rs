@@ -34,7 +34,12 @@ impl Tool for FileReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read the contents of a file in the workspace, optionally from a byte offset. A path outside the session's granted locations is answered for by the judge, and by the person when one is watching and the judge is not sure: give your reason in justification so whoever answers can weigh it."
+        "Read a text file and return its contents as `output`. A file longer than the \
+         installation's output limit comes back cut at that limit and marked `truncated`, \
+         with the file's size in `total_bytes` and the place to carry on from in \
+         `next_offset_bytes`; pass that as `offset_bytes` to read the next part. A file that \
+         does not exist fails saying so, and a binary file is refused, not shown. Reading \
+         changes nothing."
     }
 
     fn parameters(&self) -> Value {
@@ -43,12 +48,12 @@ impl Tool for FileReadTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to the file, relative to the workspace root."
+                    "description": "The file to read: relative to the session's working directory, or absolute for one elsewhere the session has been allowed to reach."
                 },
                 "offset_bytes": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Byte offset to start reading from. Use next_offset_bytes from a truncated result to continue."
+                    "description": "Where in the file to start, counted in bytes: the `next_offset_bytes` of the result being continued. Omit to read from the beginning."
                 },
                 "justification": {
                     "type": "string",

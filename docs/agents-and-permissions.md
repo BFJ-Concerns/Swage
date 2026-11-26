@@ -785,8 +785,8 @@ assembly = "default"
 alternatives = ["my-variant"]
 ```
 
-The assembly script runs in a caged QuickJS runtime (no IO, no network, no
-timers) and composes the turn's context from the elements the gateway built.
+The assembly script runs in a caged V8 isolate (no IO, no network, no
+timers, no clock) and composes the turn's context from the elements the gateway built.
 The script receives four globals:
 
 - `elements` — the turn's context elements, read-only:
@@ -810,8 +810,11 @@ add(byName.prompts);
 add(byName.history);
 ```
 
-A script that errors (missing file, syntax error, runtime error) falls back
-to the built-in default assembly. A script that runs without error but
+Each assembly has separate 32 MiB ceilings for its heap and its
+fixed-length buffer backing stores. Resizable buffers are unavailable.
+
+When a script errors or reaches a limit, the built-in default assembly
+runs and the context report records the reason. A script that runs without error but
 leaves out baseline elements has them restored by the baseline floor, with
 warnings — except elements the script declares as omitted via `omit()`,
 which stay out. If the final composition ends up genuinely empty (every

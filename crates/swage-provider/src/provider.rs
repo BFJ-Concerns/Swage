@@ -144,6 +144,7 @@ pub struct ProviderConfig {
     pub api_key: Option<MaskedString>,
     pub model: String,
     pub base_url: String,
+    provider_id: Option<String>,
 }
 
 impl ProviderConfig {
@@ -157,6 +158,7 @@ impl ProviderConfig {
             api_key: Some(MaskedString::from(api_key.into())),
             model: model.into(),
             base_url: base_url.into(),
+            provider_id: None,
         }
     }
 
@@ -166,7 +168,18 @@ impl ProviderConfig {
             api_key: None,
             model: model.into(),
             base_url: base_url.into(),
+            provider_id: None,
         }
+    }
+
+    /// Name the configured provider in diagnostics for this connection.
+    pub fn with_provider_id(mut self, provider_id: impl Into<String>) -> Self {
+        self.provider_id = Some(provider_id.into());
+        self
+    }
+
+    pub(crate) fn provider_id_or<'a>(&'a self, adapter: &'a str) -> &'a str {
+        self.provider_id.as_deref().unwrap_or(adapter)
     }
 }
 
@@ -209,6 +222,7 @@ impl
             api_key: Some(api_key.into()),
             model: model.model_id.clone(),
             base_url,
+            provider_id: Some(model.provider_id.clone()),
         })
     }
 }
@@ -337,12 +351,24 @@ pub trait LlmProvider: Send + Sync {
 /// ensuring a broken provider/model link never falls through to a real backend.
 pub struct UnsupportedLlmProvider {
     reason: String,
+    model_id: Option<String>,
 }
 
 impl UnsupportedLlmProvider {
     pub fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
+            model_id: None,
+        }
+    }
+
+    /// Stand in for a configured model that sends nothing: a request that
+    /// names the model is routed here and answered with the reason, rather
+    /// than passed to another entry of the failover chain.
+    pub fn for_model(reason: impl Into<String>, model_id: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            model_id: Some(model_id.into()),
         }
     }
 
@@ -356,7 +382,7 @@ impl UnsupportedLlmProvider {
 #[async_trait]
 impl LlmProvider for UnsupportedLlmProvider {
     fn model_id(&self) -> &str {
-        "unavailable"
+        self.model_id.as_deref().unwrap_or("unavailable")
     }
 
     async fn complete(
@@ -558,6 +584,7 @@ mod tests {
             command: None,
             state_dir: None,
             worker_staleness_threshold_ms: None,
+            plaintext_credentials: Default::default(),
         };
         let model = swage_config::ModelEndpointConfig {
             provider_id: "anthropic".into(),
@@ -588,6 +615,7 @@ mod tests {
             command: None,
             state_dir: None,
             worker_staleness_threshold_ms: None,
+            plaintext_credentials: Default::default(),
         };
         let model = swage_config::ModelEndpointConfig {
             provider_id: "anthropic".into(),
