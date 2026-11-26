@@ -457,14 +457,15 @@ export function createStreamingStore(
 
         case "error":
         case "shutdown": {
+          if (event.type === "shutdown" && !get(stream.isStreamingStore)) break;
+
           const code = event.type === "shutdown" ? "gateway_shutdown" : event.code;
           const message = event.type === "shutdown" ? event.reason : event.message;
           const interrupted = code === "approval_timeout" || code === "gateway_shutdown";
           const refused = code === "provider_refused";
           const toolCalls = get(stream.activeToolCallsStore);
           const settleCalls = interrupted || refused || code === "agent_error";
-          const hasActiveTurn = get(stream.isStreamingStore) || event.type === "error";
-          if (interrupted && hasActiveTurn && !get(stream.streamedContentStore) && options?.conversationStore?.settleUnansweredRequest) {
+          if (interrupted && !get(stream.streamedContentStore) && options?.conversationStore?.settleUnansweredRequest) {
             options.conversationStore.settleUnansweredRequest(
               { turn_state: "interrupted", tool_calls: toolCalls }, ownerId,
             );

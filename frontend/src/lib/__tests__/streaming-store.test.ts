@@ -1135,6 +1135,44 @@ describe("shutdown events", () => {
     });
   });
 
+  it("leaves the failed reply alone when the gateway shuts down afterwards", () => {
+    const conv = createMockConversationStore();
+    const store = createStreamingStore({ conversationStore: conv });
+    const failure = "Structured output validation failed: /answer is required";
+
+    store.startTurn("question");
+    store.handleServerEvent({
+      type: "tool_start",
+      call_id: "call-1",
+      tool: "echo",
+      arguments: {},
+    });
+    store.handleServerEvent({
+      type: "tool_end",
+      call_id: "call-1",
+      tool: "echo",
+      result: "echoed",
+      status: "success",
+      duration_ms: 1,
+      truncated: false,
+    });
+    store.handleServerEvent({ type: "token", content: "partial" });
+    store.handleServerEvent({
+      type: "output_schema_failed",
+      failure_message: failure,
+      turn_id: "turn-1",
+      attempts: 1,
+      errors: [{ path: "/answer", message: "is required" }],
+    });
+
+    store.handleServerEvent({ type: "shutdown", reason: "admin shutdown request" });
+
+    expect(conv.getMessages().filter((message) => message.role === "assistant")).toEqual([
+      expect.objectContaining({ turn_state: "failed", content: "partial" }),
+    ]);
+    expect(store.turnError).toEqual({ code: "output_schema_failed", message: failure });
+  });
+
   it("preserves partial response in the conversation store", () => {
     const conv = createMockConversationStore();
     const store = createStreamingStore({ conversationStore: conv });
