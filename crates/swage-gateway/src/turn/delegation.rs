@@ -669,9 +669,11 @@ async fn track_delegated_session(
                     crate::service::announce_session_updated(&state.broadcast, session_id);
                     if let Some(sender) = forward_started { let _ = sender.send(started); }
                     let result = execution.await;
-                    registration.settle();
+                    // The guard stays armed until the child leaves the running
+                    // registry: a stop can drop this future while it settles.
                     announce_delegated_outcome(state, session_id, turn_id, &result).await;
                     state.active_turns.lock().await.remove(&session_id);
+                    registration.settle();
                     crate::service::announce_session_updated(&state.broadcast, session_id);
                     drain_queue_after_delegated_turn(state, session_id, turn_id).await;
                     result
@@ -709,7 +711,7 @@ struct RegisteredChild {
 }
 
 impl RegisteredChild {
-    /// The child's execution returned; its caller settles it.
+    /// The child has left the running registry; its caller settles the rest.
     fn settle(mut self) {
         self.settled = true;
     }
