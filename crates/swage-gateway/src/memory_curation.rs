@@ -589,6 +589,7 @@ mod tests {
     use swage_storage::store::{
         AuditStore, MessageStore, SessionStore, Storage, ThreadStore, TopicStore,
     };
+    use swage_storage::{ContextSnapshotStore, TurnStore};
     use swage_storage::{
         MessageOrigin, NewSession, NewThread, SessionOrigin, SqliteStorage, model::AppendMessage,
     };
@@ -955,6 +956,43 @@ mod tests {
             apply_instruction(&state, topic.id, "   ").await.is_err(),
             "an empty instruction is refused before any session opens"
         );
+
+        // The curator's own session holds the write tool, so its memory
+        // element says it keeps memory and never that it cannot write.
+        let thread = storage
+            .list_by_session(pass.curator_session_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("the curator's thread");
+        let turn = storage
+            .list_turns_by_thread(thread.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("the curator's turn");
+        let report: serde_json::Value = serde_json::from_str(
+            &storage
+                .get_snapshot(turn.id)
+                .await
+                .unwrap()
+                .expect("the turn's context record"),
+        )
+        .unwrap();
+        let memory = report["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|element| element["name"] == "memory")
+            .and_then(|element| element["full_text"].as_str())
+            .expect("the memory element's text");
+        assert!(
+            memory.contains(swage_context::memory::KEEPER_STANDING),
+            "{memory}"
+        );
+        assert!(!memory.contains(swage_context::memory::READ_ROUTE));
     }
 
     #[tokio::test(flavor = "multi_thread")]

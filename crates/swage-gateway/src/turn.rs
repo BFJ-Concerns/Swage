@@ -535,8 +535,9 @@ pub(super) async fn process_turn_with_composition_and_focus(
         Some(
             crate::memory::load_memory_index(swage_root, &scope)
                 .await
-                .into_element(swage_context::memory::MemoryReach::with_read_tool(
+                .into_element(swage_context::memory::MemoryReach::for_tools(
                     offered_tools.contains(crate::tool::memory::MEMORY_READ_TOOL),
+                    offered_tools.contains(crate::tool::memory::MEMORY_WRITE_TOOL),
                 )),
         )
     } else {
