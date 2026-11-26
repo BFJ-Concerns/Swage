@@ -1,11 +1,35 @@
 //! Tool registry — registration, lookup, and schema generation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use swage_core::ToolError;
 
 use crate::tool::Tool;
+
+/// The tools a turn offers the model, and which of their parameters resolve
+/// a `secret://` reference.
+///
+/// A reference is resolved at the host boundary only for a parameter a tool
+/// declares through [`Tool::device_secret_keys`]; every other parameter of
+/// every other tool receives the reference as literal text. The model is
+/// told exactly this, so the standing text and the executor's behaviour come
+/// from one declaration.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OfferedTools {
+    /// The offered tools by wire name — the request's own tool list.
+    pub names: BTreeSet<String>,
+    /// By tool name, the parameters whose values are resolved when they are a
+    /// secret reference; only tools declaring at least one appear.
+    pub secret_reference_parameters: BTreeMap<String, Vec<String>>,
+}
+
+impl OfferedTools {
+    /// Whether the turn offers the named tool.
+    pub fn is_offered(&self, name: &str) -> bool {
+        self.names.contains(name)
+    }
+}
 
 /// Built-in tool names that cannot be overridden by user-registered tools.
 ///
@@ -135,6 +159,29 @@ impl ToolRegistry {
     /// are returned here like any other tool.
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.get(name).cloned()
+    }
+
+    /// The offered set over `names`, each tool's secret-resolving parameters
+    /// read from its own declaration; a name the registry lacks resolves
+    /// nothing.
+    pub fn offered(&self, names: BTreeSet<String>) -> OfferedTools {
+        let secret_reference_parameters = names
+            .iter()
+            .filter_map(|name| {
+                let tool = self.tools.get(name)?;
+                let keys = tool.device_secret_keys();
+                (!keys.is_empty()).then(|| {
+                    (
+                        name.clone(),
+                        keys.iter().map(|key| (*key).to_owned()).collect(),
+                    )
+                })
+            })
+            .collect();
+        OfferedTools {
+            names,
+            secret_reference_parameters,
+        }
     }
 
     /// Return all registered tool names in sorted order.

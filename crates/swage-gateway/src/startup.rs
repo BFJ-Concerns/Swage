@@ -2416,6 +2416,83 @@ mod tests {
         }
     }
 
+    /// The registered-secrets section names, from the tools' own
+    /// declarations, each gateway tool whose parameters resolve a
+    /// `secret://` reference — so the text never names a tool or parameter
+    /// the executor does not resolve, nor omits one it does.
+    #[tokio::test]
+    async fn orientation_names_the_tools_that_resolve_secret_references() {
+        use swage_context::element::ContextElement;
+        let storage =
+            Arc::new(swage_storage::SqliteStorage::in_memory().expect("in-memory storage"));
+        let dispatcher = build_tool_dispatcher(
+            &swage_config::ResolvedConfig::default(),
+            storage as Arc<dyn swage_storage::store::Storage>,
+            std::path::Path::new(".swage"),
+            &std::sync::OnceLock::new(),
+        );
+        let registry = dispatcher.registry();
+        let offered = registry.offered(registry.list().into_iter().map(str::to_string).collect());
+        assert!(
+            !offered.secret_reference_parameters.is_empty(),
+            "the gateway ships at least one tool that resolves a secret reference"
+        );
+        for (tool, parameters) in &offered.secret_reference_parameters {
+            let declared = registry
+                .get(tool)
+                .expect("a declared resolver is a registered tool");
+            assert_eq!(
+                parameters,
+                &declared
+                    .device_secret_keys()
+                    .iter()
+                    .map(|key| (*key).to_owned())
+                    .collect::<Vec<_>>()
+            );
+            for parameter in parameters {
+                assert!(
+                    declared.parameters()["properties"].get(parameter).is_some(),
+                    "`{tool}` resolves `{parameter}`, which its schema does not offer"
+                );
+            }
+        }
+
+        let text = swage_context::orientation::OrientationElement::new(
+            swage_context::orientation::SessionEnvironment {
+                workspaces: vec![],
+                topic_name: String::new(),
+                topic_description: String::new(),
+                tool_root: swage_context::orientation::ToolRoot::ManagedScratch(
+                    "/scratch/session".into(),
+                ),
+                started_at: chrono::Utc::now(),
+                channel: None,
+            },
+            vec![],
+            offered.names.clone(),
+            offered.secret_reference_parameters.clone(),
+        )
+        .content()[0]
+            .text_content();
+        for (tool, parameters) in &offered.secret_reference_parameters {
+            let parameters = parameters
+                .iter()
+                .map(|parameter| format!("`{parameter}`"))
+                .collect::<Vec<_>>()
+                .join(" and ");
+            assert!(
+                text.contains(&format!("`{tool}` resolves one in {parameters}")),
+                "{text}"
+            );
+        }
+        assert!(
+            text.contains(
+                "Every other tool, `shell` included, receives a reference as literal text"
+            ),
+            "{text}"
+        );
+    }
+
     #[tokio::test]
     async fn build_tool_dispatcher_registers_workflow_list_tool() {
         let storage =
