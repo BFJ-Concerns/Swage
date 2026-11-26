@@ -29,6 +29,16 @@ function hasSuccessfulApprovalResult(messages) {
       && block.content.includes("approval-ok")));
 }
 
+function definitionToolResponse(response, id, input) {
+  event(response, "message_start", { type: "message_start", message: { usage: { input_tokens: 4, output_tokens: 0 } } });
+  event(response, "content_block_start", { type: "content_block_start", index: 0, content_block: { type: "tool_use", id, name: "agent_definition", input: {} } });
+  event(response, "content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: JSON.stringify(input) } });
+  event(response, "content_block_stop", { type: "content_block_stop", index: 0 });
+  event(response, "message_delta", { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 1 } });
+  event(response, "message_stop", { type: "message_stop" });
+  response.end();
+}
+
 async function handle(request, response) {
   if (request.method !== "POST" || !request.url?.startsWith("/v1/messages")) {
     response.writeHead(404).end();
@@ -44,6 +54,7 @@ async function handle(request, response) {
         prompt: body.messages.at(-1)?.content ?? null,
         system: body.system ?? null,
         effort: body.output_config?.effort ?? null,
+        model: body.model,
       })}\n`,
     );
   }
@@ -55,7 +66,25 @@ async function handle(request, response) {
   response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", "x-request-id": "e2e-provider" });
 
   const serialised = JSON.stringify(body.messages);
-  if (hasSuccessfulApprovalResult(body.messages)) {
+  const lastContent = body.messages.at(-1)?.content;
+  const lastText = typeof lastContent === "string"
+    ? lastContent
+    : lastContent?.filter((block) => block.type === "text").map((block) => block.text).join("");
+  const definitionResult = Array.isArray(lastContent) && lastContent.find((block) =>
+    block.type === "tool_result" && ["create-e2e-agent", "refuse-e2e-agent"].includes(block.tool_use_id));
+  if (definitionResult) {
+    await textResponse(response, ["Definition tool returned to the provider."]);
+  } else if (lastText === "Create a preferred agent") {
+    definitionToolResponse(response, "create-e2e-agent", {
+      action: "create", id: "preferred-agent", display_name: "Preferred agent",
+      description: "A fixture for model selection", instructions: "Answer plainly.",
+      model_id: "preferred-model",
+    });
+  } else if (lastText === "Set an unknown preferred model") {
+    definitionToolResponse(response, "refuse-e2e-agent", {
+      action: "update", id: "preferred-agent", model_id: "unknown-model",
+    });
+  } else if (hasSuccessfulApprovalResult(body.messages)) {
     await textResponse(response, ["Approval ", "completed through the gateway."]);
   } else if (serialised.includes("tool_result")) {
     await textResponse(response, ["Approval did not execute the tool."]);

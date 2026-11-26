@@ -398,6 +398,7 @@ impl Tool for AgentDefinitionTool {
                 Ok(json!({"definitions": definitions}))
             }
             "create" => {
+                let _write = gateway.definition_writes.lock().await;
                 let id = agent_id(&params)?;
                 let topic_id = scope(&params, gateway, ctx).await?;
                 if stored(gateway, &id, topic_id).await?.is_some() {
@@ -427,6 +428,7 @@ impl Tool for AgentDefinitionTool {
                 changed(gateway, change).await
             }
             "update" => {
+                let _write = gateway.definition_writes.lock().await;
                 let id = agent_id(&params)?;
                 let topic_id = scope(&params, gateway, ctx).await?;
                 let Some(current) = stored(gateway, &id, topic_id).await? else {
@@ -476,6 +478,7 @@ impl Tool for AgentDefinitionTool {
                 changed(gateway, change).await
             }
             "delete" => {
+                let _write = gateway.definition_writes.lock().await;
                 let id = agent_id(&params)?;
                 let topic_id = scope(&params, gateway, ctx).await?;
                 let change = service::delete_agent_definition(

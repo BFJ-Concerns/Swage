@@ -41,6 +41,7 @@ pub(crate) fn is_work_surface_signal(event: &ServerEvent) -> bool {
         ServerEvent::SurfaceUpdated { .. }
             | ServerEvent::LibraryUpdated { .. }
             | ServerEvent::SessionUpdated { .. }
+            | ServerEvent::AgentDefinitionsChanged
             | ServerEvent::Lagged { .. }
             | ServerEvent::Shutdown { .. }
     )

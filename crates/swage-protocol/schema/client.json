@@ -5375,6 +5375,19 @@
           ]
         },
         {
+          "description": "Agent pickers refetch their effective definitions after a mutation.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "agent_definitions_changed"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
           "description": "A message was recorded on a conversation by something other than the\nperson at this client — a schedule's brief, a delegation's completion\nnotice, a notice from the platform — so open views append it where it\nbelongs without reloading. Carries the recorded message itself, the\nsame view the conversation's detail would return.",
           "type": "object",
           "properties": {

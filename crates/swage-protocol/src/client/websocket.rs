@@ -150,6 +150,8 @@ pub enum ServerEvent {
     /// A session row may have changed or entered or left a list. Refetch
     /// session lists to read the current rows from the gateway.
     SessionUpdated { session_id: Uuid },
+    /// Agent pickers refetch their effective definitions after a mutation.
+    AgentDefinitionsChanged,
     /// A message was recorded on a conversation by something other than the
     /// person at this client — a schedule's brief, a delegation's completion
     /// notice, a notice from the platform — so open views append it where it

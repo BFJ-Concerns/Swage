@@ -146,6 +146,8 @@ pub struct AppState {
     pub presence: Arc<AsyncMutex<PresenceRuntime>>,
     /// Registered local and attached devices.
     pub devices: Arc<AsyncMutex<DeviceRuntime>>,
+    /// Serialises definition snapshots, writes and their audit records.
+    pub(crate) definition_writes: Arc<AsyncMutex<()>>,
     /// One-time device pairing codes awaiting redemption by a remote device.
     pub pairing_codes: Arc<AsyncMutex<HashMap<String, PairingCodeRecord>>>,
     /// Canonical secret-management and resolution surface.
@@ -366,6 +368,7 @@ impl AppState {
             channel_routes: Arc::new(AsyncMutex::new(HashMap::new())),
             presence: Arc::new(AsyncMutex::new(PresenceRuntime::default())),
             devices: Arc::new(AsyncMutex::new(DeviceRuntime::default())),
+            definition_writes: Arc::new(AsyncMutex::new(())),
             pairing_codes: Arc::new(AsyncMutex::new(HashMap::new())),
             secret_manager: Arc::new(SecretManager::new(storage.clone())),
             telegram: None,
