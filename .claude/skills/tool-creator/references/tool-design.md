@@ -101,10 +101,11 @@ call in this order:
    what happens when it runs out. Listing a tool there does not grant it.
 4. Otherwise the call is allowed.
 
-`bundles` map a label to a list of tool names, and a bundle's label can be
-used wherever a tool name can. A tool that joins an existing family goes
-into that family's bundle, so that every agent granted the bundle receives
-it.
+`bundles` map a label to a list of tool names. A bundle's label can stand
+for its tools in `allow` and `require_approval`. `deny` matches tool names
+only, so denying a bundle's tools means listing each of them. A tool that
+joins an existing family goes into that family's bundle, so that every agent
+granted the bundle receives it.
 
 Three things do not grant a tool. A skill's `tools:` front matter records
 what the skill expects and authorises nothing. A workflow's or a
@@ -130,7 +131,7 @@ sit behind `require_approval` by default.
   gateway process. The skill's *Wiring a tool* says when a tool must, and
   what a tool that does not must also be added to.
 
-All three name parameter keys, and the framework does the redaction and
+The first two name parameter keys, and the framework does the redaction and
 resolution.
 
 ## Changing a tool that exists
