@@ -56,7 +56,10 @@ carries the gateway's token; requests from the gateway's own machine —
 over loopback, or from the one address it is bound to — never need it.
 Liveness (`/api/health`), the access status (`/api/access`) and pairing
 itself (`/api/pair`) answer anyone, and the web UI's own files load
-unpaired so the page can ask to pair.
+unpaired so the page can ask to pair. A device's link
+(`/api/devices/connect`) needs no gateway token either: the device proves
+itself with its registered shared token, and the gateway refuses the link
+without it.
 
 The gateway generates the token on its first start, in `gateway-token` in
 the data root, readable only by its owner. A client gets it by pairing

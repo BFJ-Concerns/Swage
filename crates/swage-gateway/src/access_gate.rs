@@ -48,9 +48,17 @@ const TOKEN_COOKIE_MAX_AGE_SECS: u32 = 400 * 24 * 60 * 60;
 pub const TOKEN_HEADER: &str = "x-swage-token";
 /// How long an issued pairing code may wait to be redeemed.
 pub const PAIRING_CODE_LIFETIME: Duration = Duration::minutes(10);
-/// Routes every client must reach before it is paired: liveness, and pairing
-/// itself. The frontend's own assets are outside `/api/` and never gated.
-const UNGATED_PATHS: &[&str] = &["/api/health", "/api/access", "/api/pair"];
+/// Routes every client must reach before it is paired: liveness, pairing
+/// itself, and the device link, whose first frame carries the device's
+/// registered shared token and is refused without it — a device client has
+/// no gateway token to present. The frontend's own assets are outside
+/// `/api/` and never gated.
+const UNGATED_PATHS: &[&str] = &[
+    "/api/health",
+    "/api/access",
+    "/api/pair",
+    "/api/devices/connect",
+];
 
 /// The gate as this gateway runs it.
 #[derive(Debug)]

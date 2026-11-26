@@ -14,8 +14,9 @@ route. It applies only when the bound host is not loopback, and admits a
 request that comes from the gateway's own machine (loopback, or the one
 specific address bound) or presents the token: `Authorization: Bearer`,
 `X-Swage-Token`, the `swage_token` cookie, or `token` in a WebSocket
-upgrade's query. `/api/health`, `/api/access` and `/api/pair` are ungated;
-assets outside `/api/` are never gated.
+upgrade's query. `/api/health`, `/api/access`, `/api/pair` and the device
+link `/api/devices/connect` (authenticated by the device's shared token in
+its hello frame) are ungated; assets outside `/api/` are never gated.
 
 - The token is `gateway-token` in the data root, created `0600` at startup
   when absent.
