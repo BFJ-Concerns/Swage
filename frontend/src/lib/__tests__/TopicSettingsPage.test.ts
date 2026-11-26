@@ -10,7 +10,7 @@ import type { ServerEvent, Topic } from "../types";
 
 let onSessionSignal: ((event: ServerEvent) => void) | undefined;
 vi.mock("../api/work-surface", () => ({
-  createWorkSurfaceChannel: () => ({
+  openSharedWorkSurfaceChannel: () => ({
     onSignal(handler: (event: ServerEvent) => void) { onSessionSignal = handler; },
     onReconnect() {},
     close() { onSessionSignal = undefined; },

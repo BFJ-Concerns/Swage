@@ -2,7 +2,7 @@
 // conversation, so a surface stays live whether or not one is selected.
 
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { createWorkSurfaceChannel } from "../api/work-surface";
+import { createWorkSurfaceChannel, openSharedWorkSurfaceChannel } from "../api/work-surface";
 import type { ServerEvent } from "../types";
 
 class FakeSocket {
@@ -120,4 +120,47 @@ describe("work-surface channel", () => {
     channel.close();
     vi.useRealTimers();
   });
+});
+
+it("shares one socket and removes only the subscription that closes", () => {
+  installFakeSocket();
+  vi.useFakeTimers();
+  const surfaces = openSharedWorkSurfaceChannel();
+  const list = openSharedWorkSurfaceChannel();
+  try {
+    const socket = FakeSocket.last!;
+    const surfaceSignal = vi.fn();
+    const listSignal = vi.fn();
+    const surfaceReconnect = vi.fn();
+    const listReconnect = vi.fn();
+    surfaces.onSignal(surfaceSignal);
+    list.onSignal(listSignal);
+    surfaces.onReconnect(surfaceReconnect);
+    list.onReconnect(listReconnect);
+
+    const data = JSON.stringify({ type: "session_updated", session_id: "session" });
+    socket.onmessage?.({ data });
+    expect(surfaceSignal).toHaveBeenCalledOnce();
+    expect(listSignal).toHaveBeenCalledOnce();
+
+    list.close();
+    expect(socket.closed).toBe(false);
+    socket.onmessage?.({ data });
+    expect(surfaceSignal).toHaveBeenCalledTimes(2);
+    expect(listSignal).toHaveBeenCalledOnce();
+
+    socket.onclose?.();
+    vi.advanceTimersByTime(1_000);
+    const reconnected = FakeSocket.last!;
+    expect(reconnected).not.toBe(socket);
+    reconnected.onopen?.();
+    expect(surfaceReconnect).toHaveBeenCalledOnce();
+    expect(listReconnect).not.toHaveBeenCalled();
+    surfaces.close();
+    expect(reconnected.closed).toBe(true);
+  } finally {
+    surfaces.close();
+    list.close();
+    vi.useRealTimers();
+  }
 });

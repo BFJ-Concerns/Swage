@@ -1,4 +1,4 @@
-// Work-surface signal channel — the live route for the shared work surfaces.
+// Shared gateway signals for work surfaces, the library and session lists.
 //
 // Separate from the conversation socket by necessity: that socket needs a
 // conversation id and admits one connection per conversation, while a surface
@@ -33,11 +33,9 @@ function isKnownServerEventType(type: string): type is KnownServerEventType {
   return (KNOWN_SERVER_EVENT_TYPES as readonly string[]).includes(type);
 }
 
-export function createWorkSurfaceChannel(
-  options?: WorkSurfaceChannelOptions,
-): WorkSurfaceChannel {
-  const handlers: ((event: ServerEvent) => void)[] = [];
-  const reconnectHandlers: (() => void)[] = [];
+export function createWorkSurfaceChannel(options?: WorkSurfaceChannelOptions) {
+  const handlers = new Set<(event: ServerEvent) => void>();
+  const reconnectHandlers = new Set<() => void>();
 
   let ws: WebSocket | null = null;
   let closed = false;
@@ -111,12 +109,14 @@ export function createWorkSurfaceChannel(
   connect();
 
   return {
-    onSignal(handler: (event: ServerEvent) => void): void {
-      handlers.push(handler);
+    onSignal(handler: (event: ServerEvent) => void): () => void {
+      handlers.add(handler);
+      return () => { handlers.delete(handler); };
     },
 
-    onReconnect(handler: () => void): void {
-      reconnectHandlers.push(handler);
+    onReconnect(handler: () => void): () => void {
+      reconnectHandlers.add(handler);
+      return () => { reconnectHandlers.delete(handler); };
     },
 
     close(): void {
@@ -127,6 +127,35 @@ export function createWorkSurfaceChannel(
       }
       ws?.close();
       ws = null;
+    },
+  };
+}
+
+let sharedChannel: ReturnType<typeof createWorkSurfaceChannel> | undefined;
+let subscribers = 0;
+
+/** Use the page's signal socket until this consumer closes its subscription. */
+export function openSharedWorkSurfaceChannel(): WorkSurfaceChannel {
+  const channel = sharedChannel ??= createWorkSurfaceChannel({ notifyOnFirstOpen: true });
+  subscribers++;
+  const unsubscribe: (() => void)[] = [];
+  let closed = false;
+  return {
+    onSignal(handler) {
+      if (!closed) unsubscribe.push(channel.onSignal((event) => handler(event)));
+    },
+    onReconnect(handler) {
+      if (!closed) unsubscribe.push(channel.onReconnect(() => handler()));
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      for (const stop of unsubscribe) stop();
+      unsubscribe.length = 0;
+      if (--subscribers === 0) {
+        channel.close();
+        sharedChannel = undefined;
+      }
     },
   };
 }

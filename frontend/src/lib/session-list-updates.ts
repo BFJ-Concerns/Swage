@@ -1,10 +1,10 @@
-import { createWorkSurfaceChannel } from "./api/work-surface";
+import { openSharedWorkSurfaceChannel } from "./api/work-surface";
 import type { WorkSurfaceChannel } from "./api/work-surface";
 
 /** Re-read a mounted session list on gateway changes and gaps in delivery. */
 export function watchSessionList(
   refresh: () => Promise<void>,
-  createChannel: () => WorkSurfaceChannel = () => createWorkSurfaceChannel({ notifyOnFirstOpen: true }),
+  createChannel: () => WorkSurfaceChannel = openSharedWorkSurfaceChannel,
 ): () => void {
   const channel = createChannel();
   let timer: ReturnType<typeof setTimeout> | undefined;

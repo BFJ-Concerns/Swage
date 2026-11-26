@@ -19,7 +19,7 @@ import {
 
 let sessionSignal: ((event: ServerEvent) => void) | undefined;
 vi.mock("../api/work-surface", () => ({
-  createWorkSurfaceChannel: () => ({
+  openSharedWorkSurfaceChannel: () => ({
     onSignal(handler: (event: ServerEvent) => void) { sessionSignal = handler; },
     onReconnect() {},
     close() { sessionSignal = undefined; },
