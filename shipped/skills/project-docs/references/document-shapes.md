@@ -1,116 +1,71 @@
-# Document Shapes
+# Document shapes
 
-Shapes and formats for files that have earned existence (doctrine gate 2). These
-are what a justified file looks like, not licences to create one — a section with
-nothing grounded to say is omitted, not stubbed.
+What a page of each kind holds, once the content for it exists. A section
+with nothing grounded to say is left out.
 
-The shapes map the classic documentation purposes: learning (tutorials),
-solving a task (how-to guides), looking things up (reference), and
-understanding (conceptual guides). Classify by the reader's purpose before
-picking a shape. All of them document using the product; how it is developed
-is out of scope entirely (the skill's Scope), so there is no architecture,
-decision-record, or development-doc shape here.
+Choose the kind by what the reader wants: to learn (a tutorial), to get a
+task done (a how-to guide), to look something up (reference), or to
+understand (a conceptual guide). Each kind is about using the product, so
+there is no shape here for architecture, decision records or development
+documents.
 
 ## Reference
 
-Home `docs/reference/`, one file per surface, created as needed — not every
-project requires any of these:
+Reference pages live in `docs/reference/`, one file for each surface the
+project really has:
 
-| File | Content |
-|------|---------|
-| `cli.md` | Commands, subcommands, flags, arguments |
-| `configuration.md` | Config options, types, defaults, valid values |
-| `api.md` | Endpoints, methods, parameters, responses, errors |
-| `errors.md` | Error codes, meanings, causes, resolutions |
-| `glossary.md` | Domain terms, acronyms, jargon |
+| File | Holds | Columns |
+|---|---|---|
+| `cli.md` | Commands, subcommands, flags, arguments | Flag, Short, Default, Description |
+| `configuration.md` | Options, their types, defaults and valid values | Option, Type, Default, Description |
+| `api.md` | Endpoints, methods, parameters, responses, errors | Parameter, Required, Type, Description |
+| `errors.md` | Error codes, their meaning, cause and remedy | Code, Name, Description, Resolution |
+| `glossary.md` | The project's terms and abbreviations | Term, Meaning |
 
-Where the project auto-generates reference docs (OpenAPI, TypeDoc, rustdoc and
-kin), the generated output is the source of truth: summarise it, link to it, and
-supplement it with the human context generators miss — the *why* and *when* of
-using an endpoint or option. Do not duplicate it by hand.
+A reference page lists every entry its source has, each copied from that
+source. Put names and values in backticks, and break a long table up under
+subheadings.
 
-Table formats:
-
-```markdown
-| Flag | Short | Default | Description |
-|------|-------|---------|-------------|
-| `--verbose` | `-v` | `false` | Enable detailed output |
-```
-
-```markdown
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `timeout` | integer | `30` | Request timeout in seconds |
-```
-
-```markdown
-| Parameter | Required | Type | Description |
-|-----------|----------|------|-------------|
-| `user_id` | Yes | string | Unique user identifier |
-```
-
-```markdown
-| Code | Name | Description | Resolution |
-|------|------|-------------|------------|
-| `E001` | InvalidToken | Authentication token expired | Re-authenticate |
-```
-
-Guidelines: be exhaustive — every option, extracted per doctrine gate 5; show
-defaults and types; wrap values and parameter names in backticks; group large
-tables with subheadings.
+Where the project generates its reference (OpenAPI, TypeDoc, rustdoc and the
+like), the generated output is the reference. Link to it and add what a
+generator cannot say: why and when someone would use an endpoint or option.
+Do not copy it out by hand.
 
 ## Guides
 
-Home `docs/guides/`. Two kinds, distinguished naturally by their titles:
+Guides live in `docs/guides/`. A **tutorial** teaches a newcomer by taking
+them through one thing from start to finish: what they will learn, what they
+need first, the steps in order, what they now know, where to go next. A
+**how-to guide** gets a practitioner through one task and can be read on its
+own: a sentence or two of introduction, what is needed first, the steps,
+related guides. A **conceptual guide** defines an idea, shows it with
+examples, and links to the guides that put it to use.
 
-| Tutorials | How-to guides |
-|-----------|---------------|
-| "Learn to build a plugin" | "Add authentication to a plugin" |
-| Linear, start to finish | Readable in isolation |
-| For newcomers | For practitioners |
-| Teach concepts | Assume concepts |
+A conceptual guide explains the product's ideas as the person using it meets
+them. Internal components and data flow are development material, and a "how
+it works" page built from the module structure is an architecture document
+under another name. A diagram earns its place when it is small enough to
+take in at a glance.
 
-Name guides `Verb Goal.md` — `Deploy Application.md`, `Debug Connection
-Issues.md` — and open each with an H1 title.
-
-- **Tutorial structure**: what the reader will learn; prerequisites (linked);
-  linear steps under clear headings; what was learned; next steps.
-- **How-to structure**: one- or two-sentence introduction; prerequisites
-  (linked); goal-focused steps; related guides at the end.
-- **Conceptual guide**: brief definition; key points with examples; links to the
-  practical guides that apply the concept. It explains the product's concepts
-  as its reader uses them — never internal components or data flow, which are
-  development material (the skill's Scope); a "How It Works" page rebuilt from
-  module structure is the removed architecture doc under another name. A
-  Mermaid diagram, where one genuinely helps, keeps to 5–7 boxes — an
-  overloaded diagram communicates less than a small one.
-
-Link with relative Markdown links: prerequisites, related concepts, next steps,
-and worked examples. A well-linked guide carries roughly 3–10 internal links
-depending on length. Keep guides practical — the common workflows, not the edge
-cases.
-
-Highlight genuine tips and cautions with GFM alerts where the forge renders
-them — `> [!TIP]`, `> [!WARNING]`, `> [!NOTE]` — and keep them rare enough to
-stay meaningful. Long optional material (full command output, an extended
-example) can sit in a collapsible `<details>` block with a clear `<summary>`.
+In a tree with no naming convention of its own, name a guide for its goal,
+verb first (`Deploy Application.md`, `Debug Connection Issues.md`). Link
+prerequisites, related concepts and next steps with relative links. Cover
+the common ways of working; leave rare cases to the reference.
 
 ## Runbooks
 
-Home `docs/runbook.md` (or a `runbook/` directory when earned): operational
-procedure for a deployed instance — deploying, restarting services, rotating
-credentials, recovering from known failures. Operating one's own instance is a
-user activity, so this is usage documentation; keep it procedural, with the
-commands extracted from manifests, CI, and scripts (doctrine gate 5) rather
-than recalled. Building from source and running locally are usage material
-too, but they live in the README's install/build lines and, when a project
-earns one, a how-to guide — not here. Under parallel sets a runbook page
-follows the normal mirror rule: author its agent counterpart first, or
-declare the page unpaired (`parallel-sets.md`).
+A runbook is `docs/runbook.md`, or a `runbook/` directory when there is
+enough for one. It holds the procedures for operating a running instance:
+deploying, restarting, rotating credentials, recovering from known failures.
+Operating your own instance is using the product, so this is user
+documentation. Keep it as procedure, with commands copied from manifests, CI
+configuration and scripts. Building from source and running locally belong in
+the README and guides, not here.
 
-Runbook content is where machine-conditioned facts concentrate, and doctrine
-gate 6 applies in full: name the machine or deployment each procedure is true
-on, and propose a runbook section only when this session can verify its claims
-on that machine — an agent that cannot reach the deployment writes no runbook
-for it, and reports the gap instead. Gate 6 governs truth-scoping; the privacy
-rule (`survey-protocol.md`) still decides what may be published at all.
+Runbooks are where facts true of only one machine gather. Name the machine
+or deployment each procedure applies to, and write a runbook section only
+when this session can check it on that machine. An agent that cannot reach
+the deployment writes no runbook for it and reports the gap.
+
+Where the project keeps both trees, a runbook page has an agent counterpart
+written first, or is declared unpaired (`parallel-sets.md`).
