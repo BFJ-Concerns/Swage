@@ -374,8 +374,6 @@ pub struct DelegationRequest {
     pub task: String,
     /// Optional durable task definition resolved by the runtime.
     pub task_definition: Option<String>,
-    /// Optional context to transfer to the delegate agent.
-    pub context: Option<serde_json::Value>,
     /// Caller-selected child working directory.
     pub cwd: Option<String>,
     /// Optional runtime-managed child isolation.
