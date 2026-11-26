@@ -140,6 +140,11 @@ pub async fn evaluate_transfer_async(
             };
 
             match provider.complete(request).await {
+                // A summary cut at the output limit stops mid-account, and
+                // nothing in it says so: the agent is told it has none.
+                Ok(response) if response.finish_reason == swage_core::FinishReason::Length => {
+                    unavailable_summary_context("the summary was cut short at its output limit")
+                }
                 Ok(response) => TransferredContext {
                     messages: vec![ChatMessage::new(
                         Role::System,
@@ -330,6 +335,7 @@ mod tests {
 
     struct MockSummaryProvider {
         summary: String,
+        finish_reason: FinishReason,
         captured: Option<Arc<Mutex<Vec<CompletionRequest>>>>,
     }
 
@@ -349,7 +355,7 @@ mod tests {
                 content: self.summary.clone(),
                 input_tokens: 10,
                 output_tokens: 20,
-                finish_reason: FinishReason::Stop,
+                finish_reason: self.finish_reason.clone(),
                 cost: None,
             })
         }
@@ -394,6 +400,7 @@ mod tests {
     async fn mode_summary_async_produces_compacted_context() {
         let provider = MockSummaryProvider {
             summary: "The user asked about reports and the assistant provided a summary.".into(),
+            finish_reason: FinishReason::Stop,
             captured: None,
         };
         let result = evaluate_transfer_async(
@@ -460,10 +467,34 @@ mod tests {
         assert!(text.contains("summary generation failed"));
     }
 
+    /// A summary the provider reports as cut at its output limit is not
+    /// handed on: the delegated agent is told it has none.
+    #[tokio::test]
+    async fn mode_summary_async_cut_summary_transfers_diagnostic() {
+        let provider = MockSummaryProvider {
+            summary: "The user requires".into(),
+            finish_reason: FinishReason::Length,
+            captured: None,
+        };
+        let result = evaluate_transfer_async(
+            &ContextTransferMode::Summary,
+            &[],
+            None,
+            &sample_context(),
+            Some(&provider),
+        )
+        .await;
+        assert_eq!(result.messages.len(), 1);
+        let text = result.messages[0].text_content();
+        assert!(text.contains("cut short at its output limit"), "{text}");
+        assert!(!text.contains("The user requires"), "{text}");
+    }
+
     #[tokio::test]
     async fn mode_summary_async_empty_context_returns_empty() {
         let provider = MockSummaryProvider {
             summary: "shouldn't be called".into(),
+            finish_reason: FinishReason::Stop,
             captured: None,
         };
         let result = evaluate_transfer_async(
@@ -482,6 +513,7 @@ mod tests {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let provider = MockSummaryProvider {
             summary: "Tool search failed and should be retried differently.".into(),
+            finish_reason: FinishReason::Stop,
             captured: Some(Arc::clone(&captured)),
         };
         let sender_context = build_tool_round_messages(
@@ -523,6 +555,7 @@ mod tests {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let provider = MockSummaryProvider {
             summary: "summary".into(),
+            finish_reason: FinishReason::Stop,
             captured: Some(Arc::clone(&captured)),
         };
 

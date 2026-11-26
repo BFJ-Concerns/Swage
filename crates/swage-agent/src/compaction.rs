@@ -322,6 +322,10 @@ async fn try_summarise(
     };
 
     match provider.complete(summarise_request).await {
+        // A summary cut at the output limit stops mid-account, and nothing
+        // in it says so. It is treated as a failed summary, not as a whole
+        // one, and tier 2 takes over.
+        Ok(response) if response.finish_reason == swage_core::FinishReason::Length => (messages, 0),
         Ok(response) => {
             let summary = ChatMessage::new(
                 Role::System,
@@ -495,6 +499,7 @@ mod tests {
     /// Provider that always returns a canned summary string.
     struct SummaryProvider {
         summary: String,
+        finish_reason: FinishReason,
         requests: Mutex<Vec<CompletionRequest>>,
     }
 
@@ -502,6 +507,16 @@ mod tests {
         fn new(summary: impl Into<String>) -> Arc<Self> {
             Arc::new(Self {
                 summary: summary.into(),
+                finish_reason: FinishReason::Stop,
+                requests: Mutex::new(Vec::new()),
+            })
+        }
+
+        /// A provider whose reply stops at its output limit.
+        fn cut_short(summary: impl Into<String>) -> Arc<Self> {
+            Arc::new(Self {
+                summary: summary.into(),
+                finish_reason: FinishReason::Length,
                 requests: Mutex::new(Vec::new()),
             })
         }
@@ -522,7 +537,7 @@ mod tests {
                 content: self.summary.clone(),
                 input_tokens: 10,
                 output_tokens: 20,
-                finish_reason: FinishReason::Stop,
+                finish_reason: self.finish_reason.clone(),
                 cost: None,
             })
         }
@@ -1280,6 +1295,45 @@ mod tests {
         assert_eq!(
             record.focus.as_deref(),
             Some("Preserve dates and named decisions")
+        );
+    }
+
+    /// A summary the provider reports as cut at its output limit does not
+    /// stand in for the messages: the pass falls through to truncation.
+    #[tokio::test]
+    async fn a_summary_cut_at_the_output_limit_falls_through_to_truncate() {
+        let messages = vec![
+            text_msg(Role::User, "m1"),
+            text_msg(Role::Assistant, "m2"),
+            text_msg(Role::User, "m3"),
+            text_msg(Role::Assistant, "m4"),
+            text_msg(Role::User, "m5"),
+        ];
+        let storage = stub_storage();
+        let provider = SummaryProvider::cut_short("The user requires");
+
+        let (result, record) = compact_with_model(
+            messages,
+            &CompactionThreshold::MessageCount(3),
+            provider.as_ref(),
+            storage.as_ref(),
+            Uuid::new_v4(),
+            None,
+            None,
+            false,
+        )
+        .await
+        .expect("compact should succeed via truncation fallback");
+
+        assert_eq!(
+            record.expect("an audit record").actual_strategy,
+            "truncation"
+        );
+        assert!(
+            result
+                .iter()
+                .all(|message| !message.text_content().contains("The user requires")),
+            "the cut summary must not be carried"
         );
     }
 

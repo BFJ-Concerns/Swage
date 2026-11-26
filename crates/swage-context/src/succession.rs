@@ -78,6 +78,8 @@ pub enum SuccessionError {
     Provider(#[from] ProviderError),
     #[error("the summarising provider returned an empty summary")]
     EmptySummary,
+    #[error("the summary reached its output limit and was cut short")]
+    SummaryCut,
     #[error("the diagnosis could not be written: {0}")]
     Diagnosis(String),
     #[error("the summariser's instruction could not be selected: {0}")]
@@ -203,13 +205,18 @@ pub async fn summarise(
     let mut call = recorded_call(provider, SuccessionStage::Summary, None, &response);
     if let Ok(response) = &response {
         if response.finish_reason == swage_core::FinishReason::Length {
-            call.failure_reason = Some("the summary reached its output limit".to_string());
+            call.failure_reason = Some(SuccessionError::SummaryCut.to_string());
         } else if response.content.trim().is_empty() {
             call.failure_reason = Some(SuccessionError::EmptySummary.to_string());
         }
     }
     calls.push(call);
     let response = response?;
+    // Notes cut at the output limit stop mid-account, and nothing in them
+    // says so: they are not handed on as though they were whole.
+    if response.finish_reason == swage_core::FinishReason::Length {
+        return Err(SuccessionError::SummaryCut);
+    }
     if response.content.trim().is_empty() {
         return Err(SuccessionError::EmptySummary);
     }
