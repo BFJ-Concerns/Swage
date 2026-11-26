@@ -83,13 +83,15 @@ pub struct TurnPollResponse {
     pub execution_isolation: Option<TurnIsolationView>,
 }
 
-/// A turn's execution isolation: sandboxed on the host or degraded for a
-/// stated reason.
+/// A turn's execution isolation: sandboxed on the host, unsandboxed because
+/// the configuration switched the sandbox off, or degraded for a stated
+/// reason.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[ts(optional_fields = nullable)]
 pub enum TurnIsolationView {
     Isolated,
+    SandboxDisabled,
     Degraded { reason: String },
 }
 

@@ -458,9 +458,9 @@ options govern sandbox behaviour:
 | `sandbox.allow_degraded_execution` | `false` | Whether to allow unsandboxed execution after sandbox setup fails |
 
 With sandboxing disabled, local gateway turns run without sandbox isolation
-and record a degraded boundary with reason
-`sandbox_disabled_by_configuration`. `allow_degraded_execution` is not
-required for this configuration choice.
+and record that the sandbox was switched off (`sandbox_disabled`), which is
+distinct from degraded execution after a sandbox failed to start.
+`allow_degraded_execution` is not required for this configuration choice.
 
 To turn sandboxing off for a topic, add this to its `config.toml`:
 

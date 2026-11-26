@@ -473,7 +473,10 @@ on (`SandboxConfig::default()` in `swage-protocol/src/client/settings.rs`). A
 topic inherits sandbox settings from the global configuration; an agent can
 override them. When `sandbox.enabled` resolves to `false`, local gateway turns
 run unsandboxed without requiring `allow_degraded_execution`. The persisted
-turn boundary is `Degraded` with reason `sandbox_disabled_by_configuration`.
+turn boundary is `SandboxDisabled`, and the audit trail carries an
+`execution_sandbox_disabled` event; `Degraded` and
+`execution_isolation_degraded` are kept for a sandbox that was meant to run
+and could not.
 
 To turn sandboxing off for a topic, add this to its `config.toml`:
 
