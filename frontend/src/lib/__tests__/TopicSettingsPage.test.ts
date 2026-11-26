@@ -272,8 +272,7 @@ describe("TopicSettingsPage", () => {
     vi.mocked(settingsApi.fetchTopicSecuritySettings).mockResolvedValue({
       available_tools: ["shell", "file_write"],
       scope: { kind: "topic", topic_id: "topic-1" },
-      effective: { sandbox_enabled: false, allow_degraded_execution: false,
-      access_gate: "token", require_approval: ["shell", "file_write"] },
+      effective: { sandbox_enabled: false, access_gate: "token", require_approval: ["shell", "file_write"] },
       overrides: {},
       relaxed: [
         { check: "sandbox", relaxed_by: { kind: "install" }, detail: "The per-turn sandbox is off." },
@@ -282,8 +281,7 @@ describe("TopicSettingsPage", () => {
     vi.mocked(settingsApi.saveTopicSecuritySettings).mockResolvedValue({
       available_tools: ["shell", "file_write"],
       scope: { kind: "topic", topic_id: "topic-1" },
-      effective: { sandbox_enabled: true, allow_degraded_execution: false,
-      access_gate: "token", require_approval: ["shell", "file_write"] },
+      effective: { sandbox_enabled: true, access_gate: "token", require_approval: ["shell", "file_write"] },
       overrides: { sandbox_enabled: true },
       relaxed: [],
     });
@@ -302,46 +300,15 @@ describe("TopicSettingsPage", () => {
 
     expect(settingsApi.saveTopicSecuritySettings).toHaveBeenCalledWith("topic-1", {
       sandbox_enabled: true,
-      allow_degraded_execution: undefined,
       require_approval: undefined,
     });
     expect(document.body.textContent).toContain("Every shipped check is in force for this topic.");
   });
 
-  it("saves unconfined fallback and reloads its persisted override", async () => {
-    const reading: SecuritySettingsResponse = {
-      available_tools: [], scope: { kind: "topic", topic_id: topic.id },
-      effective: { sandbox_enabled: true, allow_degraded_execution: false, access_gate: "token", require_approval: [] },
-      overrides: {}, relaxed: [],
-    };
-    vi.mocked(settingsApi.fetchTopicSecuritySettings).mockImplementation(async () => JSON.parse(JSON.stringify(reading)));
-    vi.mocked(settingsApi.saveTopicSecuritySettings).mockImplementation(async (_id, overrides) => {
-      reading.overrides = JSON.parse(JSON.stringify(overrides));
-      reading.effective.allow_degraded_execution = overrides.allow_degraded_execution ?? false;
-      return JSON.parse(JSON.stringify(reading));
-    });
-    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "security" } });
-    await flushUi();
-    const confinement = document.querySelector<HTMLSelectElement>('[aria-label="Sandbox confinement for this topic"]')!;
-    confinement.value = "allow_degraded";
-    confinement.dispatchEvent(new Event("change", { bubbles: true }));
-    await flushUi();
-    document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    await flushUi();
-    expect(vi.mocked(settingsApi.saveTopicSecuritySettings)).toHaveBeenLastCalledWith(topic.id, {
-      sandbox_enabled: undefined, allow_degraded_execution: true, require_approval: undefined,
-    });
-    unmount(component);
-    component = mount(TopicSettingsPage, { target: document.body, props: { topic, tab: "security" } });
-    await flushUi();
-    expect(document.querySelector<HTMLSelectElement>('[aria-label="Sandbox confinement for this topic"]')?.value).toBe("allow_degraded");
-    expect(document.querySelector('[aria-label="Effective security checks"]')?.textContent).toContain("Allow unconfined fallback");
-  });
-
   it("edits a topic approval timeout while preserving policy, and removes a tool", async () => {
     const reading: SecuritySettingsResponse = {
       available_tools: ["shell", "file_write"], scope: { kind: "topic" as const, topic_id: topic.id },
-      effective: { sandbox_enabled: true, allow_degraded_execution: false, access_gate: "token" as const,
+      effective: { sandbox_enabled: true, access_gate: "token" as const,
         require_approval: [{ tool: "shell", timeout: 12, timeout_policy: "interrupt" as const }] },
       overrides: { require_approval: [{ tool: "shell", timeout: 12, timeout_policy: "interrupt" }] }, relaxed: [],
     };
@@ -361,8 +328,7 @@ describe("TopicSettingsPage", () => {
     document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     await flushUi();
     expect(settingsApi.saveTopicSecuritySettings).toHaveBeenLastCalledWith(topic.id, {
-      sandbox_enabled: undefined, allow_degraded_execution: undefined,
-      require_approval: [{ tool: "shell", timeout: 27, timeout_policy: "interrupt" }],
+      sandbox_enabled: undefined, require_approval: [{ tool: "shell", timeout: 27, timeout_policy: "interrupt" }],
     });
     const picker = document.querySelector<HTMLSelectElement>('[aria-label="Tool to require approval"]')!;
     picker.value = "file_write"; picker.dispatchEvent(new Event("change", { bubbles: true })); await flushUi();

@@ -11,7 +11,6 @@
   let { topicId = null, onSaved }: { topicId?: string | null; onSaved?: () => void | Promise<void> } = $props();
   let security = $state<SecuritySettingsResponse | null>(null);
   let sandbox = $state("inherit");
-  let confinement = $state("inherit");
   let approvalMode = $state("inherit");
   let approvals = $state<RequireApprovalEntry[]>([]);
   let access = $state("inherit");
@@ -25,7 +24,6 @@
     security = value;
     const own = value.overrides;
     sandbox = own.sandbox_enabled == null ? "inherit" : own.sandbox_enabled ? "on" : "off";
-    confinement = own.allow_degraded_execution == null ? "inherit" : own.allow_degraded_execution ? "allow_degraded" : "strict";
     approvalMode = own.require_approval == null ? "inherit" : "own";
     approvals = own.require_approval ?? value.effective.require_approval;
     access = own.access_gate ?? "inherit";
@@ -38,7 +36,6 @@
     busy = true; error = null; notice = "";
     const overrides: SaveSecuritySettingsRequest = {};
     if (edited.has("sandbox_enabled")) overrides.sandbox_enabled = sandbox === "inherit" ? null : sandbox === "on";
-    if (edited.has("allow_degraded_execution")) overrides.allow_degraded_execution = confinement === "inherit" ? null : confinement === "allow_degraded";
     if (edited.has("require_approval")) overrides.require_approval = approvalMode === "inherit" ? null : approvals;
     if (!topicId && edited.has("access_gate")) overrides.access_gate = access === "inherit" ? null : access as AccessGateMode;
     try {
@@ -57,7 +54,6 @@
   {#if security}
     <div aria-label="Effective security checks">
       <p>Sandbox: {security.effective.sandbox_enabled ? "On" : "Off"}</p>
-      <p>Sandbox confinement: {security.effective.allow_degraded_execution ? "Allow unconfined fallback" : "Strict"}</p>
       <p>Approval prompts: {security.effective.require_approval.map((entry) => typeof entry === "string" ? entry : entry.tool).join(", ") || "none"}</p>
       <p>Access gate: {security.effective.access_gate}{topicId ? " (install setting)" : ""}</p>
     </div>
@@ -72,12 +68,6 @@
           <select aria-label={`Sandbox for ${scopeLabel}`} bind:value={sandbox} onchange={() => edited.add("sandbox_enabled")}>
             <option value="inherit">{topicId ? "Follow the install" : "Use shipped default"}</option>
             <option value="on">On</option><option value="off">Off (relaxed)</option>
-          </select>
-        </label>
-        <label>Sandbox confinement
-          <select aria-label={`Sandbox confinement for ${scopeLabel}`} bind:value={confinement} onchange={() => edited.add("allow_degraded_execution")}>
-            <option value="inherit">{topicId ? "Follow the install" : "Use shipped default"}</option>
-            <option value="strict">Strict</option><option value="allow_degraded">Allow unconfined fallback (relaxed)</option>
           </select>
         </label>
         <label>Approval prompts

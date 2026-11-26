@@ -192,7 +192,6 @@ fn effective_checks(
     };
     Ok(EffectiveSecurityChecks {
         sandbox_enabled: config.sandbox.enabled,
-        allow_degraded_execution: config.sandbox.allow_degraded_execution,
         require_approval: wire_entries(&config.tools.permissions.require_approval)?,
         access_gate: config.server.access,
     })
@@ -204,7 +203,6 @@ fn shipped_defaults() -> EffectiveSecurityChecks {
     let permissions = swage_config::ToolPermissionConfig::default();
     EffectiveSecurityChecks {
         sandbox_enabled: sandbox.enabled,
-        allow_degraded_execution: sandbox.allow_degraded_execution,
         require_approval: wire_entries(&permissions.require_approval)
             .expect("the shipped approval list is a valid wire list"),
         access_gate: swage_config::ServerConfig::default().access,
@@ -239,19 +237,8 @@ fn relaxations(
                 scope_overrides.sandbox_enabled.is_some(),
                 install_overrides.sandbox_enabled.is_some(),
             ),
-            detail: "The per-turn sandbox is off: shell, Python and file tools run unconfined, \
-                     and every turn is recorded as degraded."
+            detail: "The per-turn sandbox is off: shell, Python and file tools run without it."
                 .into(),
-        });
-    }
-    if !defaults.allow_degraded_execution && effective.allow_degraded_execution {
-        relaxed.push(RelaxedCheck {
-            check: SecurityCheck::SandboxConfinement,
-            relaxed_by: relaxed_by(
-                scope_overrides.allow_degraded_execution.is_some(),
-                install_overrides.allow_degraded_execution.is_some(),
-            ),
-            detail: "A turn whose sandbox cannot start runs unconfined instead of refusing.".into(),
         });
     }
     let missing: Vec<&str> = defaults
@@ -305,7 +292,6 @@ fn describe_relaxations(relaxed: &[RelaxedCheck]) -> String {
         .iter()
         .map(|entry| match entry.check {
             SecurityCheck::Sandbox => "sandbox relaxed",
-            SecurityCheck::SandboxConfinement => "sandbox confinement relaxed",
             SecurityCheck::ApprovalPrompts => "approval prompts relaxed",
             SecurityCheck::AccessGate => "access gate relaxed",
         })
@@ -319,10 +305,6 @@ fn overrides_from_partial(
 ) -> Result<SecurityOverrides, ApiError> {
     Ok(SecurityOverrides {
         sandbox_enabled: partial.sandbox.as_ref().and_then(|sandbox| sandbox.enabled),
-        allow_degraded_execution: partial
-            .sandbox
-            .as_ref()
-            .and_then(|sandbox| sandbox.allow_degraded_execution),
         require_approval: partial
             .tools
             .as_ref()
@@ -341,12 +323,6 @@ fn apply_overrides(
 ) -> Result<(), ApiError> {
     if let Some(enabled) = overrides.sandbox_enabled {
         partial.sandbox.get_or_insert_with(Default::default).enabled = enabled;
-    }
-    if let Some(allow_degraded) = overrides.allow_degraded_execution {
-        partial
-            .sandbox
-            .get_or_insert_with(Default::default)
-            .allow_degraded_execution = allow_degraded;
     }
     if partial.sandbox.as_ref().is_some_and(|sandbox| {
         sandbox.enabled.is_none() && sandbox.allow_degraded_execution.is_none()
@@ -384,9 +360,6 @@ fn apply_to_active_config(state: &AppState, partial: &swage_config::PartialConfi
     let defaults = swage_config::SandboxConfig::default();
     let sandbox = partial.sandbox.clone().unwrap_or_default();
     config.sandbox.enabled = sandbox.enabled.unwrap_or(defaults.enabled);
-    config.sandbox.allow_degraded_execution = sandbox
-        .allow_degraded_execution
-        .unwrap_or(defaults.allow_degraded_execution);
     config.tools.permissions.require_approval = partial
         .tools
         .as_ref()
@@ -504,7 +477,6 @@ mod tests {
             SettingsScope::Install,
             save(SecurityOverrides {
                 sandbox_enabled: Some(false),
-                allow_degraded_execution: Some(true),
                 access_gate: Some(AccessGateMode::Warn),
                 require_approval: Some(vec![
                     RequireApprovalEntry::Simple("shell".into()),
@@ -529,7 +501,6 @@ mod tests {
             serde_json::json!(["file_write"]),
             "sandbox-only save changed the permanently approved list"
         );
-        assert_eq!(updated.overrides.allow_degraded_execution, Some(true));
         assert_eq!(updated.overrides.access_gate, Some(AccessGateMode::Warn));
         let replaced = save_security_settings(
             &state,
@@ -550,7 +521,6 @@ mod tests {
             SettingsScope::Install,
             save(SecurityOverrides {
                 sandbox_enabled: Some(false),
-                allow_degraded_execution: Some(true),
                 require_approval: Some(vec![]),
                 access_gate: Some(AccessGateMode::Warn),
             }),
@@ -566,16 +536,14 @@ mod tests {
         .unwrap();
         assert!(reset.overrides.sandbox_enabled.is_none());
         assert!(reset.effective.sandbox_enabled);
-        assert_eq!(reset.overrides.allow_degraded_execution, Some(true));
         assert_eq!(reset.overrides.access_gate, Some(AccessGateMode::Warn));
         assert!(reset.overrides.require_approval.unwrap().is_empty());
         let reset = save_security_settings(&state, SettingsScope::Install,
-            serde_json::from_value(serde_json::json!({"allow_degraded_execution": null, "require_approval": null, "access_gate": null})).unwrap()
+            serde_json::from_value(serde_json::json!({"require_approval": null, "access_gate": null})).unwrap()
         ).await.unwrap();
         assert!(no_overrides(&reset.overrides));
-        assert!(!reset.effective.allow_degraded_execution);
         assert_eq!(reset.effective.access_gate, AccessGateMode::Token);
-        assert_eq!(reset.effective.require_approval.len(), 8);
+        assert_eq!(reset.effective.require_approval.len(), shipped_defaults().require_approval.len());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -696,7 +664,7 @@ mod tests {
                 &security_state,
                 SettingsScope::Install,
                 save(SecurityOverrides {
-                    allow_degraded_execution: Some(true),
+                    sandbox_enabled: Some(false),
                     ..Default::default()
                 }),
             )
@@ -720,10 +688,8 @@ mod tests {
             "successful general save was lost by the concurrent security save"
         );
         assert_eq!(
-            overrides_from_partial(&partial)
-                .unwrap()
-                .allow_degraded_execution,
-            Some(true),
+            overrides_from_partial(&partial).unwrap().sandbox_enabled,
+            Some(false),
             "successful security save was lost by the concurrent general save"
         );
     }
@@ -740,7 +706,6 @@ mod tests {
             SettingsScope::Install,
             save(SecurityOverrides {
                 sandbox_enabled: Some(true),
-                allow_degraded_execution: Some(true),
                 require_approval: Some(vec![RequireApprovalEntry::Simple("shell".into())]),
                 ..Default::default()
             }),
@@ -757,35 +722,10 @@ mod tests {
             reading.effective.sandbox_enabled,
             "general save reverted the sandbox"
         );
-        assert!(
-            reading.effective.allow_degraded_execution,
-            "general save reverted confinement"
-        );
         assert_eq!(
             serde_json::to_value(reading.effective.require_approval).unwrap(),
             serde_json::json!(["shell"])
         );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn unconfined_fallback_is_saved_and_read_as_effective() {
-        let (state, _, _root) = fixture().await;
-        save_security_settings(
-            &state,
-            SettingsScope::Install,
-            save(SecurityOverrides {
-                allow_degraded_execution: Some(true),
-                ..Default::default()
-            }),
-        )
-        .await
-        .unwrap();
-        let reading = read_security_settings(&state, SettingsScope::Install)
-            .await
-            .unwrap();
-        assert_eq!(reading.overrides.allow_degraded_execution, Some(true));
-        assert!(reading.effective.allow_degraded_execution);
-        assert!(state.active_config().sandbox.allow_degraded_execution);
     }
 
     #[tokio::test]
@@ -813,7 +753,6 @@ mod tests {
 
     fn no_overrides(overrides: &SecurityOverrides) -> bool {
         overrides.sandbox_enabled.is_none()
-            && overrides.allow_degraded_execution.is_none()
             && overrides.require_approval.is_none()
             && overrides.access_gate.is_none()
     }
@@ -825,8 +764,7 @@ mod tests {
             .await
             .expect("read");
         assert!(before.effective.sandbox_enabled);
-        assert!(!before.effective.allow_degraded_execution);
-        assert_eq!(before.effective.require_approval.len(), 8);
+        assert_eq!(before.effective.require_approval.len(), shipped_defaults().require_approval.len());
         assert!(no_overrides(&before.overrides));
         assert!(before.relaxed.is_empty());
 

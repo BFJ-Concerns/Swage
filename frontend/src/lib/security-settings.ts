@@ -3,7 +3,6 @@ import type { RelaxedCheck } from "./protocol/RelaxedCheck";
 
 export const CHECK_LABELS: Record<SecurityCheck, string> = {
   sandbox: "Sandbox",
-  sandbox_confinement: "Sandbox confinement",
   approval_prompts: "Approval prompts",
   access_gate: "Access gate",
 };

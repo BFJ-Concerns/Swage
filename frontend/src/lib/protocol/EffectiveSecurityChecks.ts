@@ -5,7 +5,7 @@ import type { RequireApprovalEntry } from "./RequireApprovalEntry";
 /**
  * The security checks as a session in the scope runs under them.
  */
-export type EffectiveSecurityChecks = { sandbox_enabled: boolean, allow_degraded_execution: boolean,
+export type EffectiveSecurityChecks = { sandbox_enabled: boolean,
 /**
  * The tools an attended session is asked about before they run.
  */

@@ -19,8 +19,8 @@ it.each([false, true])("sandbox-only stale form preserves a permanent approval (
   const reading: SecuritySettingsResponse = {
     available_tools: ["shell", "file_write"],
     scope: topic ? { kind: "topic", topic_id: "topic-1" } : { kind: "install" },
-    effective: { sandbox_enabled: true, allow_degraded_execution: true, access_gate: "warn", require_approval: ["shell", "file_write"] },
-    overrides: { sandbox_enabled: true, allow_degraded_execution: true, access_gate: topic ? undefined : "warn", require_approval: ["shell", "file_write"] },
+    effective: { sandbox_enabled: true, access_gate: "warn", require_approval: ["shell", "file_write"] },
+    overrides: { sandbox_enabled: true, access_gate: topic ? undefined : "warn", require_approval: ["shell", "file_write"] },
     relaxed: [],
   };
   const copy = () => JSON.parse(JSON.stringify(reading));
@@ -60,8 +60,8 @@ it.each([false, true])("sandbox-only stale form preserves a permanent approval (
 it("sends explicit null only for controls changed to inherit", async () => {
   vi.mocked(api.fetchInstallSecuritySettings).mockResolvedValue({
     available_tools: [], scope: { kind: "install" },
-    effective: { sandbox_enabled: false, allow_degraded_execution: true, access_gate: "off", require_approval: [] },
-    overrides: { sandbox_enabled: false, allow_degraded_execution: true, access_gate: "off", require_approval: [] }, relaxed: [],
+    effective: { sandbox_enabled: false, access_gate: "off", require_approval: [] },
+    overrides: { sandbox_enabled: false, access_gate: "off", require_approval: [] }, relaxed: [],
   });
   component = mount(SecuritySettingsPanel, { target: document.body });
   await settle();
@@ -72,6 +72,6 @@ it("sends explicit null only for controls changed to inherit", async () => {
   document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
   await settle();
   expect(api.saveInstallSecuritySettings).toHaveBeenCalledWith({
-    sandbox_enabled: null, allow_degraded_execution: null, require_approval: null, access_gate: null,
+    sandbox_enabled: null, require_approval: null, access_gate: null,
   });
 });

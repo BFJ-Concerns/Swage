@@ -7,7 +7,7 @@ import type { RequireApprovalEntry } from "./RequireApprovalEntry";
  * scope leaves the setting to the scope beneath it (a topic to the install,
  * the install to the shipped default).
  */
-export type SecurityOverrides = { sandbox_enabled?: boolean, allow_degraded_execution?: boolean, require_approval?: Array<RequireApprovalEntry>,
+export type SecurityOverrides = { sandbox_enabled?: boolean, require_approval?: Array<RequireApprovalEntry>,
 /**
  * Install scope only; a topic's request carrying it is refused.
  */

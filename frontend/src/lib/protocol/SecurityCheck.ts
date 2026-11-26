@@ -3,4 +3,4 @@
 /**
  * The shipped security checks a scope can relax.
  */
-export type SecurityCheck = "sandbox" | "sandbox_confinement" | "approval_prompts" | "access_gate";
+export type SecurityCheck = "sandbox" | "approval_prompts" | "access_gate";

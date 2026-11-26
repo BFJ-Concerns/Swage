@@ -192,11 +192,6 @@ describe("SettingsPage", () => {
       expect.soft(notice?.textContent?.trim()).toBe("Saved automatically. Changes apply to new turns.");
       expect.soft(notice?.getAttribute("role")).toBe("status");
       expect.soft(notice?.querySelector("button")).toBeNull();
-      if (tab === "automation") {
-        const sandbox = [...document.querySelectorAll(".field")].find((field) => field.querySelector(".key")?.textContent?.startsWith("Sandbox"));
-        expect.soft(sandbox?.textContent).toContain("Saved changes apply to new turns.");
-        expect.soft(sandbox?.textContent).not.toContain("require a gateway restart");
-      }
       await vi.advanceTimersByTimeAsync(5000);
       expect(document.querySelector(".notice")).toBeNull();
     },
@@ -497,8 +492,8 @@ describe("SettingsPage", () => {
     component = mount(SettingsPage, { target: document.body, props: { tab: "automation" } });
     await flushUi();
     const newer = { available_tools: [], scope: { kind: "install" as const },
-      effective: { sandbox_enabled: true, allow_degraded_execution: true, access_gate: "token" as const, require_approval: ["shell"] },
-      overrides: { sandbox_enabled: true, allow_degraded_execution: true, require_approval: ["shell"] }, relaxed: [] };
+      effective: { sandbox_enabled: true, access_gate: "token" as const, require_approval: ["shell"] },
+      overrides: { sandbox_enabled: true, require_approval: ["shell"] }, relaxed: [] };
     vi.mocked(settingsApi.saveInstallSecuritySettings).mockResolvedValue(newer);
     await settingsApi.saveInstallSecuritySettings(newer.overrides);
     const editor = document.querySelector<HTMLTextAreaElement>('[aria-label="Tool bundles"]')!;
@@ -511,41 +506,11 @@ describe("SettingsPage", () => {
     expect(body.tool_permissions?.bundles).toEqual({ inspect: ["file_read"] });
   });
 
-  it("saves unconfined fallback and reloads its persisted override", async () => {
-    const reading: SecuritySettingsResponse = {
-      available_tools: [], scope: { kind: "install" },
-      effective: { sandbox_enabled: true, allow_degraded_execution: false, access_gate: "token", require_approval: [] },
-      overrides: {}, relaxed: [],
-    };
-    vi.mocked(settingsApi.fetchInstallSecuritySettings).mockImplementation(async () => JSON.parse(JSON.stringify(reading)));
-    vi.mocked(settingsApi.saveInstallSecuritySettings).mockImplementation(async (overrides) => {
-      reading.overrides = JSON.parse(JSON.stringify(overrides));
-      reading.effective.allow_degraded_execution = overrides.allow_degraded_execution ?? false;
-      return JSON.parse(JSON.stringify(reading));
-    });
-    component = mount(SettingsPage, { target: document.body, props: { tab: "security" } });
-    await flushUi();
-    const confinement = document.querySelector<HTMLSelectElement>('[aria-label="Sandbox confinement for the install"]')!;
-    confinement.value = "allow_degraded";
-    confinement.dispatchEvent(new Event("change", { bubbles: true }));
-    await flushUi();
-    document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    await flushUi();
-    expect(vi.mocked(settingsApi.saveInstallSecuritySettings)).toHaveBeenLastCalledWith({
-      sandbox_enabled: undefined, allow_degraded_execution: true, require_approval: undefined, access_gate: undefined,
-    });
-    unmount(component);
-    component = mount(SettingsPage, { target: document.body, props: { tab: "security" } });
-    await flushUi();
-    expect(document.querySelector<HTMLSelectElement>('[aria-label="Sandbox confinement for the install"]')?.value).toBe("allow_degraded");
-    expect(document.querySelector('[aria-label="Effective security checks"]')?.textContent).toContain("Allow unconfined fallback");
-  });
-
   it("edits install security through its own reading and saves picker timeouts and removals", async () => {
     expect(parseRoute("/settings/security").settingsTab).toBe("security");
     const reading: SecuritySettingsResponse = {
       available_tools: ["shell", "file_write"], scope: { kind: "install" as const },
-      effective: { sandbox_enabled: true, allow_degraded_execution: false, access_gate: "token" as const, require_approval: [] },
+      effective: { sandbox_enabled: true, access_gate: "token" as const, require_approval: [] },
       overrides: {}, relaxed: [],
     };
     vi.mocked(settingsApi.fetchInstallSecuritySettings).mockResolvedValue(reading);
@@ -572,7 +537,7 @@ describe("SettingsPage", () => {
     timeout.value = "42"; timeout.dispatchEvent(new Event("change", { bubbles: true }));
     await flushUi(); buttonNamed("Save security settings").click(); await flushUi();
     expect(settingsApi.saveInstallSecuritySettings).toHaveBeenLastCalledWith({
-      sandbox_enabled: false, allow_degraded_execution: undefined, access_gate: "warn",
+      sandbox_enabled: false, access_gate: "warn",
       require_approval: [{ tool: "shell", timeout: 42, timeout_policy: null }],
     });
     expect(settingsApi.saveSettings).not.toHaveBeenCalled();
@@ -808,7 +773,7 @@ describe("SettingsPage", () => {
     });
     component = mount(SettingsPage, { target: document.body, props: { tab: "automation" } });
     await flushUi();
-    buttonNamed("Disabled").click();
+    buttonNamed("Interrupt").click();
     await waitForSaveCall();
     if (action === "begin") document.querySelector<HTMLInputElement>('[aria-label="Enable web search"]')!.click();
     await flushUi();

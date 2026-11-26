@@ -1942,9 +1942,6 @@
             "$ref": "#/components/schemas/AccessGateMode",
             "description": "How a binding beyond loopback gates requests; loopback is never gated."
           },
-          "allow_degraded_execution": {
-            "type": "boolean"
-          },
           "require_approval": {
             "description": "The tools an attended session is asked about before they run.",
             "items": {
@@ -1958,7 +1955,6 @@
         },
         "required": [
           "sandbox_enabled",
-          "allow_degraded_execution",
           "require_approval",
           "access_gate"
         ],
@@ -4171,12 +4167,6 @@
             ],
             "description": "Install scope only; a topic's request carrying it is refused."
           },
-          "allow_degraded_execution": {
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
           "require_approval": {
             "items": {
               "$ref": "#/components/schemas/RequireApprovalEntry"
@@ -4889,11 +4879,6 @@
             "type": "string"
           },
           {
-            "const": "sandbox_confinement",
-            "description": "The sandbox's confinement: with degraded execution allowed, a turn\nwhose sandbox cannot start runs unconfined instead of refusing.",
-            "type": "string"
-          },
-          {
             "const": "approval_prompts",
             "description": "Approval prompts before the high-risk tools run in attended sessions.",
             "type": "string"
@@ -4919,12 +4904,6 @@
               }
             ],
             "description": "Install scope only; a topic's request carrying it is refused."
-          },
-          "allow_degraded_execution": {
-            "type": [
-              "boolean",
-              "null"
-            ]
           },
           "require_approval": {
             "items": {

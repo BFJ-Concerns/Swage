@@ -5,8 +5,7 @@
 //! by setting it in its own configuration; what a session in that scope
 //! actually runs under is the cascade's result (`effective`), the scope's own
 //! settings are `overrides`, and `relaxed` names each check standing below
-//! the shipped default and the scope that relaxed it, so the settings page
-//! and a session's view can show the same thing.
+//! the shipped default and the scope that relaxed it.
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -32,9 +31,6 @@ pub enum SettingsScope {
 pub enum SecurityCheck {
     /// The per-turn sandbox around shell, Python and file tools.
     Sandbox,
-    /// The sandbox's confinement: with degraded execution allowed, a turn
-    /// whose sandbox cannot start runs unconfined instead of refusing.
-    SandboxConfinement,
     /// Approval prompts before the high-risk tools run in attended sessions.
     ApprovalPrompts,
     /// The token a client must carry to reach a gateway bound beyond
@@ -59,7 +55,6 @@ pub struct RelaxedCheck {
 #[ts(optional_fields = nullable)]
 pub struct EffectiveSecurityChecks {
     pub sandbox_enabled: bool,
-    pub allow_degraded_execution: bool,
     /// The tools an attended session is asked about before they run.
     pub require_approval: Vec<RequireApprovalEntry>,
     /// How a binding beyond loopback gates requests; loopback is never gated.
@@ -76,9 +71,6 @@ pub struct SecurityOverrides {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub sandbox_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub allow_degraded_execution: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub require_approval: Option<Vec<RequireApprovalEntry>>,
@@ -120,13 +112,6 @@ pub struct SaveSecuritySettingsRequest {
         deserialize_with = "present_override"
     )]
     #[ts(optional)]
-    pub allow_degraded_execution: Option<Option<bool>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "present_override"
-    )]
-    #[ts(optional)]
     pub require_approval: Option<Option<Vec<RequireApprovalEntry>>>,
     /// Install scope only; a topic's request carrying it is refused.
     #[serde(
@@ -161,33 +146,30 @@ mod tests {
         let empty: SaveSecuritySettingsRequest =
             serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(empty.sandbox_enabled.is_none());
-        assert!(empty.allow_degraded_execution.is_none());
         assert!(empty.require_approval.is_none());
         assert!(empty.access_gate.is_none());
         assert_eq!(serde_json::to_value(empty).unwrap(), serde_json::json!({}));
         let cleared: SaveSecuritySettingsRequest = serde_json::from_value(serde_json::json!({
-            "sandbox_enabled": null, "allow_degraded_execution": null,
+            "sandbox_enabled": null,
             "require_approval": null, "access_gate": null
         }))
         .unwrap();
         assert_eq!(cleared.sandbox_enabled, Some(None));
-        assert_eq!(cleared.allow_degraded_execution, Some(None));
         assert!(matches!(cleared.require_approval, Some(None)));
         assert_eq!(cleared.access_gate, Some(None));
         assert_eq!(
             serde_json::to_value(cleared).unwrap(),
             serde_json::json!({
-                "sandbox_enabled": null, "allow_degraded_execution": null,
+                "sandbox_enabled": null,
                 "require_approval": null, "access_gate": null
             })
         );
         let set: SaveSecuritySettingsRequest = serde_json::from_value(serde_json::json!({
-            "sandbox_enabled": false, "allow_degraded_execution": true,
+            "sandbox_enabled": false,
             "require_approval": [], "access_gate": "warn"
         }))
         .unwrap();
         assert_eq!(set.sandbox_enabled, Some(Some(false)));
-        assert_eq!(set.allow_degraded_execution, Some(Some(true)));
         assert!(set.require_approval.unwrap().unwrap().is_empty());
         assert_eq!(set.access_gate, Some(Some(AccessGateMode::Warn)));
     }

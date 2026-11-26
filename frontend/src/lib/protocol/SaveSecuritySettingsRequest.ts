@@ -7,7 +7,7 @@ import type { RequireApprovalEntry } from "./RequireApprovalEntry";
  * overrides unchanged; explicit null clears an override so the scope
  * beneath decides again. A supplied approval list replaces that list.
  */
-export type SaveSecuritySettingsRequest = { sandbox_enabled?: boolean | null, allow_degraded_execution?: boolean | null, require_approval?: Array<RequireApprovalEntry> | null,
+export type SaveSecuritySettingsRequest = { sandbox_enabled?: boolean | null, require_approval?: Array<RequireApprovalEntry> | null,
 /**
  * Install scope only; a topic's request carrying it is refused.
  */
