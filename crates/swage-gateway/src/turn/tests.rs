@@ -1263,9 +1263,12 @@ impl LlmProvider for TranscriptSummarisingProvider {
             .map(ChatMessage::text_content)
             .collect::<Vec<_>>()
             .join("\n");
+        // A summary request carries the history in its own tags; echoing it
+        // back stands in for notes that keep what the conversation settled.
         let summary = material
-            .split_once("## Conversation to summarise\n\n")
-            .map(|(_, history)| history.to_owned())
+            .split_once("<conversation_to_summarise>\n")
+            .and_then(|(_, rest)| rest.split_once("\n</conversation_to_summarise>"))
+            .map(|(history, _)| history.to_owned())
             .unwrap_or_else(|| "The missing-file reads failed repeatedly.".into());
         Ok(CompletionResponse {
             content: summary,
@@ -9100,7 +9103,7 @@ async fn memory_scheduled_file_only_receives_summaries_as_all_readable_memory() 
         "no system message may direct an unavailable memory read: {system}"
     );
     assert!(
-        system.contains("the summaries are all of memory you can read"),
+        system.contains(swage_context::memory::INDEX_ONLY),
         "summary-only guidance: {system}"
     );
 }
@@ -9110,7 +9113,7 @@ async fn memory_scheduled_with_read_tool_receives_entry_read_guidance() {
     let (system, offered) = scheduled_memory_request(true).await;
     assert!(offered);
     assert!(
-        system.contains("read the entry with `memory_read`"),
+        system.contains(swage_context::memory::READ_ROUTE),
         "entry-read guidance: {system}"
     );
 }
@@ -13076,15 +13079,9 @@ async fn assert_named_child_replay_accounts_for_reads(offered: bool) {
         envelope["note"]
             .as_str()
             .unwrap()
-            .contains("call tool_result_read"),
-        offered
-    );
-    assert_eq!(
-        envelope["note"]
-            .as_str()
-            .unwrap()
-            .contains("No tool in this session"),
-        !offered
+            .contains("`tool_result_read`"),
+        offered,
+        "the note names the read tool only where the child is offered it"
     );
 }
 
@@ -25223,9 +25220,20 @@ async fn assert_later_replay_accounts_for_reads(offered: bool) {
     let note = envelope["note"]
         .as_str()
         .expect("later replay must account for the full earlier read");
-    assert!(note.contains("You received this result whole"));
-    assert_eq!(note.contains("call tool_result_read"), offered);
-    assert_eq!(note.contains("No tool in this session"), !offered);
+    let recorded: swage_core::CompactToolReplay =
+        serde_json::from_value(envelope.clone()).expect("the replay envelope");
+    assert_eq!(
+        Some(note),
+        swage_core::CompactToolReplay {
+            note: None,
+            ..recorded
+        }
+        .with_elision_note(swage_core::ReplayRetrieval::with_read_tool(offered))
+        .note
+        .as_deref(),
+        "the note is the one written for this turn's own tools"
+    );
+    assert_eq!(note.contains("`tool_result_read`"), offered);
     let offered_in_request = captured
         .tool_definitions
         .iter()

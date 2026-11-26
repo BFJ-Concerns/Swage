@@ -474,34 +474,29 @@ mod tests {
             WorkingNormsElement::for_model("claude-opus-5", WorkingNormsScaffold::FamilyFallback)
                 .content()[0]
                 .text_content();
-        assert!(text.contains("## Working norms"));
+        assert!(text.starts_with("## Working norms\n"));
         assert!(
-            text.contains("never under /tmp"),
-            "the norms place temporary output under the session's own root"
+            !text.contains("/tmp"),
+            "the norms name no path: where files go is the place section's to say"
         );
-        assert!(text.contains("Work to completion"));
-        assert!(text.contains("issue those tool calls together"));
-        assert!(!text.contains("ending your turn"), "no GPT text on Claude");
+        assert!(text.contains(COMMON_NORMS));
+        assert!(text.contains(CLAUDE_NORMS));
+        assert!(!text.contains(GPT_NORMS), "no GPT text on Claude");
 
         let text =
             WorkingNormsElement::for_model("gpt-5.6-luna", WorkingNormsScaffold::FamilyFallback)
                 .content()[0]
                 .text_content();
-        assert!(text.contains("Work to completion"));
-        assert!(text.contains("fully resolved before ending your turn"));
-        assert!(
-            !text.contains("tool calls together"),
-            "no Claude text on GPT"
-        );
+        assert!(text.contains(COMMON_NORMS));
+        assert!(text.contains(GPT_NORMS));
+        assert!(!text.contains(CLAUDE_NORMS), "no Claude text on GPT");
     }
 
     #[test]
     fn an_unknown_family_degrades_to_common_norms_never_silence() {
         let element = WorkingNormsElement::for_model("glm-5.2", WorkingNormsScaffold::Native);
         let text = element.content()[0].text_content();
-        assert!(text.contains("Work to completion"));
-        assert!(!text.contains("tool calls together"));
-        assert!(!text.contains("ending your turn"));
+        assert_eq!(text, COMMON_NORMS);
     }
 
     #[test]
@@ -519,7 +514,8 @@ mod tests {
         let preview = element.report_preview().expect("built-in preview");
 
         assert!(content.starts_with(&preview));
-        assert!(preview.ends_with("stopping at a plan."));
+        assert_eq!(preview, built_in_first_sentence_preview(COMMON_NORMS));
+        assert!(preview.len() < COMMON_NORMS.len());
     }
 
     #[test]
@@ -554,7 +550,7 @@ mod tests {
             .content()[0]
             .text_content();
 
-        assert!(text.contains("issue those tool calls together"));
+        assert!(text.contains(CLAUDE_NORMS));
         assert!(native_harness_divergences("claude-future-6").is_none());
         assert!(!text.contains(STANDARD_DIVERGENCES[0].material));
         assert!(!text.contains("Write for a teammate returning to the work"));
@@ -603,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn every_family_block_carries_the_measured_claims_rule() {
+    fn every_family_block_carries_the_common_norms() {
         for (model, selection) in [
             ("claude-opus-5-5", WorkingNormsScaffold::Native),
             ("claude-opus-5-5", WorkingNormsScaffold::FamilyFallback),
@@ -613,10 +609,9 @@ mod tests {
         ] {
             let text = WorkingNormsElement::for_model(model, selection).content()[0].text_content();
             assert!(
-                text.contains("measure it with a tool first"),
-                "{model} ({selection:?}) lacks the measured-claims rule"
+                text.starts_with(COMMON_NORMS),
+                "{model} ({selection:?}) lacks the common norms"
             );
-            assert!(text.contains("say so rather than asserting that the limit is met"));
         }
     }
 
@@ -697,7 +692,7 @@ mod tests {
                 .content()[0]
                 .text_content();
 
-        assert!(text.contains("fully resolved before ending your turn"));
+        assert!(text.contains(GPT_NORMS));
         for divergence in native_harness_divergences("gpt-5.6-sol").unwrap() {
             assert!(!text.contains(divergence.material));
         }

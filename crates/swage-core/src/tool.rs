@@ -483,20 +483,20 @@ mod tests {
             .note
             .as_deref()
             .expect("an elided replay carries the note");
+        // The note carries the record's own figures, and the route by
+        // reference when the turn has one.
         assert!(note.contains(&format!("first {MODEL_REPLAY_PREVIEW_CHARS} characters")));
-        assert!(note.contains("You received this result whole"));
-        assert!(note.contains(&format!("({} bytes", content.len())));
-        assert!(note.contains("not in what you read"));
-        assert!(note.contains("call tool_result_read with this full_result_ref"));
+        assert!(note.contains(&format!("({})", content.len())));
+        assert!(note.ends_with(ELIDED_READ_AGAIN_BY_REFERENCE));
+        assert!(!note.contains(ELIDED_NO_READ_AGAIN));
         let parsed = parse_tool_result_reference(replay.full_result_ref.as_deref().unwrap());
         assert!(
             parsed.is_some(),
             "the reference the note points at resolves"
         );
         assert!(
-            replay
-                .to_stable_json()
-                .contains("\"note\":\"You received this result whole")
+            replay.to_stable_json().starts_with("{\"note\":\""),
+            "the note is read before the fields it explains"
         );
     }
 
@@ -510,8 +510,7 @@ mod tests {
         let replay = replay.with_elision_note(ReplayRetrieval::with_read_tool(false));
 
         let note = replay.note.as_deref().unwrap();
-        assert!(note.contains("You received this result whole"));
-        assert!(note.contains("No tool in this session shows it again"));
+        assert!(note.ends_with(ELIDED_NO_READ_AGAIN));
         assert!(!note.contains("tool_result_read"));
     }
 
@@ -524,7 +523,7 @@ mod tests {
         let replay = replay.with_elision_note(ReplayRetrieval::ByReference);
 
         let note = replay.note.as_deref().unwrap();
-        assert!(note.contains("No tool in this session shows it again"));
+        assert!(note.ends_with(ELIDED_NO_READ_AGAIN));
         assert!(!note.contains("tool_result_read"));
     }
 

@@ -242,8 +242,15 @@ mod tests {
         match &messages[0].content()[0] {
             swage_core::ContentPart::Text { text } => {
                 assert!(text.contains("You are a friendly assistant."));
-                assert!(text.contains("Skill directory: /skills/persona"));
-                assert!(text.contains("Resolve relative paths"));
+                assert!(
+                    text.starts_with("Active skill: persona."),
+                    "the lead-in names the skill: {text}"
+                );
+                let lead_in = text
+                    .split_once("\n\n")
+                    .expect("a lead-in, then the instructions")
+                    .0;
+                assert!(lead_in.contains("/skills/persona"), "{lead_in}");
             }
             _ => panic!("expected text content"),
         }

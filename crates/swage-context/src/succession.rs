@@ -620,9 +620,26 @@ mod tests {
             "the summariser runs under the instruction the caller selected"
         );
         let shown = request.messages[1].text_content();
-        assert!(shown.contains("already in place; do not repeat"), "{shown}");
-        assert!(shown.contains("You are Swage. Topic: alpha."), "{shown}");
-        assert!(shown.contains("keep the open questions"), "{shown}");
+        // Each part reaches the summariser inside the tags its instruction
+        // names.
+        assert!(
+            shown.contains(
+                "<assistant_standing_context>\n[system] You are Swage. Topic: alpha.\n</assistant_standing_context>"
+            ),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("<requested_focus>\nkeep the open questions\n</requested_focus>"),
+            "{shown}"
+        );
+        assert!(shown.contains("<conversation_to_summarise>\n[user] message 0"));
+        for tag in [
+            "assistant_standing_context",
+            "conversation_to_summarise",
+            "requested_focus",
+        ] {
+            assert!(SUMMARY_INSTRUCTIONS.contains(&format!("`{tag}`")), "{tag}");
+        }
         assert!(shown.contains("[user] message 0") && shown.contains("[assistant] message 1"));
         assert!(
             !shown.contains("message 3"),
@@ -638,8 +655,12 @@ mod tests {
             ["message 3", "message 4", "message 5"]
         );
         let rendered = succession.element.content()[0].text_content();
-        assert!(rendered.starts_with("## Conversation so far\n\nThey agreed the plan."));
-        assert!(rendered.contains("3 earlier messages") && rendered.contains("3 most recent"));
+        assert_eq!(
+            rendered,
+            format!("{SUCCESSOR_FRAME}\n\nThey agreed the plan."),
+            "the frame says what the notes are before the notes themselves"
+        );
+        assert!(rendered.starts_with("## Conversation so far\n"));
         assert_eq!(succession.record.actual_strategy, "succession");
         assert_eq!(succession.record.messages_removed, 3);
         assert_eq!(succession.record.source_message_range, Some((0, 3)));

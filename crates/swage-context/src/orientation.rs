@@ -365,7 +365,7 @@ mod tests {
     fn tool_preferences_follow_the_tools_the_turn_offers() {
         let file_only = OrientationElement::new(bare_environment(), vec![], BTreeSet::new());
         let text = file_only.content()[0].text_content();
-        assert!(text.contains("Where tools overlap, prefer the specific one."));
+        assert!(text.contains(PREFERENCES_OPENING));
         for tool in tools_named_in_preferences() {
             assert!(
                 !text.contains(&format!("`{tool}`")),
@@ -380,7 +380,11 @@ mod tests {
             BTreeSet::from(["web_search".to_string()]),
         );
         let text = with_search.content()[0].text_content();
-        assert!(text.contains("Use `web_search` to find web sources."));
+        let web_search = TOOL_PREFERENCES
+            .iter()
+            .find(|preference| preference.tool == "web_search")
+            .expect("a preference for web_search");
+        assert!(text.contains(web_search.sentence));
         assert!(!text.contains("`url_fetch`"), "{text}");
     }
 
@@ -388,10 +392,12 @@ mod tests {
     fn identity_states_record_coverage_and_secret_redaction() {
         let element = OrientationElement::new(bare_environment(), vec![], BTreeSet::new());
         let text = element.content()[0].text_content();
-        assert!(text.contains("your turns, your tool calls and their results"));
-        assert!(text.contains("how this context was assembled"));
-        assert!(text.contains("redacted from that record"));
-        assert!(text.contains("recorded as written"));
+        assert!(text.starts_with(IDENTITY), "every session opens on it");
+        // The coverage is stated by what it holds, so a reworded identity
+        // that dropped a kind of record fails here.
+        for covered in ["turn", "tool call", "result", "context", "redacted"] {
+            assert!(IDENTITY.contains(covered), "{covered}");
+        }
     }
 
     #[test]

@@ -110,6 +110,7 @@ All notable changes to Swage are documented in this file.
 
 ### Changed
 
+- The text the gateway itself gives a model is rewritten to say what is wanted and only what holds in every session: the common and family working norms, the orientation, the framing of memory, the memory curator's instructions, the instructions for conversation summaries and stall diagnoses, the note on a shortened tool result, and the lead-in to an active skill. A conversation summary now opens with the rules the user set that are still in force, written as instructions, and a continuing session is told those rules still apply.
 - The supplied and hosted guides explain creating and editing agent definitions in conversation, including the required tool grant, limits and configuration history, alongside the operator API.
 - Anthropic turns without an explicit output limit use the model's documented limit instead of a fixed 4,096 tokens. A limit the request sets is kept, and a model Anthropic does not document falls back to the catalogue's limit.
 - Session orientation lists every readable attached workspace with its path, access and trust. A worker placed inside one sees its placement root, the trust it inherits and its own write access.
@@ -166,6 +167,7 @@ All notable changes to Swage are documented in this file.
 
 ### Fixed
 
+- The memory curator's own session is no longer told that it cannot write memory: a session offered `memory_write` is told it keeps memory.
 - Failed settings saves leave configuration, managed credentials and the active runtime unchanged. History distinguishes absent values from strings and identifies its audit-event and saved-context sources.
 - `file_edit` refuses an ambiguous passage whose occurrences overlap, rather than replacing one of them.
 - Shortened tool results tell later turns that the earlier result was delivered whole and identify a retrieval route when one is available.
