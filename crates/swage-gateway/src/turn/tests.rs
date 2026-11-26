@@ -18026,10 +18026,6 @@ fn the_policy_masks_private_home_paths_and_the_data_root_and_opens_the_shared_ca
         writes.contains(&sandbox_path(&home.join(".cargo"))),
         "{writes:?}"
     );
-    assert!(
-        !writes.iter().any(|path| path.ends_with(".npm")),
-        "an absent cache is not opened: {writes:?}"
-    );
 
     // A grant beneath the data root keeps the root masked: the grant is a
     // write path the mount layer reopens on its own, deeper, so the store,
@@ -18050,6 +18046,68 @@ fn the_policy_masks_private_home_paths_and_the_data_root_and_opens_the_shared_ca
             .contains(&sandbox_path(&data_root))
     );
     assert!(sandbox_config.write_paths.contains(&sandbox_path(&inside)));
+}
+
+/// A cache that does not exist yet is created where its tool is installed,
+/// so a first fetch can fill it; one whose tool is absent is not created.
+#[test]
+fn absent_shared_caches_are_created_for_installed_tools_only() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let caches = crate::turn::dispatcher::shared_caches(&home, |tool| tool == "npm");
+
+    assert!(home.join(".npm").is_dir());
+    assert!(
+        home.join(".cache").is_dir(),
+        "every tool's cache is created"
+    );
+    assert!(!home.join(".cargo").exists(), "no cargo, no ~/.cargo");
+    assert!(!home.join("go").exists());
+    assert_eq!(
+        caches,
+        vec![
+            sandbox_path(&home.join(".cache")),
+            sandbox_path(&home.join(".npm"))
+        ]
+    );
+}
+
+/// Registry tokens are masked, the one inside the writable cargo cache
+/// included.
+#[test]
+fn registry_credentials_are_masked_even_inside_a_writable_cache() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path().join("home");
+    std::fs::create_dir_all(home.join(".cargo")).unwrap();
+    std::fs::write(home.join(".cargo/credentials.toml"), "token").unwrap();
+    std::fs::write(home.join(".npmrc"), "//registry/:_authToken=x").unwrap();
+    let workspace = home.join("project");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let roots = PolicyRoots {
+        home: home.clone(),
+        data_root: home.join(".swage"),
+    };
+    let agent_config =
+        AgentConfig::new("worker").with_workspace(&workspace, vec![workspace.clone()]);
+    let policy = build_sandbox_config(
+        &agent_config,
+        None,
+        &roots,
+        &swage_config::ResolvedConfig::default(),
+    )
+    .unwrap();
+
+    for private in [".cargo/credentials.toml", ".npmrc"] {
+        assert!(
+            policy
+                .masked_paths
+                .contains(&sandbox_path(&home.join(private))),
+            "{private}: {:?}",
+            policy.masked_paths
+        );
+    }
 }
 
 /// Of `~/.ssh`, what ssh needs to reach a forge through the operator's

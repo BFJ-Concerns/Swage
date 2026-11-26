@@ -430,7 +430,10 @@ The sandbox reads broadly and writes narrowly. Everything the host can see
 is readable except the private paths it masks: SSH and GnuPG key material,
 cloud and cluster credentials (`~/.aws`, `~/.azure`, `~/.config/gcloud`,
 `~/.kube`), plaintext token files (`~/.netrc`, `~/.git-credentials`, the
-`gh` and Forgejo token files) and the gateway's own data root. A masked
+`gh` and Forgejo token files), package-registry tokens (Cargo's
+`credentials.toml`, `~/.npmrc`, `~/.pypirc`, `~/.gem/credentials`, Docker's
+`config.json`), the desktop keyrings and `pass` store, and the gateway's own
+data root. A masked
 directory reads as empty and a masked file as `/dev/null`. Of `~/.ssh`, the
 files that hold no key — `config`, `known_hosts` and the `.pub` halves —
 stay readable. The shipped skills' files, written beneath the data root,
@@ -441,7 +444,9 @@ Writes go only to the workspace (when its grant allows), the workspace's
 git metadata where a linked worktree keeps it outside the tree, temporary
 space, the shared build and package caches under the home (`~/.cache`,
 `~/.cargo`, `~/.npm`, `~/.local/share/pnpm`, `~/go/pkg`) and any attachment
-granted write.
+granted write. A cache that does not exist yet is created before the turn
+where its tool is installed, so a first fetch can fill it; a token kept
+inside a cache stays masked.
 
 The child receives only named settings from the gateway's environment
 (`PATH`, `HOME`, the locale, the XDG directories, `CARGO_HOME`, the

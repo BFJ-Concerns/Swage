@@ -1369,3 +1369,48 @@ async fn a_sandboxed_command_reaches_the_host_network_only_when_shared() {
     }
     accepted.abort();
 }
+
+/// A registry token inside a cache the sandbox writes stays hidden: the
+/// mask is deeper than the cache's grant.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_masked_token_inside_a_writable_cache_reads_as_empty() {
+    use swage_sandbox::Sandbox;
+
+    let mut env = ProcessEnvGuard::new();
+    env.set_var("SWAGE_SANDBOX_AGENT_BINARY", env!("CARGO_BIN_EXE_swage"));
+    let root = tempfile::tempdir().unwrap();
+    env.set_var("XDG_RUNTIME_DIR", root.path());
+    let cargo = root.path().join("cargo-home");
+    std::fs::create_dir_all(&cargo).unwrap();
+    let token = cargo.join("credentials.toml");
+    std::fs::write(&token, "[registry]\ntoken = \"fixture-registry-token\"\n").unwrap();
+    let policy = SandboxConfig::builder()
+        .working_directory(root.path())
+        .write_path(root.path())
+        .write_path(&cargo)
+        .masked_path(&token)
+        .build()
+        .unwrap();
+    let mut sandbox = swage_sandbox::BubblewrapSandbox::new(
+        policy,
+        swage_sandbox::llm_handler::HostLlmHandler::new(|_| async {
+            unreachable!("the command uses no model")
+        }),
+    );
+    sandbox.spawn_agent().await.unwrap();
+    let result = sandbox
+        .execute_tool(
+            "shell",
+            json!({"command": format!(
+                "cat {}; touch {}/registry-cache && echo cache-written",
+                token.display(),
+                cargo.display()
+            )}),
+        )
+        .await
+        .unwrap();
+    sandbox.shutdown().await.unwrap();
+    let output = result.output["output"].as_str().unwrap_or_default();
+    assert!(!output.contains("fixture-registry-token"), "{output}");
+    assert!(output.contains("cache-written"), "{:?}", result.output);
+}

@@ -192,13 +192,61 @@ const MASKED_HOME_PATHS: &[&str] = &[
     ".kube",
     ".netrc",
     ".git-credentials",
+    ".config/git/credentials",
     ".config/gh/hosts.yml",
     ".config/forgejo",
+    // Registry tokens, some inside a cache the sandbox writes: a mask is
+    // deeper than the cache's grant, so it still hides.
+    ".cargo/credentials",
+    ".cargo/credentials.toml",
+    ".npmrc",
+    ".pypirc",
+    ".gem/credentials",
+    ".docker/config.json",
+    ".local/share/keyrings",
+    ".password-store",
 ];
 
 /// Under the home, the shared build and package caches a sandboxed command
-/// may write, so a dependency fetched once is fetched once.
-const SHARED_CACHE_PATHS: &[&str] = &[".cache", ".cargo", ".npm", ".local/share/pnpm", "go/pkg"];
+/// may write, so a dependency fetched once is fetched once, each with the
+/// tool that fills it; `.cache` is every tool's.
+const SHARED_CACHE_PATHS: &[(&str, Option<&str>)] = &[
+    (".cache", None),
+    (".cargo", Some("cargo")),
+    (".npm", Some("npm")),
+    (".local/share/pnpm", Some("pnpm")),
+    ("go/pkg", Some("go")),
+];
+
+/// The shared caches a turn's sandbox may write. A cache that does not
+/// exist yet is created first where its tool is installed, since the
+/// sandbox can write inside a cache but cannot create one in the home; a
+/// cache with no tool to fill it is left uncreated.
+pub(crate) fn shared_caches(home: &Path, installed: impl Fn(&str) -> bool) -> Vec<PathBuf> {
+    SHARED_CACHE_PATHS
+        .iter()
+        .filter_map(|(cache, tool)| {
+            let path = home.join(cache);
+            if !path.is_dir() && tool.is_none_or(&installed) {
+                if let Err(error) = std::fs::create_dir_all(&path) {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        "the shared cache could not be created; sandboxed commands cannot write it"
+                    );
+                }
+            }
+            path.is_dir().then(|| sandbox_path(&path))
+        })
+        .collect()
+}
+
+/// Whether a command is installed: an executable of that name on `PATH`.
+fn on_path(command: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|directory| directory.join(command).is_file())
+    })
+}
 
 /// Where a workspace's git metadata lives when it is not under the
 /// workspace: a linked worktree's `.git` is a file naming its gitdir, whose
@@ -356,11 +404,8 @@ pub(crate) fn build_sandbox_config(
         }
     }
 
-    for cache in SHARED_CACHE_PATHS {
-        let path = roots.home.join(cache);
-        if path.is_dir() {
-            builder = builder.write_path(sandbox_path(&path));
-        }
+    for cache in shared_caches(&roots.home, on_path) {
+        builder = builder.write_path(cache);
     }
     for private in &masked {
         builder = builder.masked_path(private);
